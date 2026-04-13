@@ -1,0 +1,67 @@
+# Environment ----------------------------------------------------------------
+env:
+  num_agents: 4           # N — number of drones in the swarm
+  box_width: 500.0        # metres
+  box_height: 100.0       # metres
+  dt: 0.1                 # seconds per physics timestep
+  visual_radius: 15.0     # metres — drone can see target if within this range
+  comm_radius: 50.0       # metres — comm link established if within this range
+  max_speed: 10.0         # metres/sec — velocity clamp
+  drag: 0.85              # velocity retained per step (1.0 = no drag)
+  max_force: 5.0          # maximum action magnitude (Newtons / unit mass)
+  max_steps: 500          # max timesteps per episode before forced reset
+  grid_resolution: 50     # G — coverage_grid is (G x G) boolean cells
+  # Placement: base at left-centre, target at right-centre (symmetry axis)
+  base_x: 50.0
+  base_y: 50.0
+  target_x: 450.0
+  target_y: 50.0
+  k_max_neighbors: 4      # maximum neighbours included in observation (padding applies)
+
+# Reward weights -------------------------------------------------------------
+reward:
+  time_penalty: -0.01           # applied every step — encourages speed
+  exploration_bonus: 0.5        # per newly covered grid cell
+  chain_gap_penalty: 0.1        # scales with projection gap distance
+  success_bonus: 100.0          # awarded when full chain is formed (done=True)
+
+# Training -------------------------------------------------------------------
+training:
+  seed: 42
+  num_envs: 1024               # parallel vectorised environments (vmap)
+  num_steps: 128               # rollout horizon per PPO update
+  num_epochs: 4                # PPO gradient epochs per collected batch
+  num_minibatches: 8           # batch split into this many minibatches per epoch
+  lr: 3.0e-4                   # Adam learning rate
+  gamma: 0.99                  # discount factor
+  gae_lambda: 0.95             # GAE smoothing factor
+  clip_eps: 0.2                # PPO clip ratio
+  vf_coef: 0.5                 # value function loss weight
+  ent_coef: 0.01               # entropy bonus weight
+  max_grad_norm: 0.5           # gradient clipping norm
+  total_timesteps: 50_000_000  # training budget
+
+# Network architecture -------------------------------------------------------
+network:
+  hidden_dim: 256              # size of MLP hidden layers
+  num_layers: 3                # depth of shared trunk MLP
+
+# Logging & checkpointing ----------------------------------------------------
+logging:
+  wandb_project: "swarmecho"
+  wandb_entity: null           # set to your WandB username/team
+  wandb_mode: "online"         # "online" | "offline" | "disabled"
+  video_every_n_updates: 50    # render + log video every N PPO updates
+  checkpoint_every_n_updates: 100
+  eval_episodes: 5             # deterministic eval episodes for video
+  log_dir: "outputs"
+
+# Visualization --------------------------------------------------------------
+visualize:
+  dpi: 150                   # Increase for higher resolution (HD crispness)
+  comm_color: "#03fbff"  # Comm radius indicator color ("match_drone" or hex like "#ffffff")
+  comm_fill_alpha: 0.02
+  comm_edge_alpha: 0.50
+  vis_color: "#03fbff"   # Visual radius indicator color
+  vis_fill_alpha: 0.10
+  vis_edge_alpha: 0.50

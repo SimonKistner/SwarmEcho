@@ -1,0 +1,47 @@
+# =============================================================================
+# SwarmEcho — .gitignore
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments — these live inside WSL2 filesystem, NOT in this dir.
+# Included here for safety in case someone creates one locally.
+.venv/
+venv/
+
+# uv cache
+.uv/
+
+# Outputs — large binary artifacts, never commit
+outputs/
+*.mp4
+*.gif
+
+# WandB run artifacts
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.key

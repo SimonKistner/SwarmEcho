@@ -1,0 +1,45 @@
+[project]
+name = "swarmecho"
+version = "0.1.0"
+description = "JAX-accelerated MARL drone swarm for delay-tolerant communication chain formation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Core JAX stack — CUDA 12 build (Linux/WSL2 only)
+    "jax[cuda12]>=0.4.30",
+    "flax>=0.10.0",          # NNX API (modern Flax)
+    "optax>=0.2.4",          # Gradient transformations / optimizers
+    "chex>=0.1.86",          # Shape/dtype assertions + dataclass utils
+    # Config
+    "omegaconf>=2.3.0",      # Hierarchical YAML config with dot-notation + CLI overrides
+    # Logging & visualization
+    "wandb>=0.18.0",
+    "matplotlib>=3.9.0",
+    "imageio[ffmpeg]>=2.35.0",  # Video writing (no system ffmpeg dep needed)
+    # Checkpointing
+    "orbax-checkpoint>=0.10.0", # Modern JAX checkpoint standard (DeepMind)
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["swarmecho"]
+
+# JAX CUDA wheels are hosted at Google's own index.
+# uv will pull jaxlib-cuda from here automatically when jax[cuda12] is resolved.
+[tool.uv]
+extra-index-url = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
+
+[tool.uv.pip]
+system = false  # always use the project's venv
+
+# ---------------------------------------------------------------------------
+# Development / linting extras (optional, not required for training)
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",    # fast linter + formatter
+    "pytest>=8.2.0",
+]
