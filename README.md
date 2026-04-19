@@ -17,7 +17,6 @@ The project uses a clean `src/` layout with logical modules and a centralized `c
 ```
 SwarmEcho/
 ├── docs/                     ← Technical reports & documentation
-├── maps/                     ← [Legacy] Placeholder (pure data now in src)
 ├── src/
 │   ├── core/                 ← Configuration & global utilities
 │   ├── curriculum_config/    ← Semantic curriculum settings
