@@ -1,142 +1,141 @@
 # SwarmEcho
 
-> GPU-accelerated Multi-Agent Reinforcement Learning — JAX drone swarm forming a delay-tolerant communication relay chain.
+<p align="center">
+  <video src="docs/Preview_vid/eval_update_000572_20260418_151951_20260418_151952_20260418_151952.mp4" autoplay loop muted playsinline width="600"></video>
+</p>
 
-A swarm of N drones explores a bounded environment to locate a target, then autonomously positions to bridge a communication chain between the target and a fixed base station. Trained end-to-end with MAPPO using JAX + Flax NNX entirely on GPU.
+A **GPU-accelerated Multi-Agent Reinforcement Learning** environment built in JAX, training a drone swarm to explore a 2D environment and form a **delay-tolerant communication relay chain** between a base station and a discovered target.
 
----
-
-## Prerequisites
-
-### 1. WSL2 with CUDA (Windows users)
-
-JAX GPU support on Windows requires WSL2. Set it up once:
-
-```powershell
-# In Windows PowerShell (Admin):
-wsl --install         # installs Ubuntu by default
-wsl --update
-```
-
-After reboot, open your Ubuntu terminal. NVIDIA drivers stay on Windows — WSL2 bridges automatically. Verify GPU is visible:
-
-```bash
-nvidia-smi   # should show your RTX 4090
-```
-
-> **Important — venv location**: Create the uv virtual environment **inside the WSL2 filesystem** (e.g. `~/venvs/swarmecho/`), NOT on the mounted Windows drive (`/mnt/q/...`). Cross-filesystem venvs cause slow I/O and version resolution issues. The source code on Q: is accessed in-place via the mount.
-
-### 2. Install `uv` inside WSL2
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc    # or restart terminal
-```
+Agents are trained using **MAPPO** (Multi-Agent PPO with a Centralised Critic).
 
 ---
 
-## Setup
+## Architecture
 
-```bash
-# Navigate to the project (inside WSL2, Q: is at /mnt/q/)
-cd /mnt/q/_0_Projects/000_SwarmEcho/SwarmEcho
-
-# Create the virtual environment inside WSL2's own filesystem to avoid
-# cross-filesystem penalties. uv respects UV_PROJECT_ENVIRONMENT.
-export UV_PROJECT_ENVIRONMENT=~/venvs/swarmecho
-uv sync
-
-# Verify JAX sees your GPU
-uv run python -c "import jax; print(jax.devices())"
-# Expected: [CudaDevice(id=0)]
-```
-
-> If `jax.devices()` shows only `[CpuDevice]`, check that `jax[cuda12]` installed correctly:
-> ```bash
-> uv run python -c "import jaxlib; print(jaxlib.__version__)"
-> # Should contain "cuda"
-> ```
-
----
-
-## Project Structure
+The project uses a clean `src/` layout with logical modules and a centralized `curriculum_config` package.
 
 ```
 SwarmEcho/
-├── pyproject.toml          # uv project manifest
-├── configs/
-│   └── default.yaml        # master config (OmegaConf)
-├── swarmecho/
-│   ├── config.py           # config loader
-│   ├── env/
-│   │   ├── state.py        # EnvState JAX PyTree
-│   │   ├── physics.py      # physics_step() — pure JAX
-│   │   ├── observations.py # get_observations(), adjacency
-│   │   └── rewards.py      # two-phase reward function
-│   ├── models/
-│   │   └── actor_critic.py # Flax NNX Actor-Critic
-│   ├── training/
-│   │   ├── ppo.py          # PPO rollout + loss
-│   │   └── train_state.py  # TrainState dataclass
-│   └── visualize/
-│       └── renderer.py     # render_video() → .mp4
-├── scripts/
-│   ├── test_physics.py     # physics sanity check → mp4
-│   └── train.py            # main training entry point
-└── outputs/                # .gitignored — videos, checkpoints
+├── docs/                     ← Technical reports & documentation
+├── maps/                     ← [Legacy] Placeholder (pure data now in src)
+├── src/
+│   ├── core/                 ← Configuration & global utilities
+│   ├── curriculum_config/    ← Semantic curriculum settings
+│   │   ├── base_params.yaml  ← Global base hyperparameters
+│   │   ├── levels/           ← level_00..02 yaml overrides
+│   │   └── maps/             ← Map YAML geometry definitions
+│   │       └── scripts/      ← Map tools (Builder, Baker, Prepper)
+│   ├── env/                  ← JAX physics, rewards, and observations
+│   ├── models/               ← MARL network architectures (MAPPO, IPPO)
+│   ├── tests/                ← Environment smoke tests
+│   ├── training/             ← PPO trainers, rollout buffers, and runners
+│   └── visualize/            ← Video renderers (OpenCV, Matplotlib)
+└── README.md
 ```
 
 ---
 
-## Running
+## Installation
 
-### Physics sanity check (Step 3)
-```bash
-uv run python scripts/test_physics.py
-# Opens outputs/videos/physics_test.mp4
-```
+**Prerequisites:** WSL2 with CUDA, `uv` package manager.
 
-### VRAM dry-run check
 ```bash
-uv run python scripts/test_physics.py --dry-run
-# Prints estimated VRAM usage without running the full rollout
-```
+# Clone the repo
+git clone https://github.com/yourname/SwarmEcho
+cd SwarmEcho
 
-### Training
-```bash
-uv run python scripts/train.py
-```
+# Install all dependencies (including JAX CUDA wheels)
+uv sync
 
-With config overrides (OmegaConf CLI syntax):
-```bash
-uv run python scripts/train.py env.num_agents=16 training.lr=1e-4 training.num_envs=2048
-```
-
-### WandB login (first time)
-```bash
-uv run wandb login
+# Verify GPU is detected
+uv run python -c "import jax; print(jax.devices())"
+# → [CudaDevice(id=0)]
 ```
 
 ---
 
-## Config
+## Quick Start
 
-All hyperparameters live in `configs/default.yaml`. Key parameters:
+### 1. Run the Environment Smoke Test
+Verify the JAX physics and reward functions are working correctly.
+```bash
+uv run python src/tests/smoke_test_env.py
+```
 
-| Parameter | Default | Description |
-|---|---|---|
-| `env.num_agents` | 8 | Swarm size |
-| `env.comm_radius` | 25.0 m | Communication link range |
-| `env.visual_radius` | 15.0 m | Target detection range |
-| `training.num_envs` | 1024 | Parallel environments (RTX 4090) |
-| `training.total_timesteps` | 50M | Training budget |
+### 2. Start Curriculum Training
+Train through stages: L0 (Open Field) → L1 (Warehouse) → L2 (Complex Maze).
+```bash
+uv run python src/training/curriculum.py
+```
+
+### 3. Training a Single Level
+```bash
+# Start Level 0 training with default settings
+uv run python src/training/train.py level=00
+
+# Overriding parameters via CLI
+uv run python src/training/train.py level=01 training.num_envs=512 logging.wandb_mode=online
+```
+
+### 4. Architectural Map Builder
+Launch the Streamlit-based architectural designer to create new drone environments.
+```bash
+uv run streamlit run src/curriculum_config/maps/scripts/map_builder.py
+```
+
+
+### 5. Validate Map Geometry
+Run a short trajectory test on all blueprints to verify JAX compatibility and render validation videos.
+```bash
+uv run python src/tests/validate_maps.py
+```
+
+### 6. Discovery & Analysis Dashboard
+Inspect training parameters, curriculum evolution, and evaluation videos across all runs.
+```bash
+uv run streamlit run src/analysis/dashboard.py
+```
 
 ---
 
-## Algorithm
+## Documentation Directory
 
-- **Algorithm**: IPPO (Independent PPO) with parameter sharing + one-hot agent IDs
-- **Reward**: Global cooperative — all agents share the same scalar reward
-- **Observation**: Ego-centric with 4-bit target knowledge encoding (self-seen / comm-seen + their complements)
-- **Action**: Continuous 2D force vector, clipped to `max_force`
-- **Vectorisation**: `jax.vmap` across `num_envs`, `jax.lax.scan` for rollouts — entire training loop on GPU
+To maintain a clean separation of concerns, all deep-dive technical details have been modularized and moved into the `docs/` folder, directly mirroring the `src/` codebase structure:
+
+1. **[01_system_overview.md](docs/01_system_overview.md)**: High-level CTDE architectural layout and JAX `vmap` logic.
+2. **[02_configuration_guide.md](docs/02_configuration_guide.md)**: The single source of truth for global parameters (`base_params.yaml`), map curriculum scale up, and the visual Map Builder.
+3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Deep dive into the 65-dimensional observation space, Euler physics, and continuous action clipping.
+4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
+5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.
+
+---
+
+## Output Structure
+
+Each training run creates its own directory:
+```
+outputs/
+└── {run_name}_{timestamp}/
+    ├── checkpoints/
+    │   └── ckpt_001000/    ← Orbax checkpoint (Flax NNX state dict)
+    └── videos/
+        └── eval_update_001000.mp4
+```
+
+---
+
+## Core Self-Tests
+
+```bash
+# Environment Smoke Test (RECOMMENDED)
+uv run python src/tests/smoke_test_env.py
+
+# Physics Engine Standalone
+uv run python src/env/physics.py
+
+# Observation Space Standalone
+uv run python src/env/observations.py
+
+# Neural Network Architecture
+uv run python src/models/mappo.py
+```
