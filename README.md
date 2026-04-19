@@ -1,7 +1,7 @@
 # SwarmEcho
 
 <p align="center">
-  <video src="docs/Preview_vid/eval_update_000572_20260418_151951_20260418_151952_20260418_151952.mp4" autoplay loop muted playsinline width="600"></video>
+  <img src="docs/Preview_vid/demo_2x.gif" width="600" alt="SwarmEcho Behaviour Preview" />
 </p>
 
 A **GPU-accelerated Multi-Agent Reinforcement Learning** environment built in JAX, training a drone swarm to explore a 2D environment and form a **delay-tolerant communication relay chain** between a base station and a discovered target.
