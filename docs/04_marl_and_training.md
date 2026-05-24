@@ -1,23 +1,37 @@
 # Multi-Agent RL & Training
 
-SwarmEcho uses a Multi-Agent Proximal Policy Optimization (MAPPO) arrangement. The relevant logic is distributed across `src/models/` for architecture and `src/training/` for execution loops.
+SwarmEcho uses a Multi-Agent Proximal Policy Optimization (MAPPO) framework. The architecture resides in `src/models/` and the training orchestrator in `src/training/`.
 
 ## Neural Architecture
-*(Found in `src/models/mappo.py` & `src/models/actor_critic.py`)*
+*(Found in `src/models/mappo.py`, `src/models/actor.py`, and `src/models/critic.py`)*
 
-The framework uses Flax (`nnx`). 
-- **Actor (Local Phase):** A standard MLP (3 layers, LayerNorm + Tanh). It takes the 65-dimensional local observation and executes the continuous action limits.
-- **Centralized Critic & Self-Attention:** The Critic is tasked with judging the state. To do so without breaking permutation invariance, it passes all aggregated individual agent features into a **Multi-Head Self-Attention** block, effectively allowing entities to cross-reference their isolated topological roles. After attention mapping, a Global Mean Pooling layer synthesizes the entire N-agent board state down to a singular representation used to infer the value $V$.
+The model framework is built using Flax (`nnx` API).
 
-## Cooperative Team Reward 
+### 1. Decentralized Actor
+- Located in `src/models/actor.py`.
+- **Local Policy**: The actor is represented by a shared MLP (typically 2-3 layers with LayerNorm and Tanh activations).
+- **Execution**: Each drone passes its own local observation (e.g., 57-dimensional vector) through the shared actor to sample a continuous force vector.
+- **Continuous Action Sampling**: Uses a diagonal Gaussian distribution to sample action vectors. These samples are squashed using a Tanh activation to lie cleanly within $(-1, 1)$ boundaries. The buffer stores the pre-squash sample $u_i$ directly, and standard Gaussian log-probabilities are computed over $u_i$. This avoids hard clipping gradient anomalies, and does not require explicit Tanh Jacobian correction because the correction terms cancel out in the PPO ratio.
+
+### 2. Centralized Critic Variants
+- Located in `src/models/critic.py`.
+- During training, the critic views the concatenated observations of all $N$ agents to estimate state values.
+- We support two centralized critic types:
+  - **Agent-Centric Critic (`AgentCentricCritic`) [Default & Recommended]**: Estimates a unique value $V_i$ for each agent. It uses an MLP encoder followed by a masked multi-head cross-agent attention block (where agent $i$ attends to all other agents but not itself) and an MLP head to output a tensor of shape `(..., N)`.
+  - **Global Mean Critic (`GlobalMeanCritic`) [Kept for Ablations]**: Encodes all agent observations, applies standard multi-head self-attention, and aggregates them via a Global Mean Pooling layer to produce a single team-wide scalar value $V$ of shape `(...,)`.
+
+## Cooperative Team Reward
 *(Found in `src/env/rewards.py`)*
 
-A single scalar reward $r_t$ is distributed universally to all executing members to ensure altruistic topological behaviors.
+A single scalar reward $r_t$ is computed and shared across all agents to encourage cooperative task-solving behaviors:
 
-$$r_{total} = R_{coverage} + R_{chain\_gap} + R_{collision} + R_{target\_found} + R_{success}$$
+$$r_{total} = R_{coverage} + R_{target\_found} + R_{chain\_gap} + R_{proximity} + R_{collision} + R_{success} + R_{hub\_proximity}$$
 
-- **$R_{coverage}$ (Dense):** Proportional to the area of *newly discovered* geographical grid cells this time step.
-- **$R_{chain\_gap}$ (Dense):** The primary topological penalty. The system dynamically measures the distance spanning between the sub-topology connected to the Base and the one connected to the Target. Drones actively pull away to minimize this negative coefficient.
-- **$R_{collision}$ (Dense):** Penalty per drone currently impacting the physical map walls.
-- **$R_{target\_found}$ (Sparse):** Positive one-off spike when the globe-map visualizes the target goal point for the first time.
-- **$R_{success}$ (Sparse):** Very large terminal bonus granted strictly when a pure hop-by-hop relay line stabilizes between Base and Target.
+- **$R_{coverage}$ (Local, Dense)**: Proportional to the number of *newly discovered* grid cells visited by the swarm in the current step. Once an individual agent persistently knows the target's location, its coverage reward is gated off.
+- **$R_{target\_found}$ (Shared + Local, Sparse)**: Shared team bonus when the target is first discovered, plus a localized "finder" bonus awarded only to the specific agent(s) that deliver the target info to the base station.
+- **$R_{chain\_gap}$ (Local, Dense)**: A topological penalty proportional to the gap distance between the base-connected sub-network and target-connected sub-network tips. Only "contributing" drones (those on the shortest topological path or in the connected components) receive this dynamic penalty, while non-contributing drones receive a maximum penalty.
+- **$R_{proximity}$ (Local, Dense)**: Penalty for agents that are too close to each other, to discourage clustering and promote collision avoidance.
+- **$R_{collision}$ (Local, Dense)**: Penalty for each drone currently colliding with boundaries or obstacles.
+- **$R_{success}$ (Shared, Sparse)**: A large terminal bonus divided among the team, granted when a continuous multi-hop communication link is successfully established and held for the required time.
+- **$R_{hub\_proximity}$ (Shared, Dense)**: Encourages staying near points of interest (base or target). If target is known, drones are rewarded for proximity to either base or target; otherwise, only proximity to base is rewarded.
+

@@ -57,8 +57,10 @@ class RenderJob:
     # Metadata
     update:         int
     eval_ret:       float
+    extra_metrics:  Dict[str, np.ndarray]
     video_path:     str          # Full absolute path for the .mp4
     wandb_step:     int
+    renderer:       str          # "fast" or "slow"
     # W&B config (duplicated here so worker needs no reference to the run)
     use_wandb:      bool
     wandb_project:  Optional[str]
@@ -117,7 +119,9 @@ def _worker_fn(queue: mp.Queue, cfg_dict: dict) -> None:
                 traj_ns, cfg,
                 filename     = job.video_path,
                 fps          = 20,
+                renderer     = job.renderer,
                 rewards      = rewards_arr,
+                extra_metrics= job.extra_metrics,
             )
 
             elapsed = time.perf_counter() - t0
@@ -128,16 +132,10 @@ def _worker_fn(queue: mp.Queue, cfg_dict: dict) -> None:
                 flush=True,
             )
 
-            # Optional W&B video upload
-            if job.use_wandb:
-                try:
-                    import wandb
-                    wandb.log({
-                        "eval/ep_return": job.eval_ret,
-                        "eval/video":     wandb.Video(vid_path, fps=20, format="mp4"),
-                    }, step=job.wandb_step)
-                except Exception as e:
-                    print(f"[video_worker] W&B upload failed: {e}", flush=True)
+            # Note: Child processes cannot easily log to the parent's W&B run.
+            # We skip the wandb.log() call here to avoid the 'wandb.init() not called' error.
+            # The video is still saved locally in the 'videos/' directory.
+            pass
 
         except Exception as e:
             import traceback
@@ -198,6 +196,8 @@ class VideoRenderWorker:
         ep_rewards: List[float],
         update:     int,
         eval_ret:   float,
+        extra_metrics: Dict[str, np.ndarray],
+        renderer:   str = "fast",
     ) -> None:
         """
         Package the trajectory and queue a render job.
@@ -240,8 +240,10 @@ class VideoRenderWorker:
             rewards      = np.array(ep_rewards, dtype=np.float32),
             update       = update,
             eval_ret     = eval_ret,
+            extra_metrics= {k: np.array(v) for k, v in extra_metrics.items()},
             video_path   = vid_path,
             wandb_step   = update,
+            renderer     = renderer,
             use_wandb    = self._use_wandb,
             wandb_project= self._wandb_proj,
             wandb_run_id = self._wandb_id,
@@ -266,6 +268,8 @@ class VideoRenderWorker:
             if self._process.is_alive():
                 print("  [render] Worker timeout — terminating forcefully.")
                 self._process.terminate()
+                self._process.join()
+                self._queue.cancel_join_thread()
         else:
             print("  [render] Worker will finish remaining jobs in background.")
 

@@ -6,24 +6,25 @@ Ego-centric, permutation-invariant Radar + Graph observation model.
 All functions are pure JAX — JIT/vmap/scan compatible.
 Use `make_obs_fns(cfg)` so config scalars become XLA compile-time constants.
 
-Observation structure per agent i  (obs_dim = 8 + B*6)
--------------------------------------------------------
+Observation structure per agent i  (obs_dim = 9 + 16 + B*4)
+---------------------------------------------------------
 
-┌──────────────────────────── Self state (8) ───────────────────────────────┐
+┌──────────────────────────── Self state (9) ───────────────────────────────┐
 │  vel_i / v_max                            (2)  ego velocity               │
 │  (base_pos - pos_i) / max_dim            (2)  odometry to base           │
 │  is_connected_to_base                    (1)  multi-hop graph flag        │
 │  is_connected_to_target                  (1)  multi-hop graph flag        │
 │  target_known_flag                       (1)  1.0 if drone knows target   │
 │  (target_pos - pos_i) / max_dim × mask   (2)  masked until target_known  │
-├─────────────────────── 360° Radar  (B bins × 6) ──────────────────────────┤
+├────────────────────── Local Coverage Probes (16) ─────────────────────────┤
+│  16 radial probes (evenly spaced circle) at sampling_radius:               │
+│  returns 1.0 if covered, 0.0 otherwise                                    │
+├─────────────────────── 360° Radar  (B bins × 4) ──────────────────────────┤
 │  For each of B angular bins:                                               │
 │    inv_dist_wall                         (1)  1 - d/vis_r  (ray-cast)    │
 │    inv_dist_drone                        (1)  1 - d/comm_r (any drone)   │
 │    inv_dist_target_conn_drone            (1)  1 - d/comm_r (tgt-chain)   │
 │    inv_dist_base_conn_drone              (1)  1 - d/comm_r (base-chain)  │
-│    inv_dist_base_station                 (1)  1 - d/comm_r (fixed base)  │
-│    inv_dist_target                       (1)  1 - d/vis_r  (0 if unseen) │
 └────────────────────────────────────────────────────────────────────────────┘
 
 Design principles
@@ -73,7 +74,7 @@ from core.config import compute_obs_dim
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_obs_fns(cfg: DictConfig):
+def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid: jax.Array):
     """
     Close over config scalars and return pure JAX observation functions.
 
@@ -83,44 +84,16 @@ def make_obs_fns(cfg: DictConfig):
     obs_dim     : int
     """
     N         = int(cfg.env.num_agents)
-    cell_size = float(cfg.env.grid_cell_size)
-    MGW       = int(cfg.env.max_grid_width)
-    MGH       = int(cfg.env.max_grid_height)
+    cell_size = 1.0
     B         = int(cfg.env.radar_bins)
-    W         = float(cfg.env.box_width)
-    H         = float(cfg.env.box_height)
+    W, H      = float(resolved_W), float(resolved_H)
     max_dim   = math.sqrt(W ** 2 + H ** 2)
     use_task        = (int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
     sampling_radius = float(cfg.env.exploration_sampling_radius)
     vis_r           = float(cfg.env.visual_radius)
     comm_r          = float(cfg.env.comm_radius)
+    comm_r_base     = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     v_max           = float(cfg.env.max_speed)
-
-    # Load Map for Shared Constants
-    from env.maps import MapDefinition
-    from pathlib import Path
-    occ_grid = None
-    if cfg.env.map_names and len(cfg.env.map_names) > 0:
-        active_map_name = cfg.env.map_names[0]
-        map_path = Path("maps") / f"{active_map_name}.yaml"
-        if not map_path.exists():
-            map_path = Path(__file__).resolve().parents[2] / "maps" / f"{active_map_name}.yaml"
-        
-        if map_path.exists():
-            map_def = MapDefinition.load(
-                map_path, 
-                cell_size=cell_size,
-                padding_radius=max(vis_r, comm_r)
-            )
-            W, H = map_def.width, map_def.height
-            if map_def.occupancy_grid is not None:
-                occ_grid = jnp.array(map_def.occupancy_grid, dtype=jnp.bool_)
-    
-    # Fallback occ_grid if no map
-    if occ_grid is None:
-        GW = int(W / cell_size)
-        GH = int(H / cell_size)
-        occ_grid = jnp.zeros((GW, GH), dtype=jnp.bool_)
 
     obs_dim: int = compute_obs_dim(cfg)
     GW, GH = occ_grid.shape
@@ -238,7 +211,7 @@ def make_obs_fns(cfg: DictConfig):
         target_dists  = jnp.linalg.norm(state.pos - state.target_pos[None, :], axis=-1)
         target_dists  = jnp.where(num_targets > 0, target_dists, 1e6)
         
-        p_base = jnp.where((base_dists <= comm_r) & state.active, 1.0, 0.0)
+        p_base = jnp.where((base_dists <= comm_r_base) & state.active, 1.0, 0.0)  # comm_r_base: matches first-hop rule
         p_tgt  = jnp.where((target_dists <= vis_r) & state.active, 1.0, 0.0)
 
         def _get_cell_idx(p):
@@ -276,12 +249,12 @@ def make_obs_fns(cfg: DictConfig):
             & state.active[None, :]
         )
         # 2. Visibility lookup using DDA Raycasting
-        # Drone-base adjacency (N,)
-        near_db = (base_dists <= comm_r) & state.active
+        # Drone-base adjacency (N,)  — first hop uses comm_r_base
+        near_db = (base_dists <= comm_r_base) & state.active
 
         if is_unobstructed:
-            los_dd = jnp.ones((N, N), dtype=jnp.bool_)
-            los_db = jnp.ones(N, dtype=jnp.bool_)
+            los_dd = near_dd
+            los_db = near_db
         else:
             # Vectorized DDA check for all pairs
             def _lo_dd(i, j):
@@ -357,23 +330,21 @@ def make_obs_fns(cfg: DictConfig):
 
             x_i, y_i = pos_i[0], pos_i[1]
 
-            # ── Local Coverage block (8 cells: N, NE, E, SE, S, SW, W, NW) ──
+            # ── Local Coverage block (16 cells: circular layout, clockwise starting from North) ──
             # Sensing whether nearby cells are already 'covered' in the global map.
-            offsets = jnp.array([
-                [0, sampling_radius], [sampling_radius, sampling_radius], [sampling_radius, 0], [sampling_radius, -sampling_radius],
-                [0, -sampling_radius], [-sampling_radius, -sampling_radius], [-sampling_radius, 0], [-sampling_radius, sampling_radius]
-            ], dtype=jnp.float32)
+            angles = (jnp.pi / 2.0) - jnp.arange(16, dtype=jnp.float32) * (jnp.pi / 8.0)
+            offsets = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1) * sampling_radius
             
             sample_pts = pos_i[None, :] + offsets
             
-            # Map sample points to grid indices
-            sx, sy = state.coverage_grid.shape[0] / W, state.coverage_grid.shape[1] / H
-            gix = jnp.floor(sample_pts[:, 0] * sx).astype(jnp.int32)
-            giy = jnp.floor(sample_pts[:, 1] * sy).astype(jnp.int32)
+            # Map sample points to grid indices using absolute cell mapping (1m = 1 cell)
+            # This MUST match the physics engine mapping in physics.py
+            gix = jnp.floor(sample_pts[:, 0] / cell_size).astype(jnp.int32)
+            giy = jnp.floor(sample_pts[:, 1] / cell_size).astype(jnp.int32)
             
-            # Bounds check
-            in_bounds = (gix >= 0) & (gix < state.coverage_grid.shape[0]) & \
-                        (giy >= 0) & (giy < state.coverage_grid.shape[1])
+            # Bounds check against RESOLVED map dimensions (GW, GH)
+            in_bounds = (gix >= 0) & (gix < GW) & \
+                        (giy >= 0) & (giy < GH)
             
             # Sample coverage grid (0 if out of bounds)
             local_cov = jnp.where(in_bounds, state.coverage_grid[gix, giy], False).astype(jnp.float32)
@@ -417,37 +388,35 @@ def make_obs_fns(cfg: DictConfig):
             inv_base_conn  = _scatter_max(s_base_conn, bins_j)              # (B,)
 
             # -- Base station point channel --
-            base_vec   = state.base_pos - pos_i                             # (2,)
-            base_dist  = jnp.linalg.norm(base_vec)
-            base_angle = jnp.arctan2(base_vec[1], base_vec[0])
-            base_bin   = _angle_to_bin(base_angle)                          # scalar int
-            base_sig   = jnp.maximum(0.0, 1.0 - base_dist / comm_r)       # scalar
-            # Scatter into (B,) vector using one-hot expansion
-            inv_base_stn = (
-                (base_bin == _bin_range).astype(jnp.float32) * base_sig
-            )  # (B,)
+            # base_vec   = state.base_pos - pos_i                             # (2,)
+            # base_dist  = jnp.linalg.norm(base_vec)
+            # base_angle = jnp.arctan2(base_vec[1], base_vec[0])
+            # base_bin   = _angle_to_bin(base_angle)                          # scalar int
+            # base_sig   = jnp.maximum(0.0, 1.0 - base_dist / vis_r)  # vis_r: matches first-hop connection rule
+            # # Scatter into (B,) vector using one-hot expansion
+            # inv_base_stn = (
+            #     (base_bin == _bin_range).astype(jnp.float32) * base_sig
+            # )  # (B,)
 
             # -- Target point channel (only non-zero if within vis_r) --
-            tgt_vec   = state.target_pos - pos_i                            # (2,)
-            tgt_dist  = jnp.linalg.norm(tgt_vec)
-            tgt_in_range = (tgt_dist <= vis_r).astype(jnp.float32)
-            tgt_angle = jnp.arctan2(tgt_vec[1], tgt_vec[0])
-            tgt_bin   = _angle_to_bin(tgt_angle)
-            tgt_sig   = jnp.maximum(0.0, 1.0 - tgt_dist / vis_r) * tgt_in_range
-            inv_target = (
-                (tgt_bin == _bin_range).astype(jnp.float32) * tgt_sig
-            )  # (B,)
+            # tgt_vec   = state.target_pos - pos_i                            # (2,)
+            # tgt_dist  = jnp.linalg.norm(tgt_vec)
+            # tgt_in_range = (tgt_dist <= vis_r).astype(jnp.float32)
+            # tgt_angle = jnp.arctan2(tgt_vec[1], tgt_vec[0])
+            # tgt_bin   = _angle_to_bin(tgt_angle)
+            # tgt_sig   = jnp.maximum(0.0, 1.0 - tgt_dist / vis_r) * tgt_in_range
+            # inv_target = (
+            #     (tgt_bin == _bin_range).astype(jnp.float32) * tgt_sig
+            # )  # (B,)
 
-            # -- Stack radar (B, 6) -> flatten (B*6,) --
+            # -- Stack radar (B, 4) -> flatten (B*4,) --
             radar = jnp.stack([
                 inv_wall,
                 inv_drone,
                 inv_tgt_conn,
                 inv_base_conn,
-                inv_base_stn,
-                inv_target,
-            ], axis=-1)                                                      # (B, 6)
-            radar_block = radar.reshape(-1)                                  # (B*6,)
+            ], axis=-1)                                                      # (B, 4)
+            radar_block = radar.reshape(-1)                                  # (B*4,)
 
             return jnp.concatenate([self_block_final, local_cov, radar_block])                # (obs_dim,)
 
@@ -471,21 +440,28 @@ if __name__ == "__main__":
     print("── Observation Self-Test ────────────────────────────────────")
 
     cfg = load_config(cli_overrides=False)
+    # Ensure a map is loaded for the strict-only physics factory
+    from omegaconf import OmegaConf
+    OmegaConf.set_readonly(cfg, False)
+    cfg.env.map_names = ["open_field"]
+    OmegaConf.set_readonly(cfg, True)
+    
     validate_config(cfg)
 
     N   = cfg.env.num_agents
     B   = cfg.env.radar_bins
-    expected_obs_dim = 9 + B * 6
+    expected_obs_dim = 9 + 16 + B * 4
 
     assert compute_obs_dim(cfg) == expected_obs_dim, \
         f"config.py formula mismatch: {compute_obs_dim(cfg)} ≠ {expected_obs_dim}"
 
-    compute_obs, obs_dim = make_obs_fns(cfg)
-    env_step, reset, _  = make_env_fns(cfg)
+    # Resolve world data from physics engine (Strict Flow)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
+    compute_obs, obs_dim = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
 
     print(f"  N        : {N}")
     print(f"  B        : {B}")
-    print(f"  obs_dim  : {obs_dim}  (= 8 + {B}×6 = {8 + B*6})")
+    print(f"  obs_dim  : {obs_dim}  (= 9 + 16 + {B}×4 = {9 + 16 + B*4})")
 
     key   = jax.random.PRNGKey(0)
     state = jax.jit(reset)(key)
@@ -499,8 +475,8 @@ if __name__ == "__main__":
     assert not jnp.any(jnp.isnan(obs)), "NaN in observations!"
     assert not jnp.any(jnp.isinf(obs)), "Inf in observations!"
 
-    # Radar channels (all of B*6 part) must be in [0, 1]
-    radar_part = obs[:, 8:]
+    # Radar channels (all of B*4 part) must be in [0, 1]
+    radar_part = obs[:, 25:]
     assert jnp.all((radar_part >= 0.0) & (radar_part <= 1.0 + 1e-5)), \
         f"Radar values out of [0,1]: min={radar_part.min():.4f} max={radar_part.max():.4f}"
 
@@ -517,13 +493,32 @@ if __name__ == "__main__":
             assert jnp.allclose(tgt_odo, 0.0), \
                 f"Agent {i}: target odometry should be masked but got {tgt_odo}"
 
-    print(f"\n  obs[0] (drone 0, step 0):")
-    print(f"    vel (norm)          : {obs[0, 0:2]}")
-    print(f"    rel_base (norm)     : {obs[0, 2:4]}")
-    print(f"    conn_base / conn_tgt: {obs[0, 4:6]}")
-    print(f"    target_known_flag   : {obs[0, 6]}")
-    print(f"    rel_target (masked) : {obs[0, 7:9]}  (0 if target_known=False)")
-    print(f"    radar[0] (bin 0)    : {obs[0, 9:15]}  [wall,drone,tgt,base,bstn,tgt_pt]")
+    # ── Coverage Calibration Check (Ground Truth Test) ──────────────────
+    print(f"\n  Coverage Calibration Check ...")
+    # 1. Paint a 'coverage stripe' at X=10m in the physics grid
+    import dataclasses
+    stripe_x = 10
+    new_grid = state.coverage_grid.at[stripe_x, :].set(True)
+    state = dataclasses.replace(state, coverage_grid=new_grid)
+    
+    # 2. Place drone 0 exactly on that stripe
+    new_pos = state.pos.at[0].set(jnp.array([float(stripe_x), 25.0]))
+    state = dataclasses.replace(state, pos=new_pos)
+    
+    # 3. Compute observations
+    obs = jax.jit(compute_obs)(state)
+    
+    # Local coverage block starts at index 9 (8 self-state + 1 target_known_flag)
+    # The offsets are circular (16 directions, 0 is North, 8 is South)
+    # Drone at (10, 25) sampling North (0) looks at (10, 35).
+    # Drone at (10, 25) sampling South (8) looks at (10, 15).
+    
+    local_cov_bits = obs[0, 9:25]
+    print(f"    Drone at X={stripe_x} sees local coverage bits: {local_cov_bits}")
+    
+    assert local_cov_bits[0] == 1.0, "Calibration Failed: Drone should see coverage at its current X-stripe (North)"
+    assert local_cov_bits[8] == 1.0, "Calibration Failed: Drone should see coverage at its current X-stripe (South)"
+    print("    Calibration passed ✓ (Mapping is 1:1 with Physics)")
 
     # Batch vmap test
     print(f"\n  Batch vmap (256 envs) ...")

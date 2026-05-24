@@ -2281,6 +2281,7 @@ dependencies = [
     { name = "opencv-python-headless" },
     { name = "optax" },
     { name = "orbax-checkpoint" },
+    { name = "streamlit" },
     { name = "tqdm" },
     { name = "wandb" },
 ]
@@ -2307,6 +2308,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "streamlit", specifier = ">=1.56.0" },
     { name = "streamlit", marker = "extra == 'dev'", specifier = ">=1.35.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "wandb", specifier = ">=0.18.0" },

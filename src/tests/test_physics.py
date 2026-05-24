@@ -99,13 +99,10 @@ def main() -> None:
     validate_config(cfg)
 
     N = cfg.env.num_agents
-    G = cfg.env.grid_resolution
 
-    print("\n── SwarmEcho Physics Test ──────────────────────────────")
+    print("\n-- SwarmEcho Physics Test ------------------------------")
     print(f"  Devices     : {jax.devices()}")
     print(f"  num_agents  : {N}")
-    print(f"  grid_res    : {G}×{G}")
-    print(f"  box         : {cfg.env.box_width}×{cfg.env.box_height} m")
     print(f"  steps       : {args.steps}")
     print(f"  seed        : {args.seed}")
     print("────────────────────────────────────────────────────────\n")
@@ -113,7 +110,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Build env functions
     # -----------------------------------------------------------------------
-    env_step, reset, _ = make_env_fns(cfg)
+    env_step, reset, _, (W, H, occ_grid) = make_env_fns(cfg)
 
     # JIT-compile the functions we need
     reset_jit = jax.jit(reset)
@@ -201,8 +198,10 @@ def main() -> None:
     print(f"  trajectory.pos shape : {trajectory.pos.shape}")
     print(f"  Final active         : {_final_state.active}")
     print(f"  Final target_known   : {_final_state.target_known}")
-    print(f"  Final coverage       : {int(_final_state.coverage_grid.sum())} / {G*G} cells "
-          f"({100*_final_state.coverage_grid.sum()/(G*G):.1f}%)")
+    # Cell size is hardcoded to 1.0 in physics.py
+    grid_cells = int(W) * int(H)
+    print(f"  Final coverage       : {int(_final_state.coverage_grid.sum())} / {grid_cells} cells "
+          f"({100*_final_state.coverage_grid.sum()/grid_cells:.1f}%)")
 
     # -----------------------------------------------------------------------
     # Render

@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import dataclasses
 from omegaconf import OmegaConf
 
 from core.config import load_config, validate_config
@@ -30,83 +32,118 @@ from visualize.renderer import render_video
 
 
 def run_scripted_test():
-    # Load config and override specific values for this test
-    # We need enough agents to span the 400m gap (400 / 50m = 8 agents minimum)
-    # We also disable stagger spawn so they form up quickly.
-    cfg = load_config(cli_overrides=False)
+    # Load config and respect CLI overrides (e.g. level=00)
+    cfg = load_config(cli_overrides=True)
     
-    # We use OmegaConf API to update the config dynamically
-    OmegaConf.set_readonly(cfg, False)
-    cfg.env.num_agents = 8
-    cfg.env.spawn_delay = 5      # Everyone starts active
-    cfg.env.dt = 0.1
-    OmegaConf.set_readonly(cfg, True)
-    
+    # We use OmegaConf API to update the config dynamically for the test scene
     validate_config(cfg)
     
+    # Force configuration values to match the test assumptions
+    OmegaConf.set_readonly(cfg, False)
+    cfg.env.num_agents = 10
+    cfg.env.map_names = ["open_field"]
+    cfg.env.use_random_base_spawn = False
+    cfg.env.use_random_drone_spawn = False
+    cfg.env.target_spawn_method = "map_defined"
+    cfg.env.spawn_delay = 0
+    cfg.env.comm_radius = 50.0
+    cfg.env.visual_radius = 50.0
+    cfg.env.max_speed = 30.0
+    cfg.env.max_force = 150.0
+    OmegaConf.set_readonly(cfg, True)
+    
+    is_warehouse = "warehouse" in cfg.env.map_names
+    test_y = 110.0 if is_warehouse else 50.0
+
     N = cfg.env.num_agents
     
-    env_step, reset, _ = make_env_fns(cfg)
+    env_step, reset, _, _ = make_env_fns(cfg)
     compute_reward     = make_reward_fn(cfg)
 
     step_jit   = jax.jit(env_step)
     reward_jit = jax.jit(compute_reward)
 
     state = reset(jax.random.PRNGKey(42))
+    
+    # Override positions for the perfect chain test
+    # This keeps the test-specific geometry inside the test file
+    base_pos   = jnp.array([50.0, test_y])
+    target_pos = jnp.array([450.0, test_y])
+    pos        = jnp.tile(base_pos[None, :], (N, 1))
+    state = state.replace(base_pos=base_pos, target_pos=target_pos, pos=pos)
 
     # Calculate optimal positions for each agent to form a perfect chain
-    # Base is at x=50, Target is at x=450.
-    # Drones should space themselves out evenly along the x-axis to exactly cover the 400m gap.
-    # With 8 drones, the spacing needed is exactly 50m!
-    # Base (50) -> D1 (95) -> D2 (144.2) -> D3 (193.5) -> D4 (242.8) -> D5 (292.1) -> D6 (341.4) -> D7 (390.7) -> D8 (440 - sees target at 450 visually).
-    # We use 95.0 instead of 100.0 for D1 to give 5 meters of slack on the Base connection, 
-    # ensuring P-controller physics overshoots don't accidentally snap the comm_radius!
-    optimal_x = jnp.linspace(95.0, 440.0, N)
-    optimal_positions = jnp.stack([optimal_x, jnp.full(N, 50.0)], axis=-1)
+    # With N=10, gaps become 345/8 = 43.125m (Safe!)
+    optimal_x = jnp.concatenate([
+        jnp.array([50.0]),
+        jnp.linspace(95.0, 440.0, N - 1)
+    ])
+    optimal_positions = jnp.stack([optimal_x, jnp.full(N, test_y)], axis=-1)
 
     traj_states = []
     traj_rewards = []
+    traj_gap_dist = []
+    traj_chain_pct = []
+    traj_r_gap = []
+    traj_r_explor = []
+    traj_r_coll = []
     
     print(f"Running scripted test with {N} agents...")
     print(f"  {'Step':>4} | {'r_cov':>6} | {'r_fnd':>6} | {'r_gap':>8} | {'r_coll':>8} | {'r_succ':>6} || {'Total R':>8} | {'GapDst':>6} | {'TGT':>3} | {'CONN':>4}")
     print(f"  {'-'*4} | {'-'*6} | {'-'*6} | {'-'*8} | {'-'*8} | {'-'*6} || {'-'*8} | {'-'*6} | {'-'*3} | {'-'*4}")
 
-    # First, everybody flies to the middle (X=250), except Drone 7 which flies to the target (X=440)
+    # First, everybody flies to the middle (X=250), except Drone 0 (Base) and Drone 8 (Target)
     explore_x = jnp.full(N, 250.0)
-    explore_y = jnp.array([70.0, 30.0, 60.0, 40.0, 50.0, 65.0, 35.0, 55.0])
+    # Give drones some spread in Y to avoid perfect overlap
+    explore_y = jnp.linspace(30.0, 70.0, N)
     
-    # Drone 7 runs to the target instantly
-    explore_x = explore_x.at[7].set(440.0)
-    explore_y = explore_y.at[7].set(50.0)
+    # Drone 0 sits at base
+    explore_x = explore_x.at[0].set(50.0)
+    explore_y = explore_y.at[0].set(test_y)
+    
+    # Drone 8 runs to the target instantly to "find" it
+    explore_x = explore_x.at[N-1].set(440.0)
+    explore_y = explore_y.at[N-1].set(test_y)
+    
     explore_positions = jnp.stack([explore_x, explore_y], axis=-1)
 
     chain_formed_step = None
     target_found_step = None
 
-    # Thresholds for when each drone receives the order to move to optimal position
-    # The chain "unfurls" gradually from both ends inwards, ticking every 30 frames (1.5 seconds)
-    # AFTER the target is found:
-    # Drone 0 (Base end): t_found + 0
-    # Drone 6 (Target end): t_found + 30
-    # Drone 1: t_found + 60
-    # Drone 5: t_found + 90
-    # Drone 2: t_found + 120
-    # Drone 4: t_found + 150
-    # Drone 3: t_found + 180
-    # Drone 7: already at target
-    unfurl_delays = jnp.array([0, 60, 120, 180, 150, 90, 30, -999])
+    hold_chain_for = int(cfg.env.get("hold_chain_for", 10))
+    print(f"Required hold chain steps: {hold_chain_for}")
+    success_achieved_step = None
 
-    # Run for up to 400 steps (exits early upon success)
-    for t in range(400):
+    # Run for up to 1500 steps (exits early upon success)
+    for t in range(1500):
+        # Controller target positions based on target knowledge
+        # Drone 0 (base) stays at base (50)
+        # Drone 9 (finder) flies to 440 to find target, then flies to base (50) to deliver info,
+        # and finally back to 440 once base knows target.
+        target_x_9 = jnp.where(
+            state.base_target_known,
+            optimal_positions[9, 0],
+            jnp.where(state.target_known[9], 50.0, 440.0)
+        )
         
-        time_since_found = (t - target_found_step) if target_found_step is not None else -1
+        # Drones 1-8 stay at explore positions until they receive target knowledge
+        target_x_1_8 = jnp.where(
+            state.target_known[1:N-1],
+            optimal_positions[1:N-1, 0],
+            explore_positions[1:N-1, 0]
+        )
         
-        target_x = jnp.where(time_since_found >= unfurl_delays, optimal_positions[:, 0], explore_positions[:, 0])
-        target_y = jnp.where(time_since_found >= unfurl_delays, optimal_positions[:, 1], explore_positions[:, 1])
+        target_x = jnp.concatenate([
+            jnp.array([50.0]),
+            target_x_1_8,
+            jnp.array([target_x_9])
+        ])
+        
+        target_y = jnp.full(N, test_y)
         target_pos = jnp.stack([target_x, target_y], axis=-1)
             
-        kp = 5.0
-        kd = 2.0
+        kp = 12.0
+        kd = 5.0
         
         error = target_pos - state.pos
         actions = kp * error - kd * state.vel
@@ -117,34 +154,41 @@ def run_scripted_test():
         old_state = state
         state = step_jit(old_state, actions)
         
-        traj_states.append(state)
-        
-        # Compute rewards
-        # We manually trigger success on the exact step the chain is first fully connected
-        is_connected = bool(info_dry['fully_connected'] > 0.5) if 'info_dry' in locals() else False # Need to test before calling again, but jit expects scalar bool
-        # Real logic: RL environments pass is_done=True on the step the episode terminates.
-        
-        # We'll just define is_done as: "it wasn't connected before, but it is now"
-        # Or simply, the first time it fully connects.
-        connects_now = bool(info_dry['fully_connected']) if 'info_dry' in locals() else False
+        # Compute rewards with is_done=False so success bonus is not prematurely added
         is_done = jnp.bool_(False)
-        
         rew, info = reward_jit(old_state, state, is_done)
-        info_dry = info
         
-        if info['just_found'] and target_found_step is None:
-            target_found_step = t
+        fully_connected = info['fully_connected'] > 0.5
+        new_chain_held_steps = jnp.where(
+            fully_connected,
+            state.chain_held_steps + jnp.int32(1),
+            jnp.int32(0)
+        )
+        state = dataclasses.replace(state, chain_held_steps=new_chain_held_steps)
+        success_achieved = new_chain_held_steps >= (hold_chain_for + 1)
         
-        if info['fully_connected'] and chain_formed_step is None:
-            chain_formed_step = t
-            # Assign the success bonus retroactively for visual effect right on connection
+        # If success is achieved, add the success bonus
+        if bool(success_achieved) and success_achieved_step is None:
+            success_achieved_step = t
             is_done = jnp.bool_(True)
             rew, info = reward_jit(old_state, state, is_done)
 
+        traj_states.append(state)
         traj_rewards.append(rew)
+        traj_gap_dist.append(float(info["chain_gap_dist"]))
+        traj_r_gap.append(float(info["r_chain_gap"]))
+        traj_r_explor.append(float(info["r_coverage"]))
+        traj_r_coll.append(float(info["r_collision"]))
+        traj_chain_pct.append(float(info["chain_progress_pct"]))
 
-        if t % 5 == 0 or info['just_found'] or (chain_formed_step == t):
-            r_tot = float(rew)
+        if info['just_found'] and target_found_step is None:
+            target_found_step = t
+        
+        if fully_connected and chain_formed_step is None:
+            chain_formed_step = t
+
+        if t % 50 == 0 or info['just_found'] or (chain_formed_step == t) or bool(success_achieved):
+            r_tot = float(rew.sum())
             rt_cov  = float(info['r_coverage'])
             rt_fnd  = float(info.get('r_target_found', 0.0))
             rt_gap  = float(info['r_chain_gap'])
@@ -153,25 +197,51 @@ def run_scripted_test():
             
             gap_dist = float(info['chain_gap_dist'])
             tgt = "YES" if info['global_target_found'] else "no"
-            conn = "YES!" if info['fully_connected'] else "no"
+            conn = f"YES({int(new_chain_held_steps)})" if fully_connected else "no"
             
-            highlight = ">>> " if info['just_found'] or (chain_formed_step == t) else "    "
+            highlight = ">>> " if info['just_found'] or (chain_formed_step == t) or bool(success_achieved) else "    "
             
-            print(f"{highlight}{t:>4} | {rt_cov:>6.3f} | {rt_fnd:>6.1f} | {rt_gap:>8.3f} | {rt_coll:>8.3f} | {rt_succ:>6.1f} || {r_tot:>8.3f} | {gap_dist:>6.1f} | {tgt:>3} | {conn:>4}")
+            print(f"{highlight}{t:>4} | {rt_cov:>6.3f} | {rt_fnd:>6.1f} | {rt_gap:>8.3f} | {rt_coll:>8.3f} | {rt_succ:>6.1f} || {r_tot:>8.3f} | {gap_dist:>6.1f} | {tgt:>3} | {conn}")
 
-        if chain_formed_step is not None:
-            print("\nChain successfully formed! Ending episode early.")
+        if success_achieved_step is not None:
+            print(f"\nChain successfully held for {hold_chain_for} steps! Ending episode early.")
             break
 
     # Stack the trajectory history along a new time dimension (T, ...)
     traj_stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *traj_states)
-    rewards_stacked = jnp.stack(traj_rewards)
+    rewards_stacked = jnp.array(traj_rewards)
     
+    extra_metrics = {
+        "r_gap":    np.array(traj_r_gap),
+        "r_explor": np.array(traj_r_explor),
+        "r_total":  np.array([float(r.sum()) for r in traj_rewards]),
+        "chain_pct": np.array(traj_chain_pct),
+    }
+
     print("\nRendering video to visually confirm behavior...")
-    render_video(traj_stacked, cfg, "outputs/videos/perfect_chain_test.mp4", fps=20, rewards=rewards_stacked, renderer="slow")
-    print("Done. Check out outputs/videos/perfect_chain_test.mp4!")
+
+    # 1. Slow (Matplotlib) renderer - Beautiful scientific layout
+    # render_video(
+    #     traj_stacked, 
+    #     cfg, 
+    #     filename="outputs/videos/perfect_chain_mpl.mp4", 
+    #     renderer="slow",
+    #     rewards=rewards_stacked,
+    #     extra_metrics=extra_metrics
+    # )
+
+    # 2. Fast (OpenCV) renderer - Fast layout
+    render_video(
+        traj_stacked, 
+        cfg, 
+        filename="outputs/videos/perfect_chain_cv2.mp4", 
+        renderer="fast",
+        rewards=rewards_stacked,
+        extra_metrics=extra_metrics
+    )
+    
+    print("\nDone. Check out:")
+    print("  - outputs/videos/perfect_chain_cv2.mp4")
 
 if __name__ == "__main__":
     run_scripted_test()
-
-

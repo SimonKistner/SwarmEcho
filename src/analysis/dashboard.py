@@ -45,13 +45,16 @@ st.markdown("<div class='subheader-style'>Cross-Curriculum Telemetry Analysis</d
 # Logic - Discovery Engine  & Naming Cleaners
 # ---------------------------------------------------------------------------
 
-def extract_timestamp(name: str):
-    clean = name.replace("run", "").strip("-_")
-    ts_str = clean[:15]
-    try:
-        return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
-    except ValueError:
-        return None
+def extract_timestamp_robust(name: str):
+    """Finds YYYYMMDD_HHMMSS anywhere in the string."""
+    match = re.search(r'(\d{8})_(\d{6})', name)
+    if match:
+        ts_str = f"{match.group(1)}_{match.group(2)}"
+        try:
+            return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+    return None
 
 def clean_semantic_name(raw_name: str) -> str:
     """Strips timestamps and fixes capitalization for clean UI display.
@@ -73,113 +76,163 @@ def flatten_wandb_config(cfg_dict):
             flat[key] = val
     return flat
 
+def extract_timestamp_from_video(v_dir: Path):
+    for v_file in v_dir.glob("*.mp4"):
+        parts = v_file.stem.split("_")
+        # e.g., eval_update_000015_20260427_185653
+        if len(parts) >= 5:
+            try:
+                ts_str = f"{parts[3]}_{parts[4]}"
+                return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+            except: pass
+    return None
+
 def find_all_runs(outputs_root: Path, wandb_root: Path):
-    """Timestamp-linked discovery of valid operation footprints."""
-    local_runs = []
+    """Heuristic discovery of operation footprints, prioritizing local folders."""
+    local_candidates = {} # path -> metadata
     
     if outputs_root.exists():
-        for p in outputs_root.rglob("run_*"):
+        # Discovery: folders containing config.yaml or videos/
+        for p in outputs_root.rglob("*"):
             if not p.is_dir(): continue
+            # Ignore internal system/utility folders
+            if p.name in ["videos", "checkpoints", "to_delete", "wandb", "files", "logs", "bin"]: 
+                continue
+            
+            # Absolute safety: Don't look inside any folder named 'wandb'
+            if "wandb" in p.parts: 
+                continue
+            
+            cfg_file = p / "config.yaml"
             v_dir = p / "videos"
-            if not v_dir.exists() or not any(v_dir.glob("*.mp4")): continue
-            ts = extract_timestamp(p.name)
-            if not ts: continue
             
-            c_raw = "Standalone"
-            if "curriculum" in p.parts:
-                try: c_raw = p.parts[p.parts.index("curriculum") + 1]
-                except IndexError: pass
-            
-            local_runs.append({
-                "ts": ts,
-                "outputs_path": p,
-                "curriculum_raw": c_raw,
-                "curriculum_clean": clean_semantic_name(c_raw),
-                "video_path": v_dir,
-                "folder_name": p.name
-            })
-            
-    run_registry = {}
-    
+            if cfg_file.exists() or (v_dir.exists() and any(v_dir.glob("*.mp4"))):
+                # We found a potential run directory
+                ts = extract_timestamp_robust(p.name)
+                if not ts and v_dir.exists():
+                    ts = extract_timestamp_from_video(v_dir)
+                if not ts:
+                    # Windows creation time is usually reliable for linking
+                    ts = datetime.fromtimestamp(p.stat().st_ctime)
+                
+                group_name = p.parent.name if p.parent != outputs_root else "Standalone"
+                if group_name == "curriculum": group_name = "Direct Ops" # Flatten one level if needed
+                
+                local_candidates[str(p)] = {
+                    "ts": ts,
+                    "path": p,
+                    "group": group_name,
+                    "name": p.name,
+                    "v_dir": v_dir,
+                    "cfg_file": cfg_file if cfg_file.exists() else None
+                }
+
+    # Match with WandB runs
+    wandb_runs = []
     if wandb_root.exists():
         for w_path in wandb_root.glob("run-*"):
             if not w_path.is_dir() or w_path.name == "to_delete": continue
-            cfg_path = w_path / "files" / "config.yaml"
-            if not cfg_path.exists(): continue
-            w_ts = extract_timestamp(w_path.name)
-            if not w_ts: continue
+            w_ts = extract_timestamp_robust(w_path.name)
+            if w_ts:
+                wandb_runs.append({"ts": w_ts, "path": w_path})
+
+    run_registry = {}
+    
+    for _, local in local_candidates.items():
+        # Source of Truth: The local config.yaml snapshot created at run-start
+        raw_cfg = None
+        if local["cfg_file"]:
+            try:
+                raw_cfg = OmegaConf.to_container(OmegaConf.load(local["cfg_file"]), resolve=True)
+            except: pass
             
-            match = None
-            for local in local_runs:
-                if abs((w_ts - local["ts"]).total_seconds()) <= 60:
-                    match = local
+        if raw_cfg is None: continue # Skip folders that aren't valid runs
+        
+        # Best-Effort WandB Linking (for URL/Metrics only)
+        match_w_path = None
+        internal_wandb = local["path"] / "wandb"
+        if internal_wandb.exists():
+            runs = list(internal_wandb.glob("run-*"))
+            if runs:
+                match_w_path = sorted(runs, key=os.path.getmtime)[-1]
+        
+        if not match_w_path:
+            for w in wandb_runs:
+                if abs((w["ts"] - local["ts"]).total_seconds()) <= 300:
+                    match_w_path = w["path"]
                     break
-                    
-            if match:
+        
+        verified = (match_w_path is not None)
+        if "_wandb" in raw_cfg: raw_cfg = flatten_wandb_config(raw_cfg)
+        
+        # Calculate Steps Trained (Priority: WandB Summary > Checkpoints)
+        actual_steps = "Unknown"
+        
+        # 1. Try WandB Summary
+        if match_w_path:
+            summary_path = match_w_path / "files" / "wandb-summary.json"
+            if summary_path.exists():
                 try:
-                    raw_cfg = OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=True)
-                    if "_wandb" in raw_cfg: raw_cfg = flatten_wandb_config(raw_cfg)
-                except Exception: continue
-                
-                # Calculate True Timesteps Trained from Checkpoints
-                actual_steps = "Unknown"
-                ckpt_dir = match["outputs_path"] / "checkpoints"
-                if ckpt_dir.exists():
-                    ckpts = sorted(list(ckpt_dir.glob("ckpt_*")), key=lambda x: x.name)
-                    if ckpts:
-                        latest_ckpt = ckpts[-1].name
-                        try:
-                            # Extract integer from ckpt_000381
-                            updates = int(latest_ckpt.split("_")[1])
-                            t_cfg = raw_cfg.get("training", {})
-                            envs = int(t_cfg.get("num_envs", 1024))
-                            rollout_steps = int(t_cfg.get("num_steps", 128))
-                            
-                            total_steps = updates * envs * rollout_steps
-                            
+                    with open(summary_path, 'r') as f:
+                        import json
+                        summary = json.load(f)
+                        # Look for common step keys
+                        step_val = summary.get("global_step") or summary.get("total_steps") or summary.get("_step")
+                        if step_val is not None:
+                            total_steps = int(step_val)
                             if total_steps >= 1_000_000:
                                 actual_steps = f"{total_steps / 1_000_000:.1f}M"
                             else:
                                 actual_steps = f"{total_steps:,}"
-                        except Exception: pass
+                except: pass
+
+        # 2. Fallback to Checkpoints
+        if actual_steps == "Unknown":
+            ckpt_dir = local["path"] / "checkpoints"
+            if ckpt_dir.exists():
+                ckpts = sorted(list(ckpt_dir.glob("ckpt_*")), key=lambda x: x.name)
+                if ckpts:
+                    latest_ckpt = ckpts[-1].name
+                    try:
+                        updates = int(latest_ckpt.split("_")[1])
+                        t_cfg = raw_cfg.get("training", {})
+                        envs = int(t_cfg.get("num_envs", 1024))
+                        rollout_steps = int(t_cfg.get("num_steps", 128))
+                        total_steps = updates * envs * rollout_steps
+                        if total_steps >= 1_000_000:
+                            actual_steps = f"{total_steps / 1_000_000:.1f}M"
+                        else:
+                            actual_steps = f"{total_steps:,}"
+                    except: pass
+        
+        if "telemetry" not in raw_cfg: raw_cfg["telemetry"] = {}
+        raw_cfg["telemetry"]["actual_steps_trained"] = actual_steps
+        
+        display_name = f"{local['group']} | {local['name']}"
+        run_registry[display_name] = {
+            "id": display_name,
+            "config": raw_cfg,
+            "outputs_path": local["path"],
+            "wandb_path": match_w_path,
+            "group_name": local["group"],
+            "run_name": local["name"],
+            "display_name": display_name,
+            "video_path": local["v_dir"],
+            "created": local["ts"].timestamp(),
+            "folder_name": local["path"].name,
+            "verified": verified
+        }
                 
-                # Inject as a pseudo-parameter so it bubbles up in the UI matrix
-                if "telemetry" not in raw_cfg: raw_cfg["telemetry"] = {}
-                raw_cfg["telemetry"]["actual_steps_trained"] = actual_steps
-                
-                reg_key = f"{match['curriculum_clean']}::{match['folder_name']}"
-                run_registry[reg_key] = {
-                    "id": reg_key,
-                    "config": raw_cfg,
-                    "outputs_path": match["outputs_path"],
-                    "wandb_path": w_path,
-                    "curriculum_clean": match["curriculum_clean"],
-                    "video_path": match["video_path"],
-                    "created": match["ts"].timestamp(),
-                    "folder_name": match["folder_name"]
-                }
-                
-    # Sequence mapping (Level_X)
-    sorted_reg = dict(sorted(run_registry.items(), key=lambda x: x[1]["created"]))
-    c_counts = {}
-    final_registry = {}
-    for r_key, r_data in sorted_reg.items():
-        c_name = r_data["curriculum_clean"]
-        lvl = c_counts.get(c_name, 0)
-        display_name = f"{c_name} | L{lvl}"
-        r_data["display_name"] = display_name
-        r_data["level_label"] = f"L{lvl}"
-        final_registry[display_name] = r_data
-        c_counts[c_name] = lvl + 1
-                    
-    return final_registry
+    # Sort by creation time (newest first)
+    sorted_reg = dict(sorted(run_registry.items(), key=lambda x: x[1]["created"], reverse=True))
+    return sorted_reg
 
 # ---------------------------------------------------------------------------
 # State & Data Loading
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-OUTPUTS_ROOT = BASE_DIR / "outputs" / "curriculum"
+OUTPUTS_ROOT = BASE_DIR / "outputs"
 WANDB_ROOT = BASE_DIR / "wandb"
 
 registry = find_all_runs(OUTPUTS_ROOT, WANDB_ROOT)
@@ -199,19 +252,22 @@ with st.sidebar:
     
     grouped_runs = {}
     for r_disp, r_data in registry.items():
-        c_name = r_data["curriculum_clean"]
-        if c_name not in grouped_runs: grouped_runs[c_name] = []
-        grouped_runs[c_name].append((r_disp, r_data["level_label"]))
+        g_name = r_data["group_name"]
+        if g_name not in grouped_runs: grouped_runs[g_name] = []
+        grouped_runs[g_name].append((r_disp, r_data["run_name"]))
         
     selected_operations = []
     
-    for c_name, runs in grouped_runs.items():
-        st.markdown(f"<div class='sidebar-cgroup'>{c_name}</div>", unsafe_allow_html=True)
-        # Display checkboxes smoothly
-        for r_disp, lvl_label in runs:
-            # Default to selecting the first L0 just to show something on load
-            is_def = (selected_operations == []) and (lvl_label == "L0")
-            if st.checkbox(lvl_label, value=is_def, key=r_disp):
+    for g_name, runs in grouped_runs.items():
+        st.markdown(f"<div class='sidebar-cgroup'>{g_name}</div>", unsafe_allow_html=True)
+        for r_disp, r_name in runs:
+            r_data = registry[r_disp]
+            verified_icon = "🟢" if r_data.get("verified") else "⚪"
+            label = f"{verified_icon} {r_name}"
+            
+            # Default to selecting the most recent standalone just to show something on load
+            is_def = (selected_operations == []) and (g_name == "Standalone")
+            if st.checkbox(label, value=is_def, key=r_disp):
                 selected_operations.append(r_disp)
 
 # ---------------------------------------------------------------------------
@@ -232,23 +288,37 @@ if not selected_operations:
 
 # Build DataFrame
 comp_data = {}
+all_keys = set()
 for r_disp in selected_operations:
     cfg = registry[r_disp]["config"]
     flat_cfg = {}
     for section, params in cfg.items():
-        # Exclude massive internal WandB system blobs
         if str(section).lower() in ["_wandb", "wandb"]: continue
-        
         if isinstance(params, dict):
             for k, v in params.items():
-                flat_cfg[f"{section.upper()} | {k}"] = str(v)
+                key = f"{section.upper()} | {k}"
+                flat_cfg[key] = str(v)
+                all_keys.add(key)
         else:
-            flat_cfg[f"GLOBAL | {section}"] = str(params)
+            key = f"GLOBAL | {section}"
+            flat_cfg[key] = str(params)
+            all_keys.add(key)
     comp_data[r_disp] = flat_cfg
 
+# Ensure all keys exist in all runs (use "NaN" for missing)
+for r_disp in selected_operations:
+    for key in all_keys:
+        if key not in comp_data[r_disp]:
+            comp_data[r_disp][key] = "NaN"
+
 diff_df = pd.DataFrame(comp_data)
-# Sort index so Domain groups stick together
-diff_df.sort_index(inplace=True)
+
+# Sort: Differences FIRST, then alphabetically
+is_different = diff_df.apply(lambda x: x.nunique() > 1, axis=1)
+diff_df["_sort_diff"] = is_different
+# Sort by difference status first, then by the parameter name (index)
+diff_df.sort_values(by=["_sort_diff"], ascending=[False], inplace=True)
+diff_df.drop(columns=["_sort_diff"], inplace=True)
 
 def render_html_table(df, title, show_domain=True):
     if df.empty: return

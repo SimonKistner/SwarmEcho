@@ -14,4 +14,3 @@ training:
   total_timesteps: 100_000_000
   num_envs: 1024
 
-

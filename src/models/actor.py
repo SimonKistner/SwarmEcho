@@ -1,0 +1,198 @@
+"""
+swarmecho/models/actor.py
+==========================
+Decentralised actor network for SwarmEcho (CTDE — Centralised Training,
+Decentralised Execution).
+
+Network
+-------
+  Local obs (obs_dim,) → MLP trunk → mu, log_std
+
+Action space
+------------
+  Uses tanh squashing: physical_action = tanh(u) × max_force, where u ~ N(mu, std).
+  The pre-squash sample u is stored in the buffer. The policy log-probabilities
+  and updates are computed directly on the pre-squash values u as standard Gaussian
+  densities (without the need for explicit Tanh Jacobian correction as the correction
+  terms cancel out in the PPO ratio).
+  This prevents boundary gradient explosion issues.
+  Physical force = tanh(u) × max_force is applied by the runner, NOT here.
+
+Parameter sharing
+-----------------
+  One actor instance is shared across all N agents (called via vmap).
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+from flax import nnx
+
+LOG_STD_MIN = -5.0
+LOG_STD_MAX =  2.0
+
+# Small epsilon added inside log(1 - tanh²(x)) to prevent log(0)
+_TANH_EPS = 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Building block: MLP with LayerNorm + Tanh activations
+# ---------------------------------------------------------------------------
+
+class MLP(nnx.Module):
+    """
+    Multi-layer perceptron with LayerNorm + Tanh activations.
+
+    Parameters
+    ----------
+    in_features  : input dimension
+    hidden_dim   : width of each hidden layer
+    num_layers   : number of hidden layers (≥ 1)
+    out_features : output dimension (no activation on final layer)
+    rngs         : Flax NNX random-number generators
+    """
+
+    def __init__(
+        self,
+        in_features:  int,
+        hidden_dim:   int,
+        num_layers:   int,
+        out_features: int,
+        rngs:         nnx.Rngs,
+    ) -> None:
+        assert num_layers >= 1, "Need at least one hidden layer."
+        layers, norms = [], []
+        prev = in_features
+        for _ in range(num_layers):
+            layers.append(nnx.Linear(prev, hidden_dim, rngs=rngs))
+            norms.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+            prev = hidden_dim
+        self.layers     = nnx.List(layers)
+        self.norms      = nnx.List(norms)
+        self.out_linear = nnx.Linear(hidden_dim, out_features, rngs=rngs)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        for lin, norm in zip(self.layers, self.norms):
+            x = jnp.tanh(norm(lin(x)))
+        return self.out_linear(x)
+
+
+# ---------------------------------------------------------------------------
+# DecentralizedActor
+# ---------------------------------------------------------------------------
+
+class DecentralizedActor(nnx.Module):
+    """
+    Shared actor network — every agent runs the same weights on its local obs.
+
+    Input : obs_i  (obs_dim,)    — agent i's local observation
+    Output: mu, log_std          — parameters of a diagonal Gaussian policy
+                                   BOTH clipped to give actions in [-1, 1]
+
+    Parameters
+    ----------
+    obs_dim          : observation dimension
+    act_dim          : action dimension (2 for SwarmEcho)
+    hidden_dim       : hidden layer width
+    actor_num_layers : number of hidden layers (recommended: 2)
+    rngs             : Flax NNX RNG state
+    """
+
+    def __init__(
+        self,
+        obs_dim:          int,
+        act_dim:          int,
+        hidden_dim:       int,
+        actor_num_layers: int,
+        rngs:             nnx.Rngs,
+    ) -> None:
+        self.act_dim = act_dim
+        self.trunk        = MLP(obs_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+        self.mu_head      = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+        self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+
+    def __call__(self, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """obs: (..., obs_dim) → mu (..., act_dim), log_std (..., act_dim)"""
+        feat    = self.trunk(obs)
+        mu      = self.mu_head(feat)
+        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        return mu, log_std
+
+    def act(
+        self,
+        obs:           jax.Array,   # (obs_dim,)
+        key:           jax.Array,
+        deterministic: bool = False,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """
+        Sample a tanh-squashed action for one agent.
+
+        Action space
+        ------------
+        We use tanh squashing (not hard clip) to keep the action in (-1, 1):
+          1. Sample pre-squash noise: u ~ N(mu, std)
+          2. Squash:  action = tanh(u)  ∈ (-1, 1)
+
+        This is numerically stable (no hard boundaries → no gradient explosions)
+        and keeps old_log_probs / new_log_probs consistent, preventing NaN entropy.
+
+        The buffer stores the PRE-SQUASH sample `u` so that evaluate_actions can
+        recompute the exact same log-prob on u without needing to invert tanh.
+        PPO updates are computed directly in the pre-squash space (omitting explicit
+        Jacobian corrections since they cancel out in the PPO ratio).
+
+        Returns
+        -------
+        action   : (act_dim,)  — pre-squash sample u (runner squashes and scales)
+        log_prob : ()                       — Gaussian log probability on u
+        entropy  : ()                       — Gaussian entropy on u (for logging)
+        """
+        mu, log_std = self(obs)
+        std = jnp.exp(log_std)
+
+        if deterministic:
+            u = mu
+        else:
+            u = mu + std * jax.random.normal(key, mu.shape)
+
+        action = jnp.tanh(u)   # squash to (-1, 1)
+
+        # Gaussian log-prob at pre-squash sample u
+        log_prob = -0.5 * jnp.sum(
+            ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
+        )
+
+        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+
+        # Return the pre-squash sample as the "stored action" so evaluate_actions
+        # can recompute the same log-prob exactly (buffer stores u, not tanh(u)).
+        return u, log_prob, entropy
+
+    def evaluate_actions(
+        self,
+        obs:     jax.Array,   # (..., obs_dim)
+        actions: jax.Array,   # (..., act_dim)  — PRE-SQUASH samples u from buffer
+    ) -> tuple[jax.Array, jax.Array]:
+        """
+        Evaluate log-probs and entropy for stored pre-squash actions.
+        Used in the PPO update step.
+
+        `actions` must be the PRE-SQUASH values u (as returned by act()),
+        NOT the tanh-squashed actions.
+
+        Returns
+        -------
+        log_prob : (...,)
+        entropy  : (...,)
+        """
+        mu, log_std = self(obs)
+        std = jnp.exp(log_std)
+
+        log_prob = -0.5 * jnp.sum(
+            ((actions - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi),
+            axis=-1,
+        )
+
+        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        return log_prob, entropy

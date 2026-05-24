@@ -141,7 +141,8 @@ def get_ray_stencil(radius: int) -> tuple[np.ndarray, np.ndarray]:
     targets = np.stack([dx.ravel(), dy.ravel()], axis=-1)
     
     NumRays = targets.shape[0]
-    MaxLen = int(np.ceil(np.sqrt(2) * R)) + 2 # Longest diagonal ray
+    # Bounded by maximum sampling density to prevent any broadcast errors
+    MaxLen = int(np.ceil(R * 2.0)) + 5
     
     stencil_coords = np.zeros((NumRays, MaxLen, 2), dtype=np.int32)
     stencil_lengths = np.zeros(NumRays, dtype=np.int32)

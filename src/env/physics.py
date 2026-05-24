@@ -72,28 +72,36 @@ def make_env_fns(cfg: DictConfig):
 
     # --- Extract config as Python scalars (XLA compile-time constants) -----
     N           = int(cfg.env.num_agents)
-    cell_size   = float(cfg.env.grid_cell_size)
-    MGW         = int(cfg.env.max_grid_width)
-    MGH         = int(cfg.env.max_grid_height)
+    cell_size   = 1.0  # Cell size is universally 1m for physics and coverage grids
     dt          = float(cfg.env.dt)
     drag        = float(cfg.env.drag)
     v_max       = float(cfg.env.max_speed)
     f_max       = float(cfg.env.max_force)
-    W           = float(cfg.env.box_width)
-    H           = float(cfg.env.box_height)
+    W           = cfg.env.box_width
+    H           = cfg.env.box_height
     vis_r       = float(cfg.env.visual_radius)
     comm_r      = float(cfg.env.comm_radius)
+    comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     spawn_delay = int(cfg.env.spawn_delay)
     wall_res    = float(cfg.env.wall_restitution)
     use_task    = (int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
+    # --- Spawn control scalars (B-series curriculum) ----------------------
+    use_random_base_spawn   = bool(cfg.env.get("use_random_base_spawn", True))
+    use_random_drone_spawn  = bool(cfg.env.get("use_random_drone_spawn", True))
+    target_spawn_method     = str(cfg.env.get("target_spawn_method", "map_defined"))
+    target_spawn_radius     = float(cfg.env.get("target_spawn_radius", 0.0))
+    target_spawn_radius_min = float(cfg.env.get("target_spawn_radius_min", 0.0))
+    target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
+    precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
+
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
     # 2^n_reach steps covers paths up to 2^n_reach hops — always > N.
     n_reach = max(1, math.ceil(math.log2(N + 2)))
 
-    # Fixed world geometry (may be overridden by map)
-    BASE_POS_FIXED   = jnp.array([cfg.env.base_x,   cfg.env.base_y],   dtype=jnp.float32)
-    TARGET_POS_FIXED = jnp.array([cfg.env.target_x, cfg.env.target_y], dtype=jnp.float32)
+    # world geometry will be resolved by map loading
+    BASE_POS_FIXED   = None
+    TARGET_POS_FIXED = None
 
     # Map loading
     map_def      = None
@@ -106,7 +114,7 @@ def make_env_fns(cfg: DictConfig):
         if map_path.exists():
             map_def = MapDefinition.load(
                 map_path, 
-                cell_size=float(cfg.env.grid_cell_size),
+                cell_size=1.0,
                 padding_radius=PAD_RADIUS
             )
             W, H = map_def.width, map_def.height
@@ -114,23 +122,34 @@ def make_env_fns(cfg: DictConfig):
                 occ_grid = jnp.array(map_def.occupancy_grid, dtype=jnp.bool_)
             if map_def.padded_occupancy_grid is not None:
                 padded_grid = map_def.padded_occupancy_grid
+                
+            # Override base and target positions with the center of the map's spawn zones
+            if map_def.base_spawn_zone:
+                bx = (map_def.base_spawn_zone[0] + map_def.base_spawn_zone[2]) / 2.0
+                by = (map_def.base_spawn_zone[1] + map_def.base_spawn_zone[3]) / 2.0
+                BASE_POS_FIXED = jnp.array([bx, by], dtype=jnp.float32)
+                
+            if map_def.target_spawn_zone:
+                tx = (map_def.target_spawn_zone[0] + map_def.target_spawn_zone[2]) / 2.0
+                ty = (map_def.target_spawn_zone[1] + map_def.target_spawn_zone[3]) / 2.0
+                TARGET_POS_FIXED = jnp.array([tx, ty], dtype=jnp.float32)
         else:
             raise FileNotFoundError(f"Map file not found: {map_path}")
 
     # Final Grid Dimensions (Snapped to cell_size)
-    GW = int(W / cell_size)
-    GH = int(H / cell_size)
+    if W is None or H is None:
+        raise ValueError("Environment dimensions (box_width/height) are missing. Map loading failed or dimensions not in config.")
     
-    # Fallback empty grid if no map
+    W, H = float(W), float(H)
+    GW, GH = int(W / cell_size), int(H / cell_size)
+    
     if occ_grid is None:
-        occ_grid = jnp.zeros((GW, GH), dtype=jnp.bool_)
+        raise ValueError("Occupancy grid missing. A valid map MUST be loaded for physics.")
     
     # Padding size in cells
     R_cells = int(PAD_RADIUS / cell_size) + 2
     if padded_grid is None:
-        padded_grid = jnp.ones((MGW + 2*R_cells, MGH + 2*R_cells), dtype=jnp.bool_)
-        # Use config dimensions for initial fallback box if map is missing
-        padded_grid = padded_grid.at[R_cells:R_cells+int(W/cell_size), R_cells:R_cells+int(H/cell_size)].set(occ_grid)
+        raise ValueError("Padded occupancy grid missing. Map loading or padding logic failed.")
 
     # 1. Pre-compute Ray Stencil for Visibility (Stencil + Cummax approach)
     # Circle sampling for visual radius
@@ -161,7 +180,7 @@ def make_env_fns(cfg: DictConfig):
         coverage_grid: jax.Array,   # (MGW, MGH) bool
         pos:           jax.Array,   # (N, 2) float32
         active:        jax.Array,   # (N,)   bool
-    ) -> jax.Array:                 # (MGW, MGH) bool
+    ) -> tuple[jax.Array, jax.Array]: # ((MGW, MGH) bool, (N,) int32)
         """
         OR the coverage_grid using Local Spotlight Raycasting.
         """
@@ -170,10 +189,13 @@ def make_env_fns(cfg: DictConfig):
         
         # We use a padded version of the coverage grid for accumulation to handle edges gracefully
         PAD = R_cells
-        cov_padded = jnp.zeros((GW + 2*PAD, GH + 2*PAD), dtype=jnp.bool_)
+        # Initialize with True so that any visibility "spilling" into the padding 
+        # is treated as already covered (delta = 0).
+        cov_padded = jnp.ones((GW + 2*PAD, GH + 2*PAD), dtype=jnp.bool_)
         cov_padded = cov_padded.at[PAD:PAD+GW, PAD:PAD+GH].set(coverage_grid[:GW, :GH])
         
-        def _update_one_drone(acc_grid, i):
+        def _update_one_drone(i, acc):
+            acc_grid, cov_deltas = acc
             p_idx = g_indices[i] # world-relative grid index (0..GW, 0..GH)
             
             # 1. Slice patch from MAP (padded_grid)
@@ -191,25 +213,29 @@ def make_env_fns(cfg: DictConfig):
             # Same coordinate system as padded_grid (start = center - radius)
             old_region = jax.lax.dynamic_slice(acc_grid, slice_start, (L_size, L_size))
             merged = jnp.maximum(old_region, final_mask)
-            return jax.lax.dynamic_update_slice(acc_grid, merged, slice_start)
+            
+            # Calculate how many new cells were covered
+            delta = jnp.sum(merged) - jnp.sum(old_region)
+            cov_deltas = cov_deltas.at[i].set(delta)
+            
+            return jax.lax.dynamic_update_slice(acc_grid, merged, slice_start), cov_deltas
 
         # Iterate over drones
-        def _body(i, acc):
-            return _update_one_drone(acc, i)
-        
-        final_padded = jax.lax.fori_loop(0, N, _body, cov_padded)
+        cov_deltas_init = jnp.zeros(N, dtype=jnp.int32)
+        final_padded, final_deltas = jax.lax.fori_loop(0, N, _update_one_drone, (cov_padded, cov_deltas_init))
         
         # Slice back to world dimensions
         new_world = final_padded[PAD:PAD+GW, PAD:PAD+GH]
-        return coverage_grid.at[:GW, :GH].set(new_world)
+        return coverage_grid.at[:GW, :GH].set(new_world), final_deltas
 
     # ------------------------------------------------------------------
     # _update_target_known  (internal utility)
     # ------------------------------------------------------------------
 
-    def _update_target_known(state: EnvState) -> jax.Array:
+    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array]:
         """
         Compute the updated (N,) bool target_known array using pre-computed visibility.
+        Also returns the updated () bool base_target_known scalar.
         """
         # Convert continuous positions to grid indices
         def _get_cell_idx(p):
@@ -242,7 +268,21 @@ def make_env_fns(cfg: DictConfig):
         
         is_visible = jax.vmap(_check_target_los)(jnp.arange(N))
 
-        # 3. Reachability via repeated matrix squaring (n_reach steps)
+        # 3. Base comm logic
+        def _check_base_comm(i):
+            dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
+            in_range = (dist <= comm_r_base) & state.active[i]
+            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid)
+            return in_range & can_see
+            
+        adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)) # (N,) bool
+        
+        drone_knows_target = is_visible | state.target_known
+        new_base_target_known = state.base_target_known | jnp.any(adj_db & drone_knows_target)
+
+        seed_knowledge = drone_knows_target | (adj_db & new_base_target_known)
+
+        # 4. Reachability via repeated matrix squaring (n_reach steps)
         A = adj_dd + _eye   # add self-loops
 
         def _mat_square(R: jax.Array, _) -> tuple[jax.Array, None]:
@@ -250,36 +290,98 @@ def make_env_fns(cfg: DictConfig):
 
         R, _ = jax.lax.scan(_mat_square, A, None, length=n_reach)
 
-        # 4. Propagation: Any drone reachable from drone i that directly sees OR knows target
+        # 5. Propagation: Any drone reachable from drone i that knows/sees the target OR is connected to base that knows it
         currently_informed = jnp.any(
-            (R > 0.5) & (is_visible | state.target_known)[None, :], axis=-1
+            (R > 0.5) & seed_knowledge[None, :], axis=-1
         )  # (N,) bool
 
         # If no target logic is enabled (curriculum levels 0-3), everyone knows nothing
         currently_informed = jnp.where(int(cfg.env.num_targets) > 0, currently_informed, False)
+        new_base_target_known = jnp.where(int(cfg.env.num_targets) > 0, new_base_target_known, jnp.bool_(False))
 
-        # 5. Persistent OR: once known, never forgotten
-        return state.target_known | currently_informed
+        # 6. Persistent OR: once known, never forgotten
+        return state.target_known | currently_informed, new_base_target_known
 
     # ------------------------------------------------------------------
     # reset
     # ------------------------------------------------------------------
 
     def reset(key: jax.Array) -> EnvState:
-        key, k1, k2, k3 = jax.random.split(key, 4)
+        key, k1, k2, k2b, k3 = jax.random.split(key, 5)
 
         if map_def is not None:
-            # Only sample Task related positions if using task logic
-            base_pos   = map_def.sample_base(k1) if use_task else BASE_POS_FIXED
-            target_pos = map_def.sample_target(k2) if use_task else TARGET_POS_FIXED
-            pos        = map_def.sample_drones(k3, N)
+            # ── Base position ──────────────────────────────────────────────
+            if use_random_base_spawn and use_task:
+                base_pos = map_def.sample_base(k1)
+            else:
+                # Fixed: exact centre of the loaded map
+                base_pos = jnp.array([float(W) / 2.0, float(H) / 2.0], dtype=jnp.float32)
+
+            # ── Target position ────────────────────────────────────────────
+            if target_spawn_method == "ring":
+                # Uniform random point inside a ring (min to max radius)
+                # around the base position (using rejection-free square-root trick)
+                angle = jax.random.uniform(k2, shape=(), minval=0.0, maxval=2.0 * math.pi)
+                r_sq = jax.random.uniform(
+                    k2b, shape=(), 
+                    minval=target_spawn_radius_min**2, 
+                    maxval=target_spawn_radius**2
+                )
+                r = jnp.sqrt(r_sq)
+                offset = jnp.array([r * jnp.cos(angle), r * jnp.sin(angle)], dtype=jnp.float32)
+                target_pos = jnp.clip(
+                    base_pos + offset,
+                    jnp.array([1.0, 1.0]),
+                    jnp.array([float(W) - 1.0, float(H) - 1.0]),
+                )
+            elif target_spawn_method == "outside_base":
+                # Generate 10 candidate points within the 2m boundary
+                bounds_min = jnp.array([2.0, 2.0], dtype=jnp.float32)
+                bounds_max = jnp.array([float(W) - 2.0, float(H) - 2.0], dtype=jnp.float32)
+                candidates = jax.random.uniform(k2, shape=(10, 2), minval=bounds_min, maxval=bounds_max)
+                
+                # Compute distance to base for all candidates
+                dists_to_base = jnp.linalg.norm(candidates - base_pos[None, :], axis=-1)
+                valid_mask = dists_to_base > target_invalid_spawn_base_radius
+                
+                # Pick the first valid candidate (argmax returns the first True index, or 0 if all are False)
+                valid_idx = jnp.argmax(valid_mask)
+                target_pos = candidates[valid_idx]
+            elif use_task:  # fallback to "map_defined"
+                target_pos = map_def.sample_target(k2)
+            else:
+                target_pos = TARGET_POS_FIXED if TARGET_POS_FIXED is not None else jnp.zeros(2, dtype=jnp.float32)
+
+            # ── Drone positions ────────────────────────────────────────────
+            if use_random_drone_spawn:
+                pos = map_def.sample_drones(k3, N)
+            else:
+                # All drones start stacked at the base position
+                pos = jnp.tile(base_pos[None, :], (N, 1))
         else:
-            base_pos   = BASE_POS_FIXED
-            target_pos = TARGET_POS_FIXED
-            pos        = jnp.tile(base_pos, (N, 1)).astype(jnp.float32)
+            raise ValueError("map_def is None. Map MUST be loaded to sample reset positions.")
+
+        if base_pos is None or target_pos is None:
+            raise ValueError("Reset failed: base_pos or target_pos could not be resolved from map.")
 
         vel           = jnp.zeros((N, 2), dtype=jnp.float32)
-        coverage_grid = jnp.zeros((MGW, MGH), dtype=jnp.bool_)
+        coverage_grid = jnp.zeros((GW, GH), dtype=jnp.bool_)
+
+        if precover_base_comm:
+            dists = jnp.linalg.norm(CELL_CENTRES - base_pos[None, None, :], axis=-1)
+            in_range = dists <= comm_r_base
+
+            def _check_cell(c_pos, ir):
+                return jax.lax.cond(
+                    ir,
+                    lambda op: dda_raycast(op[0] / cell_size, op[1] / cell_size, occ_grid),
+                    lambda _: jnp.bool_(False),
+                    operand=(c_pos, base_pos)
+                )
+
+            precovered = jax.vmap(jax.vmap(_check_cell))(CELL_CENTRES, in_range)
+            coverage_grid = coverage_grid | precovered
+
 
         if spawn_delay > 0:
             active = (_drone_indices == 0)
@@ -300,8 +402,11 @@ def make_env_fns(cfg: DictConfig):
             active        = active,
             target_known  = target_known,
             collides      = collides,
+            last_cov_delta= jnp.zeros(N, dtype=jnp.int32),
             box_width     = jnp.float32(W),
             box_height    = jnp.float32(H),
+            base_target_known = jnp.bool_(False),
+            chain_held_steps = jnp.int32(0),
         )
 
     # ------------------------------------------------------------------
@@ -412,7 +517,7 @@ def make_env_fns(cfg: DictConfig):
         collided = collided & new_active
 
         # 5. Coverage (active drones only)
-        new_coverage = update_coverage(state.coverage_grid, new_pos, new_active)
+        new_coverage, new_cov_deltas = update_coverage(state.coverage_grid, new_pos, new_active)
 
         # 6. Advance PRNG key
         new_key, _ = jax.random.split(state.key)
@@ -427,14 +532,15 @@ def make_env_fns(cfg: DictConfig):
             key           = new_key,
             active        = new_active,
             collides      = collided,
+            last_cov_delta= new_cov_deltas,
         )
 
         # 7. Update persistent target knowledge using new positions
-        new_target_known = _update_target_known(mid_state)
+        new_target_known, new_base_target_known = _update_target_known(mid_state)
 
-        return dataclasses.replace(mid_state, target_known=new_target_known)
+        return dataclasses.replace(mid_state, target_known=new_target_known, base_target_known=new_base_target_known)
 
-    return env_step, reset, update_coverage
+    return env_step, reset, update_coverage, (W, H, occ_grid)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +557,7 @@ if __name__ == "__main__":
     cfg = load_config(cli_overrides=False)
     validate_config(cfg)
 
-    env_step, reset, update_coverage = make_env_fns(cfg)
+    env_step, reset, update_coverage, (W, H, occ_grid) = make_env_fns(cfg)
 
     reset_jit = jax.jit(reset)
     step_jit  = jax.jit(env_step)
@@ -459,10 +565,10 @@ if __name__ == "__main__":
     key   = jax.random.PRNGKey(0)
     state = reset_jit(key)
 
-    MGW = int(cfg.env.max_grid_width)
-    MGH = int(cfg.env.max_grid_height)
+    GW, GH = occ_grid.shape
+    N   = int(cfg.env.num_agents)
 
-    assert_env_state(state, N, MGW, MGH)
+    assert_env_state(state, N, GW, GH)
     print(f"Reset OK  | pos shape: {state.pos.shape} | step: {state.step}")
     print(f"          | active: {state.active} | target_known: {state.target_known}")
 
@@ -471,7 +577,7 @@ if __name__ == "__main__":
         minval=-cfg.env.max_force, maxval=cfg.env.max_force,
     )
     state2 = step_jit(state, actions)
-    assert_env_state(state2, N, MGW, MGH)
+    assert_env_state(state2, N, GW, GH)
     print(f"Step  OK  | pos[0]: {state2.pos[0]} | step: {state2.step}")
     print(f"          | active: {state2.active}")
     print(f"Coverage  | cells covered: {state2.coverage_grid.sum()}")

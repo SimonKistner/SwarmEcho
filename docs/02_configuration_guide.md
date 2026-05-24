@@ -1,9 +1,9 @@
 # Configuration & Curriculum Guide
 
-SwarmEcho uses a modular, layered YAML configuration ecosystem. This is the single source of truth for all parameters, geometry, and neural sizes.
+SwarmEcho uses a modular, layered configuration ecosystem. Default values are defined directly in Python dataclasses, and custom settings or difficulty levels are layered on top via YAML files.
 
 ## 1. Parameters & Where to Find Them
-Rather than hardcoding arrays, all global settings live in `src/curriculum_config/base_params.yaml`. The file is separated into semantic domains:
+Rather than a global YAML file, the baseline configurations are declared inside the structured JAX/Flax-compatible dataclasses in `src/core/config.py` (specifically `SwarmEchoConfig`). The configuration structure is separated into semantic domains:
 
 | Domain | Description / Usage |
 |---|---|
@@ -13,11 +13,15 @@ Rather than hardcoding arrays, all global settings live in `src/curriculum_confi
 | `network` | Hidden layer dimensions, number of layers, activation types. |
 | `logging` | Interval lengths for weights & biases syncs and evaluative video renders. |
 
-## 2. Curriculum Overrides
+## 2. Curriculum Overrides & Level Structure
 The training system scales difficulty sequentially via the `levels/` directory.
-- `base_params.yaml` acts as the overarching default.
-- Files like `src/curriculum_config/levels/00.yaml` act as "patches". When a run scales to a new level, the configuration parameters from the level YAML overwrite the base definitions.
-- Example: Turning off the target task in early levels to foster raw spatial awareness before enforcing the tether-task.
+- The structured defaults in `src/core/config.py` act as the overarching default configuration.
+- Level override files are located in `src/curriculum_config/levels/` and act as "patches". When a run scales to a new level, the configuration parameters from the level YAML overwrite the base definitions.
+- **Level Naming Conventions**:
+  - **A-Series (Hand-designed Levels)**: E.g., `A00_open_field.yaml` and `A01_warehouse.yaml` define manually curated maps and agent counts.
+  - **B-Series (Auto-scaling Levels)**: E.g., `B02_comm50_N5.yaml`, `B03_comm50_N6.yaml`, etc. These scale agent counts, communication radii, and spawn properties dynamically.
+- **Dynamic B-Series Generation**: If a B-series YAML file or its corresponding map is missing when the training runner starts, the curriculum loader calls `generate_b_curriculum` to generate the level YAML and the square map representation automatically on the fly.
+- Example: Turning off the target task in early levels to foster raw spatial awareness before enforcing the full chain-relay task.
 
 ## 3. Map Geometry (`src/curriculum_config/maps/`)
 Maps are fundamentally defined via YAML layouts (rooms, hallways, walls) which are then rasterized into boolean occupancy grids for simulation.
@@ -25,12 +29,11 @@ Maps are fundamentally defined via YAML layouts (rooms, hallways, walls) which a
 - **Validation Tools:** We bake and prep the maps using scripts inside `src/curriculum_config/maps/scripts/` to ensure full compatibility with JAX raycasting logic.
 
 ### Map Gallery Preview
-The curriculum dynamically scales by transitioning through these predefined layouts:
+The curriculum dynamically scales by transitioning through these layouts:
 
-|<img src="../src/curriculum_config/maps/scripts/previews/map_preview_open_field.png" width="200" />|<img src="../src/curriculum_config/maps/scripts/previews/map_preview_warehouse.png" width="200" />|<img src="../src/curriculum_config/maps/scripts/previews/map_preview_office_complex.png" width="200" />|<img src="../src/curriculum_config/maps/scripts/previews/map_preview_complex_maze.png" width="200" />|
-|:---:|:---:|:---:|:---:|
-| **Level 00: Open Field** | **Level 01: Warehouse** | **Level 0X: Office Complex** | **Level 02: Complex Maze** |
-
-#### Map Builder Customization
-*(Via `map_builder.py`)*
-![Map Builder UI](../src/curriculum_config/maps/scripts/previews/map_builder_preview.png)
+| Level | Map Layout | N Agents | Description |
+| :---: | :---: | :---: | :---: |
+| **A00** | `open_field` | 8 | Open space, target and base are placed. |
+| **A01** | `warehouse` | 15 | Bulky obstacles (crates), requires coverage exploration. |
+| **B02** | `square_N5` | 5 | Square boundary box containing 5 agents. |
+| **B03+** | `square_N6+` | 6+ | Scaling agent counts and arena dimensions. |

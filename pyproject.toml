@@ -7,19 +7,20 @@ requires-python = ">=3.11"
 dependencies = [
     # Core JAX stack — CUDA 12 build (Linux/WSL2 only)
     "jax[cuda12]>=0.4.30",
-    "flax>=0.10.0",          # NNX API (modern Flax)
-    "optax>=0.2.4",          # Gradient transformations / optimizers
-    "chex>=0.1.86",          # Shape/dtype assertions + dataclass utils
+    "flax>=0.10.0", # NNX API (modern Flax)
+    "optax>=0.2.4", # Gradient transformations / optimizers
+    "chex>=0.1.86", # Shape/dtype assertions + dataclass utils
     # Config
-    "omegaconf>=2.3.0",      # Hierarchical YAML config with dot-notation + CLI overrides
+    "omegaconf>=2.3.0", # Hierarchical YAML config with dot-notation + CLI overrides
     # Logging & visualization
     "wandb>=0.18.0",
     "matplotlib>=3.9.0",
-    "opencv-python-headless>=4.9.0",   # Fast OpenCV renderer
-    "imageio[ffmpeg]>=2.35.0",  # Video writing (no system ffmpeg dep needed)
+    "opencv-python-headless>=4.9.0", # Fast OpenCV renderer
+    "imageio[ffmpeg]>=2.35.0", # Video writing (no system ffmpeg dep needed)
     # Checkpointing
     "orbax-checkpoint>=0.10.0", # Modern JAX checkpoint standard (DeepMind)
     "tqdm>=4.66.0",
+    "streamlit>=1.56.0",
 ]
 
 [build-system]

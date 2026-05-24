@@ -28,11 +28,23 @@ from pathlib import Path
 from typing import NamedTuple
 
 import imageio
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
+import jax
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # Force headless backend — must come before pyplot import
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import Circle
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from omegaconf import DictConfig
+
+from visualize.renderer_config import RendererConfig
+
+# Use a clean, modern font stack
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica", "sans-serif"]
+plt.rcParams["text.color"] = "#0f172a"
+plt.rcParams["axes.labelcolor"] = "#64748b"
 
 # To avoid 50GB GPU memory spikes in worker processes, we import jax locally
 import warnings
@@ -47,6 +59,30 @@ FRAME_STRIDE = 1
 
 
 # ---------------------------------------------------------------------------
+# RGB colour palette
+# ---------------------------------------------------------------------------
+
+_C = {
+    "white":        "#ffffff",
+    "bg_outer":     "#f0f4f8",
+    "bg_inner":     "#f8fafc",
+    "border":       "#cbd5e1",
+    "grid":         "#e2e8f0",
+    "text":         "#0f172a",
+    "text_grey":    "#64748b",
+    "base_chain":   "#3b82f6",   # blue
+    "tgt_chain":    "#ef4444",   # red
+    "both_chain":   "#a855f7",   # purple
+    "iso":          "#6b7280",   # grey
+    "base_mkr":     "#1d4ed8",   # dark blue
+    "tgt_mkr":      "#dc2626",   # dark red
+    "comm_fill":    "#22d3ee",   # cyan
+    "vis_fill":     "#fbbf24",   # amber
+    "coverage":     "#0ea5e9",   # light blue
+}
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -58,9 +94,12 @@ class _FrameData(NamedTuple):
     coverage_grid: np.ndarray
     step:          int
     active:        np.ndarray | None
+    collides:      np.ndarray | None
     occ_grid:      np.ndarray | None
     box_width:     float
     box_height:    float
+    extra_metrics: dict[str, any]
+    target_known:  np.ndarray | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -74,6 +113,25 @@ def _bfs(adj: np.ndarray, source: int) -> set[int]:
                 visited.add(nb)
                 queue.append(nb)
     return visited
+
+
+def _get_shortest_path_distances(adj: np.ndarray, source: int) -> np.ndarray:
+    """Computes shortest path distances (hops) from a single source using a queue-based BFS."""
+    V = adj.shape[0]
+    dists = np.full(V, 999, dtype=np.int32)
+    if source < 0 or source >= V:
+        return dists
+    dists[source] = 0
+    queue = deque([source])
+    while queue:
+        u = queue.popleft()
+        d_u = dists[u]
+        for v in np.where(adj[u])[0]:
+            v = int(v)
+            if dists[v] == 999:
+                dists[v] = d_u + 1
+                queue.append(v)
+    return dists
 
 
 def _dda_raycast_np(p1, p2, occ_grid):
@@ -93,11 +151,11 @@ def _dda_raycast_np(p1, p2, occ_grid):
     hit = occ_grid[ixs, iys]
     return not np.any(hit)
 
-def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, occ_grid, world_size, cfg):
+def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm_radius_base, occ_grid, world_size, cfg):
     N = int(pos.shape[0])
     num_bases = int(cfg.env.num_bases)
     num_targets = int(cfg.env.num_targets)
-    cell_size = float(cfg.env.grid_cell_size)
+    cell_size = 1.0
 
     # Build filtered entity list
     ents_comp = []
@@ -119,7 +177,23 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, occ_
     diff  = ents[:, None, :] - ents[None, :, :]
     dists = np.linalg.norm(diff, axis=-1)
     
+    # Start with full comm_radius adjacency
     adj = (dists <= comm_radius) & ~np.eye(M, dtype=bool)
+    
+    # Override base first-hop to use comm_radius_base
+    if base_idx >= 0:
+        base_mask = dists[base_idx] <= comm_radius_base
+        adj[base_idx, :] = base_mask & ~np.eye(M, dtype=bool)[base_idx]
+        adj[:, base_idx] = base_mask & ~np.eye(M, dtype=bool)[:, base_idx]
+        
+    # Target first-hop uses visual_radius
+    if target_idx >= 0:
+        tmask = dists[target_idx] <= visual_radius
+        adj[target_idx, :] &= tmask; adj[:, target_idx] &= tmask
+        
+    # Base and Target cannot connect directly
+    if base_idx >= 0 and target_idx >= 0:
+        adj[base_idx, target_idx] = adj[target_idx, base_idx] = False
     
     # Raycast check for walls
     if occ_grid is not None:
@@ -131,65 +205,59 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, occ_
                     if not _dda_raycast_np(p1_grid, p2_grid, occ_grid):
                         adj[i, j] = adj[j, i] = False
     
-    return adj, base_idx, target_idx, drone_start, ents
+    return adj, base_idx, target_idx, drone_start, ents, dists
 
 
-def _drone_colours(adj, N, base_comp, target_comp, drone_start):
-    colours = []
-    for i in range(drone_start, drone_start + N):
-        ib = i in base_comp
-        it = i in target_comp
-        if ib and it:   colours.append("#a855f7")
-        elif ib:        colours.append("#3b82f6")
-        elif it:        colours.append("#ef4444")
-        else:           colours.append("#6b7280")
-    return colours
+
 
 
 # ---------------------------------------------------------------------------
 # Figure setup — called ONCE per render_video invocation
 # ---------------------------------------------------------------------------
 
-def _make_figure(width_px, height_px, dpi, has_reward):
-    scale       = dpi / 100.0
-    fig_w       = width_px / dpi
-    fig_h       = height_px / dpi
+def _make_figure(width_px, height_px, pw, ph, dpi, has_reward, has_indiv_reward=False):
+    scale = dpi / 100.0
+    fig_w = width_px / dpi
+    fig_h = height_px / dpi
 
-    fig    = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor="#f0f4f8")
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor="#f0f4f8")
     canvas = FigureCanvasAgg(fig)
 
-    # Pre-compute axes fractions so we can restore them after clear()
-    MARGIN_LEFT   = int(55 * scale)
-    MARGIN_RIGHT  = int(175 * scale)
-    MARGIN_BOTTOM = int(45 * scale)
-    MARGIN_TOP    = int(45 * scale)
-    if has_reward:
-        MARGIN_BOTTOM += int(145 * scale)
+    ml = int(RendererConfig.MARGIN_LEFT * scale)
+    mr = int(RendererConfig.MARGIN_RIGHT * scale)
+    mt = int(RendererConfig.MARGIN_TOP * scale)
+    mb = int(RendererConfig.MARGIN_BOTTOM * scale)
 
-    plot_w = width_px - MARGIN_LEFT - MARGIN_RIGHT
-    plot_h = height_px - MARGIN_BOTTOM - MARGIN_TOP
+    # Pre-compute exact fractional axes
+    map_bot = (height_px - mt - ph) / height_px
+    ax = fig.add_axes([ml / width_px, map_bot, pw / width_px, ph / height_px])
 
-    ax_frac = dict(
-        left   = MARGIN_LEFT   / width_px,
-        bottom = MARGIN_BOTTOM / height_px,
-        width  = plot_w        / width_px,
-        height = plot_h        / height_px,
-    )
-    leg_left  = ax_frac["left"] + ax_frac["width"] + 20 / width_px
-
-    ax     = fig.add_axes([ax_frac["left"], ax_frac["bottom"],
-                           ax_frac["width"], ax_frac["height"]])
-    leg_ax = fig.add_axes([leg_left, 0.20,
-                           min(155/width_px, 0.98-leg_left), 0.60])
+    # Legend Axes (to the right of the map)
+    leg_left = (ml + pw + int(20 * scale)) / width_px
+    leg_w = (mr - int(40 * scale)) / width_px
+    leg_ax = fig.add_axes([leg_left, map_bot, leg_w, ph / height_px])
 
     rew_ax = None
-    if has_reward:
-        rew_bot = (45 * scale) / height_px
-        rew_ht  = (100 * scale) / height_px
-        rew_ax  = fig.add_axes([ax_frac["left"], rew_bot,
-                                ax_frac["width"], rew_ht])
+    indiv_rew_ax = None
+    
+    gap_map_rew = int(RendererConfig.GAP_MAP_REWARDS * scale)
+    gap_between = int(RendererConfig.GAP_BETWEEN_REWARDS * scale)
+    
+    rew_h = int(RendererConfig.TEAM_REWARD_HEIGHT * scale)
+    indiv_rew_h = int(RendererConfig.INDIV_REWARD_HEIGHT * scale)
 
-    return fig, canvas, ax, leg_ax, rew_ax
+    rew_top = mt + ph + gap_map_rew
+    indiv_rew_top = rew_top + rew_h + gap_between
+
+    if has_reward:
+        rew_bot_pos = (height_px - rew_top - rew_h) / height_px
+        rew_ax = fig.add_axes([ml / width_px, rew_bot_pos, pw / width_px, rew_h / height_px])
+        
+        if has_indiv_reward:
+            indiv_bot_pos = (height_px - indiv_rew_top - indiv_rew_h) / height_px
+            indiv_rew_ax = fig.add_axes([ml / width_px, indiv_bot_pos, pw / width_px, indiv_rew_h / height_px])
+
+    return fig, canvas, ax, leg_ax, rew_ax, indiv_rew_ax
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +267,7 @@ _THETA = np.linspace(0, 2 * np.pi, 96)
 
 
 def _draw_frame(
-    fig, ax, leg_ax, rew_ax,
+    fig, ax, leg_ax, rew_ax, indiv_rew_ax,
     frame:          _FrameData,
     cfg:            DictConfig,
     rewards_so_far: np.ndarray | None,
@@ -208,11 +276,12 @@ def _draw_frame(
     """Clear axes and redraw — no new Figure objects allocated."""
 
     # Explicitly pull dimensions or fallback to config to prevent AttributeErrors
-    W = float(getattr(frame, "box_width", cfg.env.box_width))
-    H = float(getattr(frame, "box_height", cfg.env.box_height))
+    W = float(np.asarray(getattr(frame, "box_width", cfg.env.box_width)).flatten()[0])
+    H = float(np.asarray(getattr(frame, "box_height", cfg.env.box_height)).flatten()[0])
     N = int(cfg.env.num_agents)
     vis_r  = float(cfg.env.visual_radius)
     comm_r = float(cfg.env.comm_radius)
+    comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     B      = int(cfg.env.radar_bins)
     v_cfg  = cfg.visualize
 
@@ -221,11 +290,19 @@ def _draw_frame(
     leg_ax.clear()
     if rew_ax is not None:
         rew_ax.clear()
+    if indiv_rew_ax is not None:
+        indiv_rew_ax.clear()
 
     # --- Axes base style ---
     ax.set_facecolor("#f8fafc")
     ax.set_xlim(-2, W + 2)
     ax.set_ylim(-2, H + 2)
+    # Force 1:1 coordinate scaling and a box shape that matches the world aspect
+    ax.set_aspect("equal", adjustable="datalim")
+    try:
+        ax.set_box_aspect(H / W)
+    except AttributeError:
+        pass # Older matplotlib
     ax.tick_params(labelsize=7, colors="#64748b")
     for sp in ax.spines.values():
         sp.set_edgecolor("#cbd5e1")
@@ -247,7 +324,7 @@ def _draw_frame(
 
     # ── Coverage ──────────────────────────────────────────────────────────
     if frame.coverage_grid.any():
-        cell_size = float(cfg.env.grid_cell_size)
+        cell_size = 1.0
         gh_active = int(H / cell_size)
         gw_active = int(W / cell_size)
 
@@ -267,29 +344,104 @@ def _draw_frame(
                   origin="lower", aspect="auto", zorder=1, interpolation="nearest")
 
     # ── Adjacency ─────────────────────────────────────────────────────────
-    adj, base_idx, target_idx, drone_start, ents = _build_adjacency(
+    adj, base_idx, target_idx, drone_start, ents, dists = _build_adjacency(
         frame.pos, frame.base_pos, frame.target_pos, 
-        comm_r, vis_r, frame.occ_grid, (W, H), cfg
+        comm_r, vis_r, comm_r_base, frame.occ_grid, (W, H), cfg
     )
+    M = len(ents)
     
     base_comp   = _bfs(adj, source=base_idx) if base_idx >= 0 else set()
     target_comp = _bfs(adj, source=target_idx) if target_idx >= 0 else set()
-    drone_cols  = _drone_colours(adj, N, base_comp, target_comp, drone_start)
-    full_chain  = bool(base_idx >= 0 and target_idx >= 0 and (base_comp & target_comp - {base_idx, target_idx}))
 
-    M = len(ents)
+    # --- Shortest Path Highlighting ---
+    # Calculate shortest path distances using single-source BFS
+    dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
+
+    full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
+    sp_nodes = set()
+    if full_chain:
+        for i in range(M):
+            if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
+                sp_nodes.add(i)
+
+    drone_cols = []
+    for i in range(N):
+        idx = i + drone_start
+        ib = idx in base_comp
+        it = idx in target_comp
+        if full_chain:
+            if idx in sp_nodes: col = "#a855f7"
+            elif dist_from_base[idx] <= dist_from_target[idx]: col = "#3b82f6"
+            else: col = "#ef4444"
+        else:
+            if ib and it: col = "#a855f7"
+            elif ib:      col = "#3b82f6"
+            elif it:      col = "#ef4444"
+            else:         col = "#6b7280"
+        drone_cols.append(col)
+
+    # Identify tips
+    idx_base_tip = -1
+    idx_target_tip = -1
+    if base_idx >= 0 and target_idx >= 0 and not full_chain:
+        d_to_t = dists[drone_start:, target_idx]
+        valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
+        if valid_b:
+            idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
+            
+        d_to_b = dists[drone_start:, base_idx]
+        valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
+        if valid_t:
+            idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
+
+    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+
     for i in range(M):
         for j in range(i + 1, M):
             if adj[i, j]:
                 xi, yi = ents[i]; xj, yj = ents[j]
                 ib = i in base_comp;  jb = j in base_comp
                 it = i in target_comp; jt = j in target_comp
-                if ib and jb and it and jt: ec, lw = "#a855f7", 1.5
-                elif ib and jb:              ec, lw = "#3b82f6", 1.2
-                elif it and jt:              ec, lw = "#ef4444", 1.2
-                else:                        ec, lw = "#94a3b8", 0.8
+                
+                is_both = False
+                on_base_sp = False
+                on_tgt_sp = False
+                
+                if full_chain:
+                    if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
+                        is_both = True
+                        
+                    if is_both: ec, lw = "#a855f7", 1.5
+                    else:
+                        if min(dist_from_base[i], dist_from_base[j]) <= min(dist_from_target[i], dist_from_target[j]):
+                            ec, lw = "#3b82f6", 1.2
+                        else:
+                            ec, lw = "#ef4444", 1.2
+                else:
+                    is_both = ib and jb and it and jt
+                    if is_both: ec, lw = "#a855f7", 1.5
+                    elif ib and jb:              ec, lw = "#3b82f6", 1.2
+                    elif it and jt:              ec, lw = "#ef4444", 1.2
+                    else:                        ec, lw = "#94a3b8", 0.8
+                    
+                    if ib and jb and idx_base_tip >= 0:
+                        if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
+                            on_base_sp = True
+                    
+                    if it and jt and idx_target_tip >= 0:
+                        if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
+                            on_tgt_sp = True
+
+                if on_base_sp or on_tgt_sp or is_both:
+                    glow_col = "#a855f7" if is_both else ("#3b82f6" if on_base_sp else "#ef4444")
+                    # Draw a slightly thicker, semi-transparent line behind for the shine
+                    ax.plot([xi, xj], [yi, yj], "-", color=glow_col, lw=lw*3, alpha=0.15, zorder=2)
+
                 ax.plot([xi, xj], [yi, yj], "--", color=ec, lw=lw,
                         alpha=0.7, zorder=3)
+
 
     # --- Drone radii + radar lines ---
     radar_angles = [b * 2.0 * np.pi / B - np.pi for b in range(B)]
@@ -324,47 +476,73 @@ def _draw_frame(
     # --- Base station ---
     if int(cfg.env.num_bases) > 0:
         bx, by = frame.base_pos
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (bx-2.5, by-2.5), 5, 5, boxstyle="square,pad=0.3",
-            facecolor="#1d4ed8", edgecolor="#1e3a8a", lw=1.5, zorder=5,
-        ))
-        ax.text(bx, by, "B", color="white", fontsize=7, fontweight="bold",
+        # Draw base comm radius circle (same visual style as drone circles)
+        cr_col = v_cfg.comm_color if v_cfg.comm_color != "match_drone" else "#1d4ed8"
+        ax.fill(bx + comm_r_base*np.cos(_THETA),
+                by + comm_r_base*np.sin(_THETA),
+                color=cr_col, alpha=float(v_cfg.comm_fill_alpha), zorder=3)
+        ax.plot(bx + comm_r_base*np.cos(_THETA), by + comm_r_base*np.sin(_THETA),
+                color=cr_col, alpha=float(v_cfg.comm_edge_alpha), lw=1.0,
+                linestyle="--", zorder=3)
+        ax.scatter(bx, by, s=RendererConfig.MPL_BASE_S, marker="s",
+                   facecolor="#1d4ed8", edgecolor="#1e3a8a", lw=1.5, zorder=5)
+        ax.text(bx, by, "B", color="white", fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, fontweight="bold",
                 ha="center", va="center", zorder=6)
 
     # --- Target ---
     if int(cfg.env.num_targets) > 0:
         tx, ty = frame.target_pos
-        ax.plot(tx, ty, "*", color="#dc2626", ms=14,
-                markeredgecolor="#7f1d1d", markeredgewidth=0.8, zorder=5)
-        ax.text(tx+3, ty+3, "T", color="#dc2626", fontsize=7, fontweight="bold",
-                ha="left", va="bottom", zorder=6)
+        ax.scatter(tx, ty, s=RendererConfig.MPL_TARGET_S, marker="*", color="#dc2626",
+                   edgecolors="#7f1d1d", linewidths=0.8, zorder=5)
+        ax.annotate("T", xy=(tx, ty), xytext=(6, 6), textcoords="offset points",
+                    color="#dc2626", fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, fontweight="bold",
+                    ha="left", va="bottom", zorder=6)
 
     # --- Drones ---
     for i in range(N):
         x, y   = frame.pos[i]
         is_act = frame.active[i] if frame.active is not None else True
+        is_coll = frame.collides[i] if frame.collides is not None else False
         alpha  = 1.0 if is_act else 0.3
-        ax.scatter(x, y, s=60, color=drone_cols[i],
+        col = _C["tgt_mkr"] if is_coll else drone_cols[i]
+        
+        if is_coll:
+            ax.scatter(x, y, s=RendererConfig.MPL_GLOW_S, color=_C["tgt_mkr"], alpha=0.4, zorder=6, lw=0)
+            
+        ax.scatter(x, y, s=RendererConfig.MPL_DRONE_S, color=col,
                    edgecolors="white", linewidths=0.8, zorder=7, alpha=alpha)
-        ax.text(x+1.5, y+1.5, str(i), color=drone_cols[i],
-                fontsize=6, ha="left", va="bottom", zorder=8, alpha=alpha)
+        ax.annotate(str(i), xy=(x, y), xytext=(5, 5), textcoords="offset points",
+                    color=col, fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, zorder=8, alpha=alpha)
 
     # --- Title ---
-    cell_size = float(cfg.env.grid_cell_size)
-    GW_active = int(W / cell_size)
-    GH_active = int(H / cell_size)
+    cell_size = 1.0
+    GW_active = int(W // cell_size)
+    GH_active = int(H // cell_size)
     cov_cnt = frame.coverage_grid[:GW_active, :GH_active].sum()
     cov_pct = 100.0 * cov_cnt / (GW_active * GH_active)
 
     status  = "✓ CHAIN FORMED" if full_chain else ""
-    ax.set_title(
-        f"Step {frame.step:04d}   |   Coverage {cov_pct:.1f}%   {status}",
-        fontsize=8, pad=4, color="#0f172a",
+    
+    em = frame.extra_metrics
+    r_explor = em.get("r_explor", 0.0)
+    r_gap    = em.get("r_gap", 0.0)
+    chain_pct = em.get("chain_pct", 0.0)
+    r_total  = em.get("r_total", 0.0)
+
+    title_str = (
+        f"Step {frame.step:04d}  |  "
+        f"Coverage {cov_pct:4.1f}%  |  "
+        f"r_explor {r_explor:4.1f}  |  "
+        f"r_gap {r_gap:4.1f}  |  "
+        f"r_total {r_total:4.1f}  |  "
+        f"Chain {chain_pct:4.1f}%   {status}"
     )
+
+    ax.set_title(title_str, fontsize=RendererConfig.MPL_FONT_SIZE_TITLE, pad=12, color="#0f172a", loc='left')
 
     # --- Legend ---
     leg_ax.axis("off")
-    leg_ax.set_title("Legend", fontsize=7, color="#0f172a", loc="left", pad=4)
+    leg_ax.set_title("Legend", fontsize=RendererConfig.MPL_FONT_SIZE_LEGEND_TITLE, color="#0f172a", loc="left", pad=10)
     legend_items = []
     num_bases = int(cfg.env.num_bases)
     num_targets = int(cfg.env.num_targets)
@@ -382,24 +560,70 @@ def _draw_frame(
 
     leg_ax.legend(
         handles=[p for p, _ in legend_items], labels=[l for _, l in legend_items],
-        loc="upper left", fontsize=6.5, frameon=True,
+        loc="upper left", fontsize=RendererConfig.MPL_FONT_SIZE_LEGEND, frameon=True,
         framealpha=0.8, edgecolor="#e2e8f0",
+    )
+
+    # --- Target Known Info Text ---
+    known_str = "Target known to:"
+    if frame.target_known is not None:
+        known_indices = [i for i in range(N) if bool(frame.target_known[i])]
+        known_indices.sort()
+        if known_indices:
+            for idx in known_indices:
+                known_str += f"\n- Drone {idx}"
+        else:
+            known_str += "\n  (none)"
+    else:
+        known_str += "\n  (none)"
+
+    leg_ax.text(
+        0.0, 0.40, known_str,
+        fontsize=RendererConfig.MPL_FONT_SIZE_LEGEND,
+        color="#0f172a",
+        ha="left", va="top",
+        transform=leg_ax.transAxes,
+        linespacing=1.4
     )
 
     # --- Reward plot ---
     if rew_ax is not None and rewards_so_far is not None:
-        rew_ax.clear()
-        rew_ax.set_facecolor("#ffffff")
-        rew_ax.plot(np.arange(len(rewards_so_far)), np.cumsum(rewards_so_far),
+        if rewards_so_far.ndim == 2:
+            team_rewards = rewards_so_far.sum(axis=1)
+            indiv_rewards = rewards_so_far
+        else:
+            team_rewards = rewards_so_far
+            indiv_rewards = None
+
+        rew_ax.plot(np.arange(len(team_rewards)), np.cumsum(team_rewards),
                     color="#10b981", lw=1.8)
         rew_ax.set_xlim(0, total_steps)
-        rew_ax.set_title("Cumulative Team Reward", fontsize=7, color="#0f172a",
-                          loc="left", pad=4)
+        rew_ax.set_title("Cumulative Team Reward", fontsize=16, color="#0f172a",
+                          loc="left", pad=10)
         rew_ax.set_ylabel("Return", fontsize=7, color="#64748b")
         rew_ax.tick_params(labelsize=6, colors="#64748b")
         for sp in rew_ax.spines.values():
             sp.set_edgecolor("#cbd5e1")
         rew_ax.grid(True, linestyle=":", alpha=0.5, color="#94a3b8")
+
+        if indiv_rew_ax is not None and indiv_rewards is not None:
+            # Show individual advantage relative to the worst-performing agent at each step
+            rel_indiv = indiv_rewards - indiv_rewards.min(axis=1, keepdims=True)
+            cum_indiv = np.cumsum(rel_indiv, axis=0)
+            
+            for n in range(N):
+                indiv_rew_ax.plot(np.arange(len(cum_indiv)), cum_indiv[:, n],
+                                  lw=1.2, alpha=0.8, label=f"D{n}")
+            
+            indiv_rew_ax.set_xlim(0, total_steps)
+            indiv_rew_ax.set_title("Individual Advantage (Relative Return)", fontsize=16, color="#0f172a",
+                                   loc="left", pad=10)
+            indiv_rew_ax.set_ylabel("Return", fontsize=7, color="#64748b")
+            indiv_rew_ax.tick_params(labelsize=6, colors="#64748b")
+            for sp in indiv_rew_ax.spines.values():
+                sp.set_edgecolor("#cbd5e1")
+            indiv_rew_ax.grid(True, linestyle=":", alpha=0.5, color="#94a3b8")
+            indiv_rew_ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=6, frameon=False)
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +637,7 @@ def render_video(
     fps:          int  = 20,
     frame_stride: int | None  = None,
     rewards:      np.ndarray | None = None,
+    extra_metrics: dict[str, np.ndarray] | None = None,
 ) -> str:
     """
     Render a trajectory to an MP4 file.
@@ -433,7 +658,7 @@ def render_video(
     Frames are streamed directly to the ffmpeg writer; no frame list is
     stored in memory. Peak additional RAM per call is ~1 frame.
     """
-    if frame_stride is None: frame_stride = FRAME_STRIDE
+    if frame_stride is None: frame_stride = RendererConfig.FRAME_STRIDE
 
     filename = Path(filename).resolve()
     ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -455,36 +680,73 @@ def render_video(
     H = float(traj_cpu.box_height[0])
 
     # --- Compute frame dimensions ---
-    scale         = RENDER_DPI / 100.0
-    MAX_LONG      = int(1100 * scale)
-    MIN_SHORT     = int(200 * scale)
-    aspect        = W / H
+    scale = RendererConfig.RENDER_DPI / 100.0
+    
+    ml = int(RendererConfig.MARGIN_LEFT * scale)
+    mr = int(RendererConfig.MARGIN_RIGHT * scale)
+    mt = int(RendererConfig.MARGIN_TOP * scale)
+    mb = int(RendererConfig.MARGIN_BOTTOM * scale)
+
+    # Fit map within designated display width and height
+    max_w = int(RendererConfig.MAP_DISPLAY_WIDTH * scale)
+    max_h = int(RendererConfig.MAP_DISPLAY_HEIGHT * scale)
+    
+    aspect = W / H
     if aspect >= 1.0:
-        plot_w = MAX_LONG;  plot_h = max(int(MAX_LONG / aspect), MIN_SHORT)
+        pw = max_w
+        ph = int(max_w / aspect)
     else:
-        plot_h = MAX_LONG;  plot_w = max(int(MAX_LONG * aspect), MIN_SHORT)
+        ph = max_h
+        pw = int(max_h * aspect)
 
-    MARGIN_W = int(250 * scale)
-    MARGIN_H = int(110 * scale)
-    if rewards is not None:
-        MARGIN_H += int(145 * scale)
+    has_reward = (rewards is not None)
+    has_indiv_reward = (rewards is not None and rewards.ndim == 2)
 
-    width_px  = plot_w + MARGIN_W
-    height_px = plot_h + MARGIN_H
+    # Compute reward plots layout using static values from configuration
+    rew_h = int(RendererConfig.TEAM_REWARD_HEIGHT * scale) if has_reward else 0
+    indiv_rew_h = int(RendererConfig.INDIV_REWARD_HEIGHT * scale) if has_indiv_reward else 0
+    
+    gap_map_rew = int(RendererConfig.GAP_MAP_REWARDS * scale)
+    gap_between = int(RendererConfig.GAP_BETWEEN_REWARDS * scale)
 
-    # (Moved JAX/CPU extraction up to compute dynamic dimensions)
+    rew_top = mt + ph + gap_map_rew if has_reward else 0
+    indiv_rew_top = rew_top + rew_h + gap_between if has_indiv_reward else 0
 
-    T      = traj_cpu.pos.shape[0]
+    # Calculate total width_px and height_px
+    width_px = pw + ml + mr
+    
+    if has_indiv_reward:
+        height_px = indiv_rew_top + indiv_rew_h + mb
+    elif has_reward:
+        height_px = rew_top + rew_h + mb
+    else:
+        height_px = mt + ph + mb
+
+    # Macroblock correction
+    if width_px % 2 != 0:
+        width_px += 1
+        mr += 1
+    if height_px % 2 != 0:
+        height_px += 1
+        mb += 1
+
+    # (JAX/CPU extraction)
+    traj_cpu = jax.device_get(trajectory)
+    rewards_cpu = jax.device_get(rewards) if rewards is not None else None
+    
+    T = traj_cpu.pos.shape[0]
     frames = range(0, T, frame_stride)
-    n_out  = len(frames)
+    n_out = len(frames)
     
     print(f"Frame size: {width_px}×{height_px} px  "
-          f"(Matplotlib renderer, dpi={RENDER_DPI}, stride={frame_stride}, world {W:.0f}×{H:.0f} m)")
+          f"(Matplotlib renderer, dpi={RendererConfig.RENDER_DPI}, stride={frame_stride}, world {W:.0f}×{H:.0f} m)")
     print(f"Rendering {n_out} frames ({T} steps) → {filename}")
-
+    
     # --- Create figure ONCE ---
-    fig, canvas, ax, leg_ax, rew_ax = _make_figure(
-        width_px, height_px, RENDER_DPI, has_reward=(rewards_cpu is not None)
+    fig, canvas, ax, leg_ax, rew_ax, indiv_rew_ax = _make_figure(
+        width_px, height_px, pw, ph, RendererConfig.RENDER_DPI,
+        has_reward=(rewards_cpu is not None),
+        has_indiv_reward=has_indiv_reward
     )
 
     crop_w = crop_h = None
@@ -492,14 +754,13 @@ def render_video(
 
     # Load map once for static rendering data (walls)
     from env.maps import MapDefinition
+    from core.config import MAP_DIR
     occ_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
-        map_path = Path("maps") / f"{active_map_name}.yaml"
-        if not map_path.exists():
-            map_path = Path(__file__).resolve().parents[2] / "maps" / f"{active_map_name}.yaml"
+        map_path = MAP_DIR / f"{active_map_name}.yaml"
         if map_path.exists():
-            map_def = MapDefinition.load(map_path, cell_size=float(cfg.env.grid_cell_size))
+            map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = np.array(map_def.occupancy_grid)
 
     with warnings.catch_warnings():
@@ -519,13 +780,16 @@ def render_video(
                     coverage_grid = np.array(traj_cpu.coverage_grid[t]),
                     step          = int(traj_cpu.step[t]),
                     active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
+                    collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
                     occ_grid      = occ_grid_static,
                     box_width     = float(traj_cpu.box_width[t]),
                     box_height    = float(traj_cpu.box_height[t]),
+                    extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
+                    target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
                 )
                 rew_hist = rewards_cpu[:t+1] if rewards_cpu is not None else None
 
-                _draw_frame(fig, ax, leg_ax, rew_ax, frame, cfg, rew_hist, T)
+                _draw_frame(fig, ax, leg_ax, rew_ax, indiv_rew_ax, frame, cfg, rew_hist, T)
 
                 canvas.draw()
                 buf = canvas.buffer_rgba()

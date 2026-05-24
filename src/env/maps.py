@@ -42,7 +42,9 @@ class MapDefinition:
     rooms:    list[dict] = dataclasses.field(default_factory=list)
     hallways: list[dict] = dataclasses.field(default_factory=list)
     walls:    list[list[float]] = dataclasses.field(default_factory=list) # Raw segments
-    valid_spawn_indices: jax.Array | None = None # (M, 2) int32 coordinates of non-wall cells
+    valid_base_coords:   jax.Array | None = None
+    valid_target_coords: jax.Array | None = None
+    valid_drone_coords:  jax.Array | None = None
     
     @classmethod
     def load(cls, path: str | Path, cell_size: float | None = None, padding_radius: float = 60.0) -> MapDefinition:
@@ -66,10 +68,25 @@ class MapDefinition:
         res = cell_size if cell_size is not None else 1.0
         m.rasterize(res)
         
-        # Pre-calculate safe spawn indices (where occupancy_grid is False)
-        # grid is (W, H)
+        # Pre-calculate safe spawn indices in meters
         w_idx, h_idx = np.where(~m.occupancy_grid)
-        m.valid_spawn_indices = jnp.stack([w_idx, h_idx], axis=-1)
+        valid_indices = np.stack([w_idx, h_idx], axis=-1)
+        sx, sy = m.occupancy_grid.shape[0] / m.width, m.occupancy_grid.shape[1] / m.height
+        coords_m = valid_indices.astype(np.float32) / np.array([sx, sy])
+        
+        def _get_valid_coords(zone):
+            x_min, y_min, x_max, y_max = zone
+            mask = (coords_m[:, 0] >= x_min) & (coords_m[:, 0] <= x_max) & \
+                   (coords_m[:, 1] >= y_min) & (coords_m[:, 1] <= y_max)
+            valid = coords_m[mask]
+            if len(valid) == 0:
+                # Fallback to center if no valid cells found
+                return jnp.array([[(x_min + x_max)/2, (y_min + y_max)/2]], dtype=jnp.float32)
+            return jnp.array(valid, dtype=jnp.float32)
+            
+        m.valid_base_coords = _get_valid_coords(m.base_spawn_zone)
+        m.valid_target_coords = _get_valid_coords(m.target_spawn_zone)
+        m.valid_drone_coords = _get_valid_coords(m.drone_spawn_zone)
 
         # 1. Create JAX Occupational Grid
         occ_jax = jnp.array(m.occupancy_grid, dtype=jnp.bool_)
@@ -156,56 +173,26 @@ class MapDefinition:
         self.occupancy_grid = (grid_flipped < 128).T # (W, H)
 
     def sample_base(self, key: jax.Array) -> jax.Array:
-        return self._sample_zone(key, self.base_spawn_zone)
+        if self.valid_base_coords is None:
+            return jnp.array([(self.base_spawn_zone[0] + self.base_spawn_zone[2])/2, 
+                              (self.base_spawn_zone[1] + self.base_spawn_zone[3])/2], dtype=jnp.float32)
+        idx = jax.random.randint(key, shape=(), minval=0, maxval=len(self.valid_base_coords))
+        return self.valid_base_coords[idx]
 
     def sample_target(self, key: jax.Array) -> jax.Array:
-        return self._sample_zone(key, self.target_spawn_zone)
+        if self.valid_target_coords is None:
+            return jnp.array([(self.target_spawn_zone[0] + self.target_spawn_zone[2])/2, 
+                              (self.target_spawn_zone[1] + self.target_spawn_zone[3])/2], dtype=jnp.float32)
+        idx = jax.random.randint(key, shape=(), minval=0, maxval=len(self.valid_target_coords))
+        return self.valid_target_coords[idx]
 
     def sample_drones(self, key: jax.Array, N: int) -> jax.Array:
+        if self.valid_drone_coords is None:
+            return jnp.zeros((N, 2), dtype=jnp.float32)
         keys = jax.random.split(key, N)
-        return jax.vmap(lambda k: self._sample_zone(k, self.drone_spawn_zone))(keys)
-
-    def _sample_zone(self, key: jax.Array, zone: list[float]) -> jax.Array:
-        """
-        Sample a point within a zone [x_min, y_min, x_max, y_max].
-        Ensures the point is NOT inside a wall using valid_spawn_indices.
-        """
-        x_min, y_min, x_max, y_max = zone
-        
-        # If we have no grid yet, fallback to uniform
-        if self.valid_spawn_indices is None:
-            kx, ky = jax.random.split(key)
-            return jnp.array([
-                jax.random.uniform(kx, minval=x_min, maxval=x_max),
-                jax.random.uniform(ky, minval=y_min, maxval=y_max)
-            ], dtype=jnp.float32)
-
-        # 1. Filter valid indices to those inside the zone
-        # Indices are in pixels, world is in meters. W_px / W_m = sx
-        sx, sy = self.occupancy_grid.shape[0] / self.width, self.occupancy_grid.shape[1] / self.height
-        
-        # valid_spawn_indices are (M, 2) in pixels
-        coords_m = self.valid_spawn_indices.astype(jnp.float32) / jnp.array([sx, sy])
-        
-        mask = (coords_m[:, 0] >= x_min) & (coords_m[:, 0] <= x_max) & \
-               (coords_m[:, 1] >= y_min) & (coords_m[:, 1] <= y_max)
-        
-        # 2. Pick one from the masked subset
-        # To avoid dynamic slicing in JAX, we use jnp.where then sample
-        # If no cells in zone are valid, error out (maps should be built correctly!)
-        num_valid = jnp.sum(mask)
-        # Use random choice over the entire list but only pick from 'True' indices
-        # We handle zero-sum case by fallback to center of zone (safety)
-        def _pick_safe():
-            # Standard JAX trick for sampling from masked array: 
-            # use log-probs with -inf for invalid ones
-            log_probs = jnp.where(mask, 0.0, -1e10)
-            idx = jax.random.categorical(key, log_probs)
-            return coords_m[idx]
-
-        def _fallback():
-            return jnp.array([(x_min + x_max)/2, (y_min + y_max)/2])
-
-        return jax.lax.cond(num_valid > 0, _pick_safe, _fallback)
+        def _sample_one(k):
+            idx = jax.random.randint(k, shape=(), minval=0, maxval=len(self.valid_drone_coords))
+            return self.valid_drone_coords[idx]
+        return jax.vmap(_sample_one)(keys)
 
 

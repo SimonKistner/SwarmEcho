@@ -41,6 +41,13 @@ class EnvState:
     coverage_grid : (GW, GH) Boolean exploration map — True where visited
     step          : ()      int32 timestep counter
     key           : (2,)    JAX PRNGKey for in-step randomness
+    active        : (N,)    bool  — False until step == i*spawn_delay
+    target_known  : (N,)    bool  — persistent: True once informed via comm
+    collides      : (N,)    bool  — True if agent hit wall/obstacle this step
+    last_cov_delta: (N,)    int32 — number of new cells covered this step
+    box_width     : ()      float32 — dynamic world width
+    box_height    : ()      float32 — dynamic world height
+    base_target_known: ()   bool  — persistent: True once base is informed
     """
 
     pos:           jax.Array   # (N, 2)  float32
@@ -53,9 +60,15 @@ class EnvState:
     active:        jax.Array   # (N,)    bool  — False until step == i*spawn_delay
     target_known:  jax.Array   # (N,)    bool  — persistent: True once informed via comm
     collides:      jax.Array   # (N,)    bool  — True if agent hit wall/obstacle this step
+    last_cov_delta:jax.Array   # (N,)    int32 — number of new cells covered this step
     box_width:     jax.Array   # ()      float32 — dynamic world dimensions
     box_height:    jax.Array   # ()      float32
+    base_target_known: jax.Array # ()    bool
+    chain_held_steps:  jax.Array # ()    int32
     # (Removed static world data from PyTree to save VRAM)
+
+    def replace(self, **kwargs) -> EnvState:
+        return dataclasses.replace(self, **kwargs)
 
 # Register so jit/vmap/scan can traverse the fields automatically.
 # meta_fields=[] means ALL fields are dynamic (traced) — correct for arrays.
@@ -64,8 +77,8 @@ jax.tree_util.register_dataclass(
     data_fields=[
         "pos", "vel", "base_pos", "target_pos",
         "coverage_grid", "step", "key",
-        "active", "target_known", "collides",
-        "box_width", "box_height",
+        "active", "target_known", "collides", "last_cov_delta",
+        "box_width", "box_height", "base_target_known", "chain_held_steps",
     ],
     meta_fields=[],
 )
@@ -88,6 +101,9 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(state.active,        (N,))
     chex.assert_shape(state.target_known,  (N,))
     chex.assert_shape(state.collides,      (N,))
+    chex.assert_shape(state.last_cov_delta, (N,))
+    chex.assert_shape(state.base_target_known, ())
+    chex.assert_shape(state.chain_held_steps, ())
 
     chex.assert_type(state.pos,           jnp.float32)
     chex.assert_type(state.vel,           jnp.float32)
@@ -98,5 +114,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_type(state.active,        jnp.bool_)
     chex.assert_type(state.target_known,  jnp.bool_)
     chex.assert_type(state.collides,      jnp.bool_)
+    chex.assert_type(state.base_target_known, jnp.bool_)
+    chex.assert_type(state.chain_held_steps, jnp.int32)
 
 

@@ -1,15 +1,22 @@
 """
 swarmecho/training/mappo_trainer.py
 =====================================
-MAPPO loss function and trainer for 
+MAPPO loss function and trainer.
 
-Key differences from IPPO (ppo.py)
------------------------------------
-  - Actor loss   : uses per-agent log ratios, but SHARED team advantage
-  - Value loss   : centralised value V(global_obs), one per env (not per agent)
-  - PPOStats     : exposes per-agent clip_fraction for diagnostics
+Supports two critic output shapes via the `per_agent` flag:
 
-All JAX / Flax NNX patterns compatible with JIT.
+  per_agent=False  (GlobalMeanCritic):
+    old_values  : (MB,)    — one centralised value per sample
+    advantages  : (MB,)    — broadcast to all agents inside loss
+    returns     : (MB,)
+
+  per_agent=True   (AgentCentricCritic):
+    old_values  : (MB, N)  — one value per agent
+    advantages  : (MB, N)  — already per-agent from buffer GAE
+    returns     : (MB, N)
+
+In both cases value_loss = mean((new_values - returns)²) and the
+jnp.mean() collapses all dimensions to a scalar automatically.
 """
 
 from __future__ import annotations
@@ -43,23 +50,24 @@ class MAPPOStats(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def mappo_loss(
-    model:          MAPPOModel,
-    obs:            jax.Array,   # (MB, N, D)         — local observations
-    actions:        jax.Array,   # (MB, N, A)
-    old_log_probs:  jax.Array,   # (MB, N)
-    old_values:     jax.Array,   # (MB,)               — centralised
-    advantages:     jax.Array,   # (MB,)               — same for all agents
-    returns:        jax.Array,   # (MB,)               — centralised
-    clip_eps:       float,
-    vf_coef:        float,
-    ent_coef:       float,
+    model:         MAPPOModel,
+    obs:           jax.Array,   # (MB, N, D)
+    actions:       jax.Array,   # (MB, N, A)  — normalised [-1, 1]
+    old_log_probs: jax.Array,   # (MB, N)
+    old_values:    jax.Array,   # (MB,) or (MB, N)
+    advantages:    jax.Array,   # (MB,) or (MB, N)
+    returns:       jax.Array,   # (MB,) or (MB, N)
+    clip_eps:      float,
+    vf_coef:       float,
+    ent_coef:      float,
+    per_agent:     bool,
 ) -> tuple[jax.Array, MAPPOStats]:
     """
     MAPPO loss for one minibatch.
 
-    Policy loss : PPO-clip on per-agent log ratios with SHARED advantage
-    Value loss  : MSE on centralised critic
-    Entropy     : mean across agents for the entropy bonus
+    Policy loss : PPO-clip on per-agent log ratios
+    Value loss  : MSE on critic output vs GAE returns
+    Entropy     : mean across agents for the bonus
     """
     MB, N, D = obs.shape
 
@@ -71,8 +79,14 @@ def mappo_loss(
     new_log_probs = new_log_probs_flat.reshape(MB, N)   # (MB, N)
     entropy       = entropy_flat.reshape(MB, N)          # (MB, N)
 
-    # PPO clip — broadcast shared advantage to all agents: (MB,) → (MB, 1)
-    adv = jax.lax.stop_gradient(advantages[:, None])
+    # ── Policy loss — PPO clip ──────────────────────────────────────────────
+    if per_agent:
+        # advantages already (MB, N) — use directly
+        adv = jax.lax.stop_gradient(advantages)          # (MB, N)
+    else:
+        # shared advantage (MB,) — broadcast to all agents
+        adv = jax.lax.stop_gradient(advantages[:, None]) # (MB, 1)
+
     log_ratio = new_log_probs - old_log_probs            # (MB, N)
     ratio     = jnp.exp(log_ratio)
 
@@ -81,9 +95,9 @@ def mappo_loss(
     policy_loss = jnp.mean(jnp.maximum(pg_loss1, pg_loss2))
 
     # ── Critic path ─────────────────────────────────────────────────────────
-    # The Attentive Critic takes (MB, N, D) directly
-    new_values = model.critic(obs, deterministic=False)   # (MB,)
-    value_loss = jnp.mean((new_values - returns) ** 2)
+    # critic(obs) returns (MB, N) for agent_centric, (MB,) for global_mean
+    new_values = model.critic(obs, deterministic=False)
+    value_loss = jnp.mean((new_values - returns) ** 2)   # shape-agnostic
 
     # ── Entropy ─────────────────────────────────────────────────────────────
     mean_entropy = jnp.mean(entropy)
@@ -103,12 +117,11 @@ def mappo_loss(
         approx_kl     = approx_kl,
         clip_fraction = clip_fraction,
     )
-
     return total_loss, stats
 
 
 # ---------------------------------------------------------------------------
-# Module-level JIT-able step (avoids self-in-JIT issue)
+# Module-level JIT-able step
 # ---------------------------------------------------------------------------
 
 def _mappo_step(
@@ -121,14 +134,15 @@ def _mappo_step(
     advantages:    jax.Array,
     returns:       jax.Array,
     *,
-    clip_eps: float,
-    vf_coef:  float,
-    ent_coef: float,
+    clip_eps:  float,
+    vf_coef:   float,
+    ent_coef:  float,
+    per_agent: bool,
 ) -> tuple[jax.Array, MAPPOStats]:
     def loss_fn(m):
         return mappo_loss(
             m, obs, actions, old_log_probs, old_values,
-            advantages, returns, clip_eps, vf_coef, ent_coef,
+            advantages, returns, clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, grads)
@@ -136,7 +150,7 @@ def _mappo_step(
 
 
 # ---------------------------------------------------------------------------
-# MAPPO Trainer
+# MAPPOTrainer
 # ---------------------------------------------------------------------------
 
 class MAPPOTrainer:
@@ -148,10 +162,11 @@ class MAPPOTrainer:
     model         : MAPPOModel
     lr            : Adam learning rate
     max_grad_norm : gradient clipping norm
-    clip_eps      : PPO clip ratio
+    clip_eps      : PPO clip ratio ε
     vf_coef       : value loss weight
     ent_coef      : entropy bonus weight
     num_epochs    : PPO gradient epochs per rollout
+    per_agent     : True if using AgentCentricCritic (advantages/returns are (MB, N))
     """
 
     def __init__(
@@ -163,9 +178,11 @@ class MAPPOTrainer:
         vf_coef:       float = 0.5,
         ent_coef:      float = 0.01,
         num_epochs:    int   = 4,
+        per_agent:     bool  = True,
     ) -> None:
         self.model      = model
         self.num_epochs = num_epochs
+        self.per_agent  = per_agent
 
         tx = optax.chain(
             optax.clip_by_global_norm(max_grad_norm),
@@ -174,7 +191,11 @@ class MAPPOTrainer:
         self.optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
         step_fn = functools.partial(
-            _mappo_step, clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef
+            _mappo_step,
+            clip_eps  = clip_eps,
+            vf_coef   = vf_coef,
+            ent_coef  = ent_coef,
+            per_agent = per_agent,
         )
         self._jit_step = nnx.jit(step_fn)
 
@@ -182,8 +203,8 @@ class MAPPOTrainer:
         """
         Run num_epochs × len(minibatches) gradient steps.
 
-        Expects each minibatch dict to contain keys:
-          obs, actions, old_log_probs, old_values, advantages, returns
+        Expects each minibatch dict to contain:
+            obs, actions, old_log_probs, old_values, advantages, returns
         """
         all_stats: list[MAPPOStats] = []
 
@@ -209,5 +230,3 @@ class MAPPOTrainer:
             "approx_kl":     float(jnp.mean(jnp.array([s.approx_kl    for s in all_stats]))),
             "clip_fraction": float(jnp.mean(jnp.array([s.clip_fraction for s in all_stats]))),
         }
-
-
