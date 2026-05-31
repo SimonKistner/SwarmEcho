@@ -117,6 +117,22 @@ class NetworkConfig:
 
 
 @dataclass
+class DiversityConfig:
+    enabled: bool = False
+    method: str = "forward_history"  # currently: "forward_history"
+    num_roles: int = 0                # 0 = one role per agent; otherwise agent i -> i % num_roles
+    history_len: int = 4              # number of recent (obs, action) pairs used by predictors
+    beta: float = 0.05                # intrinsic reward scale before GAE/PPO
+    aux_coef: float = 1.0             # forward predictor loss weight
+    l1_coef: float = 0.001            # role-adapter L1 loss weight
+    reward_clip: float = 1.0          # clips normalized intrinsic reward to [-clip, clip]
+    normalize_intrinsic: bool = True  # normalize intrinsic reward over valid agents each step
+    adapter_scale: float = 1.0        # multiplier for role-specific actor residuals
+    predictor_hidden_dim: int = 128
+    predictor_num_layers: int = 2
+
+
+@dataclass
 class LoggingConfig:
     project: str = "SwarmEcho"
     run_name: Optional[str] = None
@@ -159,6 +175,7 @@ class SwarmEchoConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
+    diversity: DiversityConfig = field(default_factory=DiversityConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     visualize: VisualizeConfig = field(default_factory=VisualizeConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
@@ -313,6 +330,18 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0
     assert 0 < cfg.training.gae_lambda <= 1.0
+    if bool(cfg.diversity.enabled):
+        if str(cfg.diversity.method) != "forward_history":
+            raise ValueError("diversity.method must be 'forward_history'.")
+        assert int(cfg.diversity.history_len) >= 1, "diversity.history_len must be >= 1."
+        assert int(cfg.diversity.num_roles) >= 0, "diversity.num_roles must be >= 0."
+        assert float(cfg.diversity.beta) >= 0.0, "diversity.beta must be non-negative."
+        assert float(cfg.diversity.aux_coef) >= 0.0, "diversity.aux_coef must be non-negative."
+        assert float(cfg.diversity.l1_coef) >= 0.0, "diversity.l1_coef must be non-negative."
+        assert float(cfg.diversity.reward_clip) > 0.0, "diversity.reward_clip must be positive."
+        assert float(cfg.diversity.adapter_scale) >= 0.0, "diversity.adapter_scale must be non-negative."
+        assert int(cfg.diversity.predictor_hidden_dim) >= 1, "diversity.predictor_hidden_dim must be >= 1."
+        assert int(cfg.diversity.predictor_num_layers) >= 1, "diversity.predictor_num_layers must be >= 1."
 
 
 if __name__ == "__main__":
@@ -322,5 +351,3 @@ if __name__ == "__main__":
     print(OmegaConf.to_yaml(cfg))
     print(f"\nObs dim  : {compute_obs_dim(cfg)}")
     print(f"Action dim: {compute_action_dim(cfg)}")
-
-

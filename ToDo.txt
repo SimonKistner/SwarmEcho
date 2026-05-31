@@ -1,0 +1,23 @@
+Diversity ToDo:
+
+What is a trajectory:
+Paper:
+the agent’s FULL local action-observation history, encoded by a recurrent NN
+My version:
+Sliding window over 10 past observations
+Next step:
+copy the actual version from the paper and hope it works for continuous by scaling up the NN
+
+
+What is the diversity reward?
+Paper:
+Maximizes mutual information between trajectory and identity
+Is this trajectory more likely for this specific agent than for the average agent?
+Action comparison                p(a_t | tau_t, id) vs. average_id p(a_t | tau_t, id)
+Observation comparison       p(o_t+1 | tau_t, a_t, id) vs. average_id p(o_t+1 | tau_t, a_t, id)
+My version:
+Used a shared predictor vs. a role-aware predictor:
+log p_role(next_obs | history, role) vs log p_shared(next_obs | history)
+Does adding the role help predict the next observation better?
+Next step:
+Use the papers version

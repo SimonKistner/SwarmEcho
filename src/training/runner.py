@@ -70,6 +70,36 @@ from visualize.renderer import render_video
 
 
 # ---------------------------------------------------------------------------
+# Diversity helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_num_roles(cfg: DictConfig, num_agents: int) -> int:
+    configured = int(cfg.diversity.get("num_roles", 0))
+    return num_agents if configured <= 0 else configured
+
+
+def _make_role_ids(num_agents: int, num_roles: int) -> jax.Array:
+    return jnp.arange(num_agents, dtype=jnp.int32) % jnp.int32(num_roles)
+
+
+_ROLE_DIAGNOSTIC_NAMES = (
+    "env_reward",
+    "action_norm",
+    "action_to_base",
+    "action_to_target",
+    "dist_base",
+    "dist_target",
+    "conn_base",
+    "conn_target",
+    "bridge",
+    "target_known",
+    "contributing",
+    "coverage_delta",
+    "collision",
+)
+
+
+# ---------------------------------------------------------------------------
 # W&B init
 # ---------------------------------------------------------------------------
 
@@ -176,6 +206,11 @@ def _collect_rollout_mappo(
     max_force:        float,
     T:                int,
     ep_trackers:      dict,
+    diversity_enabled: bool = False,
+    role_ids:         jax.Array | None = None,
+    diversity_beta:   float = 0.0,
+    diversity_reward_clip: float = 1.0,
+    diversity_normalize_intrinsic: bool = True,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
@@ -213,6 +248,26 @@ def _collect_rollout_mappo(
     completed_r_succ     = []
     completed_coverage   = []
 
+    if diversity_enabled:
+        if role_ids is None:
+            raise ValueError("role_ids must be provided when diversity is enabled.")
+        histories = jnp.array(ep_trackers["diversity_history"])
+        role_ids_env = jnp.broadcast_to(role_ids[None, :], (E, N))
+        intrinsic_sum = jnp.array(0.0, dtype=jnp.float32)
+        intrinsic_abs_sum = jnp.array(0.0, dtype=jnp.float32)
+        intrinsic_count = jnp.array(0.0, dtype=jnp.float32)
+        valid_count = jnp.array(0.0, dtype=jnp.float32)
+        total_count = jnp.array(0.0, dtype=jnp.float32)
+        env_reward_sum = jnp.array(0.0, dtype=jnp.float32)
+        env_reward_abs_sum = jnp.array(0.0, dtype=jnp.float32)
+        num_roles = int(np.max(np.array(role_ids))) + 1
+        role_oh_env = jax.nn.one_hot(role_ids, num_roles, dtype=jnp.float32)[None, :, :]
+        role_diag_count = jnp.zeros((num_roles,), dtype=jnp.float32)
+        role_diag_sums = {
+            name: jnp.zeros((num_roles,), dtype=jnp.float32)
+            for name in _ROLE_DIAGNOSTIC_NAMES
+        }
+
     for t in range(T):
         key, act_key = jax.random.split(key)
 
@@ -222,19 +277,99 @@ def _collect_rollout_mappo(
 
         def _rollout_one_env(obs_n, keys_n):
             # Returns normalised actions [-1,1], log_probs, value
-            actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
+            actions, log_probs, value = model.rollout_step(
+                obs_n,
+                keys_n,
+                max_force,
+                role_ids if diversity_enabled else None,
+            )
             return actions, log_probs, value
 
         actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
-        # actions_b: (E, N, A) — PRE-SQUASH samples u from actor.act()
-        # Apply tanh squashing before scaling for the physics engine.
-        # The buffer stores the raw pre-squash u for consistent PPO log-prob re-evaluation.
-        squashed_b = jnp.tanh(actions_b)  # (E, N, A) in (-1, 1)
+        # actions_b: (E, N, A) — normalised actions in (-1, 1).
+        norm_actions_b = actions_b
 
         # Scale to physical space ONLY for the env step
-        states, rewards_b, dones_b, info = autoreset_step_v(states, squashed_b * max_force)
+        prev_states = states
+        states, rewards_b, dones_b, info = autoreset_step_v(states, norm_actions_b * max_force)
 
-        rewards_np = np.array(rewards_b)
+        env_rewards_b = rewards_b
+        train_rewards_b = rewards_b
+        if diversity_enabled:
+            history_pair = jnp.concatenate([obs_batch, norm_actions_b], axis=-1)
+            histories_for_pred = jnp.concatenate(
+                [histories[:, :, 1:, :], history_pair[:, :, None, :]],
+                axis=2,
+            )
+            next_obs_batch = obs_fn_v(states)
+            diversity_masks = (1.0 - dones_b.astype(jnp.float32))[:, None] * jnp.ones((1, N), dtype=jnp.float32)
+            raw_intrinsic = model.diversity_intrinsic_reward(
+                histories_for_pred,
+                next_obs_batch,
+                role_ids_env,
+                diversity_masks,
+            )
+            if diversity_normalize_intrinsic:
+                denom = jnp.maximum(jnp.sum(diversity_masks), 1.0)
+                mean = jnp.sum(raw_intrinsic * diversity_masks) / denom
+                var = jnp.sum(((raw_intrinsic - mean) * diversity_masks) ** 2) / denom
+                raw_intrinsic = ((raw_intrinsic - mean) / jnp.sqrt(var + 1e-8)) * diversity_masks
+            raw_intrinsic = jnp.clip(raw_intrinsic, -diversity_reward_clip, diversity_reward_clip)
+            scaled_intrinsic = diversity_beta * raw_intrinsic
+            train_rewards_b = env_rewards_b + scaled_intrinsic
+
+            intrinsic_sum = intrinsic_sum + jnp.sum(scaled_intrinsic)
+            intrinsic_abs_sum = intrinsic_abs_sum + jnp.sum(jnp.abs(scaled_intrinsic))
+            intrinsic_count = intrinsic_count + jnp.sum(diversity_masks)
+            valid_count = valid_count + jnp.sum(diversity_masks)
+            total_count = total_count + diversity_masks.size
+            env_reward_sum = env_reward_sum + jnp.sum(env_rewards_b * diversity_masks)
+            env_reward_abs_sum = env_reward_abs_sum + jnp.sum(jnp.abs(env_rewards_b) * diversity_masks)
+
+            rel_base = prev_states.base_pos[:, None, :] - prev_states.pos
+            rel_target = prev_states.target_pos[:, None, :] - prev_states.pos
+            dist_base = jnp.linalg.norm(rel_base, axis=-1)
+            dist_target = jnp.linalg.norm(rel_target, axis=-1)
+            diagonal = jnp.sqrt(prev_states.box_width[:, None] ** 2 + prev_states.box_height[:, None] ** 2 + 1e-6)
+            unit_base = rel_base / (dist_base[..., None] + 1e-6)
+            unit_target = rel_target / (dist_target[..., None] + 1e-6)
+
+            role_weights = role_oh_env * diversity_masks[:, :, None]
+            role_diag_count = role_diag_count + jnp.sum(role_weights, axis=(0, 1))
+            role_metrics = {
+                "env_reward":       env_rewards_b,
+                "action_norm":      jnp.linalg.norm(norm_actions_b, axis=-1),
+                "action_to_base":   jnp.sum(norm_actions_b * unit_base, axis=-1),
+                "action_to_target": jnp.sum(norm_actions_b * unit_target, axis=-1),
+                "dist_base":        dist_base / diagonal,
+                "dist_target":      dist_target / diagonal,
+                "conn_base":        obs_batch[..., 4],
+                "conn_target":      obs_batch[..., 5],
+                "bridge":           obs_batch[..., 4] * obs_batch[..., 5],
+                "target_known":     obs_batch[..., 6],
+                "contributing":     info["is_contributing"].astype(jnp.float32),
+                "coverage_delta":   states.last_cov_delta.astype(jnp.float32),
+                "collision":        states.collides.astype(jnp.float32),
+            }
+            for name, metric in role_metrics.items():
+                role_diag_sums[name] = role_diag_sums[name] + jnp.sum(
+                    metric[:, :, None] * role_weights,
+                    axis=(0, 1),
+                )
+
+            histories = jnp.where(
+                dones_b[:, None, None, None],
+                jnp.zeros_like(histories_for_pred),
+                histories_for_pred,
+            )
+        else:
+            next_obs_batch = None
+            histories_for_pred = None
+            role_ids_env = None
+            diversity_masks = None
+
+        rewards_np = np.array(env_rewards_b)
+        train_rewards_np = np.array(train_rewards_b)
         dones_np   = np.array(dones_b).astype(bool)
 
         ep_ret_accum     += rewards_np
@@ -291,8 +426,12 @@ def _collect_rollout_mappo(
             actions   = np.array(actions_b),   # [-1, 1]
             log_probs = np.array(log_probs_b),
             values    = np.array(values_b),
-            rewards   = rewards_np,
+            rewards   = train_rewards_np,
             dones     = dones_np.astype(np.float32),
+            next_obs        = np.array(next_obs_batch) if diversity_enabled else None,
+            histories       = np.array(histories_for_pred) if diversity_enabled else None,
+            role_ids        = np.array(role_ids_env) if diversity_enabled else None,
+            diversity_masks = np.array(diversity_masks) if diversity_enabled else None,
         ))
 
     # Bootstrap value for last state
@@ -315,6 +454,20 @@ def _collect_rollout_mappo(
     ep_trackers["r_found"]    = r_found_accum
     ep_trackers["r_succ"]     = r_succ_accum
     ep_trackers["coverage"]   = cov_accum
+    if diversity_enabled:
+        ep_trackers["diversity_history"] = np.array(histories)
+        denom = jnp.maximum(intrinsic_count, 1.0)
+        ep_trackers["diversity_intrinsic_mean"] = float(intrinsic_sum / denom)
+        ep_trackers["diversity_intrinsic_abs_mean"] = float(intrinsic_abs_sum / denom)
+        ep_trackers["diversity_valid_fraction"] = float(valid_count / jnp.maximum(total_count, 1.0))
+        ep_trackers["diversity_env_reward_mean"] = float(env_reward_sum / denom)
+        ep_trackers["diversity_env_reward_abs_mean"] = float(env_reward_abs_sum / denom)
+        role_diag_means = {
+            name: values / jnp.maximum(role_diag_count, 1.0)
+            for name, values in role_diag_sums.items()
+        }
+        for name, means in role_diag_means.items():
+            ep_trackers[f"diversity_role_std_{name}"] = float(jnp.std(means))
 
     return (
         states, key, last_values, last_dones,
@@ -342,6 +495,9 @@ def _evaluate(
 ) -> tuple:
     max_force = float(cfg.env.max_force)
     max_steps = int(cfg.env.max_steps)
+    N = int(cfg.env.num_agents)
+    diversity_enabled = bool(cfg.diversity.get("enabled", False))
+    role_ids = _make_role_ids(N, _resolve_num_roles(cfg, N)) if diversity_enabled else None
 
     all_states, all_rewards, all_metrics = [], [], []
     total_ret = total_len = total_gap = total_prog_pct = total_success = total_found = 0.0
@@ -358,8 +514,11 @@ def _evaluate(
             ep_states.append(jax.device_get(state))
             obs = obs_fn(state)
 
-            # Deterministic: take mean action (pre-squash = mu), squash then scale
-            actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu in pre-squash space
+            # Deterministic: take mean action, squash, then scale.
+            if diversity_enabled:
+                actions = jax.vmap(lambda o, r: model.actor(o, r)[0])(obs, role_ids)
+            else:
+                actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu
             actions = jnp.tanh(actions) * max_force                # squash + scale to physics
 
             old_state = state
@@ -473,9 +632,18 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     obs_dim   = compute_obs_dim(cfg)
     act_dim   = compute_action_dim(cfg)
     max_force = float(cfg.env.max_force)
+    diversity_enabled = bool(cfg.diversity.get("enabled", False))
+    num_roles = _resolve_num_roles(cfg, N) if diversity_enabled else 0
+    role_ids = _make_role_ids(N, num_roles) if diversity_enabled else None
+    history_len = int(cfg.diversity.get("history_len", 1))
+    history_feature_dim = obs_dim + act_dim
 
     print(f"  Devices          : {jax.devices()}")
     print(f"  critic_type      : {critic_type}")
+    print(f"  diversity        : {'forward_history' if diversity_enabled else 'disabled'}")
+    if diversity_enabled:
+        print(f"  diversity roles  : {num_roles}  (agent i -> i % roles)")
+        print(f"  diversity history: {history_len} x (obs_dim + act_dim)")
     print(f"  num_agents N     : {N}")
     print(f"  num_envs E       : {E}")
     print(f"  rollout T        : {T}")
@@ -513,6 +681,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         actor_num_layers = int(cfg.network.actor_num_layers),
         critic_type      = critic_type,
         rngs             = rngs,
+        diversity_enabled       = diversity_enabled,
+        num_roles               = num_roles,
+        history_len             = history_len,
+        history_feature_dim     = history_feature_dim,
+        diversity_hidden_dim    = int(cfg.diversity.get("predictor_hidden_dim", 128)),
+        diversity_num_layers    = int(cfg.diversity.get("predictor_num_layers", 2)),
+        diversity_adapter_scale = float(cfg.diversity.get("adapter_scale", 1.0)),
     )
     trainer = MAPPOTrainer(
         model         = model,
@@ -523,6 +698,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         ent_coef      = float(cfg.training.ent_coef),
         num_epochs    = int(cfg.training.num_epochs),
         per_agent     = per_agent,
+        diversity_enabled = diversity_enabled,
+        diversity_aux_coef = float(cfg.diversity.get("aux_coef", 0.0)) if diversity_enabled else 0.0,
+        diversity_l1_coef = float(cfg.diversity.get("l1_coef", 0.0)) if diversity_enabled else 0.0,
     )
     buf = MAPPORolloutBuffer(
         num_steps  = T,
@@ -533,6 +711,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         gamma      = float(cfg.training.gamma),
         gae_lambda = float(cfg.training.gae_lambda),
         per_agent  = per_agent,
+        diversity_enabled = diversity_enabled,
+        history_len = history_len,
+        history_feature_dim = history_feature_dim,
     )
 
     _, params = nnx.split(model)
@@ -617,6 +798,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         "found":   np.zeros(E, dtype=np.float32),
         "gap":     np.zeros(E, dtype=np.float32),
     }
+    if diversity_enabled:
+        ep_trackers["diversity_history"] = np.zeros(
+            (E, N, history_len, history_feature_dim),
+            dtype=np.float32,
+        )
+        ep_trackers["diversity_intrinsic_mean"] = 0.0
+        ep_trackers["diversity_intrinsic_abs_mean"] = 0.0
 
     eval_render_idx = 0
 
@@ -651,9 +839,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              last_values, last_dones,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
-             raw_cov) = _collect_rollout_mappo(
+            raw_cov) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
+                diversity_enabled = diversity_enabled,
+                role_ids = role_ids,
+                diversity_beta = float(cfg.diversity.get("beta", 0.0)) if diversity_enabled else 0.0,
+                diversity_reward_clip = float(cfg.diversity.get("reward_clip", 1.0)),
+                diversity_normalize_intrinsic = bool(cfg.diversity.get("normalize_intrinsic", True)),
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
@@ -791,6 +984,30 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     "perf/sps":                 sps,
                     "perf/ppo_updates":         update,
                 }
+                if diversity_enabled:
+                    shared_pred = float(ppo_stats["diversity_shared_loss"])
+                    role_pred = float(ppo_stats["diversity_role_loss"])
+                    pred_advantage = shared_pred - role_pred
+                    intrinsic_abs = float(ep_trackers.get("diversity_intrinsic_abs_mean", 0.0))
+                    env_abs = float(ep_trackers.get("diversity_env_reward_abs_mean", 0.0))
+                    logs.update({
+                        "diversity/intrinsic_reward":       float(ep_trackers.get("diversity_intrinsic_mean", 0.0)),
+                        "diversity/intrinsic_abs_reward":   intrinsic_abs,
+                        "diversity/env_reward":             float(ep_trackers.get("diversity_env_reward_mean", 0.0)),
+                        "diversity/env_abs_reward":         env_abs,
+                        "diversity/intrinsic_to_env_abs":   intrinsic_abs / max(env_abs, 1e-8),
+                        "diversity/predictor_loss":         float(ppo_stats["diversity_loss"]),
+                        "diversity/shared_predictor_loss":  shared_pred,
+                        "diversity/role_predictor_loss":    role_pred,
+                        "diversity/prediction_advantage":   pred_advantage,
+                        "diversity/role_to_shared_loss":    role_pred / max(shared_pred, 1e-8),
+                        "diversity/role_l1":                float(ppo_stats["role_l1"]),
+                        "diversity/valid_transition_frac":  float(ep_trackers.get("diversity_valid_fraction", 0.0)),
+                    })
+                    for name in _ROLE_DIAGNOSTIC_NAMES:
+                        logs[f"diversity/role_std_{name}"] = float(
+                            ep_trackers.get(f"diversity_role_std_{name}", 0.0)
+                        )
                 if len(window_ret) == window_ret.maxlen:
                     logs.update({
                         "train/ep_return":          float(np.mean(window_ret)),

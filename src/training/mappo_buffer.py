@@ -33,6 +33,10 @@ class MAPPOTransition(NamedTuple):
     values:    np.ndarray   # (E,) or (E, N)  depends on critic type
     rewards:   np.ndarray   # (E,)
     dones:     np.ndarray   # (E,)
+    next_obs:        np.ndarray | None = None  # (E, N, D)
+    histories:       np.ndarray | None = None  # (E, N, H, D+A)
+    role_ids:        np.ndarray | None = None  # (E, N)
+    diversity_masks: np.ndarray | None = None  # (E, N), 0 across episode reset boundaries
 
 
 class MAPPORolloutBuffer:
@@ -61,6 +65,9 @@ class MAPPORolloutBuffer:
         gamma:      float = 0.99,
         gae_lambda: float = 0.95,
         per_agent:  bool  = True,
+        diversity_enabled:     bool = False,
+        history_len:           int  = 1,
+        history_feature_dim:   int  = 0,
     ) -> None:
         self.T          = num_steps
         self.E          = num_envs
@@ -70,6 +77,9 @@ class MAPPORolloutBuffer:
         self.gamma      = gamma
         self.gae_lambda = gae_lambda
         self.per_agent  = per_agent
+        self.diversity_enabled = diversity_enabled
+        self.history_len = history_len
+        self.history_feature_dim = history_feature_dim
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
         self._actions   = np.zeros((self.T, self.E, self.N, self.A), dtype=np.float32)
@@ -82,6 +92,17 @@ class MAPPORolloutBuffer:
         else:
             self._rewards = np.zeros((self.T, self.E), dtype=np.float32)
             self._values = np.zeros((self.T, self.E),  dtype=np.float32)
+
+        if diversity_enabled:
+            if history_len < 1 or history_feature_dim < 1:
+                raise ValueError("history_len and history_feature_dim must be positive when diversity is enabled.")
+            self._next_obs = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
+            self._histories = np.zeros(
+                (self.T, self.E, self.N, self.history_len, self.history_feature_dim),
+                dtype=np.float32,
+            )
+            self._role_ids = np.zeros((self.T, self.E, self.N), dtype=np.int32)
+            self._diversity_masks = np.zeros((self.T, self.E, self.N), dtype=np.float32)
 
         self._ptr = 0
 
@@ -111,6 +132,13 @@ class MAPPORolloutBuffer:
                 self._rewards[self._ptr] = rew_arr
         
         self._dones[self._ptr]     = np.asarray(tr.dones)
+        if self.diversity_enabled:
+            if tr.next_obs is None or tr.histories is None or tr.role_ids is None or tr.diversity_masks is None:
+                raise ValueError("Diversity transitions must include next_obs, histories, role_ids, and diversity_masks.")
+            self._next_obs[self._ptr] = np.asarray(tr.next_obs)
+            self._histories[self._ptr] = np.asarray(tr.histories)
+            self._role_ids[self._ptr] = np.asarray(tr.role_ids)
+            self._diversity_masks[self._ptr] = np.asarray(tr.diversity_masks)
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -234,4 +262,11 @@ class MAPPORolloutBuffer:
                 "advantages":    jnp.array(adv_f[idx]),
                 "returns":       jnp.array(returns_f[idx]),
             })
+            if self.diversity_enabled:
+                minibatches[-1].update({
+                    "next_obs":        jnp.array(_flat(self._next_obs)[idx]),
+                    "histories":       jnp.array(_flat(self._histories)[idx]),
+                    "role_ids":        jnp.array(_flat(self._role_ids)[idx]),
+                    "diversity_masks": jnp.array(_flat(self._diversity_masks)[idx]),
+                })
         return minibatches

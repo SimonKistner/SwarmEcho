@@ -43,6 +43,10 @@ class MAPPOStats(NamedTuple):
     total_loss:    jax.Array
     approx_kl:     jax.Array
     clip_fraction: jax.Array
+    diversity_loss:        jax.Array
+    diversity_shared_loss: jax.Array
+    diversity_role_loss:   jax.Array
+    role_l1:               jax.Array
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +65,13 @@ def mappo_loss(
     vf_coef:       float,
     ent_coef:      float,
     per_agent:     bool,
+    role_ids:      jax.Array | None = None,
+    histories:     jax.Array | None = None,
+    next_obs:      jax.Array | None = None,
+    diversity_masks: jax.Array | None = None,
+    diversity_enabled: bool = False,
+    diversity_aux_coef: float = 0.0,
+    diversity_l1_coef: float = 0.0,
 ) -> tuple[jax.Array, MAPPOStats]:
     """
     MAPPO loss for one minibatch.
@@ -74,7 +85,8 @@ def mappo_loss(
     # ── Actor path ─────────────────────────────────────────────────────────
     obs_flat     = obs.reshape(MB * N, D)
     actions_flat = actions.reshape(MB * N, -1)
-    new_log_probs_flat, entropy_flat = model.actor.evaluate_actions(obs_flat, actions_flat)
+    role_ids_flat = role_ids.reshape(MB * N) if diversity_enabled else None
+    new_log_probs_flat, entropy_flat = model.actor.evaluate_actions(obs_flat, actions_flat, role_ids_flat)
 
     new_log_probs = new_log_probs_flat.reshape(MB, N)   # (MB, N)
     entropy       = entropy_flat.reshape(MB, N)          # (MB, N)
@@ -103,7 +115,23 @@ def mappo_loss(
     mean_entropy = jnp.mean(entropy)
 
     # ── Total ───────────────────────────────────────────────────────────────
-    total_loss = policy_loss + vf_coef * value_loss - ent_coef * mean_entropy
+    diversity_loss = jnp.array(0.0)
+    diversity_shared_loss = jnp.array(0.0)
+    diversity_role_loss = jnp.array(0.0)
+    role_l1 = jnp.array(0.0)
+    if diversity_enabled:
+        diversity_loss, diversity_shared_loss, diversity_role_loss = model.diversity_loss(
+            histories, next_obs, role_ids, diversity_masks,
+        )
+        role_l1 = model.role_adapter_l1(obs_flat, role_ids_flat)
+
+    total_loss = (
+        policy_loss
+        + vf_coef * value_loss
+        - ent_coef * mean_entropy
+        + diversity_aux_coef * diversity_loss
+        + diversity_l1_coef * role_l1
+    )
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     approx_kl     = jnp.mean((ratio - 1.0) - log_ratio)
@@ -116,6 +144,10 @@ def mappo_loss(
         total_loss    = total_loss,
         approx_kl     = approx_kl,
         clip_fraction = clip_fraction,
+        diversity_loss        = diversity_loss,
+        diversity_shared_loss = diversity_shared_loss,
+        diversity_role_loss   = diversity_role_loss,
+        role_l1               = role_l1,
     )
     return total_loss, stats
 
@@ -133,16 +165,25 @@ def _mappo_step(
     old_values:    jax.Array,
     advantages:    jax.Array,
     returns:       jax.Array,
+    role_ids:      jax.Array,
+    histories:     jax.Array,
+    next_obs:      jax.Array,
+    diversity_masks: jax.Array,
     *,
     clip_eps:  float,
     vf_coef:   float,
     ent_coef:  float,
     per_agent: bool,
+    diversity_enabled: bool,
+    diversity_aux_coef: float,
+    diversity_l1_coef: float,
 ) -> tuple[jax.Array, MAPPOStats]:
     def loss_fn(m):
         return mappo_loss(
             m, obs, actions, old_log_probs, old_values,
             advantages, returns, clip_eps, vf_coef, ent_coef, per_agent,
+            role_ids, histories, next_obs, diversity_masks,
+            diversity_enabled, diversity_aux_coef, diversity_l1_coef,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, grads)
@@ -179,10 +220,14 @@ class MAPPOTrainer:
         ent_coef:      float = 0.01,
         num_epochs:    int   = 4,
         per_agent:     bool  = True,
+        diversity_enabled: bool = False,
+        diversity_aux_coef: float = 0.0,
+        diversity_l1_coef: float = 0.0,
     ) -> None:
         self.model      = model
         self.num_epochs = num_epochs
         self.per_agent  = per_agent
+        self.diversity_enabled = diversity_enabled
 
         tx = optax.chain(
             optax.clip_by_global_norm(max_grad_norm),
@@ -196,6 +241,9 @@ class MAPPOTrainer:
             vf_coef   = vf_coef,
             ent_coef  = ent_coef,
             per_agent = per_agent,
+            diversity_enabled = diversity_enabled,
+            diversity_aux_coef = diversity_aux_coef,
+            diversity_l1_coef = diversity_l1_coef,
         )
         self._jit_step = nnx.jit(step_fn)
 
@@ -210,6 +258,16 @@ class MAPPOTrainer:
 
         for _epoch in range(self.num_epochs):
             for mb in minibatches:
+                if self.diversity_enabled:
+                    role_ids = mb["role_ids"]
+                    histories = mb["histories"]
+                    next_obs = mb["next_obs"]
+                    diversity_masks = mb["diversity_masks"]
+                else:
+                    role_ids = jnp.zeros((1,), dtype=jnp.int32)
+                    histories = jnp.zeros((1,), dtype=jnp.float32)
+                    next_obs = jnp.zeros((1,), dtype=jnp.float32)
+                    diversity_masks = jnp.zeros((1,), dtype=jnp.float32)
                 _loss, stats = self._jit_step(
                     self.model,
                     self.optimizer,
@@ -219,6 +277,10 @@ class MAPPOTrainer:
                     mb["old_values"],
                     mb["advantages"],
                     mb["returns"],
+                    role_ids,
+                    histories,
+                    next_obs,
+                    diversity_masks,
                 )
                 all_stats.append(stats)
 
@@ -229,4 +291,8 @@ class MAPPOTrainer:
             "total_loss":    float(jnp.mean(jnp.array([s.total_loss    for s in all_stats]))),
             "approx_kl":     float(jnp.mean(jnp.array([s.approx_kl    for s in all_stats]))),
             "clip_fraction": float(jnp.mean(jnp.array([s.clip_fraction for s in all_stats]))),
+            "diversity_loss": float(jnp.mean(jnp.array([s.diversity_loss for s in all_stats]))),
+            "diversity_shared_loss": float(jnp.mean(jnp.array([s.diversity_shared_loss for s in all_stats]))),
+            "diversity_role_loss": float(jnp.mean(jnp.array([s.diversity_role_loss for s in all_stats]))),
+            "role_l1": float(jnp.mean(jnp.array([s.role_l1 for s in all_stats]))),
         }

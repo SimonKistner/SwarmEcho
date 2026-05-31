@@ -106,6 +106,7 @@ To maintain a clean separation of concerns, all deep-dive technical details have
 3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Deep dive into the 57-dimensional observation space, Euler physics, and continuous action clipping.
 4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
 5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.
+6. **[07_forward_history_diversity.md](docs/07_forward_history_diversity.md)**: Optional CDS-inspired role diversity extension for MAPPO.
 
 ---
 

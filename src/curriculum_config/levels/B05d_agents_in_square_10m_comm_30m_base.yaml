@@ -19,7 +19,7 @@ reward:
 # 128, 256, 512, 1024, 2048, 4096, 8192, 16384
 
 training:
-  total_timesteps: 2_000_000
+  total_timesteps: 200_000_000
   num_envs: 4096
   num_steps: 64
   num_epochs: 10

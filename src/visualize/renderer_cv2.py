@@ -76,6 +76,17 @@ _TAB10 = [
     _hex_to_bgr("#17becf")
 ]
 
+_ROLE_COLORS = [
+    _hex_to_bgr("#0072b2"),
+    _hex_to_bgr("#e69f00"),
+    _hex_to_bgr("#009e73"),
+    _hex_to_bgr("#cc79a7"),
+    _hex_to_bgr("#56b4e9"),
+    _hex_to_bgr("#d55e00"),
+    _hex_to_bgr("#f0e442"),
+    _hex_to_bgr("#6b7280"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -95,6 +106,14 @@ class _FrameData(NamedTuple):
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
+
+
+def _diversity_role_colors(cfg: DictConfig, num_agents: int) -> tuple[bool, int]:
+    div_cfg = cfg.get("diversity", None)
+    enabled = bool(div_cfg is not None and div_cfg.get("enabled", False))
+    configured_roles = int(div_cfg.get("num_roles", 0)) if enabled else 0
+    num_roles = num_agents if configured_roles <= 0 else configured_roles
+    return enabled, num_roles
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -423,12 +442,15 @@ def _draw_frame_cv2(
             if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
                 sp_nodes.add(i)
                 
+    use_role_colors, num_roles = _diversity_role_colors(cfg, N)
     drone_cols = []
     for i in range(N):
         idx = i + drone_start
         ib = idx in base_comp
         it = idx in target_comp
-        if full_chain:
+        if use_role_colors:
+            col = _ROLE_COLORS[(i % num_roles) % len(_ROLE_COLORS)]
+        elif full_chain:
             if idx in sp_nodes: col = _C["both_chain"]
             elif dist_from_base[idx] <= dist_from_target[idx]: col = _C["base_chain"]
             else: col = _C["tgt_chain"]

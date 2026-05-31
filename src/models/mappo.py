@@ -24,6 +24,7 @@ from flax import nnx
 
 from models.actor import DecentralizedActor
 from models.critic import AgentCentricCritic, GlobalMeanCritic
+from models.diversity import ForwardHistoryDiversity
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +57,20 @@ class MAPPOModel(nnx.Module):
         actor_num_layers: int,
         critic_type:      str,
         rngs:             nnx.Rngs,
+        diversity_enabled:       bool  = False,
+        num_roles:               int   = 0,
+        history_len:             int   = 1,
+        history_feature_dim:     int   = 0,
+        diversity_hidden_dim:    int   = 128,
+        diversity_num_layers:    int   = 2,
+        diversity_adapter_scale: float = 1.0,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
         self.act_dim     = act_dim
         self.critic_type = critic_type
+        self.diversity_enabled = diversity_enabled
+        self.num_roles = num_roles
 
         self.actor = DecentralizedActor(
             obs_dim          = obs_dim,
@@ -68,7 +78,25 @@ class MAPPOModel(nnx.Module):
             hidden_dim       = hidden_dim,
             actor_num_layers = actor_num_layers,
             rngs             = rngs,
+            use_role_adapters = diversity_enabled,
+            num_roles         = num_roles,
+            adapter_scale     = diversity_adapter_scale,
         )
+
+        if diversity_enabled:
+            if num_roles <= 0:
+                raise ValueError("num_roles must be positive when diversity is enabled.")
+            if history_feature_dim <= 0:
+                raise ValueError("history_feature_dim must be positive when diversity is enabled.")
+            self.diversity_model = ForwardHistoryDiversity(
+                history_len         = history_len,
+                history_feature_dim = history_feature_dim,
+                obs_dim             = obs_dim,
+                num_roles           = num_roles,
+                hidden_dim          = diversity_hidden_dim,
+                num_layers          = diversity_num_layers,
+                rngs                = rngs,
+            )
 
         if critic_type == "agent_centric":
             self.critic = AgentCentricCritic(
@@ -112,30 +140,56 @@ class MAPPOModel(nnx.Module):
         all_obs:   jax.Array,   # (N, obs_dim)
         keys:      jax.Array,   # (N, 2) — per-agent PRNGKeys
         max_force: float = 50.0,
+        role_ids:  jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """
         Full CTDE forward pass for ONE environment during rollout.
 
-        Actions are returned as PRE-SQUASH samples u (Gaussian samples before tanh).
-        The caller (runner) is responsible for:
-          1. Squashing:  tanh(u)  → bounded (-1, 1)
-          2. Scaling:    tanh(u) × max_force → physics space
-        The buffer stores u directly so evaluate_actions can recompute the
-        exact same log-prob on u.
+        Actions are returned as squashed normalised values in [-1, 1].
+        The caller (runner) scales them by max_force for physics. The buffer
+        stores the same normalised actions used by evaluate_actions.
 
         Returns
         -------
-        actions   : (N, act_dim)  — pre-squash u values
-        log_probs : (N,)          — Gaussian log-prob on u
+        actions   : (N, act_dim)  — normalised action values
+        log_probs : (N,)          — squashed Gaussian log-prob
         value     : (N,) for agent_centric  |  () for global_mean
         """
-        def _act_one(obs_i, key_i):
-            a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
+        def _act_one(obs_i, key_i, role_i):
+            a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False, role_id=role_i)
             return a, lp
 
-        actions, log_probs = jax.vmap(_act_one)(all_obs, keys)
+        if role_ids is None:
+            role_ids = jnp.zeros((all_obs.shape[0],), dtype=jnp.int32)
+        actions, log_probs = jax.vmap(_act_one)(all_obs, keys, role_ids)
         value = self.get_value(all_obs, deterministic=False)
         return actions, log_probs, value
+
+    def diversity_intrinsic_reward(
+        self,
+        history:  jax.Array,
+        next_obs: jax.Array,
+        role_ids: jax.Array,
+        mask:     jax.Array,
+    ) -> jax.Array:
+        if not self.diversity_enabled:
+            return jnp.zeros_like(mask, dtype=jnp.float32)
+        return self.diversity_model.intrinsic_reward(history, next_obs, role_ids, mask)
+
+    def diversity_loss(
+        self,
+        history:  jax.Array,
+        next_obs: jax.Array,
+        role_ids: jax.Array,
+        mask:     jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        if not self.diversity_enabled:
+            z = jnp.array(0.0)
+            return z, z, z
+        return self.diversity_model.loss(history, next_obs, role_ids, mask)
+
+    def role_adapter_l1(self, obs: jax.Array, role_ids: jax.Array | None) -> jax.Array:
+        return self.actor.role_adapter_l1(obs, role_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +247,8 @@ if __name__ == "__main__":
         assert val.shape == (), f"value shape {val.shape} (expected ())"
     print(f"  rollout_step : acts={acts.shape} lps={lps.shape} val={val.shape}  ✓")
 
-    # Action normalisation check — acts are pre-squash u; squashed = tanh(u) must be in (-1, 1)
-    squashed_acts = jnp.tanh(acts)
-    assert jnp.all(squashed_acts > -1.0) and jnp.all(squashed_acts < 1.0), "tanh(actions) out of (-1, 1)!"
-    print("  tanh(actions) in (-1, 1)  ✓")
+    assert jnp.all(acts > -1.0) and jnp.all(acts < 1.0), "actions out of (-1, 1)!"
+    print("  actions in (-1, 1)  ✓")
 
     # Batched get_value
     obs_batch  = jnp.zeros((8, N, obs_dim))

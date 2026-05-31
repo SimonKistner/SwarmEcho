@@ -81,6 +81,17 @@ _C = {
     "coverage":     "#0ea5e9",   # light blue
 }
 
+_ROLE_COLORS = (
+    "#0072b2",  # blue
+    "#e69f00",  # orange
+    "#009e73",  # green
+    "#cc79a7",  # magenta
+    "#56b4e9",  # sky
+    "#d55e00",  # vermillion
+    "#f0e442",  # yellow
+    "#6b7280",  # grey
+)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -100,6 +111,14 @@ class _FrameData(NamedTuple):
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
+
+
+def _diversity_role_colors(cfg: DictConfig, num_agents: int) -> tuple[bool, int]:
+    div_cfg = cfg.get("diversity", None)
+    enabled = bool(div_cfg is not None and div_cfg.get("enabled", False))
+    configured_roles = int(div_cfg.get("num_roles", 0)) if enabled else 0
+    num_roles = num_agents if configured_roles <= 0 else configured_roles
+    return enabled, num_roles
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -365,12 +384,15 @@ def _draw_frame(
             if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
                 sp_nodes.add(i)
 
+    use_role_colors, num_roles = _diversity_role_colors(cfg, N)
     drone_cols = []
     for i in range(N):
         idx = i + drone_start
         ib = idx in base_comp
         it = idx in target_comp
-        if full_chain:
+        if use_role_colors:
+            col = _ROLE_COLORS[(i % num_roles) % len(_ROLE_COLORS)]
+        elif full_chain:
             if idx in sp_nodes: col = "#a855f7"
             elif dist_from_base[idx] <= dist_from_target[idx]: col = "#3b82f6"
             else: col = "#ef4444"
@@ -822,5 +844,4 @@ def render_video(
     size_mb  = filename.stat().st_size / 1e6
     print(f"Saved {filename}  ({size_mb:.1f} MB, {n_out} frames @ {fps} fps)")
     return str(filename)
-
 
