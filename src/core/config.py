@@ -87,7 +87,10 @@ class RewardConfig:
     max_gap_penalty: float = 5.0       # absolute penalty when gap is at its maximum
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
+    target_found_requires_delivery: bool = True
     only_shortest_path_chain_reward: bool = False
+    only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
+    every_reward_global: bool = False     # share every reward/penalty equally across agents
 
 
 @dataclass
@@ -284,6 +287,12 @@ def load_config(
 
     if cfg.logging.run_name:
         print(f"  Run Name         : {cfg.logging.run_name}")
+
+    if cfg.reward.every_reward_global:
+        cfg.reward.only_explor_individual = False
+        cfg.reward.only_shortest_path_chain_reward = False
+    elif cfg.reward.only_explor_individual:
+        cfg.reward.only_shortest_path_chain_reward = False
 
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)

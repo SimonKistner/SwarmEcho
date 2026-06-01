@@ -284,6 +284,12 @@ def _draw_frame(
     comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     B      = int(cfg.env.radar_bins)
     v_cfg  = cfg.visualize
+    rew_cfg = cfg.reward
+    use_shortest_path_visuals = (
+        bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and not bool(rew_cfg.get("only_explor_individual", False))
+        and not bool(rew_cfg.get("every_reward_global", False))
+    )
 
     # Clear only the dynamic axes
     ax.clear()
@@ -354,13 +360,18 @@ def _draw_frame(
     target_comp = _bfs(adj, source=target_idx) if target_idx >= 0 else set()
 
     # --- Shortest Path Highlighting ---
-    # Calculate shortest path distances using single-source BFS
-    dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
-    dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
-
-    full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
+    # Only use shortest-path highlighting when the active reward mode uses the
+    # shortest-path chain gate; otherwise draw component links uniformly.
+    if use_shortest_path_visuals:
+        dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
+        dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
+        full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
+    else:
+        dist_from_base = np.full(M, 999, dtype=np.int32)
+        dist_from_target = np.full(M, 999, dtype=np.int32)
+        full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
     sp_nodes = set()
-    if full_chain:
+    if use_shortest_path_visuals and full_chain:
         for i in range(M):
             if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
                 sp_nodes.add(i)
@@ -370,7 +381,7 @@ def _draw_frame(
         idx = i + drone_start
         ib = idx in base_comp
         it = idx in target_comp
-        if full_chain:
+        if use_shortest_path_visuals and full_chain:
             if idx in sp_nodes: col = "#a855f7"
             elif dist_from_base[idx] <= dist_from_target[idx]: col = "#3b82f6"
             else: col = "#ef4444"
@@ -384,7 +395,7 @@ def _draw_frame(
     # Identify tips
     idx_base_tip = -1
     idx_target_tip = -1
-    if base_idx >= 0 and target_idx >= 0 and not full_chain:
+    if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
         d_to_t = dists[drone_start:, target_idx]
         valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
         if valid_b:
@@ -395,8 +406,8 @@ def _draw_frame(
         if valid_t:
             idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
-    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
-    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
 
     for i in range(M):
         for j in range(i + 1, M):
@@ -409,7 +420,7 @@ def _draw_frame(
                 on_base_sp = False
                 on_tgt_sp = False
                 
-                if full_chain:
+                if use_shortest_path_visuals and full_chain:
                     if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
                         is_both = True
                         
@@ -434,7 +445,7 @@ def _draw_frame(
                         if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
                             on_tgt_sp = True
 
-                if on_base_sp or on_tgt_sp or is_both:
+                if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):
                     glow_col = "#a855f7" if is_both else ("#3b82f6" if on_base_sp else "#ef4444")
                     # Draw a slightly thicker, semi-transparent line behind for the shine
                     ax.plot([xi, xj], [yi, yj], "-", color=glow_col, lw=lw*3, alpha=0.15, zorder=2)

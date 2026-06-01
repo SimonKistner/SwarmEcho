@@ -10,16 +10,19 @@ env:
   target_spawn_method: outside_base
   target_invalid_spawn_base_radius: 35.0
   precover_base_comm: true
-  hold_chain_for: 100                      # number of consecutive timesteps the chain must be held before success
+  hold_chain_for: 50                      # number of consecutive timesteps the chain must be held before success
 
 
 reward:
-  only_shortest_path_chain_reward: true
+  every_reward_global: false
+  only_explor_individual: true
+  only_shortest_path_chain_reward: false
+  target_found_requires_delivery: true
 
 # 128, 256, 512, 1024, 2048, 4096, 8192, 16384
 
 training:
-  total_timesteps: 2_000_000
+  total_timesteps: 100_000_000
   num_envs: 4096
   num_steps: 64
   num_epochs: 10

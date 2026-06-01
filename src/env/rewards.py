@@ -101,7 +101,15 @@ def make_reward_fn(cfg: DictConfig):
     w_base_prox  = float(cfg.reward.get("base_proximity_bonus", 0.0))
     w_target_prox = float(cfg.reward.get("target_proximity_bonus", 0.0))
     use_task     = bool(int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
-    only_shortest_path_chain_reward = bool(cfg.reward.get("only_shortest_path_chain_reward", False))
+    target_found_requires_delivery = bool(cfg.reward.get("target_found_requires_delivery", True))
+    every_reward_global = bool(cfg.reward.get("every_reward_global", False))
+    only_explor_individual = bool(cfg.reward.get("only_explor_individual", False)) and not every_reward_global
+    only_shortest_path_chain_reward = (
+        bool(cfg.reward.get("only_shortest_path_chain_reward", False))
+        and not only_explor_individual
+        and not every_reward_global
+    )
+    chain_rewards_global = only_explor_individual or every_reward_global
 
     # Reachability matrix squarings
 
@@ -220,11 +228,6 @@ def make_reward_fn(cfg: DictConfig):
         w_gap = jnp.where(bt_dist > 0, p_gap_max / bt_dist, 0.0)
 
         # ---- 2. Global Target Found --------------------------------------
-        was_target_found    = old_state.base_target_known
-        global_target_found = new_state.base_target_known
-        just_found          = global_target_found & ~was_target_found
-        
-        # Local bonus for the drone delivering to base station
         dist_to_base = jnp.linalg.norm(new_state.pos - new_state.base_pos[None, :], axis=-1)
         adj_db = (dist_to_base <= comm_r_base) & new_state.active
         
@@ -233,9 +236,20 @@ def make_reward_fn(cfg: DictConfig):
         
         knew_or_sees_target = old_state.target_known | is_visible
         actual_deliverers = adj_db & knew_or_sees_target
+
+        if target_found_requires_delivery:
+            was_target_found = old_state.base_target_known
+            global_target_found = new_state.base_target_known
+            target_found_local_receivers = actual_deliverers
+        else:
+            was_target_found = jnp.any(old_state.target_known)
+            global_target_found = jnp.any(new_state.target_known)
+            target_found_local_receivers = is_visible & ~old_state.target_known
+        just_found = global_target_found & ~was_target_found
         
         r_target_found_shared = jnp.where(use_task & just_found, w_found, 0.0)
-        r_target_found_local  = jnp.where(use_task & just_found & actual_deliverers, w_finder, 0.0)
+        finder_bonus_value = w_finder if (use_task and not chain_rewards_global) else 0.0
+        r_target_found_local = jnp.where(just_found & target_found_local_receivers, finder_bonus_value, 0.0)
         # Shared component is divided by N to be agent-invariant
         r_target_found = (r_target_found_shared / N) + r_target_found_local
 
@@ -295,17 +309,22 @@ def make_reward_fn(cfg: DictConfig):
         active_gap = jnp.where(use_dynamic_gap, chain_gap_dist, bt_dist)
         base_gap_penalty = -active_gap * w_gap
         
-        # Only apply dynamic gap penalty to contributing drones; others get max penalty
-        if only_shortest_path_chain_reward:
-            is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
+        # Only apply dynamic gap penalty to contributing drones unless chain
+        # rewards are deliberately shared as a team signal.
+        if chain_rewards_global:
+            is_contributing = jnp.ones(N, dtype=jnp.bool_)
+            r_chain_gap = jnp.full((N,), base_gap_penalty / N, dtype=jnp.float32)
         else:
-            is_contributing = is_conn_base | is_conn_target
-            
-        r_chain_gap = jnp.where(
-            is_contributing,
-            base_gap_penalty / N,
-            -p_gap_max / N
-        )
+            if only_shortest_path_chain_reward:
+                is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
+            else:
+                is_contributing = is_conn_base | is_conn_target
+
+            r_chain_gap = jnp.where(
+                is_contributing,
+                base_gap_penalty / N,
+                -p_gap_max / N
+            )
 
         # ---- 5. Proximity penalty ----------------------------------------
         pairwise_dists = jnp.linalg.norm(new_state.pos[:, None, :] - new_state.pos[None, :, :], axis=-1)
@@ -346,6 +365,8 @@ def make_reward_fn(cfg: DictConfig):
 
         # ---- Total -------------------------------------------------------
         reward = r_coverage + r_target_found + r_chain_gap + r_proximity + r_collision + r_success + r_hub_proximity
+        if every_reward_global:
+            reward = jnp.full((N,), jnp.sum(reward) / N, dtype=jnp.float32)
 
         info = {
             "r_coverage":     jnp.sum(r_coverage),

@@ -317,6 +317,12 @@ def _draw_frame_cv2(
     comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     cell_size = 1.0
     B = int(cfg.env.radar_bins); v_cfg = cfg.visualize
+    rew_cfg = cfg.reward
+    use_shortest_path_visuals = (
+        bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and not bool(rew_cfg.get("only_explor_individual", False))
+        and not bool(rew_cfg.get("every_reward_global", False))
+    )
 
     # Backgrounds
     img = np.full((lay.total_h, lay.total_w, 3), _C["bg_outer"], dtype=np.uint8)
@@ -412,13 +418,18 @@ def _draw_frame_cv2(
     base_comp = _bfs(adj, base_idx) if base_idx >= 0 else set()
     target_comp = _bfs(adj, target_idx) if target_idx >= 0 else set()
     
-    # Calculate shortest path distances using single-source BFS
-    dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
-    dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
-    
-    full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
+    # Calculate shortest path distances only when the reward mode actually uses
+    # shortest-path chain gating; otherwise render component links uniformly.
+    if use_shortest_path_visuals:
+        dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
+        dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
+        full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
+    else:
+        dist_from_base = np.full(M, 999, dtype=np.int32)
+        dist_from_target = np.full(M, 999, dtype=np.int32)
+        full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
     sp_nodes = set()
-    if full_chain:
+    if use_shortest_path_visuals and full_chain:
         for i in range(M):
             if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
                 sp_nodes.add(i)
@@ -428,7 +439,7 @@ def _draw_frame_cv2(
         idx = i + drone_start
         ib = idx in base_comp
         it = idx in target_comp
-        if full_chain:
+        if use_shortest_path_visuals and full_chain:
             if idx in sp_nodes: col = _C["both_chain"]
             elif dist_from_base[idx] <= dist_from_target[idx]: col = _C["base_chain"]
             else: col = _C["tgt_chain"]
@@ -457,7 +468,7 @@ def _draw_frame_cv2(
     # Identify tips (drones closest to hubs) for shortest path calc
     idx_base_tip = -1
     idx_target_tip = -1
-    if base_idx >= 0 and target_idx >= 0 and not full_chain:
+    if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
         d_to_t = dists[drone_start:, target_idx]
         valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
         if valid_b:
@@ -468,8 +479,8 @@ def _draw_frame_cv2(
         if valid_t:
             idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
-    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
-    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
 
     for i in range(M):
         for j in range(i + 1, M):
@@ -480,7 +491,7 @@ def _draw_frame_cv2(
             on_base_sp = False
             on_tgt_sp = False
             
-            if full_chain:
+            if use_shortest_path_visuals and full_chain:
                 # On full shortest path
                 if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
                     is_both = True
@@ -507,7 +518,7 @@ def _draw_frame_cv2(
                         on_tgt_sp = True
 
             # Draw the subtle "glow" for shortest paths
-            if on_base_sp or on_tgt_sp or is_both:
+            if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):
                 glow_col = _C["both_chain"] if is_both else (_C["base_chain"] if on_base_sp else _C["tgt_chain"])
                 # Draw a thicker, semi-transparent line behind
                 overlay = img.copy()
