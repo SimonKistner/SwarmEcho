@@ -13,6 +13,13 @@ Rather than a global YAML file, the baseline configurations are declared inside 
 | `network` | Hidden layer dimensions, number of layers, activation types. |
 | `logging` | Interval lengths for weights & biases syncs and evaluative video renders. |
 
+The recurrent MAPPO extension is controlled from `network`:
+
+| Key | Default | Effect |
+|---|---:|---|
+| `actor_memory` | `false` | Replaces the feed-forward actor with a per-agent GRU actor. |
+| `critic_memory` | `false` | Replaces the agent-centric critic with a per-agent GRU critic before cross-agent attention. Requires `critic_type: agent_centric`. |
+
 ## 2. Curriculum Overrides & Level Structure
 The training system scales difficulty sequentially via the `levels/` directory.
 - The structured defaults in `src/core/config.py` act as the overarching default configuration.

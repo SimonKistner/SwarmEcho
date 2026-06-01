@@ -20,18 +20,31 @@ The model framework is built using Flax (`nnx` API).
   - **Agent-Centric Critic (`AgentCentricCritic`) [Default & Recommended]**: Estimates a unique value $V_i$ for each agent. It uses an MLP encoder followed by a masked multi-head cross-agent attention block (where agent $i$ attends to all other agents but not itself) and an MLP head to output a tensor of shape `(..., N)`.
   - **Global Mean Critic (`GlobalMeanCritic`) [Kept for Ablations]**: Encodes all agent observations, applies standard multi-head self-attention, and aggregates them via a Global Mean Pooling layer to produce a single team-wide scalar value $V$ of shape `(...,)`.
 
-## Cooperative Team Reward
+### 3. Toggleable Episode Memory
+- Controlled by `network.actor_memory` and `network.critic_memory`; both default to `false`, preserving the original feed-forward MAPPO architecture.
+- **Actor memory** uses per-agent GRU state inside the decentralized actor:
+  ```text
+  obs_i -> actor encoder -> GRU_i -> policy head -> mu/log_std
+  ```
+  The hidden state is reset at episode boundaries and while an agent is inactive.
+- **Critic memory** is available for the agent-centric critic:
+  ```text
+  obs_i -> critic encoder -> GRU_i -> masked cross-agent attention -> V_i
+  ```
+  Memory is applied before attention so the critic attends over current observations plus each agent's episode history.
+- Recurrent PPO updates preserve rollout time order, replay actor/critic sequences from stored initial hidden states, and use clipped value loss on the recurrent path.
+
+## Cooperative Team Reward And Local Credit
 *(Found in `src/env/rewards.py`)*
 
-A single scalar reward $r_t$ is computed and shared across all agents to encourage cooperative task-solving behaviors:
+SwarmEcho returns one reward value per agent. Some terms are shared team signals divided by `N`; others stay local for precise credit assignment:
 
 $$r_{total} = R_{coverage} + R_{target\_found} + R_{chain\_gap} + R_{proximity} + R_{collision} + R_{success} + R_{hub\_proximity}$$
 
 - **$R_{coverage}$ (Local, Dense)**: Proportional to the number of *newly discovered* grid cells visited by the swarm in the current step. Once an individual agent persistently knows the target's location, its coverage reward is gated off.
-- **$R_{target\_found}$ (Shared + Local, Sparse)**: Shared team bonus when the target is first discovered, plus a localized "finder" bonus awarded only to the specific agent(s) that deliver the target info to the base station.
+- **$R_{target\_found}$ (Shared + Local, Sparse)**: Shared team bonus when the target is first discovered, plus a localized `finder_bonus` for the specific agent(s) that newly find or deliver target information.
 - **$R_{chain\_gap}$ (Local, Dense)**: A topological penalty proportional to the gap distance between the base-connected sub-network and target-connected sub-network tips. Only "contributing" drones (those on the shortest topological path or in the connected components) receive this dynamic penalty, while non-contributing drones receive a maximum penalty.
 - **$R_{proximity}$ (Local, Dense)**: Penalty for agents that are too close to each other, to discourage clustering and promote collision avoidance.
 - **$R_{collision}$ (Local, Dense)**: Penalty for each drone currently colliding with boundaries or obstacles.
 - **$R_{success}$ (Shared, Sparse)**: A large terminal bonus divided among the team, granted when a continuous multi-hop communication link is successfully established and held for the required time.
 - **$R_{hub\_proximity}$ (Shared, Dense)**: Encourages staying near points of interest (base or target). If target is known, drones are rewarded for proximity to either base or target; otherwise, only proximity to base is rewarded.
-

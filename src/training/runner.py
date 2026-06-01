@@ -176,12 +176,18 @@ def _collect_rollout_mappo(
     max_force:        float,
     T:                int,
     ep_trackers:      dict,
+    actor_h = None,
+    critic_h = None,
+    last_dones = None,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
     Actions sent to the physics engine are scaled by max_force.
     """
-    buf.reset()
+    recurrent = bool(model.actor_memory or model.critic_memory)
+    if last_dones is None:
+        last_dones = np.zeros(buf.E, dtype=bool)
+    buf.reset(actor_h, critic_h)
     E, N = buf.E, buf.N
 
     ep_ret_accum     = ep_trackers["ret"]
@@ -219,13 +225,35 @@ def _collect_rollout_mappo(
         obs_batch = obs_fn_v(states)          # (E, N, D)
         E_, N_, D_ = obs_batch.shape
         act_keys = jax.random.split(act_key, E_ * N_).reshape(E_, N_, 2)
+        reset_agents_b = jnp.asarray(last_dones)[:, None] | jnp.logical_not(states.active)
 
-        def _rollout_one_env(obs_n, keys_n):
-            # Returns normalised actions [-1,1], log_probs, value
-            actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
-            return actions, log_probs, value
+        if recurrent:
+            if model.actor_memory and actor_h is None:
+                actor_h = model.initial_actor_hidden((E_,))
+            if model.critic_memory and critic_h is None:
+                critic_h = model.initial_critic_hidden((E_,))
 
-        actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
+            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                return model.rollout_step_recurrent(
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force
+                )
+
+            actor_h_in = actor_h if actor_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
+            critic_h_in = critic_h if critic_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
+            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b
+            )
+            if not model.actor_memory:
+                actor_h = None
+            if not model.critic_memory:
+                critic_h = None
+        else:
+            def _rollout_one_env(obs_n, keys_n):
+                # Returns normalised actions [-1,1], log_probs, value
+                actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
+                return actions, log_probs, value
+
+            actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
         # actions_b: (E, N, A) — PRE-SQUASH samples u from actor.act()
         # Apply tanh squashing before scaling for the physics engine.
         # The buffer stores the raw pre-squash u for consistent PPO log-prob re-evaluation.
@@ -240,7 +268,9 @@ def _collect_rollout_mappo(
         ep_ret_accum     += rewards_np
         ep_len_accum     += 1
         ep_success_accum  = np.maximum(ep_success_accum, np.array(info["fully_connected"]))
-        ep_found_accum    = np.maximum(ep_found_accum, np.array(info["global_target_found"]))
+        # MEM_T8-only diagnostic fallback: normal levels report global_target_found.
+        found_metric = np.array(info.get("target_found_fraction", info["global_target_found"]))
+        ep_found_accum    = np.maximum(ep_found_accum, found_metric)
         ep_gap_accum      = np.array(info["chain_gap_dist"])
         ep_prog_pct_accum  = np.array(info["chain_progress_pct"])
 
@@ -293,12 +323,23 @@ def _collect_rollout_mappo(
             values    = np.array(values_b),
             rewards   = rewards_np,
             dones     = dones_np.astype(np.float32),
+            rnn_resets = np.array(reset_agents_b) if recurrent else None,
         ))
+        last_dones = dones_np
 
     # Bootstrap value for last state
     last_obs    = obs_fn_v(states)
-    last_values = model.get_value(last_obs)    # (E,) or (E, N)
-    last_dones  = jnp.zeros(E, dtype=jnp.float32)
+    if recurrent and model.critic_memory:
+        reset_agents_b = jnp.asarray(last_dones)[:, None] | jnp.logical_not(states.active)
+
+        def _value_one_env(obs_n, h_n, resets_n):
+            _, value = model.get_value_recurrent(obs_n, h_n, resets_n)
+            return value
+
+        last_values = jax.vmap(_value_one_env)(last_obs, critic_h, reset_agents_b)
+    else:
+        last_values = model.get_value(last_obs)    # (E,) or (E, N)
+    bootstrap_dones = jnp.zeros(E, dtype=jnp.float32)
 
     # Save persistent accumulators back
     ep_trackers["ret"]     = ep_ret_accum
@@ -317,7 +358,7 @@ def _collect_rollout_mappo(
     ep_trackers["coverage"]   = cov_accum
 
     return (
-        states, key, last_values, last_dones,
+        states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool),
         completed_returns, completed_lengths, completed_success, 
         completed_found, completed_gaps, completed_prog_pcts,
         completed_r_coverage, completed_r_gap, completed_r_coll,
@@ -349,6 +390,7 @@ def _evaluate(
     for _ in range(num_episodes):
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
+        actor_h = model.initial_actor_hidden(()) if model.actor_memory else None
         ep_ret  = ep_gap = ep_prog_pct = 0.0
         ep_success = ep_found = False
         ep_states, ep_rewards = [], []
@@ -359,7 +401,16 @@ def _evaluate(
             obs = obs_fn(state)
 
             # Deterministic: take mean action (pre-squash = mu), squash then scale
-            actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu in pre-squash space
+            if model.actor_memory:
+                resets = jnp.logical_not(state.active)
+
+                def _act_eval(o, h, r):
+                    h, mu, _ = model.actor(o, h, r)
+                    return h, mu
+
+                actor_h, actions = jax.vmap(_act_eval)(obs, actor_h, resets)
+            else:
+                actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu in pre-squash space
             actions = jnp.tanh(actions) * max_force                # squash + scale to physics
 
             old_state = state
@@ -390,7 +441,9 @@ def _evaluate(
             ep_gap    = float(info["chain_gap_dist"])
             ep_prog_pct = float(info["chain_progress_pct"])
             ep_success = ep_success or bool(success_achieved)
-            ep_found   = ep_found   or bool(info["global_target_found"] > 0.5)
+            # MEM_T8-only diagnostic fallback: normal levels report global_target_found.
+            found_metric = info.get("target_found_fraction", info["global_target_found"])
+            ep_found = max(float(ep_found), float(found_metric))
             ep_rewards.append(np.array(rew))
             
             ep_metrics["r_explor"].append(float(info["r_coverage"]))
@@ -459,6 +512,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     critic_type = str(cfg.network.critic_type)
     per_agent   = (critic_type == "agent_centric")
+    actor_memory = bool(cfg.network.get("actor_memory", False))
+    critic_memory = bool(cfg.network.get("critic_memory", False))
 
     print("\n══════════════════════════════════════════════════════")
     print(f"  SwarmEcho — MAPPO  [{critic_type} critic]")
@@ -476,6 +531,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     print(f"  Devices          : {jax.devices()}")
     print(f"  critic_type      : {critic_type}")
+    print(f"  actor_memory     : {actor_memory}")
+    print(f"  critic_memory    : {critic_memory}")
     print(f"  num_agents N     : {N}")
     print(f"  num_envs E       : {E}")
     print(f"  rollout T        : {T}")
@@ -512,6 +569,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
         critic_type      = critic_type,
+        actor_memory     = actor_memory,
+        critic_memory    = critic_memory,
         rngs             = rngs,
     )
     trainer = MAPPOTrainer(
@@ -523,6 +582,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         ent_coef      = float(cfg.training.ent_coef),
         num_epochs    = int(cfg.training.num_epochs),
         per_agent     = per_agent,
+        actor_memory  = actor_memory,
+        critic_memory = critic_memory,
     )
     buf = MAPPORolloutBuffer(
         num_steps  = T,
@@ -533,6 +594,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         gamma      = float(cfg.training.gamma),
         gae_lambda = float(cfg.training.gae_lambda),
         per_agent  = per_agent,
+        recurrent  = actor_memory or critic_memory,
+        hidden_dim = int(cfg.network.hidden_dim),
+        actor_memory  = actor_memory,
+        critic_memory = critic_memory,
     )
 
     _, params = nnx.split(model)
@@ -560,6 +625,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     env_keys = jax.random.split(env_key, E)
     states   = reset_v(env_keys)
     print("  Environments initialised ✓")
+
+    actor_h = model.initial_actor_hidden((E,)) if actor_memory else None
+    critic_h = model.initial_critic_hidden((E,)) if critic_memory else None
+    rollout_last_dones = np.zeros(E, dtype=bool)
 
     # ── Run directory & Name ──────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -648,12 +717,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── Rollout ───────────────────────────────────────────────────────
             (states, collect_key,
-             last_values, last_dones,
+             last_values, last_dones, actor_h, critic_h, rollout_last_dones,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
+                actor_h, critic_h, rollout_last_dones,
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────

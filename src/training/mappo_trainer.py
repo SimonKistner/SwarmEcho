@@ -120,6 +120,93 @@ def mappo_loss(
     return total_loss, stats
 
 
+def recurrent_mappo_loss(
+    model:           MAPPOModel,
+    obs:             jax.Array,   # (T, B, N, D)
+    actions:         jax.Array,   # (T, B, N, A)
+    old_log_probs:   jax.Array,   # (T, B, N)
+    old_values:      jax.Array,   # (T, B) or (T, B, N)
+    advantages:      jax.Array,   # (T, B) or (T, B, N)
+    returns:         jax.Array,   # (T, B) or (T, B, N)
+    rnn_resets:      jax.Array,   # (T, B, N)
+    initial_actor_h: jax.Array,   # (B, N, H)
+    initial_critic_h:jax.Array,   # (B, N, H)
+    clip_eps:        float,
+    vf_coef:         float,
+    ent_coef:        float,
+    per_agent:       bool,
+) -> tuple[jax.Array, MAPPOStats]:
+    """
+    Recurrent MAPPO loss over full rollout sequences.
+
+    Time order is preserved until after actor/critic replay. Loss terms are
+    then averaged across time, environment minibatch, and agent dimensions.
+    """
+    T, B, N, D = obs.shape
+
+    if model.actor_memory:
+        obs_actor = obs.reshape(T, B * N, D)
+        actions_actor = actions.reshape(T, B * N, actions.shape[-1])
+        resets_actor = rnn_resets.reshape(T, B * N)
+        init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
+        _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
+            obs_actor,
+            actions_actor,
+            init_actor,
+            resets_actor,
+        )
+        new_log_probs = log_probs_flat.reshape(T, B, N)
+        entropy = entropy_flat.reshape(T, B, N)
+    else:
+        obs_flat = obs.reshape(T * B * N, D)
+        actions_flat = actions.reshape(T * B * N, -1)
+        lp_flat, ent_flat = model.actor.evaluate_actions(obs_flat, actions_flat)
+        new_log_probs = lp_flat.reshape(T, B, N)
+        entropy = ent_flat.reshape(T, B, N)
+
+    if per_agent:
+        adv = jax.lax.stop_gradient(advantages)
+    else:
+        adv = jax.lax.stop_gradient(advantages[..., None])
+
+    log_ratio = new_log_probs - old_log_probs
+    ratio = jnp.exp(log_ratio)
+    pg_loss1 = -adv * ratio
+    pg_loss2 = -adv * jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+    policy_loss = jnp.mean(jnp.maximum(pg_loss1, pg_loss2))
+
+    if model.critic_memory:
+        _, new_values = model.critic.values_sequence(
+            obs,
+            initial_critic_h,
+            rnn_resets,
+            deterministic=False,
+        )
+    else:
+        flat_values = model.critic(obs.reshape(T * B, N, D), deterministic=False)
+        new_values = flat_values.reshape(old_values.shape)
+
+    clipped_values = old_values + jnp.clip(new_values - old_values, -clip_eps, clip_eps)
+    value_losses = (new_values - returns) ** 2
+    value_losses_clipped = (clipped_values - returns) ** 2
+    value_loss = 0.5 * jnp.mean(jnp.maximum(value_losses, value_losses_clipped))
+
+    mean_entropy = jnp.mean(entropy)
+    total_loss = policy_loss + vf_coef * value_loss - ent_coef * mean_entropy
+    approx_kl = jnp.mean((ratio - 1.0) - log_ratio)
+    clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32))
+
+    stats = MAPPOStats(
+        policy_loss   = policy_loss,
+        value_loss    = value_loss,
+        entropy       = mean_entropy,
+        total_loss    = total_loss,
+        approx_kl     = approx_kl,
+        clip_fraction = clip_fraction,
+    )
+    return total_loss, stats
+
+
 # ---------------------------------------------------------------------------
 # Module-level JIT-able step
 # ---------------------------------------------------------------------------
@@ -143,6 +230,36 @@ def _mappo_step(
         return mappo_loss(
             m, obs, actions, old_log_probs, old_values,
             advantages, returns, clip_eps, vf_coef, ent_coef, per_agent,
+        )
+    (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+    optimizer.update(model, grads)
+    return loss, stats
+
+
+def _recurrent_mappo_step(
+    model:           MAPPOModel,
+    optimizer:       nnx.Optimizer,
+    obs:             jax.Array,
+    actions:         jax.Array,
+    old_log_probs:   jax.Array,
+    old_values:      jax.Array,
+    advantages:      jax.Array,
+    returns:         jax.Array,
+    rnn_resets:      jax.Array,
+    initial_actor_h: jax.Array,
+    initial_critic_h:jax.Array,
+    *,
+    clip_eps:  float,
+    vf_coef:   float,
+    ent_coef:  float,
+    per_agent: bool,
+) -> tuple[jax.Array, MAPPOStats]:
+    def loss_fn(m):
+        return recurrent_mappo_loss(
+            m, obs, actions, old_log_probs, old_values,
+            advantages, returns, rnn_resets,
+            initial_actor_h, initial_critic_h,
+            clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, grads)
@@ -179,10 +296,13 @@ class MAPPOTrainer:
         ent_coef:      float = 0.01,
         num_epochs:    int   = 4,
         per_agent:     bool  = True,
+        actor_memory:  bool  = False,
+        critic_memory: bool  = False,
     ) -> None:
         self.model      = model
         self.num_epochs = num_epochs
         self.per_agent  = per_agent
+        self.recurrent  = actor_memory or critic_memory
 
         tx = optax.chain(
             optax.clip_by_global_norm(max_grad_norm),
@@ -190,8 +310,9 @@ class MAPPOTrainer:
         )
         self.optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
+        step_impl = _recurrent_mappo_step if self.recurrent else _mappo_step
         step_fn = functools.partial(
-            _mappo_step,
+            step_impl,
             clip_eps  = clip_eps,
             vf_coef   = vf_coef,
             ent_coef  = ent_coef,
@@ -203,8 +324,9 @@ class MAPPOTrainer:
         """
         Run num_epochs × len(minibatches) gradient steps.
 
-        Expects each minibatch dict to contain:
-            obs, actions, old_log_probs, old_values, advantages, returns
+        Feed-forward minibatches contain flat samples. Recurrent minibatches
+        preserve time order and additionally include reset masks plus rollout
+        initial actor/critic hidden states.
         """
         all_stats: list[MAPPOStats] = []
 
@@ -219,6 +341,11 @@ class MAPPOTrainer:
                     mb["old_values"],
                     mb["advantages"],
                     mb["returns"],
+                    *((
+                        mb["rnn_resets"],
+                        mb["initial_actor_h"],
+                        mb["initial_critic_h"],
+                    ) if self.recurrent else ()),
                 )
                 all_stats.append(stats)
 

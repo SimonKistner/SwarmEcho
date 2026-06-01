@@ -24,8 +24,10 @@ When training on Weights and Biases (`wandb`), the key metrics include:
 |---|---|
 | `train/ep_return` | Mean unified team return across the 1024 parallel environments. |
 | `train/success_rate` | Fraction of the batched episodes resolving with a full chain link. |
-| `train/target_found_rate` | Fraction of environments where the swarm visibly located the objective point. |
+| `train/target_found_rate` | Fraction of environments where the swarm found the target. |
 | `train/chain_gap_dist` | Physical distance (metres) between the Base network subset and Target network subset. |
 | `ppo/policy_loss` | PPO clipped surrogate loss algorithm output. |
 | `ppo/value_loss` | MSE accuracy estimate of the generalized Critic module. |
+| `ppo/clip_fraction` | Fraction of PPO samples whose policy ratio was clipped. Useful for spotting overly aggressive recurrent updates. |
+| `ppo/approx_kl` | Approximate KL divergence between old and updated policies. |
 | `perf/sps` | System Steps per second. |

@@ -29,6 +29,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from models.recurrent import GRUCell
+
 LOG_STD_MIN = -5.0
 LOG_STD_MAX =  2.0
 
@@ -196,3 +198,109 @@ class DecentralizedActor(nnx.Module):
 
         entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
         return log_prob, entropy
+
+
+# ---------------------------------------------------------------------------
+# RecurrentDecentralizedActor
+# ---------------------------------------------------------------------------
+
+class RecurrentDecentralizedActor(nnx.Module):
+    """
+    Shared recurrent actor for decentralized execution.
+
+    Flow per agent and timestep:
+
+        obs_i -> encoder MLP -> GRU_i -> policy MLP -> mu/log_std
+
+    The GRU state is per environment and per agent. It is reset by the runner
+    at episode boundaries and while an agent is inactive, so memory remains
+    episode-local and agent-local.
+    """
+
+    def __init__(
+        self,
+        obs_dim:          int,
+        act_dim:          int,
+        hidden_dim:       int,
+        actor_num_layers: int,
+        rngs:             nnx.Rngs,
+    ) -> None:
+        self.act_dim = act_dim
+        self.hidden_dim = hidden_dim
+        self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
+        self.gru = GRUCell(hidden_dim, hidden_dim, rngs)
+        self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+        self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+        self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+
+    def __call__(
+        self,
+        obs:    jax.Array,
+        hidden: jax.Array,
+        reset:  jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """obs (..., D), hidden (..., H), reset (...) -> hidden, mu, log_std."""
+        if reset is not None:
+            hidden = jnp.where(reset[..., None], jnp.zeros_like(hidden), hidden)
+
+        encoded = self.encoder(obs)
+        hidden = self.gru(hidden, encoded)
+        feat = self.policy_trunk(hidden)
+        mu = self.mu_head(feat)
+        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        return hidden, mu, log_std
+
+    def act(
+        self,
+        obs:           jax.Array,
+        hidden:        jax.Array,
+        key:           jax.Array,
+        deterministic: bool = False,
+        reset:         jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """
+        Recurrent action sampling for one agent.
+
+        Returns the updated hidden state and the pre-squash sample `u`, matching
+        the stateless actor's buffer contract.
+        """
+        hidden, mu, log_std = self(obs, hidden, reset)
+        std = jnp.exp(log_std)
+
+        if deterministic:
+            u = mu
+        else:
+            u = mu + std * jax.random.normal(key, mu.shape)
+
+        log_prob = -0.5 * jnp.sum(
+            ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
+        )
+        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+        return hidden, u, log_prob, entropy
+
+    def evaluate_actions_sequence(
+        self,
+        obs:          jax.Array,  # (T, B, D)
+        actions:      jax.Array,  # (T, B, A)
+        init_hidden:  jax.Array,  # (B, H)
+        resets:       jax.Array,  # (T, B)
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Replay a rollout sequence for recurrent PPO updates."""
+
+        def _step(hidden, xs):
+            obs_t, act_t, reset_t = xs
+            hidden, mu, log_std = self(obs_t, hidden, reset_t)
+            std = jnp.exp(log_std)
+            log_prob = -0.5 * jnp.sum(
+                ((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi),
+                axis=-1,
+            )
+            entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+            return hidden, (log_prob, entropy)
+
+        final_hidden, (log_probs, entropy) = jax.lax.scan(
+            _step,
+            init_hidden,
+            (obs, actions, resets),
+        )
+        return final_hidden, log_probs, entropy
