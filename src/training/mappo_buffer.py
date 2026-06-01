@@ -19,7 +19,7 @@ All storage is numpy (CPU). JAX arrays are converted on add().
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +33,7 @@ class MAPPOTransition(NamedTuple):
     values:    np.ndarray   # (E,) or (E, N)  depends on critic type
     rewards:   np.ndarray   # (E,)
     dones:     np.ndarray   # (E,)
+    rnn_resets: Optional[np.ndarray] = None  # (E, N), recurrent path only
 
 
 class MAPPORolloutBuffer:
@@ -49,6 +50,7 @@ class MAPPORolloutBuffer:
     gamma      : discount factor
     gae_lambda : GAE λ
     per_agent  : True → values shape (T,E,N); False → (T,E)
+    recurrent  : True → minibatches preserve rollout time order
     """
 
     def __init__(
@@ -61,6 +63,10 @@ class MAPPORolloutBuffer:
         gamma:      float = 0.99,
         gae_lambda: float = 0.95,
         per_agent:  bool  = True,
+        recurrent:  bool  = False,
+        hidden_dim: int   = 0,
+        actor_memory:  bool = False,
+        critic_memory: bool = False,
     ) -> None:
         self.T          = num_steps
         self.E          = num_envs
@@ -70,6 +76,10 @@ class MAPPORolloutBuffer:
         self.gamma      = gamma
         self.gae_lambda = gae_lambda
         self.per_agent  = per_agent
+        self.recurrent  = recurrent
+        self.hidden_dim = hidden_dim
+        self.actor_memory = actor_memory
+        self.critic_memory = critic_memory
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
         self._actions   = np.zeros((self.T, self.E, self.N, self.A), dtype=np.float32)
@@ -83,10 +93,19 @@ class MAPPORolloutBuffer:
             self._rewards = np.zeros((self.T, self.E), dtype=np.float32)
             self._values = np.zeros((self.T, self.E),  dtype=np.float32)
 
+        self._rnn_resets = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._initial_actor_h = None
+        self._initial_critic_h = None
+
         self._ptr = 0
 
-    def reset(self) -> None:
+    def reset(self, actor_h=None, critic_h=None) -> None:
         self._ptr = 0
+        if self.recurrent:
+            if self.actor_memory:
+                self._initial_actor_h = np.asarray(actor_h, dtype=np.float32)
+            if self.critic_memory:
+                self._initial_critic_h = np.asarray(critic_h, dtype=np.float32)
 
     def add(self, tr: MAPPOTransition) -> None:
         assert self._ptr < self.T, "Buffer full — call reset() first."
@@ -111,6 +130,8 @@ class MAPPORolloutBuffer:
                 self._rewards[self._ptr] = rew_arr
         
         self._dones[self._ptr]     = np.asarray(tr.dones)
+        if self.recurrent and tr.rnn_resets is not None:
+            self._rnn_resets[self._ptr] = np.asarray(tr.rnn_resets).astype(bool)
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -204,6 +225,9 @@ class MAPPORolloutBuffer:
             advantages    : (MB,)
             returns       : (MB,)
         """
+        if self.recurrent:
+            return self._get_sequence_minibatches(advantages, returns, n_minibatches, key)
+
         total = self.T * self.E
 
         def _flat(arr):
@@ -233,5 +257,45 @@ class MAPPORolloutBuffer:
                 "old_values":    jnp.array(values_f[idx]),
                 "advantages":    jnp.array(adv_f[idx]),
                 "returns":       jnp.array(returns_f[idx]),
+            })
+        return minibatches
+
+    def _get_sequence_minibatches(
+        self,
+        advantages:    np.ndarray,
+        returns:       np.ndarray,
+        n_minibatches: int,
+        key:           jax.Array,
+    ) -> list[dict]:
+        """
+        Recurrent minibatches preserve the time axis and keep all agents in an
+        environment together so the ACC can attend over the full team.
+        """
+        assert self.E % n_minibatches == 0, "num_envs must divide num_minibatches for recurrent MAPPO."
+
+        adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        perm = np.array(jax.random.permutation(key, self.E))
+        mb_envs = self.E // n_minibatches
+
+        actor_h = self._initial_actor_h
+        critic_h = self._initial_critic_h
+        if actor_h is None:
+            actor_h = np.zeros((self.E, self.N, self.hidden_dim), dtype=np.float32)
+        if critic_h is None:
+            critic_h = np.zeros((self.E, self.N, self.hidden_dim), dtype=np.float32)
+
+        minibatches = []
+        for i in range(n_minibatches):
+            idx = perm[i * mb_envs : (i + 1) * mb_envs]
+            minibatches.append({
+                "obs":             jnp.array(self._obs[:, idx]),
+                "actions":         jnp.array(self._actions[:, idx]),
+                "old_log_probs":   jnp.array(self._log_probs[:, idx]),
+                "old_values":      jnp.array(self._values[:, idx]),
+                "advantages":      jnp.array(adv[:, idx]),
+                "returns":         jnp.array(returns[:, idx]),
+                "rnn_resets":      jnp.array(self._rnn_resets[:, idx]),
+                "initial_actor_h":  jnp.array(actor_h[idx]),
+                "initial_critic_h": jnp.array(critic_h[idx]),
             })
         return minibatches

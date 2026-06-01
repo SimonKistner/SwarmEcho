@@ -94,6 +94,10 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
     comm_r          = float(cfg.env.comm_radius)
     comm_r_base     = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     v_max           = float(cfg.env.max_speed)
+    # MEM_T8-only diagnostic flag. Normal SwarmEcho levels keep the full
+    # observation; the memory test zeros non-local channels that reveal which
+    # fixed T-corridor an agent occupies.
+    mem_test_mask_nonlocal_obs = bool(cfg.env.get("mem_test_mask_nonlocal_obs", False))
 
     obs_dim: int = compute_obs_dim(cfg)
     GW, GH = occ_grid.shape
@@ -135,22 +139,22 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
         """
         cos_t = jnp.cos(theta)
         sin_t = jnp.sin(theta)
-        
+
         # 1. Mathematical Ray-AABB (outer boundary)
         t_r = jnp.where(cos_t >  1e-7, (W - x) / cos_t, jnp.inf)
         t_l = jnp.where(cos_t < -1e-7, -x / cos_t,       jnp.inf)
         t_t = jnp.where(sin_t >  1e-7, (H - y) / sin_t,  jnp.inf)
         t_b = jnp.where(sin_t < -1e-7, -y / sin_t,        jnp.inf)
         d_box = jnp.minimum(jnp.minimum(t_r, t_l), jnp.minimum(t_t, t_b))
-        
+
         # 2. DDA Grid Raycast (internal obstacles)
         # We only check up to vis_r to keep it efficient.
         p1 = jnp.array([x, y]) / cell_size
         p2 = (jnp.array([x, y]) + jnp.array([cos_t, sin_t]) * vis_r) / cell_size
-        
+
         t_hit = dda_dist(p1, p2, occ_grid)
         d_maze = t_hit * vis_r
-        
+
         # Return the closest of the two
         return jnp.minimum(d_box, d_maze)
 
@@ -202,15 +206,18 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
         # We only ping if they exist. If count is 0, dist becomes huge to avoid phantom hits.
         num_bases = int(cfg.env.num_bases)
         num_targets = int(cfg.env.num_targets)
-        
+
         # Base pings
         base_dists = jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
-        base_dists = jnp.where(num_bases > 0, base_dists, 1e6) 
-        
+        base_dists = jnp.where(num_bases > 0, base_dists, 1e6)
+
+        per_agent_targets = (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+
         # Target pings
-        target_dists  = jnp.linalg.norm(state.pos - state.target_pos[None, :], axis=-1)
+        target_dists  = jnp.linalg.norm(state.pos - target_pos_agents, axis=-1)
         target_dists  = jnp.where(num_targets > 0, target_dists, 1e6)
-        
+
         p_base = jnp.where((base_dists <= comm_r_base) & state.active, 1.0, 0.0)  # comm_r_base: matches first-hop rule
         p_tgt  = jnp.where((target_dists <= vis_r) & state.active, 1.0, 0.0)
 
@@ -222,16 +229,17 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
 
         idx_all = jax.vmap(_get_cell_idx)(state.pos) # (N,)
         base_idx = _get_cell_idx(state.base_pos)
-        target_idx = _get_cell_idx(state.target_pos)
+        target_idx = _get_cell_idx(target_pos_agents[0])
 
         # Direct target visibility for active drones using DDA
         if is_unobstructed:
             target_los = jnp.ones(N, dtype=jnp.bool_)
         else:
             def _lo_target(i):
+                target_i = target_pos_agents[i]
                 return jnp.where(
                     (target_dists[i] <= vis_r) & state.active[i],
-                    dda_raycast(state.pos[i]/cell_size, state.target_pos/cell_size, occ_grid),
+                    dda_raycast(state.pos[i]/cell_size, target_i/cell_size, occ_grid),
                     False
                 )
             target_los = jax.vmap(_lo_target)(jnp.arange(N))
@@ -239,7 +247,7 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
         directly_sees_target = (target_dists <= vis_r) & state.active & target_los  # (N,)
 
         # ── Step 2: Graph connectivity ────────────────────────────────────────
-        
+
         # Drone-drone adjacency (N, N)
         # 1. Distance & Activity check
         near_dd = (
@@ -264,7 +272,7 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
                     dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, occ_grid),
                     False
                 )
-            
+
             def _lo_db(i):
                 return jnp.where(
                     near_db[i],
@@ -306,7 +314,7 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
             # Target mask: use persistent knowledge (state.target_known), NOT
             # current live connectivity. Once known, always known.
             target_mask     = state.target_known[i].astype(jnp.float32)
-            rel_target      = (state.target_pos - pos_i) / max_dim
+            rel_target      = (target_pos_agents[i] - pos_i) / max_dim
             rel_target_m    = rel_target * target_mask # masked by knowledge
             rel_base        = (state.base_pos - pos_i) / max_dim
 
@@ -316,6 +324,13 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
             is_conn_target_f= jnp.where(use_task, is_conn_target[i].astype(jnp.float32), 0.0)
             target_mask_f   = jnp.where(use_task, target_mask, 0.0)
             rel_target_f    = jnp.where(use_task, rel_target_m, 0.0)
+
+            if mem_test_mask_nonlocal_obs:
+                rel_base_f = jnp.zeros_like(rel_base_f)
+                is_conn_base_f = jnp.float32(0.0)
+                is_conn_target_f = jnp.float32(0.0)
+                target_mask_f = jnp.float32(0.0)
+                rel_target_f = jnp.zeros_like(rel_target_f)
 
             self_block_final = jnp.concatenate([
                 vel_i / v_max,                                              # (2,)
@@ -334,20 +349,24 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
             # Sensing whether nearby cells are already 'covered' in the global map.
             angles = (jnp.pi / 2.0) - jnp.arange(16, dtype=jnp.float32) * (jnp.pi / 8.0)
             offsets = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1) * sampling_radius
-            
+
             sample_pts = pos_i[None, :] + offsets
-            
+
             # Map sample points to grid indices using absolute cell mapping (1m = 1 cell)
             # This MUST match the physics engine mapping in physics.py
             gix = jnp.floor(sample_pts[:, 0] / cell_size).astype(jnp.int32)
             giy = jnp.floor(sample_pts[:, 1] / cell_size).astype(jnp.int32)
-            
+
             # Bounds check against RESOLVED map dimensions (GW, GH)
             in_bounds = (gix >= 0) & (gix < GW) & \
                         (giy >= 0) & (giy < GH)
-            
+
             # Sample coverage grid (0 if out of bounds)
             local_cov = jnp.where(in_bounds, state.coverage_grid[gix, giy], False).astype(jnp.float32)
+            if mem_test_mask_nonlocal_obs:
+                # MEM_T8-only: coverage history can act as an external memory
+                # trace, so remove it when testing the recurrent actor itself.
+                local_cov = jnp.zeros_like(local_cov)
 
             # ── Radar block ───────────────────────────────────────────────────
 
@@ -386,6 +405,11 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
             inv_drone      = _scatter_max(s_drone,    bins_j)               # (B,)
             inv_tgt_conn   = _scatter_max(s_tgt_conn, bins_j)               # (B,)
             inv_base_conn  = _scatter_max(s_base_conn, bins_j)              # (B,)
+            if mem_test_mask_nonlocal_obs:
+                # MEM_T8-only: keep local geometry and nearby-agent occupancy,
+                # but remove graph/topology channels unrelated to the cue task.
+                inv_tgt_conn = jnp.zeros_like(inv_tgt_conn)
+                inv_base_conn = jnp.zeros_like(inv_base_conn)
 
             # -- Base station point channel --
             # base_vec   = state.base_pos - pos_i                             # (2,)
@@ -445,7 +469,7 @@ if __name__ == "__main__":
     OmegaConf.set_readonly(cfg, False)
     cfg.env.map_names = ["open_field"]
     OmegaConf.set_readonly(cfg, True)
-    
+
     validate_config(cfg)
 
     N   = cfg.env.num_agents
@@ -500,22 +524,22 @@ if __name__ == "__main__":
     stripe_x = 10
     new_grid = state.coverage_grid.at[stripe_x, :].set(True)
     state = dataclasses.replace(state, coverage_grid=new_grid)
-    
+
     # 2. Place drone 0 exactly on that stripe
     new_pos = state.pos.at[0].set(jnp.array([float(stripe_x), 25.0]))
     state = dataclasses.replace(state, pos=new_pos)
-    
+
     # 3. Compute observations
     obs = jax.jit(compute_obs)(state)
-    
+
     # Local coverage block starts at index 9 (8 self-state + 1 target_known_flag)
     # The offsets are circular (16 directions, 0 is North, 8 is South)
     # Drone at (10, 25) sampling North (0) looks at (10, 35).
     # Drone at (10, 25) sampling South (8) looks at (10, 15).
-    
+
     local_cov_bits = obs[0, 9:25]
     print(f"    Drone at X={stripe_x} sees local coverage bits: {local_cov_bits}")
-    
+
     assert local_cov_bits[0] == 1.0, "Calibration Failed: Drone should see coverage at its current X-stripe (North)"
     assert local_cov_bits[8] == 1.0, "Calibration Failed: Drone should see coverage at its current X-stripe (South)"
     print("    Calibration passed ✓ (Mapping is 1:1 with Physics)")
@@ -541,5 +565,3 @@ if __name__ == "__main__":
     print(f"  Coverage: {int(state.coverage_grid.sum())} / {state.coverage_grid.size} cells")
 
     print("\nObservation self-test passed ✓")
-
-

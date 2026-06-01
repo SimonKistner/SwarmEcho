@@ -7,6 +7,9 @@ Holds a DecentralizedActor and one of two critic variants, selected via config:
   - "agent_centric"  (default) : AgentCentricCritic → V_i per agent  (..., N)
   - "global_mean"              : GlobalMeanCritic   → scalar V        (...,)
 
+Optional recurrent actor and critic paths are selected by config flags. When
+disabled, the architecture and call contract are the original feed-forward MAPPO.
+
 All heavy lifting (network definitions) lives in actor.py and critic.py.
 This file is the single construction point used by runner.py.
 
@@ -22,8 +25,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from models.actor import DecentralizedActor
-from models.critic import AgentCentricCritic, GlobalMeanCritic
+from models.actor import DecentralizedActor, RecurrentDecentralizedActor
+from models.critic import AgentCentricCritic, GlobalMeanCritic, RecurrentAgentCentricCritic
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +46,8 @@ class MAPPOModel(nnx.Module):
     num_layers       : number of hidden layers in the CRITIC
     actor_num_layers : number of hidden layers in the ACTOR (recommended: 2)
     critic_type      : "agent_centric" | "global_mean"
+    actor_memory     : if True, use a per-agent GRU actor
+    critic_memory    : if True, use a per-agent GRU agent-centric critic
     rngs             : Flax NNX RNG state
     """
 
@@ -56,21 +61,45 @@ class MAPPOModel(nnx.Module):
         actor_num_layers: int,
         critic_type:      str,
         rngs:             nnx.Rngs,
+        actor_memory:     bool = False,
+        critic_memory:    bool = False,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
         self.act_dim     = act_dim
+        self.hidden_dim  = hidden_dim
         self.critic_type = critic_type
+        self.actor_memory = actor_memory
+        self.critic_memory = critic_memory
 
-        self.actor = DecentralizedActor(
-            obs_dim          = obs_dim,
-            act_dim          = act_dim,
-            hidden_dim       = hidden_dim,
-            actor_num_layers = actor_num_layers,
-            rngs             = rngs,
-        )
+        if actor_memory:
+            self.actor = RecurrentDecentralizedActor(
+                obs_dim          = obs_dim,
+                act_dim          = act_dim,
+                hidden_dim       = hidden_dim,
+                actor_num_layers = actor_num_layers,
+                rngs             = rngs,
+            )
+        else:
+            self.actor = DecentralizedActor(
+                obs_dim          = obs_dim,
+                act_dim          = act_dim,
+                hidden_dim       = hidden_dim,
+                actor_num_layers = actor_num_layers,
+                rngs             = rngs,
+            )
 
-        if critic_type == "agent_centric":
+        if critic_memory and critic_type != "agent_centric":
+            raise ValueError("critic_memory=True requires critic_type='agent_centric'.")
+
+        if critic_type == "agent_centric" and critic_memory:
+            self.critic = RecurrentAgentCentricCritic(
+                obs_dim    = obs_dim,
+                hidden_dim = hidden_dim,
+                num_layers = num_layers,
+                rngs       = rngs,
+            )
+        elif critic_type == "agent_centric":
             self.critic = AgentCentricCritic(
                 obs_dim    = obs_dim,
                 hidden_dim = hidden_dim,
@@ -105,7 +134,33 @@ class MAPPOModel(nnx.Module):
         agent_centric : (..., N)  — one value per agent
         global_mean   : (...,)    — one value for the team
         """
+        if self.critic_memory:
+            hidden = self.initial_critic_hidden(all_obs.shape[:-2])
+            _, values = self.critic(all_obs, hidden, deterministic=deterministic)
+            return values
         return self.critic(all_obs, deterministic=deterministic)
+
+    def initial_actor_hidden(self, batch_shape=()) -> jax.Array:
+        """Return zero actor memory with shape batch_shape + (N, H)."""
+        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.hidden_dim), dtype=jnp.float32)
+
+    def initial_critic_hidden(self, batch_shape=()) -> jax.Array:
+        """Return zero critic memory with shape batch_shape + (N, H)."""
+        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.hidden_dim), dtype=jnp.float32)
+
+    def get_value_recurrent(
+        self,
+        all_obs:        jax.Array,
+        critic_hidden:  jax.Array | None,
+        resets:         jax.Array | None,
+        deterministic:  bool = True,
+    ) -> tuple[jax.Array | None, jax.Array]:
+        """Centralised value call that carries critic memory when enabled."""
+        if self.critic_memory:
+            if critic_hidden is None:
+                critic_hidden = self.initial_critic_hidden(all_obs.shape[:-2])
+            return self.critic(all_obs, critic_hidden, resets, deterministic=deterministic)
+        return critic_hidden, self.critic(all_obs, deterministic=deterministic)
 
     def rollout_step(
         self,
@@ -137,6 +192,47 @@ class MAPPOModel(nnx.Module):
         value = self.get_value(all_obs, deterministic=False)
         return actions, log_probs, value
 
+    def rollout_step_recurrent(
+        self,
+        all_obs:        jax.Array,   # (N, obs_dim)
+        keys:           jax.Array,   # (N, 2)
+        actor_hidden:   jax.Array | None,
+        critic_hidden:  jax.Array | None,
+        resets:         jax.Array,   # (N,)
+        max_force:      float = 50.0,
+    ) -> tuple[jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
+        """
+        Rollout step that carries optional actor and critic recurrent states.
+
+        The returned actions are pre-squash Gaussian samples, matching the
+        feed-forward rollout contract.
+        """
+        if self.actor_memory:
+            if actor_hidden is None:
+                actor_hidden = self.initial_actor_hidden(())
+
+            def _act_one(obs_i, key_i, h_i, reset_i):
+                h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
+                return h_i, a, lp
+
+            actor_hidden, actions, log_probs = jax.vmap(_act_one)(
+                all_obs, keys, actor_hidden, resets
+            )
+        else:
+            def _act_one(obs_i, key_i):
+                a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
+                return a, lp
+
+            actions, log_probs = jax.vmap(_act_one)(all_obs, keys)
+
+        critic_hidden, value = self.get_value_recurrent(
+            all_obs,
+            critic_hidden,
+            resets,
+            deterministic=False,
+        )
+        return actor_hidden, critic_hidden, actions, log_probs, value
+
 
 # ---------------------------------------------------------------------------
 # Self-test
@@ -162,6 +258,8 @@ if __name__ == "__main__":
     print(f"  critic_type    : {cfg.network.critic_type}")
     print(f"  actor_layers   : {cfg.network.actor_num_layers}")
     print(f"  critic_layers  : {cfg.network.num_layers}")
+    print(f"  actor_memory   : {cfg.network.get('actor_memory', False)}")
+    print(f"  critic_memory  : {cfg.network.get('critic_memory', False)}")
 
     rngs  = nnx.Rngs(0)
     model = MAPPOModel(
@@ -172,6 +270,8 @@ if __name__ == "__main__":
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
         critic_type      = str(cfg.network.critic_type),
+        actor_memory     = bool(cfg.network.get("actor_memory", False)),
+        critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
     )
 

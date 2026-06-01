@@ -37,12 +37,14 @@ class EnvState:
     pos           : (N, 2)  Agent x,y positions  [metres]
     vel           : (N, 2)  Agent x,y velocities  [m/s]
     base_pos      : (2,)    Base station position  [fixed across episode]
-    target_pos    : (2,)    Target position        [fixed across episode]
+    target_pos    : (2,) Target position [fixed across episode].
+                    MEM_T8-only diagnostic path may use (N, 2).
     coverage_grid : (GW, GH) Boolean exploration map — True where visited
     step          : ()      int32 timestep counter
     key           : (2,)    JAX PRNGKey for in-step randomness
     active        : (N,)    bool  — False until step == i*spawn_delay
     target_known  : (N,)    bool  — persistent: True once informed via comm
+    anti_target_known: (N,) bool  — MEM_T8-only diagnostic flag for paired anti-targets
     collides      : (N,)    bool  — True if agent hit wall/obstacle this step
     last_cov_delta: (N,)    int32 — number of new cells covered this step
     box_width     : ()      float32 — dynamic world width
@@ -53,7 +55,7 @@ class EnvState:
     pos:           jax.Array   # (N, 2)  float32
     vel:           jax.Array   # (N, 2)  float32
     base_pos:      jax.Array   # (2,)    float32  — fixed, replicated for vmap
-    target_pos:    jax.Array   # (2,)    float32  — fixed, replicated for vmap
+    target_pos:    jax.Array   # (2,) normally; (N, 2) only for MEM_T8 diagnostic maps
     coverage_grid: jax.Array   # (GW, GH) bool
     step:          jax.Array   # ()      int32
     key:           jax.Array   # (2,)    uint32   PRNGKey
@@ -65,6 +67,11 @@ class EnvState:
     box_height:    jax.Array   # ()      float32
     base_target_known: jax.Array # ()    bool
     chain_held_steps:  jax.Array # ()    int32
+    # MEM_T8-only: persistent one-shot anti-target discovery flags.
+    # Empty by default so older hand-built EnvState test fixtures stay valid.
+    anti_target_known: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
+    )
     # (Removed static world data from PyTree to save VRAM)
 
     def replace(self, **kwargs) -> EnvState:
@@ -79,6 +86,7 @@ jax.tree_util.register_dataclass(
         "coverage_grid", "step", "key",
         "active", "target_known", "collides", "last_cov_delta",
         "box_width", "box_height", "base_target_known", "chain_held_steps",
+        "anti_target_known",
     ],
     meta_fields=[],
 )
@@ -94,12 +102,17 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(state.pos,           (N, 2))
     chex.assert_shape(state.vel,           (N, 2))
     chex.assert_shape(state.base_pos,      (2,))
-    chex.assert_shape(state.target_pos,    (2,))
+    if state.target_pos.ndim == 1:
+        chex.assert_shape(state.target_pos, (2,))
+    else:
+        chex.assert_shape(state.target_pos, (N, 2))
     chex.assert_shape(state.coverage_grid, (GW, GH))
     chex.assert_shape(state.step,          ())
     chex.assert_shape(state.key,           (2,))
     chex.assert_shape(state.active,        (N,))
     chex.assert_shape(state.target_known,  (N,))
+    if state.anti_target_known.size:
+        chex.assert_shape(state.anti_target_known, (N,))
     chex.assert_shape(state.collides,      (N,))
     chex.assert_shape(state.last_cov_delta, (N,))
     chex.assert_shape(state.base_target_known, ())
@@ -113,8 +126,8 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_type(state.step,          jnp.int32)
     chex.assert_type(state.active,        jnp.bool_)
     chex.assert_type(state.target_known,  jnp.bool_)
+    if state.anti_target_known.size:
+        chex.assert_type(state.anti_target_known, jnp.bool_)
     chex.assert_type(state.collides,      jnp.bool_)
     chex.assert_type(state.base_target_known, jnp.bool_)
     chex.assert_type(state.chain_held_steps, jnp.int32)
-
-

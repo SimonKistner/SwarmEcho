@@ -1,7 +1,7 @@
 """
 swarmecho/config.py
 ====================
-Configuration management for 
+Configuration management for SwarmEcho.
 
 Loads SwarmEcho configuration via OmegaConf, optionally merges mission-specific YAMLs and CLI overrides.
 Exposes a clean typed interface via Python dataclasses.
@@ -70,6 +70,7 @@ class EnvConfig:
     target_invalid_spawn_base_radius: float = 0.0 # if > 0, target cannot spawn within this radius of the base (for "outside_base")
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
+    mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
 
 
 
@@ -117,6 +118,8 @@ class NetworkConfig:
     num_layers:       int = 3    # critic depth
     actor_num_layers: int = 3    # actor depth (lighter, separate)
     critic_type:      str = "agent_centric"  # "agent_centric" | "global_mean"
+    actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
+    critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
 
 
 @dataclass
@@ -136,7 +139,7 @@ class LoggingConfig:
     save_model: bool = True
     checkpoint_dir: str = "outputs/checkpoints"
     suppress_xla_warnings: bool = True
-    obs_log: bool = True
+    obs_log: bool = False
 
 
 @dataclass
@@ -322,6 +325,11 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0
     assert 0 < cfg.training.gae_lambda <= 1.0
+    if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
+        raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
+    if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
+        if int(cfg.training.num_envs) % int(cfg.training.num_minibatches) != 0:
+            raise ValueError("Recurrent MAPPO requires training.num_envs divisible by training.num_minibatches.")
 
 
 if __name__ == "__main__":
@@ -331,5 +339,3 @@ if __name__ == "__main__":
     print(OmegaConf.to_yaml(cfg))
     print(f"\nObs dim  : {compute_obs_dim(cfg)}")
     print(f"Action dim: {compute_action_dim(cfg)}")
-
-

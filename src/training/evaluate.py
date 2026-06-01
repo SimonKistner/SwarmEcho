@@ -100,6 +100,8 @@ def main():
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
         critic_type      = critic_type,
+        actor_memory     = bool(cfg.network.get("actor_memory", False)),
+        critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
     )
 

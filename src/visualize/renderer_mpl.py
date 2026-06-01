@@ -90,7 +90,8 @@ class _FrameData(NamedTuple):
     pos:           np.ndarray
     vel:           np.ndarray
     base_pos:      np.ndarray
-    target_pos:    np.ndarray
+    target_pos:    np.ndarray  # (2,) normally; (N, 2) only for MEM_T8 diagnostics
+    anti_target_pos: np.ndarray | None  # MEM_T8-only diagnostic markers
     coverage_grid: np.ndarray
     step:          int
     active:        np.ndarray | None
@@ -159,13 +160,20 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm
 
     # Build filtered entity list
     ents_comp = []
-    base_idx = -1; target_idx = -1
+    target_points = np.asarray(target_pos)
+    if target_points.ndim == 1:
+        target_points = target_points[None, :]
+
+    base_idx = -1; target_idx = -1; target_indices = []
     if num_bases > 0: 
         base_idx = len(ents_comp)
         ents_comp.append(base_pos)
     if num_targets > 0:
-        target_idx = len(ents_comp)
-        ents_comp.append(target_pos)
+        for tp in target_points:
+            if target_idx < 0:
+                target_idx = len(ents_comp)
+            target_indices.append(len(ents_comp))
+            ents_comp.append(tp)
     
     drone_start = len(ents_comp)
     for i in range(N):
@@ -187,13 +195,15 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm
         adj[:, base_idx] = base_mask & ~np.eye(M, dtype=bool)[:, base_idx]
         
     # Target first-hop uses visual_radius
-    if target_idx >= 0:
-        tmask = dists[target_idx] <= visual_radius
-        adj[target_idx, :] &= tmask; adj[:, target_idx] &= tmask
-        
+    for ti in target_indices:
+        tmask = dists[ti] <= visual_radius
+        adj[ti, :] &= tmask
+        adj[:, ti] &= tmask
+
     # Base and Target cannot connect directly
-    if base_idx >= 0 and target_idx >= 0:
-        adj[base_idx, target_idx] = adj[target_idx, base_idx] = False
+    if base_idx >= 0:
+        for ti in target_indices:
+            adj[base_idx, ti] = adj[ti, base_idx] = False
     
     # Raycast check for walls
     if occ_grid is not None:
@@ -205,7 +215,7 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm
                     if not _dda_raycast_np(p1_grid, p2_grid, occ_grid):
                         adj[i, j] = adj[j, i] = False
     
-    return adj, base_idx, target_idx, drone_start, ents, dists
+    return adj, base_idx, target_idx, target_indices, drone_start, ents, dists
 
 
 
@@ -350,14 +360,16 @@ def _draw_frame(
                   origin="lower", aspect="auto", zorder=1, interpolation="nearest")
 
     # ── Adjacency ─────────────────────────────────────────────────────────
-    adj, base_idx, target_idx, drone_start, ents, dists = _build_adjacency(
+    adj, base_idx, target_idx, target_indices, drone_start, ents, dists = _build_adjacency(
         frame.pos, frame.base_pos, frame.target_pos, 
         comm_r, vis_r, comm_r_base, frame.occ_grid, (W, H), cfg
     )
     M = len(ents)
     
     base_comp   = _bfs(adj, source=base_idx) if base_idx >= 0 else set()
-    target_comp = _bfs(adj, source=target_idx) if target_idx >= 0 else set()
+    target_comp = set()
+    for ti in target_indices:
+        target_comp |= _bfs(adj, source=ti)
 
     # --- Shortest Path Highlighting ---
     # Only use shortest-path highlighting when the active reward mode uses the
@@ -369,7 +381,7 @@ def _draw_frame(
     else:
         dist_from_base = np.full(M, 999, dtype=np.int32)
         dist_from_target = np.full(M, 999, dtype=np.int32)
-        full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
+        full_chain = bool(base_idx >= 0 and any(ti in base_comp for ti in target_indices))
     sp_nodes = set()
     if use_shortest_path_visuals and full_chain:
         for i in range(M):
@@ -502,12 +514,31 @@ def _draw_frame(
 
     # --- Target ---
     if int(cfg.env.num_targets) > 0:
-        tx, ty = frame.target_pos
-        ax.scatter(tx, ty, s=RendererConfig.MPL_TARGET_S, marker="*", color="#dc2626",
-                   edgecolors="#7f1d1d", linewidths=0.8, zorder=5)
-        ax.annotate("T", xy=(tx, ty), xytext=(6, 6), textcoords="offset points",
-                    color="#dc2626", fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, fontweight="bold",
-                    ha="left", va="bottom", zorder=6)
+        target_points = np.asarray(frame.target_pos)
+        if target_points.ndim == 1:
+            target_points = target_points[None, :]
+        for k, tp in enumerate(target_points):
+            tx, ty = tp
+            ax.scatter(tx, ty, s=RendererConfig.MPL_TARGET_S, marker="*", color="#dc2626",
+                       edgecolors="#7f1d1d", linewidths=0.8, zorder=5)
+            label = "T" if len(target_points) == 1 else f"T{k}"
+            ax.annotate(label, xy=(tx, ty), xytext=(6, 6), textcoords="offset points",
+                        color="#dc2626", fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, fontweight="bold",
+                        ha="left", va="bottom", zorder=6)
+
+    # MEM_T8-only diagnostic markers for wrong-branch decoys.
+    if frame.anti_target_pos is not None:
+        anti_points = np.asarray(frame.anti_target_pos)
+        if anti_points.ndim == 1:
+            anti_points = anti_points[None, :]
+        for k, ap in enumerate(anti_points):
+            anti_x, anti_y = ap
+            ax.scatter(anti_x, anti_y, s=RendererConfig.MPL_TARGET_S * 0.75, marker="X",
+                       color="#581c87", edgecolors="#2e1065", linewidths=0.8, zorder=5)
+            label = "A" if len(anti_points) == 1 else f"A{k}"
+            ax.annotate(label, xy=(anti_x, anti_y), xytext=(6, -8), textcoords="offset points",
+                        color="#581c87", fontsize=RendererConfig.MPL_FONT_SIZE_LABELS, fontweight="bold",
+                        ha="left", va="top", zorder=6)
 
     # --- Drones ---
     for i in range(N):
@@ -560,6 +591,9 @@ def _draw_frame(
     
     if num_bases > 0:   legend_items.append((mpatches.Patch(color="#1d4ed8"), "Base station"))
     if num_targets > 0: legend_items.append((mpatches.Patch(color="#dc2626"), "Target"))
+    # MEM_T8-only diagnostic legend entry.
+    if frame.anti_target_pos is not None:
+        legend_items.append((mpatches.Patch(color="#581c87"), "Anti-target"))
     
     if num_bases > 0:   legend_items.append((mpatches.Patch(color="#3b82f6"), "Base-connected"))
     if num_targets > 0: legend_items.append((mpatches.Patch(color="#ef4444"), "Target-connected"))
@@ -767,12 +801,16 @@ def render_video(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    anti_target_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = np.array(map_def.occupancy_grid)
+            # MEM_T8-only diagnostic marker overlay.
+            if map_def.anti_target_spawn_points is not None:
+                anti_target_static = np.array(map_def.anti_target_spawn_points)
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",
@@ -788,6 +826,7 @@ def render_video(
                     vel           = np.array(traj_cpu.vel[t]),
                     base_pos      = np.array(traj_cpu.base_pos[t]),
                     target_pos    = np.array(traj_cpu.target_pos[t]),
+                    anti_target_pos = anti_target_static,
                     coverage_grid = np.array(traj_cpu.coverage_grid[t]),
                     step          = int(traj_cpu.step[t]),
                     active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),

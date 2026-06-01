@@ -61,6 +61,7 @@ _C = {
     "iso":          _hex_to_bgr("#6b7280"),   # grey
     "base_mkr":     _hex_to_bgr("#1d4ed8"),   # dark blue
     "tgt_mkr":      _hex_to_bgr("#dc2626"),   # dark red
+    "anti_mkr":     _hex_to_bgr("#581c87"),   # dark purple
     "coverage":     _hex_to_bgr("#0d9488"),   # teal
     "link_grey":    _hex_to_bgr("#94a3b8"),
     "reward":       _hex_to_bgr("#10b981"),   # green
@@ -85,7 +86,8 @@ class _FrameData(NamedTuple):
     pos:           np.ndarray   # (N, 2)
     vel:           np.ndarray   # (N, 2)
     base_pos:      np.ndarray   # (2,)
-    target_pos:    np.ndarray   # (2,)
+    target_pos:    np.ndarray   # (2,) normally; (N, 2) only for MEM_T8 diagnostics
+    anti_target_pos: np.ndarray | None  # MEM_T8-only diagnostic markers
     coverage_grid: np.ndarray   # (G, G) bool
     step:          int
     active:        np.ndarray | None  # (N,) bool
@@ -116,13 +118,13 @@ def _dda_raycast_np(p1, p2, occ_grid):
     dx = gx1 - gx0; dy = gy1 - gy0
     steps = int(max(abs(dx), abs(dy), 1) * 2) # Over-sample for safety in drawing
     if steps > 1000: steps = 1000
-    
+
     xs = np.linspace(gx0, gx1, steps)
     ys = np.linspace(gy0, gy1, steps)
-    
+
     ixs = np.floor(xs).astype(int)
     iys = np.floor(ys).astype(int)
-    
+
     # Clip to bounds
     W, H = occ_grid.shape
     mask = (ixs >= 0) & (ixs < W) & (iys >= 0) & (iys < H)
@@ -139,19 +141,19 @@ def _build_adjacency(pos, base_pos, target_pos, comm_r, vis_r, occ_grid, world_s
     N = pos.shape[0];  M = N + 2
     ents  = np.concatenate([base_pos[None], target_pos[None], pos], axis=0)
     dists = np.linalg.norm(ents[:, None] - ents[None, :], axis=-1)
-    
+
     # Distance based adjacency
     adj = (dists <= comm_r) & ~np.eye(M, dtype=bool)
-    
+
     # Base visibility
     bmask = dists[0] <= vis_r
     adj[0, :] &= bmask;  adj[:, 0] &= bmask
-    
+
     # Target visibility
     tmask = dists[1] <= vis_r
     adj[1, :] &= tmask;  adj[:, 1] &= tmask
     adj[1, 1] = adj[0, 1] = adj[1, 0] = False
-    
+
     # Raycast check
     if occ_grid is not None:
         W_m, H_m = world_size
@@ -163,10 +165,10 @@ def _build_adjacency(pos, base_pos, target_pos, comm_r, vis_r, occ_grid, world_s
                     p2 = ents[j] * np.array([sx, sy])
                     if not _dda_raycast_np(p1, p2, occ_grid):
                         adj[i, j] = adj[j, i] = False
-                        
+
     # Identify indices
     base_idx = 0; target_idx = 1; drone_start = 2
-    
+
     return adj, base_idx, target_idx, drone_start, ents, dists
 
 
@@ -235,7 +237,7 @@ def _draw_dashed_line(img, pt1, pt2, color, thickness=1, gap=10):
 class _Layout:
     def __init__(self, W_world: float, H_world: float, has_reward: bool, has_indiv_reward: bool = False):
         scale = RendererConfig.RENDER_DPI / 100.0
-        
+
         ml = int(RendererConfig.MARGIN_LEFT * scale)
         mr = int(RendererConfig.MARGIN_RIGHT * scale)
         mt = int(RendererConfig.MARGIN_TOP * scale)
@@ -244,7 +246,7 @@ class _Layout:
         # Fit map within designated display width and height
         max_w = int(RendererConfig.MAP_DISPLAY_WIDTH * scale)
         max_h = int(RendererConfig.MAP_DISPLAY_HEIGHT * scale)
-        
+
         aspect = W_world / H_world
         if aspect >= 1.0:
             pw = max_w
@@ -262,7 +264,7 @@ class _Layout:
         # Compute reward plots layout using static values from configuration
         self.rew_h = int(RendererConfig.TEAM_REWARD_HEIGHT * scale) if has_reward else 0
         self.indiv_rew_h = int(RendererConfig.INDIV_REWARD_HEIGHT * scale) if has_indiv_reward else 0
-        
+
         gap_map_rew = int(RendererConfig.GAP_MAP_REWARDS * scale)
         gap_between = int(RendererConfig.GAP_BETWEEN_REWARDS * scale)
 
@@ -271,7 +273,7 @@ class _Layout:
 
         # Calculate total total_w and total_h
         self.total_w = pw + ml + mr
-        
+
         if has_indiv_reward:
             self.total_h = self.indiv_rew_top + self.indiv_rew_h + mb
         elif has_reward:
@@ -279,7 +281,7 @@ class _Layout:
         else:
             self.total_h = mt + ph + mb
 
-        # H.264 macroblock encoding requires strictly even dimensions. 
+        # H.264 macroblock encoding requires strictly even dimensions.
         # We absorb any odd-pixel remainder into the margins.
         if self.total_w % 2 != 0:
             self.total_w += 1
@@ -287,7 +289,7 @@ class _Layout:
         if self.total_h % 2 != 0:
             self.total_h += 1
             self.mb += 1
-        
+
         # Base scale factor for fonts
         self.fs = scale * 0.45
 
@@ -333,7 +335,7 @@ def _draw_frame_cv2(
 
     # ── Walls (Occupancy Grid) ───────────────────────────────────────────
     # We load the grid from the state (if available) or assume a static one
-    # For now, we try to get it from the state if we were to add it, or 
+    # For now, we try to get it from the state if we were to add it, or
     # we'll have to load it from the map.
     occ_grid = getattr(frame, "occ_grid", None)
     if occ_grid is not None:
@@ -355,9 +357,9 @@ def _draw_frame_cv2(
         # Use local world dimensions to mask the active region
         GW_active = int(W // cell_size)
         GH_active = int(H // cell_size)
-        
+
         active_cov = frame.coverage_grid[:GW_active, :GH_active]
-        
+
         # grid is (GW, GH), opencv wants (GH, GW)
         cov_img_bool = active_cov.T[::-1]
         gh_px, gw_px = cov_img_bool.shape
@@ -372,16 +374,23 @@ def _draw_frame_cv2(
     # ── Connectivity ──────────────────────────────────────────────────────
     num_bases = int(cfg.env.num_bases or 0)
     num_targets = int(cfg.env.num_targets or 0)
-    
+
+    target_points = np.asarray(frame.target_pos)
+    if target_points.ndim == 1:
+        target_points = target_points[None, :]
+
     ents_comp = []
-    base_idx = -1; target_idx = -1
-    if num_bases > 0: 
+    base_idx = -1; target_idx = -1; target_indices = []
+    if num_bases > 0:
         base_idx = len(ents_comp)
         ents_comp.append(frame.base_pos)
     if num_targets > 0:
-        target_idx = len(ents_comp)
-        ents_comp.append(frame.target_pos)
-    
+        for tp in target_points:
+            if target_idx < 0:
+                target_idx = len(ents_comp)
+            target_indices.append(len(ents_comp))
+            ents_comp.append(tp)
+
     drone_start = len(ents_comp)
     for i in range(N):
         ents_comp.append(frame.pos[i])
@@ -391,7 +400,7 @@ def _draw_frame_cv2(
     # Build adjacency only for present entities
     adj = np.zeros((M, M), dtype=bool)
     dists = np.linalg.norm(ents[:, None] - ents[None, :], axis=-1)
-    
+
     for i in range(M):
         for j in range(i + 1, M):
             # First hop logic:
@@ -400,11 +409,11 @@ def _draw_frame_cv2(
             #   - Drone-to-drone edges use comm_r
             if i == base_idx or j == base_idx:
                 threshold = comm_r_base
-            elif i == target_idx or j == target_idx:
+            elif i in target_indices or j in target_indices:
                 threshold = vis_r
             else:
                 threshold = comm_r
-            
+
             if dists[i, j] <= threshold:
                 if occ_grid is not None:
                     # Wall check
@@ -414,10 +423,12 @@ def _draw_frame_cv2(
                         adj[i, j] = adj[j, i] = True
                 else:
                     adj[i, j] = adj[j, i] = True
-    
+
     base_comp = _bfs(adj, base_idx) if base_idx >= 0 else set()
-    target_comp = _bfs(adj, target_idx) if target_idx >= 0 else set()
-    
+    target_comp = set()
+    for ti in target_indices:
+        target_comp |= _bfs(adj, ti)
+
     # Calculate shortest path distances only when the reward mode actually uses
     # shortest-path chain gating; otherwise render component links uniformly.
     if use_shortest_path_visuals:
@@ -433,7 +444,7 @@ def _draw_frame_cv2(
         for i in range(M):
             if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
                 sp_nodes.add(i)
-                
+
     drone_cols = []
     for i in range(N):
         idx = i + drone_start
@@ -473,7 +484,7 @@ def _draw_frame_cv2(
         valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
         if valid_b:
             idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
-            
+
         d_to_b = dists[drone_start:, base_idx]
         valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
         if valid_t:
@@ -486,16 +497,16 @@ def _draw_frame_cv2(
         for j in range(i + 1, M):
             if not adj[i, j]: continue
             ib = i in base_comp; jb = j in base_comp; it = i in target_comp; jt = j in target_comp
-            
+
             is_both = False
             on_base_sp = False
             on_tgt_sp = False
-            
+
             if use_shortest_path_visuals and full_chain:
                 # On full shortest path
                 if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
                     is_both = True
-                
+
                 if is_both: ec, lw = _C["both_chain"], 2
                 else:
                     if min(dist_from_base[i], dist_from_base[j]) <= min(dist_from_target[i], dist_from_target[j]):
@@ -508,11 +519,11 @@ def _draw_frame_cv2(
                 elif ib and jb: ec, lw = _C["base_chain"], 1
                 elif it and jt: ec, lw = _C["tgt_chain"], 1
                 else: ec, lw = _C["link_grey"], 1
-                
+
                 if ib and jb and idx_base_tip >= 0:
                     if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
                         on_base_sp = True
-                
+
                 if it and jt and idx_target_tip >= 0:
                     if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
                         on_tgt_sp = True
@@ -538,7 +549,7 @@ def _draw_frame_cv2(
             # Comm/Vis circles
             cv2.circle(img, (cx, cy), comm_r_px, cr_col, 1, cv2.LINE_AA)
             cv2.circle(img, (cx, cy), vis_r_px, vr_col, 1, cv2.LINE_AA)
-            
+
             # 8 Radar bins: Draw as distinct radial pings
             for ang in radar_angles:
                 ex = frame.pos[i, 0] + vis_r * np.cos(ang)
@@ -567,10 +578,24 @@ def _draw_frame_cv2(
 
     # ── Target ────────────────────────────────────────────────────────────
     if int(cfg.env.num_targets) > 0:
-        tpx, tpy = lay.w2p(frame.target_pos[0], frame.target_pos[1])
         tm = int(RendererConfig.TARGET_MARKER_SIZE * scale)
-        cv2.drawMarker(img, (tpx, tpy), _C["tgt_mkr"], cv2.MARKER_STAR, tm * 2, 2, cv2.LINE_AA)
-        _draw_text(img, "T", (tpx + tm + int(4 * scale), tpy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["tgt_mkr"])
+        for k, tp in enumerate(target_points):
+            tpx, tpy = lay.w2p(tp[0], tp[1])
+            cv2.drawMarker(img, (tpx, tpy), _C["tgt_mkr"], cv2.MARKER_STAR, tm * 2, 2, cv2.LINE_AA)
+            label = "T" if len(target_points) == 1 else f"T{k}"
+            _draw_text(img, label, (tpx + tm + int(4 * scale), tpy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["tgt_mkr"])
+
+    # MEM_T8-only diagnostic markers for wrong-branch decoys.
+    if frame.anti_target_pos is not None:
+        am = int(RendererConfig.TARGET_MARKER_SIZE * scale)
+        anti_points = np.asarray(frame.anti_target_pos)
+        if anti_points.ndim == 1:
+            anti_points = anti_points[None, :]
+        for k, ap in enumerate(anti_points):
+            apx, apy = lay.w2p(ap[0], ap[1])
+            cv2.drawMarker(img, (apx, apy), _C["anti_mkr"], cv2.MARKER_TILTED_CROSS, am * 2, 2, cv2.LINE_AA)
+            label = "A" if len(anti_points) == 1 else f"A{k}"
+            _draw_text(img, label, (apx + am + int(4 * scale), apy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["anti_mkr"])
 
     # ── Drones ────────────────────────────────────────────────────────────
     dr = int(RendererConfig.DRONE_MARKER_SIZE * scale)
@@ -580,14 +605,14 @@ def _draw_frame_cv2(
         alpha = 1.0 if is_act else 0.3
         cx, cy = lay.w2p(frame.pos[i, 0], frame.pos[i, 1])
         col = _C["tgt_mkr"] if is_coll else drone_cols[i]  # Red if colliding
-        
+
         # Collision glow
         if is_coll:
             glow_r = int(RendererConfig.COLLISION_GLOW_RADIUS * scale)
             overlay = img.copy()
             cv2.circle(overlay, (cx, cy), glow_r, _C["tgt_mkr"], -1, cv2.LINE_AA)
             cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
-            
+
         if alpha < 1.0:
             overlay = img.copy()
             cv2.circle(overlay, (cx, cy), dr, col, -1, cv2.LINE_AA)
@@ -601,15 +626,15 @@ def _draw_frame_cv2(
     # ── Title ─────────────────────────────────────────────────────────────
     GW_active = int(W // cell_size)
     GH_active = int(H // cell_size)
-    
+
     # Coverage calculation on the active region
     cov_cnt = frame.coverage_grid[:GW_active, :GH_active].sum()
     cov_pct = 100.0 * cov_cnt / (GW_active * GH_active)
-    
+
     # Logic for successful chain: intersection of base and target sets (excluding themselves)
     full_chain = bool(base_idx >= 0 and target_idx >= 0 and (base_comp & target_comp - {base_idx, target_idx}))
     status = " | CHAIN FORMED!" if full_chain else ""
-    
+
     metrics_str = ""
     if frame.extra_metrics:
       em = frame.extra_metrics
@@ -639,15 +664,18 @@ def _draw_frame_cv2(
     legend_items = []
     if num_bases > 0:   legend_items.append((_C["base_mkr"],   "Base station"))
     if num_targets > 0: legend_items.append((_C["tgt_mkr"],    "Target"))
-    
+    # MEM_T8-only diagnostic legend entry.
+    if frame.anti_target_pos is not None:
+        legend_items.append((_C["anti_mkr"], "Anti-target"))
+
     if num_bases > 0:   legend_items.append((_C["base_chain"], "Base-connected"))
     if num_targets > 0: legend_items.append((_C["tgt_chain"],  "Target-connected"))
     if num_bases > 0 and num_targets > 0:
         legend_items.append((_C["both_chain"], "Both (bridge)"))
-    
+
     legend_items.append((_C["iso"],        "Isolated"))
     legend_items.append((_C["coverage"],   "Coverage"))
-    
+
     ly += int(25 * scale)
     bs = int(10 * scale)
     for col, label in legend_items:
@@ -658,12 +686,12 @@ def _draw_frame_cv2(
     # ── Target Known Info Text ────────────────────────────────────────────
     ly += int(30 * scale)
     _draw_text(img, "Target known to:", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 1.1, _C["text"])
-    
+
     known_indices = []
     if frame.target_known is not None:
         known_indices = [i for i in range(N) if bool(frame.target_known[i])]
         known_indices.sort()
-        
+
     ly += int(20 * scale)
     if known_indices:
         for idx in known_indices:
@@ -677,20 +705,20 @@ def _draw_frame_cv2(
     if lay.has_reward and rewards_so_far is not None:
         # Slice rewards to current step to show progression
         curr_rewards = rewards_so_far[:frame.step + 1]
-        
+
         if curr_rewards.ndim == 2:
             team_rewards = curr_rewards.sum(axis=1)
             indiv_rewards = curr_rewards
         else:
             team_rewards = curr_rewards
             indiv_rewards = None
-            
+
         rt = lay.rew_top; rh = lay.rew_h
         rl = lay.ml; rr = lay.ml + lay.pw; rb = rt + rh
 
         cv2.rectangle(img, (rl, rt), (rr, rb), _C["reward_bg"], -1)
         cv2.rectangle(img, (rl, rt), (rr, rb), _C["border"], 1)
-        
+
         # Title and Axis Labelling
         _draw_text(img, "Cumulative Team Reward", (rl, rt - 12), lay.fs * 0.8, _C["text"])
         _draw_text(img, "Return", (rl - 50, rt + rh//2), lay.fs * 0.7, _C["text_grey"])
@@ -707,7 +735,7 @@ def _draw_frame_cv2(
             cum = np.cumsum(team_rewards)
             cmin = float(cum.min()); cmax = float(cum.max())
             if abs(cmax - cmin) < 1e-4: cmax += 1.0
-            
+
             # Y-Axis Ticks (Min/Max)
             _draw_text(img, f"{cmax:.0f}", (rl - 8, rt + 5), lay.fs * 0.6, _C["text_grey"], center=False)
             _draw_text(img, f"{cmin:.0f}", (rl - 8, rb - 5), lay.fs * 0.6, _C["text_grey"], center=False)
@@ -729,39 +757,39 @@ def _draw_frame_cv2(
         if lay.has_indiv_reward and indiv_rewards is not None:
             irt = lay.indiv_rew_top; irh = lay.indiv_rew_h
             irl = lay.ml; irr = lay.ml + lay.pw; irb = irt + irh
-            
+
             cv2.rectangle(img, (irl, irt), (irr, irb), _C["reward_bg"], -1)
             cv2.rectangle(img, (irl, irt), (irr, irb), _C["border"], 1)
-            
+
             for i in range(1, 4):
                 yy = irt + i * irh // 4
                 cv2.line(img, (irl, yy), (irr, yy), _C["grid"], 1)
             for i in range(1, 5):
                 xx = irl + i * (irr - irl) // 5
                 cv2.line(img, (xx, irt), (xx, irb), _C["grid"], 1)
-            
+
             if len(indiv_rewards) > 0:
                 # To highlight differences, we subtract the step-wise minimum reward
                 # This removes the large shared penalty and shows who is "pulling ahead"
                 rel_indiv = indiv_rewards - indiv_rewards.min(axis=1, keepdims=True)
                 cum_indiv = np.cumsum(rel_indiv, axis=0) # (t, N)
-                
+
                 cmin = float(cum_indiv.min()); cmax = float(cum_indiv.max())
                 if abs(cmax - cmin) < 1e-4: cmax += 1.0
-                
+
                 _draw_text(img, f"Relative Return", (irl - 50, irt + irh//2), lay.fs * 0.7, _C["text_grey"])
                 _draw_text(img, f"Individual Advantage", (irl, irt - 12), lay.fs * 0.8, _C["text"])
                 if abs(cmax - cmin) < 1e-4: cmax += 1.0
-                
+
                 _draw_text(img, f"{cmax:.0f}", (irl - 8, irt + 5), lay.fs * 0.6, _C["text_grey"], center=False)
                 _draw_text(img, f"{cmin:.0f}", (irl - 8, irb - 5), lay.fs * 0.6, _C["text_grey"], center=False)
-                
+
                 for i in range(6):
                     tx = irl + i * (irr - irl) // 5
                     step_val = i * total_steps // 5
                     cv2.line(img, (tx, irb), (tx, irb + 5), _C["border"], 1)
                     _draw_text(img, str(step_val), (tx, irb + 18), lay.fs * 0.6, _C["text_grey"], center=True)
-                    
+
                 if len(indiv_rewards) > 1:
                     xs = np.linspace(irl, irr, len(cum_indiv)).astype(np.int32)
                     for n in range(indiv_rewards.shape[1]):
@@ -769,7 +797,7 @@ def _draw_frame_cv2(
                         pts = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
                         col = _TAB10[n % len(_TAB10)]
                         cv2.polylines(img, [pts], False, col, 2, cv2.LINE_AA)
-            
+
             # Draw tiny legend for individual drones to the right of the individual plot
             lg_x = irr + 20
             lg_y = irt
@@ -800,7 +828,7 @@ def render_video_cv2(
     extra_metrics: dict[str, np.ndarray] | None = None,
 ) -> str:
     filename = Path(filename).resolve()
-    
+
     sample = getattr(trajectory, "pos", None)
     if sample is not None and isinstance(sample, np.ndarray):
         traj_cpu = trajectory; rewards_cpu = rewards
@@ -814,24 +842,28 @@ def render_video_cv2(
 
     T = traj_cpu.pos.shape[0]
     idxs = list(range(0, T, frame_stride))
-    
+
     # Extract dynamic world dimensions from the first frame
     W = float(traj_cpu.box_width[0]) if hasattr(traj_cpu, "box_width") else float(cfg.env.box_width)
     H = float(traj_cpu.box_height[0]) if hasattr(traj_cpu, "box_height") else float(cfg.env.box_height)
-    
+
     has_indiv_reward = (rewards_cpu is not None and getattr(rewards_cpu, "ndim", 0) == 2)
     lay = _Layout(W, H, rewards_cpu is not None, has_indiv_reward=has_indiv_reward)
-    
+
     # Load map once for static rendering data (walls)
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    anti_target_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = map_def.occupancy_grid
+            # MEM_T8-only diagnostic marker overlay.
+            if map_def.anti_target_spawn_points is not None:
+                anti_target_static = np.array(map_def.anti_target_spawn_points)
 
     # 1. Prepare frame data for parallel processing
     frame_args = []
@@ -841,6 +873,7 @@ def render_video_cv2(
             vel           = np.array(traj_cpu.vel[t]),
             base_pos      = np.array(traj_cpu.base_pos[t]),
             target_pos    = np.array(traj_cpu.target_pos[t]),
+            anti_target_pos = anti_target_static,
             coverage_grid = np.array(traj_cpu.coverage_grid[t]),
             step          = int(traj_cpu.step[t]),
             active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
@@ -856,10 +889,10 @@ def render_video_cv2(
     is_daemon = multiprocessing.current_process().daemon
     num_vcpus = multiprocessing.cpu_count()
     pool_size = max(1, num_vcpus - 1) if not is_daemon else 0
-    
+
     # Partial function for the worker
     worker = partial(_draw_frame_cv2, cfg=cfg, lay=lay, total_steps=T, rewards_so_far=rewards_cpu)
-    
+
     print(f"Frame size: {lay.total_w}×{lay.total_h} px  (CV2 renderer, pool={pool_size}, world {W:.0f}×{H:.0f} m)")
     print(f"Rendering {len(idxs)} frames ({T} steps) → {filename}")
 
@@ -867,12 +900,12 @@ def render_video_cv2(
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="os.fork.*is incompatible with multithreaded code")
-        
+
         writer = imageio.get_writer(
             str(filename), fps=fps, codec="libx264",
             pixelformat="yuv420p", macro_block_size=None, quality=7,
         )
-        
+
         try:
             if pool_size > 1:
                 # Parallel path
@@ -901,5 +934,3 @@ def render_video_cv2(
             writer.close()
 
     return str(filename)
-
-
