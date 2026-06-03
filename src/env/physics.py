@@ -375,17 +375,33 @@ def make_env_fns(cfg: DictConfig):
                     jnp.array([float(W) - 1.0, float(H) - 1.0]),
                 )
             elif target_spawn_method == "outside_base":
-                # Generate 10 candidate points within the 2m boundary
+                # Generate candidate points within the 2m boundary, then choose
+                # the first candidate that is both outside the base exclusion
+                # radius and in a free occupancy-grid cell.
                 bounds_min = jnp.array([2.0, 2.0], dtype=jnp.float32)
                 bounds_max = jnp.array([float(W) - 2.0, float(H) - 2.0], dtype=jnp.float32)
-                candidates = jax.random.uniform(k2, shape=(10, 2), minval=bounds_min, maxval=bounds_max)
+                candidates = jax.random.uniform(k2, shape=(64, 2), minval=bounds_min, maxval=bounds_max)
 
                 # Compute distance to base for all candidates
                 dists_to_base = jnp.linalg.norm(candidates - base_pos[None, :], axis=-1)
-                valid_mask = dists_to_base > target_invalid_spawn_base_radius
 
-                # Pick the first valid candidate (argmax returns the first True index, or 0 if all are False)
-                valid_idx = jnp.argmax(valid_mask)
+                cand_idx = jnp.floor(candidates / cell_size).astype(jnp.int32)
+                cand_in_bounds = (
+                    (cand_idx[:, 0] >= 0) & (cand_idx[:, 0] < GW)
+                    & (cand_idx[:, 1] >= 0) & (cand_idx[:, 1] < GH)
+                )
+                cand_idx_safe = jnp.stack([
+                    jnp.clip(cand_idx[:, 0], 0, GW - 1),
+                    jnp.clip(cand_idx[:, 1], 0, GH - 1),
+                ], axis=-1)
+                cand_free = cand_in_bounds & ~occ_grid[cand_idx_safe[:, 0], cand_idx_safe[:, 1]]
+
+                valid_mask = cand_free & (dists_to_base > target_invalid_spawn_base_radius)
+
+                # Pick the first valid candidate. If every candidate is too
+                # close to base, fall back to the farthest free candidate.
+                fallback_idx = jnp.argmax(jnp.where(cand_free, dists_to_base, -1.0))
+                valid_idx = jnp.where(jnp.any(valid_mask), jnp.argmax(valid_mask), fallback_idx)
                 target_pos = candidates[valid_idx]
             elif use_task:  # fallback to "map_defined"
                 # MEM_T8-only diagnostic path: fixed per-agent target slots.

@@ -12,6 +12,12 @@ import yaml
 from PIL import Image
 from env.raycast import PAD_RADIUS
 
+try:
+    from scipy.ndimage import binary_dilation
+    _HAVE_SCIPY = True
+except ImportError:
+    _HAVE_SCIPY = False
+
 
 @dataclasses.dataclass
 class MapDefinition:
@@ -27,6 +33,17 @@ class MapDefinition:
     base_spawn_zone:   list[float]
     target_spawn_zone: list[float]
     drone_spawn_zone:  list[float]
+
+    # Optional per-zone wall-clearance distances (metres). Candidates within
+    # this distance of any wall are excluded from the valid coord pool.
+    target_wall_clearance: float = 0.0
+    base_wall_clearance:   float = 0.0
+    drone_wall_clearance:  float = 0.0
+
+    # Optional list of axis-aligned bounding boxes to *exclude* from the
+    # target spawn pool (e.g., to keep target out of the base room).
+    # Each entry: [x_min, y_min, x_max, y_max] in world metres.
+    target_exclude_zones: list[list[float]] = dataclasses.field(default_factory=list)
 
     # Physical walls (Occupancy grid)
     # shape (H_cells, W_cells), True where wall exists
@@ -67,6 +84,10 @@ class MapDefinition:
             rooms             = data.get("rooms", []),
             hallways          = data.get("hallways", []),
             walls             = data.get("walls", []),
+            target_wall_clearance = float(data.get("target_wall_clearance", 0.0)),
+            base_wall_clearance   = float(data.get("base_wall_clearance",   0.0)),
+            drone_wall_clearance  = float(data.get("drone_wall_clearance",  0.0)),
+            target_exclude_zones  = data.get("target_exclude_zones", []),
         )
         if data.get("spawn_points", {}).get("drone") is not None:
             m.drone_spawn_points = jnp.array(data["spawn_points"]["drone"], dtype=jnp.float32)
@@ -83,24 +104,73 @@ class MapDefinition:
         m.rasterize(res)
 
         # Pre-calculate safe spawn indices in meters
-        w_idx, h_idx = np.where(~m.occupancy_grid)
-        valid_indices = np.stack([w_idx, h_idx], axis=-1)
-        sx, sy = m.occupancy_grid.shape[0] / m.width, m.occupancy_grid.shape[1] / m.height
-        coords_m = valid_indices.astype(np.float32) / np.array([sx, sy])
+        # Build an eroded occupancy grid for each clearance distance:
+        # a cell is "too close to a wall" if any wall cell lies within
+        # `clearance` metres (= cells at 1 m/cell resolution).
+        occ = m.occupancy_grid  # shape (W_px, H_px), True=wall
+        sx_scale = occ.shape[0] / m.width
+        sy_scale = occ.shape[1] / m.height
 
-        def _get_valid_coords(zone):
+        def _build_clearance_mask(clearance_m: float) -> np.ndarray:
+            """Return bool mask (W_px, H_px): True where safe (not near wall)."""
+            if clearance_m <= 0.0:
+                return ~occ
+            if not _HAVE_SCIPY:
+                raise ImportError(
+                    f"scipy is required to apply wall_clearance={clearance_m}m. "
+                    "Install it with: pip install scipy"
+                )
+            # Number of cells to erode (at 1 m resolution)
+            r_cells = max(1, int(np.ceil(clearance_m * ((sx_scale + sy_scale) / 2))))
+            # Dilate the wall map by r_cells; then safe = NOT dilated
+            dilated = binary_dilation(occ, iterations=r_cells)
+            return ~dilated
+
+        safe_target = _build_clearance_mask(m.target_wall_clearance)
+        safe_base   = _build_clearance_mask(m.base_wall_clearance)
+        safe_drone  = _build_clearance_mask(m.drone_wall_clearance)
+
+        def _get_valid_coords(zone, safe_mask, exclude_zones=None):
             x_min, y_min, x_max, y_max = zone
-            mask = (coords_m[:, 0] >= x_min) & (coords_m[:, 0] <= x_max) & \
-                   (coords_m[:, 1] >= y_min) & (coords_m[:, 1] <= y_max)
-            valid = coords_m[mask]
-            if len(valid) == 0:
-                # Fallback to center if no valid cells found
-                return jnp.array([[(x_min + x_max)/2, (y_min + y_max)/2]], dtype=jnp.float32)
-            return jnp.array(valid, dtype=jnp.float32)
+            # Convert zone to pixel ranges
+            ix_lo = int(np.floor(x_min * sx_scale))
+            ix_hi = int(np.ceil(x_max  * sx_scale))
+            iy_lo = int(np.floor(y_min * sy_scale))
+            iy_hi = int(np.ceil(y_max  * sy_scale))
+            # Clamp to grid bounds
+            ix_lo = max(0, ix_lo); ix_hi = min(safe_mask.shape[0], ix_hi)
+            iy_lo = max(0, iy_lo); iy_hi = min(safe_mask.shape[1], iy_hi)
 
-        m.valid_base_coords = _get_valid_coords(m.base_spawn_zone)
-        m.valid_target_coords = _get_valid_coords(m.target_spawn_zone)
-        m.valid_drone_coords = _get_valid_coords(m.drone_spawn_zone)
+            # Slice and find safe cells
+            local_safe = safe_mask[ix_lo:ix_hi, iy_lo:iy_hi]
+            w_idx, h_idx = np.where(local_safe)
+            # Back to world metres (cell centre = cell_index + 0.5 at 1 m/cell)
+            coords_m = np.stack([
+                (w_idx + ix_lo + 0.5) / sx_scale,
+                (h_idx + iy_lo + 0.5) / sy_scale,
+            ], axis=-1).astype(np.float32)
+
+            # Apply optional exclusion zones (e.g., base spawn room)
+            if exclude_zones:
+                keep = np.ones(len(coords_m), dtype=bool)
+                for ez in exclude_zones:
+                    ex0, ey0, ex1, ey1 = ez
+                    in_zone = (
+                        (coords_m[:, 0] >= ex0) & (coords_m[:, 0] <= ex1) &
+                        (coords_m[:, 1] >= ey0) & (coords_m[:, 1] <= ey1)
+                    )
+                    keep &= ~in_zone
+                coords_m = coords_m[keep]
+
+            if len(coords_m) == 0:
+                # Fallback to zone centre
+                return jnp.array([[(x_min + x_max) / 2, (y_min + y_max) / 2]], dtype=jnp.float32)
+            return jnp.array(coords_m, dtype=jnp.float32)
+
+        m.valid_base_coords   = _get_valid_coords(m.base_spawn_zone,   safe_base)
+        m.valid_target_coords = _get_valid_coords(m.target_spawn_zone, safe_target,
+                                                   exclude_zones=m.target_exclude_zones)
+        m.valid_drone_coords  = _get_valid_coords(m.drone_spawn_zone,  safe_drone)
 
         # 1. Create JAX Occupational Grid
         occ_jax = jnp.array(m.occupancy_grid, dtype=jnp.bool_)
