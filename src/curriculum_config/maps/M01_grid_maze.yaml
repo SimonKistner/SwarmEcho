@@ -1,0 +1,105 @@
+# M01 Grid Maze  –  9×9 cell grid, 24 m per cell (= visual_radius × 2), 216×216 m total.
+# Designed by user; encoded from grid-maze-v1 JSON (horizontal / vertical wall arrays).
+# Base room: cell (4,4), centre at (108, 108).  Four open exits: N, S, E, W.
+# Cell size matches visual_radius * 2 so agents can see exactly to the next corridor wall.
+
+name: M01_grid_maze
+width: 216.0
+height: 216.0
+
+spawn_zones:
+  base:   [96.0,   96.0,  120.0,  120.0]
+  drone:  [96.0,   96.0,  120.0,  120.0]
+  target: [2.0,     2.0,  214.0,  214.0]
+
+# Target must be at least 3 m away from every wall (including world border).
+target_wall_clearance: 3.0
+
+# Target must NOT spawn inside the centre spawn room (the 24x24 m cell at
+# columns 4-5, rows 4-5, i.e. world coords 96-120, 96-120).
+target_exclude_zones:
+  - [73.0, 73.0, 144.0, 144.0]   # centre room + 16 m margin all sides
+
+rooms: []
+hallways: []
+walls:
+  # ── World border (fully closed, no exits) ──────────────────────────────────
+  - [0.0,   0.0, 216.0,   0.0]    # south border
+  - [216.0, 0.0, 216.0, 216.0]    # east border
+  - [216.0, 216.0,  0.0, 216.0]   # north border
+  - [0.0,  216.0,   0.0,   0.0]   # west border
+
+  # ── Horizontal walls  (y = (9-r)×24,  from JSON horizontal[r][c]) ─────────
+  # r=1  y=192
+  - [24.0,  192.0,  96.0, 192.0]  # c=1,2,3 merged
+  - [120.0, 192.0, 144.0, 192.0]  # c=5
+  - [168.0, 192.0, 192.0, 192.0]  # c=7
+
+  # r=2  y=168
+  - [0.0,   168.0,  24.0, 168.0]  # c=0
+  - [48.0,  168.0,  72.0, 168.0]  # c=2
+  - [96.0,  168.0, 120.0, 168.0]  # c=4
+  - [144.0, 168.0, 192.0, 168.0]  # c=6,7 merged
+
+  # r=3  y=144
+  - [24.0,  144.0,  48.0, 144.0]  # c=1
+  - [72.0,  144.0,  96.0, 144.0]  # c=3
+  - [120.0, 144.0, 144.0, 144.0]  # c=5
+  - [168.0, 144.0, 192.0, 144.0]  # c=7
+
+  # r=4  y=120  →  no interior walls (all open – base room row)
+
+  # r=5  y=96
+  - [0.0,    96.0,  72.0,  96.0]  # c=0,1,2 merged
+  - [192.0,  96.0, 216.0,  96.0]  # c=8
+
+  # r=6  y=72
+  - [24.0,   72.0,  48.0,  72.0]  # c=1
+  - [72.0,   72.0,  96.0,  72.0]  # c=3
+  - [120.0,  72.0, 144.0,  72.0]  # c=5
+  - [168.0,  72.0, 192.0,  72.0]  # c=7
+
+  # r=7  y=48
+  - [48.0,   48.0,  96.0,  48.0]  # c=2,3 merged
+  - [120.0,  48.0, 192.0,  48.0]  # c=5,6,7 merged
+
+  # r=8  y=24
+  - [24.0,   24.0, 144.0,  24.0]  # c=1,2,3,4,5 merged
+  - [168.0,  24.0, 192.0,  24.0]  # c=7
+
+  # ── Vertical walls  (x = c×24,  y from (8-r)×24 to (9-r)×24) ─────────────
+  # c=1  x=24
+  - [24.0, 168.0, 24.0, 192.0]   # r=1
+  - [24.0, 120.0, 24.0, 144.0]   # r=3
+  - [24.0,  72.0, 24.0,  96.0]   # r=5
+  - [24.0,  24.0, 24.0,  48.0]   # r=7
+
+  # c=2  x=48
+  - [48.0, 144.0, 48.0, 168.0]   # r=2
+  - [48.0,  96.0, 48.0, 120.0]   # r=4
+  - [48.0,  48.0, 48.0,  72.0]   # r=6
+
+  # c=3  x=72
+  - [72.0, 120.0, 72.0, 144.0]   # r=3
+  - [72.0,  72.0, 72.0,  96.0]   # r=5
+  - [72.0,   0.0, 72.0,  24.0]   # r=8
+
+  # c=4  x=96  (r=1,2 merged)
+  - [96.0, 144.0, 96.0, 192.0]   # r=1,2 merged
+
+  # c=5  x=120
+  - [120.0, 192.0, 120.0, 216.0]  # r=0
+  - [120.0,  48.0, 120.0,  72.0]  # r=6
+
+  # c=6  x=144  (r=1,2,3 merged)
+  - [144.0, 120.0, 144.0, 192.0]  # r=1,2,3 merged
+  - [144.0,  72.0, 144.0,  96.0]  # r=5
+
+  # c=7  x=168  (r=4,5 merged)
+  - [168.0,  72.0, 168.0, 120.0]  # r=4,5 merged
+  - [168.0,  24.0, 168.0,  48.0]  # r=7
+
+  # c=8  x=192
+  - [192.0, 168.0, 192.0, 192.0]  # r=1
+  - [192.0, 120.0, 192.0, 144.0]  # r=3
+  - [192.0,  48.0, 192.0,  72.0]  # r=6
