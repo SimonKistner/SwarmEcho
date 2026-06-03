@@ -86,14 +86,21 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
                 k, _, v = line.partition("=")
                 os.environ.setdefault(k.strip(), v.strip())
 
+    wandb_kwargs = {
+        "project": cfg.logging.get("wandb_project", "swarmecho"),
+        "entity": cfg.logging.get("wandb_entity", None),
+        "name": run_name,
+        "mode": mode,
+        "dir": str(run_dir),
+        "config": OmegaConf.to_container(cfg, resolve=True),
+    }
+    wandb_group = cfg.logging.get("wandb_group", None)
+    if wandb_group:
+        wandb_kwargs["group"] = str(wandb_group)
+
     import wandb
     run = wandb.init(
-        project = cfg.logging.get("wandb_project", "swarmecho"),
-        entity  = cfg.logging.get("wandb_entity", None),
-        name    = run_name,
-        mode    = mode,
-        dir     = str(run_dir),
-        config  = OmegaConf.to_container(cfg, resolve=True),
+        **wandb_kwargs,
     )
     return run
 
@@ -662,10 +669,17 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         print(f"  W&B run      : {wandb_run.url}")
 
     # ── Render setup ──────────────────────────────────────────────────────
+    eval_video  = bool(cfg.logging.get("eval_video", True))
+    save_model  = bool(cfg.logging.get("save_model", True))
     async_video = cfg.logging.get("async_video", False)
-    if async_video:
+    if not save_model:
+        print("  [ckpt] Checkpoint saving disabled")
+    if eval_video and async_video:
         render_worker = VideoRenderWorker(cfg, video_dir, wandb_run)
         render_worker.start()
+    elif not eval_video:
+        print("  [render] Eval video rendering disabled")
+        render_worker = None
     else:
         print("  [render] Sequential mode (blocking training during render)")
         render_worker = None
@@ -757,15 +771,20 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"threshold {success_threshold:.1%} -- advancing to next level."
                 )
                 # Save an intermediate checkpoint before breaking
-                import orbax.checkpoint as ocp
-                import shutil
-                early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                if early_ckpt.exists():
-                    shutil.rmtree(early_ckpt)
-                _, state_dict = nnx.split(model)
-                checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                print(f"  [ckpt-early] saved -> {early_ckpt}")
+                early_ckpt_str = ""
+                if save_model:
+                    import orbax.checkpoint as ocp
+                    import shutil
+                    early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                    if early_ckpt.exists():
+                        shutil.rmtree(early_ckpt)
+                    _, state_dict = nnx.split(model)
+                    checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                    checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                    print(f"  [ckpt-early] saved -> {early_ckpt}")
+                    early_ckpt_str = str(early_ckpt)
+                else:
+                    print("  [ckpt-early] skipped (save_model=false)")
 
                 # ── Eval + video on early exit ──
                 master_key, eval_key = jax.random.split(master_key)
@@ -776,21 +795,22 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     cfg, eval_key, eval_eps,
                 )
 
-                # Render sequential slow render of the first episode to save local premium video
-                ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-                vid_path = str((video_dir / f"eval_early_{update:06d}_{ts_now}.mp4").absolute())
-                from types import SimpleNamespace
-                stacked = jax.tree.map(lambda *xs: np.array(np.stack(xs)), *ep_states_list[0])
-                traj_ns = SimpleNamespace(**{f.name: getattr(stacked, f.name) for f in dataclasses.fields(stacked)})
-                
-                print(f"  [render] Generating early exit premium video -> {vid_path}")
-                render_video(
-                    traj_ns, cfg,
-                    filename     = vid_path,
-                    renderer     = "fast" if is_benchmark else "slow",
-                    rewards      = np.array(ep_rewards_list[0]),
-                    extra_metrics= all_metrics_list[0],
-                )
+                if eval_video:
+                    # Render sequential slow render of the first episode to save local premium video
+                    ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    vid_path = str((video_dir / f"eval_early_{update:06d}_{ts_now}.mp4").absolute())
+                    from types import SimpleNamespace
+                    stacked = jax.tree.map(lambda *xs: np.array(np.stack(xs)), *ep_states_list[0])
+                    traj_ns = SimpleNamespace(**{f.name: getattr(stacked, f.name) for f in dataclasses.fields(stacked)})
+                    
+                    print(f"  [render] Generating early exit premium video -> {vid_path}")
+                    render_video(
+                        traj_ns, cfg,
+                        filename     = vid_path,
+                        renderer     = "fast" if is_benchmark else "slow",
+                        rewards      = np.array(ep_rewards_list[0]),
+                        extra_metrics= all_metrics_list[0],
+                    )
 
                 if wandb_run:
                     import wandb
@@ -804,7 +824,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "eval/target_found":        eval_found,
                     }, step=steps_done)
 
-                return str(early_ckpt)
+                return early_ckpt_str
 
             # ── GAE + minibatches ─────────────────────────────────────────────
             advs, rets = buf.compute_gae(last_values, last_dones)
@@ -892,7 +912,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     cfg, eval_key, eval_eps,
                 )
 
-                if update == n_updates:
+                if eval_video and update == n_updates:
                     for idx in range(0, eval_eps, 2):
                         if async_video and render_worker:
                             render_worker.submit(
@@ -919,7 +939,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 rewards      = np.array(ep_rewards_list[idx]),
                                 extra_metrics= all_metrics_list[idx],
                             )
-                else:
+                elif eval_video:
                     render_idx = eval_render_idx
                     eval_render_idx = (eval_render_idx + 1) % eval_eps
                     
@@ -966,14 +986,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"ep_return={eval_ret:.2f}  "
                     f"chain={eval_prog_pct:.1f}%  "
                     f"success={eval_success:.1%}  "
-                    f"→ render queued"
+                    f"→ {'render queued' if eval_video else 'render disabled'}"
                 )
                 
                 # Small sleep to allow XLA to settle after the heavy eval/render spike
                 time.sleep(1.0)
 
             # ── Checkpoint ────────────────────────────────────────────────────
-            if not is_benchmark and (update % ckpt_every == 0 or update == n_updates):
+            if save_model and not is_benchmark and (update % ckpt_every == 0 or update == n_updates):
                 import orbax.checkpoint as ocp
                 import shutil
                 ckpt_path = (ckpt_dir / f"ckpt_{update:06d}").absolute()
@@ -988,7 +1008,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         print(f"\n  Training complete in {total_time:.1f}s  ({total_time/60:.1f} min)")
 
         # ── Final Checkpoint ─────────────────────────────────────────────────
-        if not is_benchmark:
+        if save_model and not is_benchmark:
             final_ckpt = (ckpt_dir / f"ckpt_{n_updates:06d}").absolute()
             import orbax.checkpoint as ocp
             import shutil

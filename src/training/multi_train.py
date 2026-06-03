@@ -121,6 +121,8 @@ if __name__ == "__main__":
             f"training.seed={seed}",
             f"logging.run_name={run_name}",
         ]
+        if base_cfg.logging.get("wandb_mode", "disabled") != "disabled":
+            run_overrides.append(f"logging.wandb_group={base_run_name}")
         cfg = load_config(cli_overrides=True, overrides=run_overrides)
         validate_config(cfg)
 

@@ -15,10 +15,10 @@ Each corridor is exactly `visual_radius * 2` wide, so one traversal reveals the 
 
 The level sets `env.mem_test_mask_nonlocal_obs: true`. This keeps the normal observation dimension but zeros channels that would identify the fixed T location or bypass memory: base-relative vector, base/target connectivity flags, target-known and target-relative vector, local coverage probes, and base/target-connected teammate radar. Local velocity and wall radar remain available so the agent can navigate by geometry and the intended cue.
 
-The preview script renders five static frames for visual inspection:
+The preview command renders a simulated rollout of the memory layout:
 
 ```bash
-uv run python src/tests/test_memory/render_memory_preview.py
+uv run python src/visualize/render_preview.py memory_t_maze_8 --mode video --level MEM_T8_memory
 ```
 
 The training level is `src/curriculum_config/levels/MEM_T8_memory.yaml`.

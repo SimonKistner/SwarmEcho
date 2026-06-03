@@ -83,10 +83,10 @@ uv run streamlit run src/curriculum_config/maps/scripts/map_builder.py
 ```
 
 
-### 5. Validate Map Geometry
-Run a short trajectory test on all blueprints to verify JAX compatibility and render validation videos.
+### 5. Consolidated Map Preview & Renderer
+Render static blueprint images or simulated video/GIF rollouts of any map blueprint.
 ```bash
-uv run python src/tests/validate_maps.py
+uv run python src/visualize/render_preview.py M01_grid_maze
 ```
 
 ### 6. Discovery & Analysis Dashboard

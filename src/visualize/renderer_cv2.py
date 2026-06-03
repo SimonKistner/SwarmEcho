@@ -112,30 +112,12 @@ def _bfs(adj: np.ndarray, source: int) -> set[int]:
     return visited
 
 
+from env.raycast import dda_raycast_np
+
 def _dda_raycast_np(p1, p2, occ_grid):
     """NumPy version of DDA raycast for the renderer."""
-    gx0, gy0 = p1; gx1, gy1 = p2
-    dx = gx1 - gx0; dy = gy1 - gy0
-    steps = int(max(abs(dx), abs(dy), 1) * 2) # Over-sample for safety in drawing
-    if steps > 1000: steps = 1000
+    return dda_raycast_np(p1, p2, occ_grid)
 
-    xs = np.linspace(gx0, gx1, steps)
-    ys = np.linspace(gy0, gy1, steps)
-
-    ixs = np.floor(xs).astype(int)
-    iys = np.floor(ys).astype(int)
-
-    # Clip to bounds
-    W, H = occ_grid.shape
-    mask = (ixs >= 0) & (ixs < W) & (iys >= 0) & (iys < H)
-    if not np.all(mask):
-        # We allow out of bounds rays as long as they don't hit a wall
-        # but realistically they shouldn't happen much.
-        ixs = np.clip(ixs, 0, W-1)
-        iys = np.clip(iys, 0, H-1)
-
-    hit = occ_grid[ixs, iys]
-    return not np.any(hit)
 
 def _build_adjacency(pos, base_pos, target_pos, comm_r, vis_r, occ_grid, world_size):
     N = pos.shape[0];  M = N + 2

@@ -131,8 +131,10 @@ class LoggingConfig:
     wandb_mode: str = "online"   # "online", "offline", or "disabled"
     wandb_project: str = "SwarmEcho"
     wandb_entity: Optional[str] = None
+    wandb_group: Optional[str] = None
     log_freq: int = 10
     video_freq: int = 30
+    eval_video: bool = True
     async_video: bool = False   # If True, renders in background process; if False, blocks training to render
     num_checkpoints: int = 10   # Guaranteed number of checkpoints per run
     eval_episodes: int = 1
@@ -323,6 +325,7 @@ def validate_config(cfg: DictConfig) -> None:
     assert 0.0 <= cfg.env.wall_restitution <= 1.0, "wall_restitution must be [0, 1]."
     assert cfg.training.num_envs > 0
     assert cfg.training.num_steps > 0
+    assert cfg.logging.eval_episodes > 0, "logging.eval_episodes must be > 0."
     assert 0 < cfg.training.gamma <= 1.0
     assert 0 < cfg.training.gae_lambda <= 1.0
     if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
