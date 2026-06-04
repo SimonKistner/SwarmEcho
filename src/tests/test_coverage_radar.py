@@ -19,7 +19,6 @@ def test_coverage_radar():
             "max_grid_width": 100,
             "max_grid_height": 100,
             "radar_bins": 4,
-            "exploration_sampling_radius": 10.0,
             "visual_radius": 5.0,
             "comm_radius": 10.0,
             "max_speed": 10.0,

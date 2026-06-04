@@ -60,7 +60,6 @@ class EnvConfig:
     map_names: list[str] = field(default_factory=list) # if set, samples from these maps
     num_targets: int = 1       # 0 = exploration focus, 1 = find target goal
     num_bases: int = 1         # 0 = exploration focus, 1 = tethered relay goal
-    exploration_sampling_radius: float = 6.0 # meter offset for local coverage grid sampling
     # --- Spawn overrides (B-series curriculum) ---
     use_random_base_spawn: bool = True    # if False, base always spawns at map centre
     use_random_drone_spawn: bool = True   # if False, drones spawn stacked at base_pos

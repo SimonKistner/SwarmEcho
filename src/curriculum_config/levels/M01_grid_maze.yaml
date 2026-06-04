@@ -8,7 +8,6 @@ env:
   num_bases: 1
   max_steps: 550
   visual_radius: 12.0
-  exploration_sampling_radius: 13.0
   comm_radius: 50.0
   comm_radius_base: 40.0
   spawn_delay: 5

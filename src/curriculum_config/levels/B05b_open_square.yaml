@@ -2,9 +2,9 @@
 #
 env:
   map_names: ["square_B04_10m_comm_20m_base"]
-  num_agents: 9
+  num_agents: 8
   spawn_delay: 5
-  max_steps: 50
+  max_steps: 600
   use_random_base_spawn: false
   use_random_drone_spawn: false
   target_spawn_method: outside_base
@@ -32,4 +32,4 @@ curriculum:
   success_threshold: 0.999
 
 logging:
-  video_freq: 20
+  video_freq: 30
