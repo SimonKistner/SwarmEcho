@@ -63,6 +63,11 @@ class MAPPOModel(nnx.Module):
         rngs:             nnx.Rngs,
         actor_memory:     bool = False,
         critic_memory:    bool = False,
+        memory_comm_enabled: bool = False,
+        memory_comm_gradient_mode: str = "rial",
+        memory_comm_variant: str = "cross_attention_residual",
+        memory_comm_every_k_steps: int = 10,
+        memory_comm_num_heads: int = 4,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -71,6 +76,9 @@ class MAPPOModel(nnx.Module):
         self.critic_type = critic_type
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
+        self.memory_comm_enabled = memory_comm_enabled
+        self.memory_comm_variant = memory_comm_variant
+        self.memory_comm_every_k_steps = memory_comm_every_k_steps
 
         if actor_memory:
             self.actor = RecurrentDecentralizedActor(
@@ -79,6 +87,10 @@ class MAPPOModel(nnx.Module):
                 hidden_dim       = hidden_dim,
                 actor_num_layers = actor_num_layers,
                 rngs             = rngs,
+                memory_comm_enabled = memory_comm_enabled,
+                memory_comm_gradient_mode = memory_comm_gradient_mode,
+                memory_comm_variant = memory_comm_variant,
+                memory_comm_num_heads = memory_comm_num_heads,
             )
         else:
             self.actor = DecentralizedActor(
@@ -200,6 +212,10 @@ class MAPPOModel(nnx.Module):
         critic_hidden:  jax.Array | None,
         resets:         jax.Array,   # (N,)
         max_force:      float = 50.0,
+        comm_mask:      jax.Array | None = None,
+        active:         jax.Array | None = None,
+        base_memory:    jax.Array | None = None,
+        base_memory_mask: jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
         """
         Rollout step that carries optional actor and critic recurrent states.
@@ -211,13 +227,26 @@ class MAPPOModel(nnx.Module):
             if actor_hidden is None:
                 actor_hidden = self.initial_actor_hidden(())
 
-            def _act_one(obs_i, key_i, h_i, reset_i):
-                h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
-                return h_i, a, lp
+            if self.memory_comm_enabled:
+                actor_hidden, actions, log_probs, _ = self.actor.act_team(
+                    all_obs,
+                    actor_hidden,
+                    keys,
+                    reset=resets,
+                    comm_mask=comm_mask,
+                    active=active,
+                    base_memory=base_memory,
+                    base_memory_mask=base_memory_mask,
+                    deterministic=False,
+                )
+            else:
+                def _act_one(obs_i, key_i, h_i, reset_i):
+                    h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
+                    return h_i, a, lp
 
-            actor_hidden, actions, log_probs = jax.vmap(_act_one)(
-                all_obs, keys, actor_hidden, resets
-            )
+                actor_hidden, actions, log_probs = jax.vmap(_act_one)(
+                    all_obs, keys, actor_hidden, resets
+                )
         else:
             def _act_one(obs_i, key_i):
                 a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
@@ -273,6 +302,11 @@ if __name__ == "__main__":
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
+        memory_comm_variant = str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
     )
 
     _, params = nnx.split(model)

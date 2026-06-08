@@ -50,7 +50,7 @@ def test_visual_occlusion():
         cfg.env.spawn_delay = 0
         cfg.logging.suppress_xla_warnings = True
 
-        env_step, reset, _ = make_env_fns(cfg)
+        env_step, reset, _, _ = make_env_fns(cfg)
         key = jax.random.PRNGKey(123)
         state = reset(key)
         

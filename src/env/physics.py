@@ -73,7 +73,8 @@ def make_env_fns(cfg: DictConfig):
     env_step        : (EnvState, actions (N,2)) -> EnvState
     reset           : (PRNGKey) -> EnvState
     update_coverage : (coverage_grid, pos, active) -> coverage_grid
-    world_meta      : tuple (W, H, occ_grid) - resolved box width, height, and occupancy grid
+    world_meta      : tuple (W, H, occ_grid, comm_occ_grid) - resolved box width, height,
+                      physical occupancy grid, and communication occupancy grid
     """
 
     # --- Extract config as Python scalars (XLA compile-time constants) -----
@@ -99,7 +100,7 @@ def make_env_fns(cfg: DictConfig):
     target_spawn_radius_min = float(cfg.env.get("target_spawn_radius_min", 0.0))
     target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
     precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
-    log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False))
+    log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False)) or bool(cfg.network.get("memory_comm_enabled", False))
 
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
@@ -114,6 +115,7 @@ def make_env_fns(cfg: DictConfig):
     # Map loading
     map_def      = None
     occ_grid     = None
+    comm_occ_grid = None
     padded_grid  = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
@@ -128,6 +130,8 @@ def make_env_fns(cfg: DictConfig):
             W, H = map_def.width, map_def.height
             if map_def.occupancy_grid is not None:
                 occ_grid = jnp.array(map_def.occupancy_grid, dtype=jnp.bool_)
+            if map_def.communication_occupancy_grid is not None:
+                comm_occ_grid = jnp.array(map_def.communication_occupancy_grid, dtype=jnp.bool_)
             if map_def.padded_occupancy_grid is not None:
                 padded_grid = map_def.padded_occupancy_grid
 
@@ -156,6 +160,8 @@ def make_env_fns(cfg: DictConfig):
 
     if occ_grid is None:
         raise ValueError("Occupancy grid missing. A valid map MUST be loaded for physics.")
+    if comm_occ_grid is None:
+        comm_occ_grid = occ_grid
 
     # Padding size in cells
     R_cells = int(PAD_RADIUS / cell_size) + 2
@@ -268,8 +274,8 @@ def make_env_fns(cfg: DictConfig):
         def _check_comm(i, j):
             dist = jnp.linalg.norm(state.pos[i] - state.pos[j])
             in_range = (dist <= comm_r) & state.active[i] & state.active[j] & (i != j)
-            # DDA Raycast (structural)
-            can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, occ_grid)
+            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+            can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid)
             return in_range & can_see
 
         adj_dd = jax.vmap(jax.vmap(_check_comm, (None, 0)), (0, None))(
@@ -280,8 +286,8 @@ def make_env_fns(cfg: DictConfig):
         def _check_base_comm(i):
             dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
             in_range = (dist <= comm_r_base) & state.active[i]
-            # DDA Raycast (structural)
-            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid)
+            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid)
             return in_range & can_see
 
         adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)).astype(jnp.float32)
@@ -620,7 +626,7 @@ def make_env_fns(cfg: DictConfig):
             adj_matrix=new_adj_matrix,
         )
 
-    return env_step, reset, update_coverage, (W, H, occ_grid)
+    return env_step, reset, update_coverage, (W, H, occ_grid, comm_occ_grid)
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +643,7 @@ if __name__ == "__main__":
     cfg = load_config(cli_overrides=False)
     validate_config(cfg)
 
-    env_step, reset, update_coverage, (W, H, occ_grid) = make_env_fns(cfg)
+    env_step, reset, update_coverage, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
 
     reset_jit = jax.jit(reset)
     step_jit  = jax.jit(env_step)

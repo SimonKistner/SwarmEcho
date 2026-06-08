@@ -74,7 +74,13 @@ from core.config import compute_obs_dim
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid: jax.Array):
+def make_obs_fns(
+    cfg: DictConfig,
+    resolved_W: float,
+    resolved_H: float,
+    occ_grid: jax.Array,
+    comm_occ_grid: jax.Array | None = None,
+):
     """
     Close over config scalars and return pure JAX observation functions.
 
@@ -98,10 +104,16 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
     # observation; the memory test zeros non-local channels that reveal which
     # fixed T-corridor an agent occupies.
     mem_test_mask_nonlocal_obs = bool(cfg.env.get("mem_test_mask_nonlocal_obs", False))
+    observe_base_vector = bool(cfg.env.get("observe_base_vector", True))
+    observe_target_vector = bool(cfg.env.get("observe_target_vector", True))
 
     obs_dim: int = compute_obs_dim(cfg)
+    if comm_occ_grid is None:
+        comm_occ_grid = occ_grid
+
     GW, GH = occ_grid.shape
     is_unobstructed = (not jnp.any(occ_grid))
+    is_comm_unobstructed = (not jnp.any(comm_occ_grid))
 
     # Pre-compute bin centre angles: θ_b ∈ (−π, π]
     _bin_angles  = (jnp.arange(B, dtype=jnp.float32) + 0.5) * (2.0 * jnp.pi / B) - jnp.pi
@@ -260,7 +272,7 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
         # Drone-base adjacency (N,)  — first hop uses comm_r_base
         near_db = (base_dists <= comm_r_base) & state.active
 
-        if is_unobstructed:
+        if is_comm_unobstructed:
             los_dd = near_dd
             los_db = near_db
         else:
@@ -269,14 +281,14 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
                 # Only raycast if within range
                 return jnp.where(
                     near_dd[i, j],
-                    dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, occ_grid),
+                    dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid),
                     False
                 )
 
             def _lo_db(i):
                 return jnp.where(
                     near_db[i],
-                    dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid),
+                    dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid),
                     False
                 )
 
@@ -332,16 +344,17 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
                 target_mask_f = jnp.float32(0.0)
                 rel_target_f = jnp.zeros_like(rel_target_f)
 
-            self_block_final = jnp.concatenate([
-                vel_i / v_max,                                              # (2,)
-                rel_base_f,                                                 # (2,)
-                jnp.array([                                                 # (3,)
-                    is_conn_base_f,
-                    is_conn_target_f,
-                    target_mask_f,
-                ], dtype=jnp.float32),
-                rel_target_f,                                               # (2,)
-            ])
+            self_parts = [vel_i / v_max]
+            if observe_base_vector:
+                self_parts.append(rel_base_f)
+            self_parts.append(jnp.array([
+                is_conn_base_f,
+                is_conn_target_f,
+                target_mask_f,
+            ], dtype=jnp.float32))
+            if observe_target_vector:
+                self_parts.append(rel_target_f)
+            self_block_final = jnp.concatenate(self_parts)
 
             x_i, y_i = pos_i[0], pos_i[1]
 
@@ -480,8 +493,8 @@ if __name__ == "__main__":
         f"config.py formula mismatch: {compute_obs_dim(cfg)} ≠ {expected_obs_dim}"
 
     # Resolve world data from physics engine (Strict Flow)
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
-    compute_obs, obs_dim = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
+    compute_obs, obs_dim = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
 
     print(f"  N        : {N}")
     print(f"  B        : {B}")
