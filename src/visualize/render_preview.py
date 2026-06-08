@@ -134,7 +134,7 @@ def render_svg(
             py = (height - cy) * scale
             rx = px - cell_px / 2
             ry = py - cell_px / 2
-            svg.append(f'<rect x="{rx:.2f}" y="{ry:.2f}" width="{cell_px:.2f}" height="{cell_px:.2f}" fill="#ef4444" fill-opacity="0.55" stroke="none"/>')
+            svg.append(f'<rect x="{rx:.2f}" y="{ry:.2f}" width="{cell_px:.2f}" height="{cell_px:.2f}" fill="#ef4444" fill-opacity="0.1375" stroke="none"/>')
 
     # Exclude zones (cross-hatched)
     if show_zones:
@@ -171,19 +171,28 @@ def render_svg(
             zy = (height - y2) * scale
             zw = (x2 - x1) * scale
             zh = (y2 - y1) * scale
-            svg.append(f'<rect x="{zx:.3f}" y="{zy:.3f}" width="{zw:.3f}" height="{zh:.3f}" fill="{fill}" fill-opacity="0.25" stroke="{outline}" stroke-width="2"/>')
+            alpha = 0.0625 if key == "target" else 0.25
+            svg.append(f'<rect x="{zx:.3f}" y="{zy:.3f}" width="{zw:.3f}" height="{zh:.3f}" fill="{fill}" fill-opacity="{alpha:.4f}" stroke="{outline}" stroke-width="2"/>')
             svg.append(f'<text x="{zx + 5:.3f}" y="{max(14, zy - 5):.3f}" fill="{outline}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="700">{label}</text>')
+
+    # Base Station (Always drawn as a reference landmark if resolvable)
+    # TODO: Support random base spawns when show_spawns is False (do not rely on zone average)
+    base_pos = None
+    if state is not None and getattr(state, "base_pos", None) is not None:
+        base_pos = (float(state.base_pos[0]), float(state.base_pos[1]))
+    elif "spawn_zones" in data and "base" in data["spawn_zones"]:
+        x1, y1, x2, y2 = data["spawn_zones"]["base"]
+        base_pos = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    if base_pos is not None:
+        px = base_pos[0] * scale
+        py = (height - base_pos[1]) * scale
+        bs = max(4.0, 5.0 * scale / 4.0)
+        svg.append(f'<rect x="{px - bs:.3f}" y="{py - bs:.3f}" width="{2*bs:.3f}" height="{2*bs:.3f}" fill="#2563eb" stroke="#1d4ed8" stroke-width="1.5"/>')
+        svg.append(f'<text x="{px:.3f}" y="{py + bs/2:.3f}" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="700" text-anchor="middle">B</text>')
 
     # Real Spawns
     if show_spawns and state is not None:
-        # Base
-        if getattr(state, "base_pos", None) is not None:
-            bx, by = float(state.base_pos[0]), float(state.base_pos[1])
-            px = bx * scale
-            py = (height - by) * scale
-            bs = max(4.0, 5.0 * scale / 4.0)
-            svg.append(f'<rect x="{px - bs:.3f}" y="{py - bs:.3f}" width="{2*bs:.3f}" height="{2*bs:.3f}" fill="#2563eb" stroke="#1d4ed8" stroke-width="1.5"/>')
-            svg.append(f'<text x="{px:.3f}" y="{py + bs/2:.3f}" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="700" text-anchor="middle">B</text>')
 
         # Target
         if getattr(state, "target_pos", None) is not None:
@@ -248,7 +257,7 @@ def render_png(
             rx2 = rx1 + cell_px
             ry2 = ry1 + cell_px
             cv2.rectangle(overlay, (rx1, ry1), (rx2, ry2), (68, 68, 239), -1)
-        cv2.addWeighted(overlay, 0.55, img, 0.45, 0, img)
+        cv2.addWeighted(overlay, 0.1375, img, 0.8625, 0, img)
 
     # 4. Target exclude zones (cross-hatched equivalent)
     if show_zones:
@@ -290,21 +299,30 @@ def render_png(
             py2 = int((height - y1) * scale)
             overlay = img.copy()
             cv2.rectangle(overlay, (px1, py1), (px2, py2), fill, -1)
-            cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+            alpha = 0.0625 if key == "target" else 0.25
+            cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
             cv2.rectangle(img, (px1, py1), (px2, py2), outline, 2, cv2.LINE_AA)
             cv2.putText(img, label, (px1 + 5, max(15, py1 - 5)), cv2.FONT_HERSHEY_DUPLEX, 0.4, outline, 1, cv2.LINE_AA)
 
-    # 7. Real Spawns (drones, base, target)
+    # Base Station (Always drawn as a reference landmark if resolvable)
+    # TODO: Support random base spawns when show_spawns is False (do not rely on zone average)
+    base_pos = None
+    if state is not None and getattr(state, "base_pos", None) is not None:
+        base_pos = (float(state.base_pos[0]), float(state.base_pos[1]))
+    elif "spawn_zones" in data and "base" in data["spawn_zones"]:
+        x1, y1, x2, y2 = data["spawn_zones"]["base"]
+        base_pos = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    if base_pos is not None:
+        px = int(base_pos[0] * scale)
+        py = int((height - base_pos[1]) * scale)
+        bs = max(4, int(5 * scale / 4))
+        cv2.rectangle(img, (px - bs, py - bs), (px + bs, py + bs), (216, 78, 29), -1)
+        cv2.rectangle(img, (px - bs, py - bs), (px + bs, py + bs), (100, 24, 17), 1, cv2.LINE_AA)
+        cv2.putText(img, "B", (px - 4, py + 4), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # 7. Real Spawns (drones, target)
     if show_spawns and state is not None:
-        # Base
-        if getattr(state, "base_pos", None) is not None:
-            bx, by = float(state.base_pos[0]), float(state.base_pos[1])
-            px = int(bx * scale)
-            py = int((height - by) * scale)
-            bs = max(4, int(5 * scale / 4))
-            cv2.rectangle(img, (px - bs, py - bs), (px + bs, py + bs), (216, 78, 29), -1)
-            cv2.rectangle(img, (px - bs, py - bs), (px + bs, py + bs), (100, 24, 17), 1, cv2.LINE_AA)
-            cv2.putText(img, "B", (px - 4, py + 4), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
         # Target
         if getattr(state, "target_pos", None) is not None:

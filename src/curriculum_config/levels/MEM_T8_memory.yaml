@@ -44,5 +44,5 @@ network:
 
 
 logging:
-  video_freq: 10
+  eval_freq: 10
   obs_log: false

@@ -73,6 +73,7 @@ def make_env_fns(cfg: DictConfig):
     env_step        : (EnvState, actions (N,2)) -> EnvState
     reset           : (PRNGKey) -> EnvState
     update_coverage : (coverage_grid, pos, active) -> coverage_grid
+    world_meta      : tuple (W, H, occ_grid) - resolved box width, height, and occupancy grid
     """
 
     # --- Extract config as Python scalars (XLA compile-time constants) -----
@@ -98,6 +99,7 @@ def make_env_fns(cfg: DictConfig):
     target_spawn_radius_min = float(cfg.env.get("target_spawn_radius_min", 0.0))
     target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
     precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
+    log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False))
 
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
@@ -241,10 +243,17 @@ def make_env_fns(cfg: DictConfig):
     # _update_target_known  (internal utility)
     # ------------------------------------------------------------------
 
-    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array]:
+    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """
-        Compute the updated (N,) bool target_known array using pre-computed visibility.
-        Also returns the updated () bool base_target_known scalar.
+        Compute the updated target knowledge and connectivity status.
+
+        Returns
+        -------
+        new_target_known      : (N,) bool
+        new_base_target_known : () bool
+        is_conn_base          : (N,) bool
+        is_conn_target        : (N,) bool
+        adj_matrix            : (N+1, N+1) bool
         """
         # Convert continuous positions to grid indices
         def _get_cell_idx(p):
@@ -267,6 +276,16 @@ def make_env_fns(cfg: DictConfig):
             jnp.arange(N), jnp.arange(N)
         ).astype(jnp.float32)
 
+        # Base connectivity
+        def _check_base_comm(i):
+            dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
+            in_range = (dist <= comm_r_base) & state.active[i]
+            # DDA Raycast (structural)
+            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid)
+            return in_range & can_see
+
+        adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)).astype(jnp.float32)
+
         # MEM_T8-only diagnostic path: target_pos may be (N, 2) to run eight
         # independent cue/choice tasks inside one env. Normal levels use (2,).
         per_agent_targets = (state.target_pos.ndim == 2)
@@ -277,74 +296,59 @@ def make_env_fns(cfg: DictConfig):
             target_i = target_pos_agents[i]
             dist = jnp.linalg.norm(state.pos[i] - target_i)
             in_range = (dist <= vis_r) & state.active[i]
-            # DDA Raycast (structural)
             can_see = dda_raycast(state.pos[i]/cell_size, target_i/cell_size, occ_grid)
             return in_range & can_see
 
-        is_visible = jax.vmap(_check_target_los)(jnp.arange(N))
+        directly_sees = jax.vmap(_check_target_los)(jnp.arange(N))
 
-        # 3. Base comm logic
-        def _check_base_comm(i):
-            dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
-            in_range = (dist <= comm_r_base) & state.active[i]
-            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid)
-            return in_range & can_see
+        # 3. Graph reachability matrix squaring
+        _eye_Np1 = jnp.eye(N + 1, dtype=jnp.float32)
+        A_top = jnp.concatenate([adj_dd, adj_db[:, None]], axis=-1)
+        A_bot = jnp.concatenate([adj_db[None, :], jnp.zeros((1, 1))], axis=-1)
+        A_full = jnp.concatenate([A_top, A_bot], axis=0) + _eye_Np1
 
-        adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)) # (N,) bool
-
-        drone_knows_target = is_visible | state.target_known
-        new_base_target_known = state.base_target_known | jnp.any(adj_db & drone_knows_target)
-
-        seed_knowledge = drone_knows_target | (adj_db & new_base_target_known)
-
-        if per_agent_targets:
-            new_target_known = state.target_known | jnp.where(int(cfg.env.num_targets) > 0, drone_knows_target, False)
-            new_base_target_known = jnp.where(
-                int(cfg.env.num_targets) > 0,
-                new_base_target_known,
-                jnp.bool_(False),
-            )
-            return new_target_known, new_base_target_known
-
-        # 4. Reachability via repeated matrix squaring (n_reach steps)
-        A = adj_dd + _eye   # add self-loops
-
-        def _mat_square(R: jax.Array, _) -> tuple[jax.Array, None]:
+        def _square(R, _):
             return jnp.clip(R @ R, 0.0, 1.0), None
 
-        R, _ = jax.lax.scan(_mat_square, A, None, length=n_reach)
+        R, _ = jax.lax.scan(_square, jnp.clip(A_full, 0.0, 1.0), None, length=n_reach)
 
-        # 5. Propagation: Any drone reachable from drone i that knows/sees the target OR is connected to base that knows it
-        currently_informed = jnp.any(
-            (R > 0.5) & seed_knowledge[None, :], axis=-1
-        )  # (N,) bool
+        is_conn_base = R[:N, N] > 0.5
+        is_conn_target = jnp.any((R[:N, :N] > 0.5) & directly_sees[None, :], axis=-1)
 
-        # If no target logic is enabled (curriculum levels 0-3), everyone knows nothing
-        currently_informed = jnp.where(int(cfg.env.num_targets) > 0, currently_informed, False)
-        new_base_target_known = jnp.where(int(cfg.env.num_targets) > 0, new_base_target_known, jnp.bool_(False))
+        # Persistent target knowledge propagation
+        # Nodes that know the target before propagation in the current step
+        knows_before = jnp.concatenate([
+            state.target_known | directly_sees,
+            jnp.array([state.base_target_known], dtype=jnp.bool_)
+        ], axis=0)
 
-        # 6. Persistent OR: once known, never forgotten
-        return state.target_known | currently_informed, new_base_target_known
+        # Transitive propagation over the communication graph R (which includes base at index N)
+        knows_after = jnp.any((R > 0.5) & knows_before[None, :], axis=-1)
+
+        # Direct connection adjacency matrix of size (N+1, N+1) (excluding self-loops)
+        if log_adj:
+            adj_matrix = jnp.concatenate([A_top, A_bot], axis=0) > 0.5
+        else:
+            adj_matrix = jnp.zeros((0, 0), dtype=jnp.bool_)
+
+        new_target_known = knows_after[:N]
+        new_base_target_known = knows_after[N]
+
+        return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix
 
     def _update_anti_target_known(state: EnvState) -> jax.Array:
-        """MEM_T8-only: update paired anti-target discovery flags."""
-        if ANTI_TARGET_POINTS is None:
-            return state.anti_target_known
+        if ANTI_TARGET_POINTS is None or state.anti_target_known.size == 0:
+            return jnp.zeros(N, dtype=jnp.bool_)
 
-        def _check_anti_target_los(i):
-            anti_i = ANTI_TARGET_POINTS[i]
-            dist = jnp.linalg.norm(state.pos[i] - anti_i)
+        def _sees_anti(i):
+            anti_pos = ANTI_TARGET_POINTS[i]
+            dist = jnp.linalg.norm(state.pos[i] - anti_pos)
             in_range = (dist <= vis_r) & state.active[i]
-            can_see = dda_raycast(state.pos[i] / cell_size, anti_i / cell_size, occ_grid)
+            can_see = dda_raycast(state.pos[i] / cell_size, anti_pos / cell_size, occ_grid)
             return in_range & can_see
 
-        is_visible = jax.vmap(_check_anti_target_los)(jnp.arange(N))
-        is_visible = jnp.where(int(cfg.env.num_targets) > 1, is_visible, False)
-        return state.anti_target_known | is_visible
-
-    # ------------------------------------------------------------------
-    # reset
-    # ------------------------------------------------------------------
+        sees_now = jax.vmap(_sees_anti)(jnp.arange(N))
+        return state.anti_target_known | sees_now
 
     def reset(key: jax.Array) -> EnvState:
         key, k1, k2, k2b, k3 = jax.random.split(key, 5)
@@ -470,6 +474,9 @@ def make_env_fns(cfg: DictConfig):
             box_height    = jnp.float32(H),
             base_target_known = jnp.bool_(False),
             chain_held_steps = jnp.int32(0),
+            is_conn_base      = jnp.zeros(N, dtype=jnp.bool_),
+            is_conn_target    = jnp.zeros(N, dtype=jnp.bool_),
+            adj_matrix        = jnp.zeros((N + 1, N + 1), dtype=jnp.bool_) if log_adj else jnp.zeros((0, 0), dtype=jnp.bool_),
         )
 
     # ------------------------------------------------------------------
@@ -599,7 +606,7 @@ def make_env_fns(cfg: DictConfig):
         )
 
         # 7. Update persistent target knowledge using new positions
-        new_target_known, new_base_target_known = _update_target_known(mid_state)
+        new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix = _update_target_known(mid_state)
         # MEM_T8-only diagnostic state update; no-op for normal levels.
         new_anti_target_known = _update_anti_target_known(mid_state)
 
@@ -608,6 +615,9 @@ def make_env_fns(cfg: DictConfig):
             target_known=new_target_known,
             base_target_known=new_base_target_known,
             anti_target_known=new_anti_target_known,
+            is_conn_base=is_conn_base,
+            is_conn_target=is_conn_target,
+            adj_matrix=new_adj_matrix,
         )
 
     return env_step, reset, update_coverage, (W, H, occ_grid)

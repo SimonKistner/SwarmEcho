@@ -26,10 +26,10 @@ training:
   num_envs: 4096
   num_steps: 64
   num_epochs: 10
-  num_minibatches: 16
+  num_minibatches: null
 
 curriculum:
   success_threshold: 0.999
 
 logging:
-  video_freq: 30
+  eval_freq: 30

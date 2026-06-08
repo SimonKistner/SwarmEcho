@@ -50,6 +50,10 @@ class EnvState:
     box_width     : ()      float32 — dynamic world width
     box_height    : ()      float32 — dynamic world height
     base_target_known: ()   bool  — persistent: True once base is informed
+    chain_held_steps:  ()   int32 — consecutive timesteps chain has been held
+    is_conn_base  : (N,)    bool  — True if agent is connected to base
+    is_conn_target: (N,)    bool  — True if agent is connected to target
+    adj_matrix    : (N+1, N+1) bool — direct communication adjacency matrix
     """
 
     pos:           jax.Array   # (N, 2)  float32
@@ -67,6 +71,12 @@ class EnvState:
     box_height:    jax.Array   # ()      float32
     base_target_known: jax.Array # ()    bool
     chain_held_steps:  jax.Array # ()    int32
+    is_conn_base:      jax.Array # (N,)  bool
+    is_conn_target:    jax.Array # (N,)  bool
+    # Direct communication adjacency matrix (excluding self-loops)
+    adj_matrix:        jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 0), dtype=jnp.bool_)
+    )
     # MEM_T8-only: persistent one-shot anti-target discovery flags.
     # Empty by default so older hand-built EnvState test fixtures stay valid.
     anti_target_known: jax.Array = dataclasses.field(
@@ -86,6 +96,7 @@ jax.tree_util.register_dataclass(
         "coverage_grid", "step", "key",
         "active", "target_known", "collides", "last_cov_delta",
         "box_width", "box_height", "base_target_known", "chain_held_steps",
+        "is_conn_base", "is_conn_target", "adj_matrix",
         "anti_target_known",
     ],
     meta_fields=[],
@@ -117,6 +128,10 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(state.last_cov_delta, (N,))
     chex.assert_shape(state.base_target_known, ())
     chex.assert_shape(state.chain_held_steps, ())
+    chex.assert_shape(state.is_conn_base, (N,))
+    chex.assert_shape(state.is_conn_target, (N,))
+    if state.adj_matrix.size:
+        chex.assert_shape(state.adj_matrix, (N + 1, N + 1))
 
     chex.assert_type(state.pos,           jnp.float32)
     chex.assert_type(state.vel,           jnp.float32)
@@ -131,3 +146,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_type(state.collides,      jnp.bool_)
     chex.assert_type(state.base_target_known, jnp.bool_)
     chex.assert_type(state.chain_held_steps, jnp.int32)
+    chex.assert_type(state.is_conn_base, jnp.bool_)
+    chex.assert_type(state.is_conn_target, jnp.bool_)
+    if state.adj_matrix.size:
+        chex.assert_type(state.adj_matrix, jnp.bool_)

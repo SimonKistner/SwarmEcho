@@ -38,18 +38,20 @@ update index.
 Run organisation
 -----------------
     outputs/{run_name}_{timestamp}/
-        checkpoints/ckpt_{update:06d}/
-        videos/eval_update_{update:06d}_{timestamp}.mp4
+         checkpoints/ckpt_{update:06d}/
+         videos/
+             train/   ← mid-training eval videos and heatmaps (every eval_freq updates)
+             eval/    ← final-eval videos (end of training or early exit)
 """
 
 from __future__ import annotations
 
 import os
 import time
-from collections import deque  # kept for any future use; deque currently unused
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import dataclasses
 
 import jax
@@ -65,7 +67,7 @@ from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
 from training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from training.mappo_trainer import MAPPOTrainer
-from training.video_worker import VideoRenderWorker
+from training.video_worker import render_eval_video
 from visualize.renderer import render_video
 
 
@@ -99,9 +101,7 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
         wandb_kwargs["group"] = str(wandb_group)
 
     import wandb
-    run = wandb.init(
-        **wandb_kwargs,
-    )
+    run = wandb.init(**wandb_kwargs)
     return run
 
 
@@ -114,8 +114,8 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
     Wrap env_step to auto-reset on episode termination.
 
     Done conditions (either triggers reset):
-      • time_up        : new_state.step >= max_steps
-      • fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
+      * time_up        : new_state.step >= max_steps
+      * fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
 
     Returns
     -------
@@ -160,9 +160,15 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
             lambda r, c: jnp.where(done, r, c),
             reset_state, new_state,
         )
-        
-        # Override key fields in info dict to reflect hold status
-        info = {**info, "fully_connected": success_achieved.astype(jnp.float32)}
+
+        # Override key fields in info dict to reflect hold status and terminal target data
+        info = {
+            **info,
+            "fully_connected": success_achieved.astype(jnp.float32),
+            "terminal_target_pos": new_state.target_pos,
+            "terminal_delivered": new_state.base_target_known,
+            "terminal_visually_found": jnp.any(new_state.target_known, axis=-1)
+        }
 
         return next_state, reward, done, info
 
@@ -217,7 +223,11 @@ def _collect_rollout_mappo(
     completed_found    = []
     completed_gaps     = []
     completed_prog_pcts = []
-    
+    completed_target_pos = []
+    completed_target_success = []
+    completed_target_delivered = []
+    completed_target_visually_found = []
+
     completed_r_coverage = []
     completed_r_gap      = []
     completed_r_coll     = []
@@ -298,7 +308,7 @@ def _collect_rollout_mappo(
             completed_found.append(float(ep_found_accum[e]))
             completed_gaps.append(float(ep_gap_accum[e]))
             completed_prog_pcts.append(float(ep_prog_pct_accum[e]))
-            
+
             completed_r_coverage.append(float(r_coverage_accum[e]))
             completed_r_gap.append(float(r_gap_accum[e]))
             completed_r_coll.append(float(r_coll_accum[e]))
@@ -307,13 +317,22 @@ def _collect_rollout_mappo(
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
 
+            # Append terminal target data
+            t_pos = np.array(info["terminal_target_pos"][e])
+            if t_pos.ndim == 2:
+                t_pos = t_pos[0]
+            completed_target_pos.append(t_pos.tolist())
+            completed_target_success.append(bool(ep_success_accum[e] > 0.5))
+            completed_target_delivered.append(bool(info["terminal_delivered"][e]))
+            completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
+
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
         ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
         ep_success_accum = np.where(dones_np, 0.0, ep_success_accum)
         ep_found_accum   = np.where(dones_np, 0.0, ep_found_accum)
         ep_gap_accum     = np.where(dones_np, 0.0, ep_gap_accum)  # reset so next ep starts clean
         ep_prog_pct_accum = np.where(dones_np, 0.0, ep_prog_pct_accum)
-        
+
         r_coverage_accum = np.where(dones_np, 0.0, r_coverage_accum)
         r_gap_accum      = np.where(dones_np, 0.0, r_gap_accum)
         r_coll_accum     = np.where(dones_np, 0.0, r_coll_accum)
@@ -355,7 +374,7 @@ def _collect_rollout_mappo(
     ep_trackers["found"]   = ep_found_accum
     ep_trackers["gap"]     = ep_gap_accum
     ep_trackers["prog_pct"] = ep_prog_pct_accum
-    
+
     ep_trackers["r_coverage"] = r_coverage_accum
     ep_trackers["r_gap"]      = r_gap_accum
     ep_trackers["r_coll"]     = r_coll_accum
@@ -366,11 +385,12 @@ def _collect_rollout_mappo(
 
     return (
         states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool),
-        completed_returns, completed_lengths, completed_success, 
+        completed_returns, completed_lengths, completed_success,
         completed_found, completed_gaps, completed_prog_pcts,
         completed_r_coverage, completed_r_gap, completed_r_coll,
         completed_r_prox, completed_r_found, completed_r_succ,
-        completed_coverage
+        completed_coverage,
+        completed_target_pos, completed_target_success, completed_target_delivered, completed_target_visually_found
     )
 
 
@@ -387,14 +407,25 @@ def _evaluate(
     cfg:          DictConfig,
     key:          jax.Array,
     num_episodes: int = 1,
+    episode_callback: Optional[Callable] = None,
 ) -> tuple:
+    """
+    Run deterministic evaluation episodes.
+
+    Parameters
+    ----------
+    episode_callback : optional callable(ep_idx, success, ep_states, ep_rewards, ep_metrics) -> bool
+        Called after each episode completes.  Return True to stop early
+        (e.g. when selective render buckets are full).
+        If None, all num_episodes are run and data is collected normally.
+    """
     max_force = float(cfg.env.max_force)
     max_steps = int(cfg.env.max_steps)
 
     all_states, all_rewards, all_metrics = [], [], []
     total_ret = total_len = total_gap = total_prog_pct = total_success = total_found = 0.0
 
-    for _ in range(num_episodes):
+    for ep_idx in range(num_episodes):
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
         actor_h = model.initial_actor_hidden(()) if model.actor_memory else None
@@ -452,7 +483,7 @@ def _evaluate(
             found_metric = info.get("target_found_fraction", info["global_target_found"])
             ep_found = max(float(ep_found), float(found_metric))
             ep_rewards.append(np.array(rew))
-            
+
             ep_metrics["r_explor"].append(float(info["r_coverage"]))
             ep_metrics["r_gap"].append(float(info["r_chain_gap"]))
             ep_metrics["r_coll"].append(float(info["r_collision"]))
@@ -473,9 +504,10 @@ def _evaluate(
                 ep_metrics["obs"].append(ep_metrics["obs"][-1])
                 break
 
+        final_metrics = {k: np.array(v) for k, v in ep_metrics.items()}
         all_states.append(ep_states)
         all_rewards.append(ep_rewards)
-        all_metrics.append({k: np.array(v) for k, v in ep_metrics.items()})
+        all_metrics.append(final_metrics)
         total_ret     += ep_ret
         total_len     += ep_len
         total_gap     += ep_gap
@@ -483,15 +515,130 @@ def _evaluate(
         total_success += float(ep_success)
         total_found   += float(ep_found)
 
-    n = num_episodes
+        # Fire per-episode callback (used for streaming selective renders)
+        if episode_callback is not None:
+            stop = episode_callback(ep_idx, ep_success, ep_states, ep_rewards, final_metrics)
+            if stop:
+                break
+
+    n = max(1, len(all_states))
     return (
         all_states, all_rewards, all_metrics,
-        total_ret / num_episodes,
-        total_len / num_episodes,
-        total_gap / num_episodes,
-        total_prog_pct / num_episodes,
-        total_success / num_episodes,
-        total_found / num_episodes
+        total_ret / n,
+        total_len / n,
+        total_gap / n,
+        total_prog_pct / n,
+        total_success / n,
+        total_found / n,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Selective eval render callback factory
+# ---------------------------------------------------------------------------
+
+def _make_selective_eval_callback(
+    n_success:    int,
+    n_fail:       int,
+    out_dir:      Path,
+    ckpt_name:    str,
+    renderer:     str,
+    cfg,
+) -> Callable:
+    """
+    Returns a closure for use as episode_callback in _evaluate().
+
+    Behaviour per episode
+    ---------------------
+    * success=True  and rendered_success < n_success  → render with SUCCESS_ prefix
+    * success=False and rendered_fail    < n_fail      → render with FAIL_ prefix
+    * otherwise                                        → skip rendering
+    Returns True (early-exit signal) when both buckets are full.
+
+    Note: both n_success=0 and n_fail=0 is valid — episodes are computed and
+    counted but nothing is rendered (useful for stats-only mode).
+    """
+    rendered_success     = [0]
+    rendered_fail        = [0]
+    cumulative_successes = [0]
+
+    def callback(ep_idx: int, success: bool, ep_states, ep_rewards, ep_metrics) -> bool:
+        nonlocal rendered_success, rendered_fail, cumulative_successes
+
+        if success:
+            cumulative_successes[0] += 1
+
+        should_render = False
+        prefix = ""
+
+        if success and rendered_success[0] < n_success:
+            should_render = True
+            prefix = "SUCCESS_"
+        elif not success and rendered_fail[0] < n_fail:
+            should_render = True
+            prefix = "FAIL_"
+
+        # Calculate running stats
+        total_eps = ep_idx + 1
+        success_rate = (cumulative_successes[0] / total_eps) * 100.0
+        steps = len(ep_states)
+        ep_ret = float(ep_metrics["r_total"].sum())
+
+        status_str = f"Ep {ep_idx:>2}: success={str(success):<5} steps={steps:>3} return={ep_ret:>7.1f} | Success Rate={success_rate:>5.1f}% ({cumulative_successes[0]}/{total_eps})"
+
+        if should_render:
+            if success:
+                rendered_success[0] += 1
+            else:
+                rendered_fail[0] += 1
+
+            ep_num = rendered_success[0] + rendered_fail[0] - 1
+            stem = f"{prefix}{ckpt_name}_ep{ep_num:02d}"
+            render_status = f"Render: {rendered_success[0]}/{n_success} Success, {rendered_fail[0]}/{n_fail} Fail"
+
+            print(f"  [eval] {status_str} | {render_status} | RENDERED {stem}.mp4")
+
+            render_eval_video(
+                ep_states  = ep_states,
+                ep_rewards = ep_rewards,
+                ep_metrics = ep_metrics,
+                cfg        = cfg,
+                out_dir    = out_dir,
+                filename_stem = stem,
+                renderer   = renderer,
+            )
+        else:
+            reason = "Bucket Full" if (success and n_success > 0) or (not success and n_fail > 0) else "Render Target is 0"
+            render_status = f"Render: {rendered_success[0]}/{n_success} Success, {rendered_fail[0]}/{n_fail} Fail"
+            print(f"  [eval] {status_str} | {render_status} | SKIPPED ({reason})")
+
+        # Stop early if both buckets are full
+        buckets_full = (rendered_success[0] >= n_success) and (rendered_fail[0] >= n_fail)
+        return buckets_full
+
+    return callback
+
+
+# ---------------------------------------------------------------------------
+# Utility: print eval stats summary
+# ---------------------------------------------------------------------------
+
+def _print_eval_stats(
+    label: str,
+    num_computed: int,
+    mean_ret: float,
+    mean_len: float,
+    mean_prog: float,
+    success_rate: float,
+    found_rate: float,
+) -> None:
+    print(
+        f"  [{label}] episodes={num_computed}  "
+        f"ep_return={mean_ret:.2f}  "
+        f"chain={mean_prog:.1f}%  "
+        f"success={success_rate:.1%}  "
+        f"found={found_rate:.1%}  "
+        f"ep_len={mean_len:.0f}"
     )
 
 
@@ -529,6 +676,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     N         = int(cfg.env.num_agents)
     E         = int(cfg.training.num_envs)
     T         = int(cfg.training.num_steps)
+    MB        = int(cfg.training.num_minibatches)
     max_steps = int(cfg.env.max_steps)
     total_ts  = int(cfg.training.total_timesteps)
     n_updates = total_ts // (E * T)
@@ -536,18 +684,27 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     act_dim   = compute_action_dim(cfg)
     max_force = float(cfg.env.max_force)
 
+    transitions_per_mb  = (E * T) // MB
+    estimated_vram_gib  = transitions_per_mb * 0.00063
+
     print(f"  Devices          : {jax.devices()}")
-    print(f"  critic_type      : {critic_type}")
-    print(f"  actor_memory     : {actor_memory}")
-    print(f"  critic_memory    : {critic_memory}")
+    print()
     print(f"  num_agents N     : {N}")
+    print(f"  obs_dim          : {obs_dim}")
+    print(f"  max_force        : {max_force}")
+    print()
+    print(f"  max_steps        : {max_steps}")
     print(f"  num_envs E       : {E}")
     print(f"  rollout T        : {T}")
-    print(f"  max_steps        : {max_steps}")
-    print(f"  obs_dim          : {obs_dim}")
-    print(f"  max_force        : {max_force}  (actor outputs [-1,1], scaled at env boundary)")
+    print(f"  num_minibatches  : {MB}")
+    print(f"  transitions/mb   : {transitions_per_mb:,}")
+    print(f"  allocating       : {estimated_vram_gib:.2f}GiB")
+    print()
     print(f"  actor_layers     : {cfg.network.actor_num_layers}")
+    print(f"  actor_memory     : {actor_memory}")
     print(f"  critic_layers    : {cfg.network.num_layers}")
+    print(f"  critic_memory    : {critic_memory}")
+    print()
     print(f"  ppo updates      : {n_updates:,}  ({total_ts:,} total timesteps)")
     print()
 
@@ -641,7 +798,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     cfg_run_name = cfg.logging.get("run_name", None)
     use_ts = cfg.logging.get("use_timestamp_postfix", False)
-    
+
     if not cfg_run_name:
         run_name = f"run_{ts}"
     else:
@@ -649,10 +806,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     log_root = Path(cfg.logging.get("log_dir", "outputs")).absolute()
     run_dir  = log_root / run_name
-    ckpt_dir  = run_dir / "checkpoints"
-    video_dir = run_dir / "videos"
+    ckpt_dir       = run_dir / "checkpoints"
+    train_video_dir = run_dir / "videos" / "train"   # mid-training evals
+    eval_video_dir  = run_dir / "videos" / "eval"    # final / early-exit evals
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    video_dir.mkdir(parents=True, exist_ok=True)
+    train_video_dir.mkdir(parents=True, exist_ok=True)
+    eval_video_dir.mkdir(parents=True, exist_ok=True)
 
     # Update config with resolved world dimensions for the snapshot
     OmegaConf.set_readonly(cfg, False)
@@ -668,29 +827,37 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     if wandb_run:
         print(f"  W&B run      : {wandb_run.url}")
 
-    # ── Render setup ──────────────────────────────────────────────────────
-    eval_video  = bool(cfg.logging.get("eval_video", True))
-    save_model  = bool(cfg.logging.get("save_model", True))
-    async_video = cfg.logging.get("async_video", False)
+    # ── Renderer config ───────────────────────────────────────────────────
+    eval_video   = bool(cfg.logging.get("eval_video", True))
+    save_model   = bool(cfg.logging.get("save_model", True))
+    is_benchmark = bool(cfg.logging.get("benchmark_mode", False))
+
+    train_eval_renderer = str(cfg.visualize.get("train_eval_renderer", "fast"))
+    final_eval_renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))
+    # is_benchmark forces fast rendering everywhere regardless of config
+    effective_train_renderer = "fast" if is_benchmark else train_eval_renderer
+    effective_final_renderer = "fast" if is_benchmark else final_eval_renderer
+
+    # Selective render config
+    selective_eval_render    = bool(cfg.visualize.get("selective_eval_render", False))
+    eval_render_videos       = int(cfg.visualize.get("eval_render_videos", 1))
+    eval_max_compute_episodes = int(cfg.visualize.get("eval_max_compute_episodes", 50))
+    eval_render_successes    = int(cfg.visualize.get("eval_render_successes", 3))
+    eval_render_failures     = int(cfg.visualize.get("eval_render_failures", 3))
+
     if not save_model:
         print("  [ckpt] Checkpoint saving disabled")
-    if eval_video and async_video:
-        render_worker = VideoRenderWorker(cfg, video_dir, wandb_run)
-        render_worker.start()
-    elif not eval_video:
+    if not eval_video:
         print("  [render] Eval video rendering disabled")
-        render_worker = None
     else:
-        print("  [render] Sequential mode (blocking training during render)")
-        render_worker = None
+        mode_str = "selective" if selective_eval_render else "legacy"
+        print(f"  [render] Sequential mode | train={effective_train_renderer} | final={effective_final_renderer} | eval_mode={mode_str}")
 
     # ── Training loop ─────────────────────────────────────────────────────
-    video_every = int(cfg.logging.get("video_freq", 50))
+    eval_every  = int(cfg.logging.get("eval_freq", cfg.logging.get("video_freq", 30) or 30))
     num_ckpt    = int(cfg.logging.get("num_checkpoints", 20))
     ckpt_every  = max(1, n_updates // num_ckpt)
-    eval_eps    = int(cfg.logging.get("eval_episodes", 10))
     log_every   = max(1, n_updates // 200)
-    is_benchmark = bool(cfg.logging.get("benchmark_mode", False))
 
     # ── Persistent Accumulators & Windows ────────────────────────────────
     ep_trackers = {
@@ -701,17 +868,20 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         "gap":     np.zeros(E, dtype=np.float32),
     }
 
-    eval_render_idx = 0
-
     # Sliding window for stable logging metrics
-    from collections import deque
     window_ret  = deque(maxlen=2000)
     window_len  = deque(maxlen=2000)
     window_succ = deque(maxlen=2000)
     window_fnd  = deque(maxlen=2000)
     window_gap  = deque(maxlen=2000)
     window_prog_pct = deque(maxlen=2000)
-    
+
+    # Sliding window for evaluation heatmaps
+    window_target_pos = deque(maxlen=2000)
+    window_target_success = deque(maxlen=2000)
+    window_target_delivered = deque(maxlen=2000)
+    window_target_visually_found = deque(maxlen=2000)
+
     window_r_cov   = deque(maxlen=2000)
     window_r_gap   = deque(maxlen=2000)
     window_r_coll  = deque(maxlen=2000)
@@ -719,11 +889,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_r_found = deque(maxlen=2000)
     window_r_succ  = deque(maxlen=2000)
     window_cov     = deque(maxlen=2000)
-    
+
     completed_eps_count = 0
 
     t_start = time.perf_counter()
-    
+
     try:
         for update in range(1, n_updates + 1):
             master_key, collect_key = jax.random.split(master_key)
@@ -734,7 +904,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              last_values, last_dones, actor_h, critic_h, rollout_last_dones,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
-             raw_cov) = _collect_rollout_mappo(
+             raw_cov,
+             raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones,
@@ -751,7 +922,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_fnd.extend(raw_found)
                 window_gap.extend(raw_gap)
                 window_prog_pct.extend(raw_prog_pct)
-                
+
+                window_target_pos.extend(raw_target_pos)
+                window_target_success.extend(raw_target_success)
+                window_target_delivered.extend(raw_target_delivered)
+                window_target_visually_found.extend(raw_target_visually_found)
+
                 window_r_cov.extend(raw_r_cov)
                 window_r_gap.extend(raw_r_gap)
                 window_r_coll.extend(raw_r_coll)
@@ -786,43 +962,26 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 else:
                     print("  [ckpt-early] skipped (save_model=false)")
 
-                # ── Eval + video on early exit ──
-                master_key, eval_key = jax.random.split(master_key)
-                (ep_states_list, ep_rewards_list, all_metrics_list,
-                 eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
-                    model, reset_s,
-                    jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
-                    cfg, eval_key, eval_eps,
-                )
-
+                # ── Early-exit eval + video (same logic as final eval) ────────
                 if eval_video:
-                    # Render sequential slow render of the first episode to save local premium video
-                    ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    vid_path = str((video_dir / f"eval_early_{update:06d}_{ts_now}.mp4").absolute())
-                    from types import SimpleNamespace
-                    stacked = jax.tree.map(lambda *xs: np.array(np.stack(xs)), *ep_states_list[0])
-                    traj_ns = SimpleNamespace(**{f.name: getattr(stacked, f.name) for f in dataclasses.fields(stacked)})
-                    
-                    print(f"  [render] Generating early exit premium video -> {vid_path}")
-                    render_video(
-                        traj_ns, cfg,
-                        filename     = vid_path,
-                        renderer     = "fast" if is_benchmark else "slow",
-                        rewards      = np.array(ep_rewards_list[0]),
-                        extra_metrics= all_metrics_list[0],
+                    master_key, eval_key = jax.random.split(master_key)
+                    _run_eval_with_render(
+                        model=model, reset_s=reset_s, env_step=env_step,
+                        compute_obs=compute_obs, compute_reward=compute_reward,
+                        cfg=cfg, eval_key=eval_key,
+                        out_dir=eval_video_dir,
+                        ckpt_name=f"early_{update:06d}",
+                        renderer=effective_final_renderer,
+                        selective=selective_eval_render,
+                        eval_render_videos=eval_render_videos,
+                        eval_max_compute=eval_max_compute_episodes,
+                        n_success=eval_render_successes,
+                        n_fail=eval_render_failures,
+                        wandb_run=wandb_run,
+                        steps_done=steps_done,
+                        max_steps=max_steps,
+                        label="eval-early",
                     )
-
-                if wandb_run:
-                    import wandb
-                    wandb.log({
-                        "eval/ep_return":           eval_ret,
-                        "eval/ep_length":           eval_len,
-                        "eval/chain_gap_dist":      eval_gap,
-                        "eval/chain_progress_pct":  eval_prog_pct,
-                        "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-                        "eval/success_rate":        eval_success,
-                        "eval/target_found":        eval_found,
-                    }, step=steps_done)
 
                 return early_ckpt_str
 
@@ -846,9 +1005,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 _red  = f"{(1.0 - (np.mean(window_len) / max_steps)) * 100.0:>5.1f}%" if window_full else "  ---%"
                 _s = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
                 _f = f"{np.mean(window_fnd):>5.1%}"  if window_full else " ----"
-                
+
                 now_str = datetime.now().strftime("%H:%M:%S")
-                
+
                 # Calculate ETA
                 time_per_update = elapsed / update
                 eta_sec = int(time_per_update * (n_updates - update))
@@ -892,7 +1051,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "train/ep_length_reduction": (1.0 - (float(np.mean(window_len)) / max_steps)) * 100.0,
                         "train/map_coverage_pct":   float(np.mean(window_cov)) * 100.0,
                         "train/episodes_completed": completed_eps_count,
-                        
+
                         "rewards/exploration":      float(np.mean(window_r_cov)),
                         "rewards/chain_gap":        float(np.mean(window_r_gap)),
                         "rewards/collision":        float(np.mean(window_r_coll)),
@@ -902,94 +1061,188 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     })
                 wandb.log(logs, step=steps_done)
 
-            # ── Eval + async video ────────────────────────────────────────────
-            if update % video_every == 0 or update == n_updates:
+            # ── Mid-training eval + single video ─────────────────────────────
+            if update % eval_every == 0 and update != n_updates:
                 master_key, eval_key = jax.random.split(master_key)
                 (ep_states_list, ep_rewards_list, all_metrics_list,
                  eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
                     model, reset_s,
                     jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
-                    cfg, eval_key, eval_eps,
+                    cfg, eval_key, num_episodes=1,
                 )
 
-                if eval_video and update == n_updates:
-                    for idx in range(0, eval_eps, 2):
-                        if async_video and render_worker:
-                            render_worker.submit(
-                                ep_states     = ep_states_list[idx],
-                                ep_rewards    = ep_rewards_list[idx],
-                                update        = update,
-                                eval_ret      = eval_ret,
-                                extra_metrics = all_metrics_list[idx],
-                                renderer      = "fast" if is_benchmark else "slow",
-                            )
-                        else:
-                            # Sequential render (blocking)
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            vid_path = str((video_dir / f"eval_update_{update:06d}_{ts}.mp4").absolute())
-                            from types import SimpleNamespace
-                            # Package the trajectory for the renderer
-                            stacked = jax.tree.map(lambda *xs: np.array(np.stack(xs)), *ep_states_list[idx])
-                            traj_ns = SimpleNamespace(**{f.name: getattr(stacked, f.name) for f in dataclasses.fields(stacked)})
-                            
-                            render_video(
-                                traj_ns, cfg,
-                                filename     = vid_path,
-                                renderer     = "fast" if is_benchmark else "slow",
-                                rewards      = np.array(ep_rewards_list[idx]),
-                                extra_metrics= all_metrics_list[idx],
-                            )
-                elif eval_video:
-                    render_idx = eval_render_idx
-                    eval_render_idx = (eval_render_idx + 1) % eval_eps
-                    
-                    if async_video and render_worker:
-                        render_worker.submit(
-                            ep_states     = ep_states_list[render_idx],
-                            ep_rewards    = ep_rewards_list[render_idx],
-                            update        = update,
-                            eval_ret      = eval_ret,
-                            extra_metrics = all_metrics_list[render_idx],
-                            renderer      = "fast",
-                        )
-                    else:
-                        # Sequential render (blocking)
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        vid_path = str((video_dir / f"eval_update_{update:06d}_{ts}.mp4").absolute())
-                        from types import SimpleNamespace
-                        stacked = jax.tree.map(lambda *xs: np.array(np.stack(xs)), *ep_states_list[render_idx])
-                        traj_ns = SimpleNamespace(**{f.name: getattr(stacked, f.name) for f in dataclasses.fields(stacked)})
-                        
-                        render_video(
-                            traj_ns, cfg,
-                            filename     = vid_path,
-                            renderer     = "fast",
-                            rewards      = np.array(ep_rewards_list[render_idx]),
-                            extra_metrics= all_metrics_list[render_idx],
-                        )
+                eval_timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
 
-                if wandb_run:
-                    import wandb
-                    wandb.log({
-                        "eval/ep_return":           eval_ret,
-                        "eval/ep_length":           eval_len,
-                        "eval/chain_gap_dist":      eval_gap,
-                        "eval/chain_progress_pct":  eval_prog_pct,
-                        "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-                        "eval/success_rate":        eval_success,
-                        "eval/target_found":        eval_found,
-                    }, step=steps_done)
+                if eval_video:
+                    stem = f"{eval_timestamp}_eval_update_{update:06d}"
+                    render_eval_video(
+                        ep_states  = ep_states_list[0],
+                        ep_rewards = ep_rewards_list[0],
+                        ep_metrics = all_metrics_list[0],
+                        cfg        = cfg,
+                        out_dir    = train_video_dir,
+                        filename_stem = stem,
+                        renderer   = effective_train_renderer,
+                    )
 
                 print(
-                    f"  [eval] update={update}  "
+                    f"  [eval-train] update={update}  "
                     f"steps={steps_done:,}  "
                     f"ep_return={eval_ret:.2f}  "
                     f"chain={eval_prog_pct:.1f}%  "
-                    f"success={eval_success:.1%}  "
-                    f"→ {'render queued' if eval_video else 'render disabled'}"
+                    f"success={eval_success:.1%}"
                 )
-                
-                # Small sleep to allow XLA to settle after the heavy eval/render spike
+
+                # Generate mid-run evaluation heatmaps if toggled in LoggingConfig
+                generate_any_heatmap = bool(
+                    cfg.logging.get("eval_failed_chain_heatmap", False) or
+                    cfg.logging.get("eval_not_delivered_heatmap", False) or
+                    cfg.logging.get("eval_not_visually_found_heatmap", False)
+                )
+
+                if generate_any_heatmap and len(window_target_success) > 0:
+                    try:
+                        # Load map data once (locally imported to prevent circular dependencies)
+                        from training.evaluate_pipeline import (
+                            load_map_data,
+                            render_and_save_failed_chain_heatmap,
+                            render_and_save_not_found_heatmap,
+                            render_and_save_merged_heatmap,
+                            MERGE_TARGET_FOUND_HEATMAPS
+                        )
+                        _, map_data, map_def = load_map_data(cfg)
+                        
+                        target_pos_arr = np.array(window_target_pos)
+                        target_success_arr = np.array(window_target_success)
+                        target_delivered_arr = np.array(window_target_delivered)
+                        target_visually_found_arr = np.array(window_target_visually_found)
+                        
+                        n_completed = len(window_target_success)
+                        run_timestamp = f"{eval_timestamp}_update_{update:06d}"
+                        
+                        # 1. Failed Chain Heatmap
+                        if cfg.logging.get("eval_failed_chain_heatmap", False):
+                            failed_positions = target_pos_arr[~target_success_arr]
+                            success_rate = (np.sum(target_success_arr) / n_completed * 100.0)
+                            num_fail = len(failed_positions)
+                            _ = render_and_save_failed_chain_heatmap(
+                                failed_positions=failed_positions,
+                                map_data=map_data,
+                                map_def=map_def,
+                                success_rate=success_rate,
+                                num_fail=num_fail,
+                                run_dir=run_dir,
+                                video_dir=train_video_dir,
+                                run_timestamp=run_timestamp,
+                                save_csv=False,
+                                save_png=True,
+                                total_episodes=n_completed
+                            )
+                            
+                        # 2 & 3. Merged or Separate Target Found/Delivered Heatmaps
+                        if MERGE_TARGET_FOUND_HEATMAPS:
+                            if cfg.logging.get("eval_not_delivered_heatmap", False) or cfg.logging.get("eval_not_visually_found_heatmap", False):
+                                not_delivered_positions = target_pos_arr[~target_delivered_arr]
+                                delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
+                                num_not_delivered = len(not_delivered_positions)
+
+                                not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
+                                visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
+                                num_not_visually_found = len(not_visually_found_positions)
+
+                                render_and_save_merged_heatmap(
+                                    not_delivered_positions=not_delivered_positions,
+                                    not_visually_found_positions=not_visually_found_positions,
+                                    map_data=map_data,
+                                    map_def=map_def,
+                                    delivered_rate=delivered_rate,
+                                    visually_found_rate=visually_found_rate,
+                                    num_not_delivered=num_not_delivered,
+                                    num_not_visually_found=num_not_visually_found,
+                                    run_dir=run_dir,
+                                    video_dir=train_video_dir,
+                                    run_timestamp=run_timestamp,
+                                    total_episodes=n_completed
+                                )
+                        else:
+                            # 2. Delivered-to-base Heatmap
+                            if cfg.logging.get("eval_not_delivered_heatmap", False):
+                                not_delivered_positions = target_pos_arr[~target_delivered_arr]
+                                delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
+                                num_not_delivered = len(not_delivered_positions)
+                                render_and_save_not_found_heatmap(
+                                    not_found_positions=not_delivered_positions,
+                                    map_data=map_data,
+                                    map_def=map_def,
+                                    found_rate=delivered_rate,
+                                    num_not_found=num_not_delivered,
+                                    run_dir=run_dir,
+                                    video_dir=train_video_dir,
+                                    run_timestamp=run_timestamp,
+                                    filename_prefix="not_delivered_targets_heatmap",
+                                    label="Not Delivered",
+                                    total_episodes=n_completed
+                                )
+                                
+                            # 3. Visually Found Heatmap
+                            if cfg.logging.get("eval_not_visually_found_heatmap", False):
+                                not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
+                                visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
+                                num_not_visually_found = len(not_visually_found_positions)
+                                render_and_save_not_found_heatmap(
+                                    not_found_positions=not_visually_found_positions,
+                                    map_data=map_data,
+                                    map_def=map_def,
+                                    found_rate=visually_found_rate,
+                                    num_not_found=num_not_visually_found,
+                                    run_dir=run_dir,
+                                    video_dir=train_video_dir,
+                                    run_timestamp=run_timestamp,
+                                    filename_prefix="not_visually_found_targets_heatmap",
+                                    label="Not Visually Found",
+                                    total_episodes=n_completed
+                                )
+                    except Exception as heatmap_err:
+                        print(f"  [heatmap-error] Failed to render evaluation heatmaps: {heatmap_err}")
+
+                # TODO: Mid-training eval W&B metrics are based on a single episode and carry
+                #       little statistical weight. Replace with a proper multi-episode test
+                #       harness before re-enabling.
+                # if wandb_run:
+                #     import wandb
+                #     wandb.log({
+                #         "eval/ep_return":           eval_ret,
+                #         "eval/ep_length":           eval_len,
+                #         "eval/chain_gap_dist":      eval_gap,
+                #         "eval/chain_progress_pct":  eval_prog_pct,
+                #         "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
+                #         "eval/success_rate":        eval_success,
+                #         "eval/target_found":        eval_found,
+                #     }, step=steps_done)
+
+                # Small sleep to allow XLA to settle after the eval/render spike
+                time.sleep(1.0)
+
+            # ── Final eval (last update) ──────────────────────────────────────
+            if update == n_updates and eval_video:
+                master_key, eval_key = jax.random.split(master_key)
+                _run_eval_with_render(
+                    model=model, reset_s=reset_s, env_step=env_step,
+                    compute_obs=compute_obs, compute_reward=compute_reward,
+                    cfg=cfg, eval_key=eval_key,
+                    out_dir=eval_video_dir,
+                    ckpt_name=f"update_{update:06d}",
+                    renderer=effective_final_renderer,
+                    selective=selective_eval_render,
+                    eval_render_videos=eval_render_videos,
+                    eval_max_compute=eval_max_compute_episodes,
+                    n_success=eval_render_successes,
+                    n_fail=eval_render_failures,
+                    wandb_run=wandb_run,
+                    steps_done=steps_done,
+                    max_steps=max_steps,
+                    label="eval-final",
+                )
                 time.sleep(1.0)
 
             # ── Checkpoint ────────────────────────────────────────────────────
@@ -1002,7 +1255,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 _, state_dict = nnx.split(model)
                 checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                 checkpointer.save(str(ckpt_path), args=ocp.args.StandardSave(state_dict))
-                print(f"  [ckpt] saved → {ckpt_path}")
+                print(f"  [ckpt] saved -> {ckpt_path}")
 
         total_time = time.perf_counter() - t_start
         print(f"\n  Training complete in {total_time:.1f}s  ({total_time/60:.1f} min)")
@@ -1017,14 +1270,104 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             _, state_dict = nnx.split(model)
             checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
             checkpointer.save(str(final_ckpt), args=ocp.args.StandardSave(state_dict))
-            print(f"  [ckpt-final] saved → {final_ckpt}")
+            print(f"  [ckpt-final] saved -> {final_ckpt}")
             return str(final_ckpt)
-            
+
         return ""
-        
+
     finally:
-        if render_worker:
-            render_worker.shutdown(wait=True)
         if wandb_run:
             import wandb
             wandb.finish()
+
+
+# ---------------------------------------------------------------------------
+# Shared eval + render helper (used for both final and early-exit evals)
+# ---------------------------------------------------------------------------
+
+def _run_eval_with_render(
+    model, reset_s, env_step, compute_obs, compute_reward,
+    cfg, eval_key,
+    out_dir: Path,
+    ckpt_name: str,
+    renderer: str,
+    selective: bool,
+    eval_render_videos: int,
+    eval_max_compute: int,
+    n_success: int,
+    n_fail: int,
+    wandb_run,
+    steps_done: int,
+    max_steps: int,
+    label: str = "eval",
+) -> None:
+    """Run evaluation and render videos to out_dir. Handles both legacy and selective modes."""
+
+    if selective:
+        # Selective mode: stream episodes, fill SUCCESS_/FAIL_ buckets first-come-first-served
+        callback = _make_selective_eval_callback(
+            n_success = n_success,
+            n_fail    = n_fail,
+            out_dir   = out_dir,
+            ckpt_name = ckpt_name,
+            renderer  = renderer,
+            cfg       = cfg,
+        )
+        (_, _, _,
+         eval_ret, eval_len, eval_gap, eval_prog_pct,
+         eval_success, eval_found) = _evaluate(
+            model, reset_s,
+            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+            cfg, eval_key,
+            num_episodes=eval_max_compute,
+            episode_callback=callback,
+        )
+        n_computed = callback.__closure__[0].cell_contents[0] + callback.__closure__[1].cell_contents[0]
+        # Note: n_computed above is approximate (only rendered counts); full episode count from _evaluate
+    else:
+        # Legacy mode: compute and render eval_render_videos episodes sequentially
+        (ep_states_list, ep_rewards_list, all_metrics_list,
+         eval_ret, eval_len, eval_gap, eval_prog_pct,
+         eval_success, eval_found) = _evaluate(
+            model, reset_s,
+            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+            cfg, eval_key,
+            num_episodes=eval_render_videos,
+        )
+        for idx in range(eval_render_videos):
+            stem = f"eval_{ckpt_name}_ep{idx:02d}"
+            render_eval_video(
+                ep_states  = ep_states_list[idx],
+                ep_rewards = ep_rewards_list[idx],
+                ep_metrics = all_metrics_list[idx],
+                cfg        = cfg,
+                out_dir    = out_dir,
+                filename_stem = stem,
+                renderer   = renderer,
+            )
+
+    _print_eval_stats(
+        label=label,
+        num_computed=eval_max_compute if selective else eval_render_videos,
+        mean_ret=eval_ret,
+        mean_len=eval_len,
+        mean_prog=eval_prog_pct,
+        success_rate=eval_success,
+        found_rate=eval_found,
+    )
+
+    # TODO: Mid-training eval W&B metrics are based on very few episodes and carry
+    #       little statistical weight. Replace with a proper multi-episode test
+    #       harness before re-enabling. For now only training window metrics are
+    #       logged to W&B.
+    # if wandb_run:
+    #     import wandb
+    #     wandb.log({
+    #         "eval/ep_return":           eval_ret,
+    #         "eval/ep_length":           eval_len,
+    #         "eval/chain_gap_dist":      eval_gap,
+    #         "eval/chain_progress_pct":  eval_prog_pct,
+    #         "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
+    #         "eval/success_rate":        eval_success,
+    #         "eval/target_found":        eval_found,
+    #     }, step=steps_done)

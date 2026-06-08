@@ -246,8 +246,12 @@ class MapDefinition:
         for seg in all_segments:
             if len(seg) == 4:
                 x1, y1, x2, y2 = seg
-                # Snap to pixels/meters (width=1 ensures 1m thick walls)
-                draw.line([x1*sx, (self.height - y1)*sy, x2*sx, (self.height - y2)*sy], fill=0, width=1)
+                # Clamp coordinates to [0, W_px - 1] and [0, H_px - 1] to prevent clipping at boundaries
+                cx1 = min(max(x1 * sx, 0.0), W_px - 1)
+                cy1 = min(max((self.height - y1) * sy, 0.0), H_px - 1)
+                cx2 = min(max(x2 * sx, 0.0), W_px - 1)
+                cy2 = min(max((self.height - y2) * sy, 0.0), H_px - 1)
+                draw.line([cx1, cy1, cx2, cy2], fill=0, width=1)
 
         # In current SwarmEcho world (physics.py), occupancy_grid[ix, iy]
         # is accessed where ix is world-x, iy is world-y index.

@@ -73,3 +73,19 @@ uv run python src/training/curriculum.py
 # Run a custom sequence of levels
 uv run python src/training/curriculum.py levels=B02,B03,B04
 ```
+
+---
+
+## Spatial Failure Analysis Pipeline
+
+### Run Evaluation Sweep & Generate Heatmaps
+Simulate parallel environments (4096 by default) to sweep for failure coordinates and generate heatmaps (failed chain targets, and merged or individual target-not-found heatmaps):
+```bash
+uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000
+```
+
+### Re-simulate & Render Failed Targets from CSV
+Extract the failed target positions from a generated CSV file and render individual simulation rollout videos for debugging (limiting to the first 5 in this example):
+```bash
+uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000 --render-failed-csv=5
+```
