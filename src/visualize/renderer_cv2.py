@@ -93,6 +93,8 @@ class _FrameData(NamedTuple):
     active:        np.ndarray | None  # (N,) bool
     collides:      np.ndarray | None  # (N,) bool
     occ_grid:      np.ndarray | None  # (W_px, H_px) bool
+    comm_occ_grid: np.ndarray | None  # communication blockers; mesh walls are transparent
+    mesh_walls:    np.ndarray | None  # (M, 4), drawn blue for communication-transparent blockers
     box_width:     float
     box_height:    float
     extra_metrics: dict[str, any]
@@ -330,6 +332,7 @@ def _draw_frame_cv2(
     # For now, we try to get it from the state if we were to add it, or
     # we'll have to load it from the map.
     occ_grid = getattr(frame, "occ_grid", None)
+    comm_occ_grid = getattr(frame, "comm_occ_grid", occ_grid)
     if occ_grid is not None:
         wall_img = np.zeros((occ_grid.shape[1], occ_grid.shape[0]), dtype=np.uint8)
         # grid is (W, H), opencv wants (H, W)
@@ -338,6 +341,12 @@ def _draw_frame_cv2(
         mask = wall_full > 0
         roi = img[lay.mt:lay.mt+lay.ph, lay.ml:lay.ml+lay.pw]
         roi[mask] = 50 # Solid walls
+
+    mesh_walls = getattr(frame, "mesh_walls", None)
+    if mesh_walls is not None:
+        mesh_width = max(2, int(round(lay.scale)))
+        for x1, y1, x2, y2 in np.asarray(mesh_walls):
+            cv2.line(img, lay.w2p(float(x1), float(y1)), lay.w2p(float(x2), float(y2)), (235, 165, 14), mesh_width, cv2.LINE_AA)
 
     # Axis labels removed per request
 
@@ -407,11 +416,11 @@ def _draw_frame_cv2(
                 threshold = comm_r
 
             if dists[i, j] <= threshold:
-                if occ_grid is not None:
-                    # Wall check
+                if comm_occ_grid is not None:
+                    # Communication raycast: mesh walls are transparent only for comm.
                     p1_grid = ents[i] / cell_size
                     p2_grid = ents[j] / cell_size
-                    if _dda_raycast_np(p1_grid, p2_grid, occ_grid):
+                    if _dda_raycast_np(p1_grid, p2_grid, comm_occ_grid):
                         adj[i, j] = adj[j, i] = True
                 else:
                     adj[i, j] = adj[j, i] = True
@@ -883,6 +892,8 @@ def render_video_cv2(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    comm_occ_grid_static = None
+    mesh_walls_static = None
     anti_target_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
@@ -890,6 +901,8 @@ def render_video_cv2(
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = map_def.occupancy_grid
+            comm_occ_grid_static = map_def.communication_occupancy_grid
+            mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -908,6 +921,8 @@ def render_video_cv2(
             active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
             collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
             occ_grid      = occ_grid_static,
+            comm_occ_grid = comm_occ_grid_static,
+            mesh_walls    = mesh_walls_static,
             box_width     = float(traj_cpu.box_width[t]),
             box_height    = float(traj_cpu.box_height[t]),
             extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},

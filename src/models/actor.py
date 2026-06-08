@@ -224,14 +224,130 @@ class RecurrentDecentralizedActor(nnx.Module):
         hidden_dim:       int,
         actor_num_layers: int,
         rngs:             nnx.Rngs,
+        memory_comm_enabled: bool = False,
+        memory_comm_gradient_mode: str = "rial",
+        memory_comm_variant: str = "cross_attention_residual",
+        memory_comm_num_heads: int = 4,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
+        self.memory_comm_enabled = memory_comm_enabled
+        self.memory_comm_gradient_mode = memory_comm_gradient_mode
+        self.memory_comm_variant = memory_comm_variant
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
         self.gru = GRUCell(hidden_dim, hidden_dim, rngs)
-        self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+        decision_dim = hidden_dim * 2 if memory_comm_variant == "cross_attention_concat" else hidden_dim
+        if memory_comm_enabled:
+            self.memory_attention = nnx.MultiHeadAttention(
+                num_heads=memory_comm_num_heads,
+                in_features=hidden_dim,
+                rngs=rngs,
+            )
+        self.policy_trunk = MLP(decision_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
         self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
         self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+
+
+    def _decision_state(
+        self,
+        hidden: jax.Array,
+        comm_mask: jax.Array | None = None,
+        active: jax.Array | None = None,
+        base_memory: jax.Array | None = None,
+        base_memory_mask: jax.Array | None = None,
+        deterministic: bool = True,
+    ) -> jax.Array:
+        """Apply optional receiver-conditioned actor-memory communication."""
+        if not self.memory_comm_enabled:
+            return hidden
+
+        N = hidden.shape[-2]
+        if comm_mask is None:
+            comm_mask = ~jnp.eye(N, dtype=bool)
+        if active is None:
+            active = jnp.ones((N,), dtype=bool)
+        active_pair = active[:, None] & active[None, :]
+        share_mask = comm_mask & active_pair & ~jnp.eye(N, dtype=bool)
+
+        # TODO: Later extension: add an optional sender-side message encoder or bottleneck before transmission. For the first implementation, send the raw post-GRU hidden state and let the receiver-side attention block handle Q/K/V projections internally.
+        kv = jax.lax.stop_gradient(hidden) if self.memory_comm_gradient_mode == "rial" else hidden
+        mask = share_mask
+        if base_memory is not None and base_memory_mask is not None:
+            base_token = base_memory[None, :]
+            kv = jnp.concatenate([kv, base_token], axis=-2)
+            mask = jnp.concatenate([mask, base_memory_mask[:, None] & active[:, None]], axis=-1)
+
+        if self.memory_comm_variant == "self_attention":
+            self_token = hidden
+            kv_self = jax.lax.stop_gradient(self_token) if self.memory_comm_gradient_mode == "rial" else self_token
+            kv = jnp.concatenate([kv_self, kv], axis=-2)
+            self_mask = jnp.eye(N, dtype=bool) & active[:, None]
+            mask = jnp.concatenate([self_mask, mask], axis=-1)
+
+        has_any = jnp.any(mask, axis=-1, keepdims=True)
+        first_key = jnp.arange(mask.shape[-1]) == 0
+        safe_mask = mask | ((~has_any) & first_key[None, :])
+        context = self.memory_attention(
+            hidden,
+            kv,
+            mask=safe_mask,
+            decode=False,
+            deterministic=deterministic,
+        )
+
+        context = jnp.where(has_any, context, jnp.zeros_like(context))
+        if self.memory_comm_variant == "cross_attention_residual":
+            return hidden + context
+        if self.memory_comm_variant == "cross_attention_concat":
+            return jnp.concatenate([hidden, context], axis=-1)
+        if self.memory_comm_variant == "self_attention":
+            return context
+        raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
+
+    def __call_team__(
+        self,
+        obs: jax.Array,
+        hidden: jax.Array,
+        reset: jax.Array | None = None,
+        comm_mask: jax.Array | None = None,
+        active: jax.Array | None = None,
+        base_memory: jax.Array | None = None,
+        base_memory_mask: jax.Array | None = None,
+        deterministic: bool = True,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Team actor pass with optional receiver-conditioned memory attention."""
+        if reset is not None:
+            hidden = jnp.where(reset[..., None], jnp.zeros_like(hidden), hidden)
+        encoded = self.encoder(obs)
+        hidden = self.gru(hidden, encoded)
+        decision_state = self._decision_state(
+            hidden, comm_mask, active, base_memory, base_memory_mask, deterministic
+        )
+        feat = self.policy_trunk(decision_state)
+        mu = self.mu_head(feat)
+        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        return hidden, mu, log_std
+
+    def act_team(
+        self,
+        obs: jax.Array,
+        hidden: jax.Array,
+        keys: jax.Array,
+        reset: jax.Array | None = None,
+        comm_mask: jax.Array | None = None,
+        active: jax.Array | None = None,
+        base_memory: jax.Array | None = None,
+        base_memory_mask: jax.Array | None = None,
+        deterministic: bool = False,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        hidden, mu, log_std = self.__call_team__(
+            obs, hidden, reset, comm_mask, active, base_memory, base_memory_mask, deterministic
+        )
+        std = jnp.exp(log_std)
+        u = jnp.where(deterministic, mu, mu + std * jax.vmap(lambda k: jax.random.normal(k, mu.shape[-1:]))(keys))
+        log_prob = -0.5 * jnp.sum(((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        return hidden, u, log_prob, entropy
 
     def __call__(
         self,
@@ -280,27 +396,41 @@ class RecurrentDecentralizedActor(nnx.Module):
 
     def evaluate_actions_sequence(
         self,
-        obs:          jax.Array,  # (T, B, D)
-        actions:      jax.Array,  # (T, B, A)
-        init_hidden:  jax.Array,  # (B, H)
-        resets:       jax.Array,  # (T, B)
+        obs:          jax.Array,
+        actions:      jax.Array,
+        init_hidden:  jax.Array,
+        resets:       jax.Array,
+        comm_masks:   jax.Array | None = None,
+        actives:      jax.Array | None = None,
+        base_memories: jax.Array | None = None,
+        base_memory_masks: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Replay a rollout sequence for recurrent PPO updates."""
+
+        if self.memory_comm_enabled:
+            def _step(hidden, xs):
+                obs_t, act_t, reset_t, mask_t, active_t, base_mem_t, base_mask_t = xs
+                hidden, mu, log_std = self.__call_team__(
+                    obs_t, hidden, reset_t, mask_t, active_t, base_mem_t, base_mask_t
+                )
+                std = jnp.exp(log_std)
+                log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+                entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+                return hidden, (log_prob, entropy)
+            final_hidden, (log_probs, entropy) = jax.lax.scan(
+                _step,
+                init_hidden,
+                (obs, actions, resets, comm_masks, actives, base_memories, base_memory_masks),
+            )
+            return final_hidden, log_probs, entropy
 
         def _step(hidden, xs):
             obs_t, act_t, reset_t = xs
             hidden, mu, log_std = self(obs_t, hidden, reset_t)
             std = jnp.exp(log_std)
-            log_prob = -0.5 * jnp.sum(
-                ((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi),
-                axis=-1,
-            )
+            log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
             entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
             return hidden, (log_prob, entropy)
 
-        final_hidden, (log_probs, entropy) = jax.lax.scan(
-            _step,
-            init_hidden,
-            (obs, actions, resets),
-        )
+        final_hidden, (log_probs, entropy) = jax.lax.scan(_step, init_hidden, (obs, actions, resets))
         return final_hidden, log_probs, entropy

@@ -67,7 +67,7 @@ def run_mismatch_test():
     validate_config(cfg)
 
     # 2. Initialize env functions
-    env_step, reset, _, (W, H, occ_grid) = make_env_fns(cfg)
+    env_step, reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
     compute_reward = make_reward_fn(cfg)
 
     state = reset(jax.random.PRNGKey(42))

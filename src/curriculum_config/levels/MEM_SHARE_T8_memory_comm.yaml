@@ -1,0 +1,53 @@
+env:
+  map_names: ["memory_share_t_maze_8"]
+  num_agents: 8
+  num_targets: 8
+  num_bases: 1
+  max_steps: 50
+  visual_radius: 8.0
+  comm_radius: 45.0
+  comm_radius_base: 0.01
+  spawn_delay: 0
+  use_random_base_spawn: true
+  use_random_drone_spawn: true
+  target_spawn_method: "map_defined"
+  precover_base_comm: false
+  mem_test_mask_nonlocal_obs: true
+  observe_target_vector: false
+  observe_base_vector: false
+
+training:
+  total_timesteps: 20_000_000
+  num_envs: 4096
+  num_steps: 50
+  num_epochs: 10
+  num_minibatches: 16
+
+reward:
+  exploration_bonus: 0.05
+  target_found_requires_delivery: false
+  target_found_bonus: 0.0
+  finder_bonus: 50.0
+  max_gap_penalty: 0.0
+  success_bonus: 0.0
+  base_proximity_bonus: 0.0
+  target_proximity_bonus: 0.0
+  proximity_penalty: 0.0
+  collision_penalty: 0.1
+  every_reward_global: false
+  only_explor_individual: false
+  only_shortest_path_chain_reward: false
+
+network:
+  critic_type: "agent_centric"
+  actor_memory: true
+  critic_memory: true
+  memory_comm_enabled: true
+  memory_comm_gradient_mode: "dial"
+  memory_comm_variant: "cross_attention_residual"
+  memory_comm_every_k_steps: 1
+  memory_comm_num_heads: 4
+
+logging:
+  eval_freq: 10
+  obs_log: false

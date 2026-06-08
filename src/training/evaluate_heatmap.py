@@ -102,8 +102,8 @@ def main():
     map_name = map_names[0]
 
     # ── Environment ───────────────────────────────────────────────────────
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
-    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
+    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
     compute_reward = make_reward_fn(cfg)
 
     # ── Build Model ───────────────────────────────────────────────────────
@@ -124,6 +124,11 @@ def main():
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
+        memory_comm_variant = str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
     )
 
     # ── Load Checkpoint ───────────────────────────────────────────────────
