@@ -18,10 +18,10 @@ env:
 
 training:
   total_timesteps: 20_000_000
-  num_envs: 4096
+  num_envs: 4000
   num_steps: 50
-  num_epochs: 10
-  num_minibatches: 16
+  num_epochs: 2
+  num_minibatches: 10
 
 reward:
   exploration_bonus: 0.05
@@ -42,12 +42,19 @@ network:
   critic_type: "agent_centric"
   actor_memory: true
   critic_memory: true
-  memory_comm_enabled: true
-  memory_comm_gradient_mode: "dial"
+  memory_comm_enabled: false
+  memory_comm_gradient_mode: "rial"
   memory_comm_variant: "cross_attention_residual"
   memory_comm_every_k_steps: 1
   memory_comm_num_heads: 4
 
+  num_layers:  4    # critic depth
+  actor_num_layers:  4    # actor depth (lighter, separate)
+
 logging:
   eval_freq: 10
   obs_log: false
+  eval_video: true
+  eval_failed_chain_heatmap: false
+  eval_not_delivered_heatmap: false
+  eval_not_visually_found_heatmap: false
