@@ -257,39 +257,75 @@ def _collect_rollout_mappo(
             if model.critic_memory and critic_h is None:
                 critic_h = model.initial_critic_hidden((E_,))
 
-            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
-                return model.rollout_step_recurrent(
-                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
-                    comm_mask=comm_mask_n,
-                    active=active_n,
-                    base_memory=base_memory_n,
-                    base_memory_mask=base_memory_mask_n,
-                )
-
             actor_h_in = actor_h if actor_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
             critic_h_in = critic_h if critic_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
-            raw_adj_b = states.adj_matrix[:, :N_, :N_] if states.adj_matrix.shape[-1] else jnp.zeros((E_, N_, N_), dtype=bool)
-            step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
-            comm_mask_b = raw_adj_b & jnp.asarray(step_share)
-            active_mask_b = states.active
-            base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
-            base_receiver_mask_b = (
-                states.adj_matrix[:, :N_, N_]
-                if states.adj_matrix.shape[-1]
-                else jnp.zeros((E_, N_), dtype=bool)
-            )
-            # Base-memory relay is only offered to drones that do not already know the target.
-            # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
-            base_receiver_mask_b = (
-                base_receiver_mask_b
-                & ~states.target_known[:, :N_]
-                & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
-                & jnp.asarray(step_share)
-            )
-            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
-            )
+
+            if model.actor_memory and model.memory_comm_enabled:
+                def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
+                    return model.rollout_step_recurrent(
+                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                        comm_mask=comm_mask_n,
+                        active=active_n,
+                        base_memory=base_memory_n,
+                        base_memory_mask=base_memory_mask_n,
+                    )
+
+                raw_adj_b = states.adj_matrix[:, :N_, :N_] if states.adj_matrix.shape[-1] else jnp.zeros((E_, N_, N_), dtype=bool)
+                step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
+                comm_mask_b = raw_adj_b & jnp.asarray(step_share)
+                active_mask_b = states.active
+                base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
+                base_receiver_mask_b = (
+                    states.adj_matrix[:, :N_, N_]
+                    if states.adj_matrix.shape[-1]
+                    else jnp.zeros((E_, N_), dtype=bool)
+                )
+                # Base-memory relay is only offered to drones that do not already know the target.
+                # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
+                base_receiver_mask_b = (
+                    base_receiver_mask_b
+                    & ~states.target_known[:, :N_]
+                    & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
+                    & jnp.asarray(step_share)
+                )
+                def _rollout_one_env_no_comm(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                    return model.rollout_step_recurrent(
+                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    )
+
+                def _rollout_with_comm(_):
+                    return jax.vmap(_rollout_one_env)(
+                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                        comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
+                    )
+
+                def _rollout_without_comm(_):
+                    return jax.vmap(_rollout_one_env_no_comm)(
+                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                    )
+
+                has_drone_receiver = jnp.any(comm_mask_b)
+                # base_receiver_mask_b already includes base_memory_valid, so drones connected to
+                # an empty base do not force the attention path at episode start.
+                has_base_memory_receiver = jnp.any(base_receiver_mask_b)
+                can_skip_empty_comm = str(model.memory_comm_variant) != "self_attention"
+                use_attention_path = (has_drone_receiver | has_base_memory_receiver) | jnp.asarray(not can_skip_empty_comm)
+                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.lax.cond(
+                    use_attention_path,
+                    _rollout_with_comm,
+                    _rollout_without_comm,
+                    operand=None,
+                )
+            else:
+                def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                    return model.rollout_step_recurrent(
+                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    )
+
+                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                )
+
             if not model.actor_memory:
                 actor_h = None
             if not model.critic_memory:
@@ -880,8 +916,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     actor_h = model.initial_actor_hidden((E,)) if actor_memory else None
     critic_h = model.initial_critic_hidden((E,)) if critic_memory else None
-    base_memory = jnp.zeros((E, int(cfg.network.hidden_dim)), dtype=jnp.float32) if actor_memory else None
-    base_memory_valid = jnp.zeros((E,), dtype=bool) if actor_memory else None
+    use_memory_comm = actor_memory and bool(cfg.network.get("memory_comm_enabled", False))
+    base_memory = jnp.zeros((E, int(cfg.network.hidden_dim)), dtype=jnp.float32) if use_memory_comm else None
+    base_memory_valid = jnp.zeros((E,), dtype=bool) if use_memory_comm else None
     rollout_last_dones = np.zeros(E, dtype=bool)
 
     # ── Run directory & Name ──────────────────────────────────────────────

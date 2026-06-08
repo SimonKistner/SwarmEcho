@@ -285,24 +285,43 @@ class RecurrentDecentralizedActor(nnx.Module):
             mask = jnp.concatenate([self_mask, mask], axis=-1)
 
         has_any = jnp.any(mask, axis=-1, keepdims=True)
-        first_key = jnp.arange(mask.shape[-1]) == 0
-        safe_mask = mask | ((~has_any) & first_key[None, :])
-        context = self.memory_attention(
-            hidden,
-            kv,
-            mask=safe_mask,
-            decode=False,
-            deterministic=deterministic,
-        )
 
-        context = jnp.where(has_any, context, jnp.zeros_like(context))
-        if self.memory_comm_variant == "cross_attention_residual":
-            return hidden + context
-        if self.memory_comm_variant == "cross_attention_concat":
-            return jnp.concatenate([hidden, context], axis=-1)
-        if self.memory_comm_variant == "self_attention":
-            return context
-        raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
+        def _empty_cross_attention_state() -> jax.Array:
+            if self.memory_comm_variant == "cross_attention_residual":
+                return hidden
+            if self.memory_comm_variant == "cross_attention_concat":
+                return jnp.concatenate([hidden, jnp.zeros_like(hidden)], axis=-1)
+            raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
+
+        def _attended_state() -> jax.Array:
+            first_key = jnp.arange(mask.shape[-1]) == 0
+            safe_mask = mask | ((~has_any) & first_key[None, :])
+            context = self.memory_attention(
+                hidden,
+                kv,
+                mask=safe_mask,
+                decode=False,
+                deterministic=deterministic,
+            )
+
+            context = jnp.where(
+              , context, jnp.zeros_like(context))
+            if self.memory_comm_variant == "cross_attention_residual":
+                return hidden + context
+            if self.memory_comm_variant == "cross_attention_concat":
+                return jnp.concatenate([hidden, context], axis=-1)
+            if self.memory_comm_variant == "self_attention":
+                return context
+            raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
+
+        if self.memory_comm_variant in ("cross_attention_residual", "cross_attention_concat"):
+            return jax.lax.cond(
+                jnp.any(has_any),
+                lambda _: _attended_state(),
+                lambda _: _empty_cross_attention_state(),
+                operand=None,
+            )
+        return _attended_state()
 
     def __call_team__(
         self,
