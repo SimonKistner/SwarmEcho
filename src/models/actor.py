@@ -304,7 +304,8 @@ class RecurrentDecentralizedActor(nnx.Module):
                 deterministic=deterministic,
             )
 
-            context = jnp.where(has_any, context, jnp.zeros_like(context))
+            context = jnp.where(
+              , context, jnp.zeros_like(context))
             if self.memory_comm_variant == "cross_attention_residual":
                 return hidden + context
             if self.memory_comm_variant == "cross_attention_concat":
