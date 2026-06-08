@@ -1,0 +1,48 @@
+# M02 Small Grid Maze – single target, relay-chain training.
+# Map: 9×9 cell grid, 10 m per cell (cell = visual_radius × 2), 90×90 m total.
+# Mathematically scaled down version of M01_grid_maze (scale factor 5/12).
+
+env:
+  map_names: ["M02_small_grid_maze"]
+  num_agents: 8
+  num_targets: 1
+  num_bases: 1
+  max_steps: 1000
+  visual_radius: 5.0
+  max_speed: 4.17   # 10.0 * 5/12
+  max_force: 20.83  # 50.0 * 5/12
+  comm_radius: 20.83       # 50.0 * 5/12
+  comm_radius_base: 16.67  # 40.0 * 5/12
+  spawn_delay: 5
+  use_random_base_spawn: false
+  use_random_drone_spawn: false
+  target_spawn_method: map_defined   # spawn from wall-buffered valid_target_coords (see M02_small_grid_maze.yaml)
+  precover_base_comm: true
+  hold_chain_for: 50
+
+reward:
+  every_reward_global: false
+  only_explor_individual: false
+  only_shortest_path_chain_reward: true
+  target_found_requires_delivery: true
+  exploration_bonus: 0.25  # 0.05 * (12/5)^2 to adjust for fixed 1m grid resolution
+
+training:
+  total_timesteps: 300_000_000
+  num_envs: 4000
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+
+network:
+  critic_type: "agent_centric"
+  actor_memory: true
+  critic_memory: true
+  num_layers: 4    # critic depth
+  actor_num_layers: 4    # actor depth (lighter, separate)
+
+curriculum:
+  success_threshold: 0.99
+
+logging:
+  eval_freq: 50

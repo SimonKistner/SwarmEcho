@@ -25,7 +25,7 @@ Each drone receives an ego-centric overview combining geometric awareness with s
 5. **Relative Vector to Target (2D)**: Masked out (`[0,0]`) until the target is known.
 
 ### B. Coverage Probes (16 Dims)
-Queries 16 radial points in a circle at `exploration_sampling_radius` (default 6.0 meters). If the coordinate in the occupancy grid has been "mapped" by the swarm historically, it returns `1.0` (else `0.0`). Acts as a navigational push toward undiscovered grid cells.
+Queries 16 radial points in a circle at `visual_radius + 1.0` (meter offset dynamically calculated from the visual range). If the coordinate in the occupancy grid has been "mapped" by the swarm historically, it returns `1.0` (else `0.0`). Acts as a navigational push toward undiscovered grid cells.
 
 ### C. Unified Radar (32 Dims)
 *(Powered by `src/env/raycast.py`)*

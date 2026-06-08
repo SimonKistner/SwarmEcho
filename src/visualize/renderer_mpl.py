@@ -101,6 +101,8 @@ class _FrameData(NamedTuple):
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
+    base_target_known: bool | None
+    adj_matrix:    np.ndarray | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -135,22 +137,12 @@ def _get_shortest_path_distances(adj: np.ndarray, source: int) -> np.ndarray:
     return dists
 
 
+from env.raycast import dda_raycast_np
+
 def _dda_raycast_np(p1, p2, occ_grid):
     """NumPy version of DDA raycast for the renderer (shared with CV2)."""
-    gx0, gy0 = p1; gx1, gy1 = p2
-    dx = gx1 - gx0; dy = gy1 - gy0
-    steps = int(max(abs(dx), abs(dy), 1) * 2)
-    if steps > 1000: steps = 1000
-    xs = np.linspace(gx0, gx1, steps)
-    ys = np.linspace(gy0, gy1, steps)
-    ixs = np.floor(xs).astype(int)
-    iys = np.floor(ys).astype(int)
-    W, H = occ_grid.shape
-    mask = (ixs >= 0) & (ixs < W) & (iys >= 0) & (iys < H)
-    if not np.all(mask):
-        ixs = np.clip(ixs, 0, W-1); iys = np.clip(iys, 0, H-1)
-    hit = occ_grid[ixs, iys]
-    return not np.any(hit)
+    return dda_raycast_np(p1, p2, occ_grid)
+
 
 def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm_radius_base, occ_grid, world_size, cfg):
     N = int(pos.shape[0])
@@ -611,15 +603,18 @@ def _draw_frame(
 
     # --- Target Known Info Text ---
     known_str = "Target known to:"
+    has_any = False
+    if getattr(frame, "base_target_known", False):
+        known_str += "\n- Base station"
+        has_any = True
     if frame.target_known is not None:
         known_indices = [i for i in range(N) if bool(frame.target_known[i])]
         known_indices.sort()
         if known_indices:
             for idx in known_indices:
                 known_str += f"\n- Drone {idx}"
-        else:
-            known_str += "\n  (none)"
-    else:
+            has_any = True
+    if not has_any:
         known_str += "\n  (none)"
 
     leg_ax.text(
@@ -630,6 +625,39 @@ def _draw_frame(
         transform=leg_ax.transAxes,
         linespacing=1.4
     )
+
+    # --- Connection Matrix Text ---
+    render_conn = bool(cfg.visualize.get("render_conn_matrix", True))
+    if render_conn:
+        lines_count = known_str.count("\n") + 1
+        conn_y = 0.40 - lines_count * 0.035 - 0.03
+        conn_str = "Connections (0..N-1, B):"
+        if getattr(frame, "adj_matrix", None) is not None and frame.adj_matrix.size > 0:
+            adj = frame.adj_matrix
+            # Header
+            header = "   " + " ".join(str(i) for i in range(N)) + " B"
+            conn_str += f"\n{header}"
+            for i in range(N + 1):
+                row_label = f"{i} " if i < N else "B "
+                row_vals = []
+                for j in range(N + 1):
+                    if i == j:
+                        row_vals.append(".")
+                    else:
+                        row_vals.append("1" if bool(adj[i, j]) else "0")
+                conn_str += f"\n{row_label} " + " ".join(row_vals)
+        else:
+            conn_str += "\n  (not available)"
+
+        leg_ax.text(
+            0.0, conn_y, conn_str,
+            fontfamily="monospace",
+            fontsize=RendererConfig.MPL_FONT_SIZE_LEGEND * 0.8,
+            color="#0f172a",
+            ha="left", va="top",
+            transform=leg_ax.transAxes,
+            linespacing=1.2
+        )
 
     # --- Reward plot ---
     if rew_ax is not None and rewards_so_far is not None:
@@ -833,9 +861,10 @@ def render_video(
                     collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
                     occ_grid      = occ_grid_static,
                     box_width     = float(traj_cpu.box_width[t]),
-                    box_height    = float(traj_cpu.box_height[t]),
                     extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
                     target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
+                    base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
+                    adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
                 )
                 rew_hist = rewards_cpu[:t+1] if rewards_cpu is not None else None
 

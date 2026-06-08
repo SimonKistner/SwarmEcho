@@ -19,7 +19,6 @@ def test_coverage_radar():
             "max_grid_width": 100,
             "max_grid_height": 100,
             "radar_bins": 4,
-            "exploration_sampling_radius": 10.0,
             "visual_radius": 5.0,
             "comm_radius": 10.0,
             "max_speed": 10.0,
@@ -55,6 +54,8 @@ def test_coverage_radar():
         box_height    = jnp.array(100.0, dtype=jnp.float32),
         base_target_known = jnp.bool_(False),
         chain_held_steps = jnp.int32(0),
+        is_conn_base      = jnp.array([False], dtype=jnp.bool_),
+        is_conn_target    = jnp.array([False], dtype=jnp.bool_),
     )
     
     obs = obs_fn(state) # (1, obs_dim)

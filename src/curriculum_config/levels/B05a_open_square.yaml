@@ -2,7 +2,7 @@
 #
 env:
   map_names: ["square_B04_10m_comm_20m_base"]
-  num_agents: 9
+  num_agents: 8
   spawn_delay: 5
   max_steps: 600
   use_random_base_spawn: false
@@ -15,21 +15,23 @@ env:
 
 reward:
   every_reward_global: false
-  only_explor_individual: true
-  only_shortest_path_chain_reward: false
+  only_explor_individual: false
+  only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
 
 # 128, 256, 512, 1024, 2048, 4096, 8192, 16384
 
 training:
-  total_timesteps: 100_000_000
+  total_timesteps: 200_000_000
   num_envs: 4096
   num_steps: 64
   num_epochs: 10
-  num_minibatches: 16
+  num_minibatches: null
+  seed: 5555
+
 
 curriculum:
   success_threshold: 0.999
 
 logging:
-  video_freq: 20
+  eval_freq: 30

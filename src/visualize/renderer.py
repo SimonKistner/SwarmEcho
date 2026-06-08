@@ -64,8 +64,10 @@ def render_video(
         renderer = "fast"
 
     filename = Path(filename).resolve()
-    ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = filename.with_name(f"{filename.stem}_{ts}{filename.suffix}")
+    import re
+    if not re.match(r"^\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_", filename.name):
+        ts = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M")
+        filename = filename.with_name(f"{ts}_{filename.name}")
     filename.parent.mkdir(parents=True, exist_ok=True)
 
     # Save CSV observation logs if requested and available

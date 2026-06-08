@@ -77,36 +77,35 @@ def flatten_wandb_config(cfg_dict):
     return flat
 
 def extract_timestamp_from_video(v_dir: Path):
-    for v_file in v_dir.glob("*.mp4"):
-        parts = v_file.stem.split("_")
-        # e.g., eval_update_000015_20260427_185653
-        if len(parts) >= 5:
-            try:
-                ts_str = f"{parts[3]}_{parts[4]}"
-                return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
-            except: pass
+    for v_file in v_dir.rglob("*.mp4"):
+        ts = extract_timestamp_robust(v_file.name)
+        if ts:
+            return ts
     return None
 
+@st.cache_data(ttl=60)
 def find_all_runs(outputs_root: Path, wandb_root: Path):
     """Heuristic discovery of operation footprints, prioritizing local folders."""
     local_candidates = {} # path -> metadata
     
     if outputs_root.exists():
-        # Discovery: folders containing config.yaml or videos/
-        for p in outputs_root.rglob("*"):
-            if not p.is_dir(): continue
-            # Ignore internal system/utility folders
-            if p.name in ["videos", "checkpoints", "to_delete", "wandb", "files", "logs", "bin"]: 
-                continue
+        exclude_dirs = {"videos", "checkpoints", "to_delete", "wandb", "files", "logs", "bin", ".git"}
+        for root, dirs, files in os.walk(str(outputs_root)):
+            # Prune directory search in-place so we don't descend into excluded directories
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
             
-            # Absolute safety: Don't look inside any folder named 'wandb'
-            if "wandb" in p.parts: 
-                continue
-            
+            p = Path(root)
             cfg_file = p / "config.yaml"
             v_dir = p / "videos"
             
-            if cfg_file.exists() or (v_dir.exists() and any(v_dir.glob("*.mp4"))):
+            # Check if there are any mp4 files in videos/ (including subdirectories like train/eval)
+            has_mp4 = False
+            if v_dir.exists():
+                for _ in v_dir.rglob("*.mp4"):
+                    has_mp4 = True
+                    break
+            
+            if cfg_file.exists() or (v_dir.exists() and has_mp4):
                 # We found a potential run directory
                 ts = extract_timestamp_robust(p.name)
                 if not ts and v_dir.exists():
@@ -431,13 +430,66 @@ for idx, r_disp in enumerate(selected_operations):
     with cols[idx]:
         st.markdown(f"**{r_disp}**")
         v_dir = registry[r_disp]["video_path"]
-        v_files = sorted(list(v_dir.glob("*.mp4")), key=os.path.getmtime, reverse=True)
+        v_files = sorted(list(v_dir.rglob("*.mp4")), key=os.path.getmtime, reverse=True)
         if v_files:
-            st.video(str(v_files[0]))
+            options = []
+            option_map = {}
+            for vf in v_files:
+                stem = vf.stem
+                cat_pref = ""
+                # Categorize based on path structure or filename
+                if "eval" in vf.parts or vf.parent.name == "eval" or stem.startswith("eval_") or "_eval_" in stem:
+                    cat_pref = " [Eval]"
+                elif "train" in vf.parts or vf.parent.name == "train" or stem.startswith("train_") or "_train_" in stem:
+                    cat_pref = " [Train]"
+                
+                status_icon = "⚪"
+                if stem.startswith("SUCCESS_"):
+                    status_icon = "🟢"
+                    stem = stem[len("SUCCESS_"):]
+                elif stem.startswith("FAIL_"):
+                    status_icon = "🔴"
+                    stem = stem[len("FAIL_"):]
+                
+                # Check for update / ckpt numbers and episode numbers
+                up_match = re.search(r'(?:update|ckpt)_(\d+)', stem)
+                ep_match = re.search(r'ep(\d+)', stem)
+                
+                parts = []
+                if up_match:
+                    parts.append(f"Update {int(up_match.group(1))}")
+                if ep_match:
+                    parts.append(f"Ep {int(ep_match.group(1))}")
+                
+                if not parts:
+                    # Tidy up raw name
+                    label = f"{status_icon}{cat_pref} {stem.replace('_', ' ').title()}"
+                else:
+                    label = f"{status_icon}{cat_pref} " + " | ".join(parts)
+                
+                # Unique label check
+                dup_idx = 1
+                orig_label = label
+                while label in option_map:
+                    label = f"{orig_label} ({dup_idx})"
+                    dup_idx += 1
+                
+                options.append(label)
+                option_map[label] = vf
+            
+            selected_label = st.selectbox(
+                "Select Rollout Video",
+                options,
+                index=0,
+                key=f"vid_select_{r_disp}"
+            )
+            selected_vf = option_map[selected_label]
+            st.video(str(selected_vf))
             int_meta = registry[r_disp]["folder_name"]
-            st.markdown(f"<span style='color:#666; font-size:10px;'>{int_meta}</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color:#666; font-size:10px;'>Run: {int_meta}</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color:#666; font-size:10px;'>Path: {selected_vf.relative_to(BASE_DIR)}</span>", unsafe_allow_html=True)
         else:
-            st.warning("Video Link Broken")
+            st.warning("Video Link Broken / No Videos Found")
 
 # ---------------------------------------------------------------------------
 # Static Baseline Grouped (Moved to Bottom)

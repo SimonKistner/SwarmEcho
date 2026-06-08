@@ -11,11 +11,11 @@ Usage
 From Python:
     from core.config import load_config
     cfg = load_config()                        # loads Python defaults
-    cfg = load_config("levels/01_warehouse.yaml") # loads warehouse mission
+    cfg = load_config("src/curriculum_config/levels/A01_warehouse.yaml") # loads warehouse mission
     print(cfg.env.num_agents)
 
 From CLI:
-    uv run python training/train.py level=01 env.num_agents=16
+    uv run python src/training/train.py level=A01 env.num_agents=16
 """
 
 from __future__ import annotations
@@ -60,7 +60,6 @@ class EnvConfig:
     map_names: list[str] = field(default_factory=list) # if set, samples from these maps
     num_targets: int = 1       # 0 = exploration focus, 1 = find target goal
     num_bases: int = 1         # 0 = exploration focus, 1 = tethered relay goal
-    exploration_sampling_radius: float = 6.0 # meter offset for local coverage grid sampling
     # --- Spawn overrides (B-series curriculum) ---
     use_random_base_spawn: bool = True    # if False, base always spawns at map centre
     use_random_drone_spawn: bool = True   # if False, drones spawn stacked at base_pos
@@ -71,6 +70,7 @@ class EnvConfig:
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
+    log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
 
 
 
@@ -100,7 +100,7 @@ class TrainingConfig:
     num_envs: int = 1024
     num_steps: int = 256
     num_epochs: int = 4
-    num_minibatches: int = 8
+    num_minibatches: Optional[int] = 8
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -110,6 +110,10 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     total_timesteps: int = 50_000_000
     checkpoint_path: Optional[str] = None  # if set, resumes training from this path
+    warn_vram_limit: bool = True
+    abort_on_vram_limit: bool = True
+    vram_limit_gb: float = 20.0
+
 
 
 @dataclass
@@ -124,33 +128,68 @@ class NetworkConfig:
 
 @dataclass
 class LoggingConfig:
+    # --- Project & Directories ---
     project: str = "SwarmEcho"
     run_name: Optional[str] = None
     use_timestamp_postfix: bool = False
     log_dir: str = "outputs"
+
+    # --- WandB Logging ---
     wandb_mode: str = "online"   # "online", "offline", or "disabled"
     wandb_project: str = "SwarmEcho"
     wandb_entity: Optional[str] = None
+    wandb_group: Optional[str] = None
+
+    # --- Frequencies ---
     log_freq: int = 10
-    video_freq: int = 30
-    async_video: bool = False   # If True, renders in background process; if False, blocks training to render
-    num_checkpoints: int = 10   # Guaranteed number of checkpoints per run
-    eval_episodes: int = 1
+    eval_freq: int = 30           # Run evaluation and heatmap generation every N updates
+
+    # --- Model Checkpointing ---
     save_model: bool = True
+    num_checkpoints: int = 10     # Guaranteed number of checkpoints per run
     checkpoint_dir: str = "outputs/checkpoints"
+
+    # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
     obs_log: bool = False
+
+    # --- Mid-run Evaluation Toggles ---
+    eval_video: bool = True       # Render rollout video for evaluation episodes
+    eval_failed_chain_heatmap: bool = True  # Generate heatmap of target positions for failed chain deliveries from sliding window
+    eval_not_delivered_heatmap: bool = True  # Generate heatmap of target positions not delivered to base from sliding window
+    eval_not_visually_found_heatmap: bool = True  # Generate heatmap of target positions not visually found from sliding window
+
+    # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
+    video_freq: Optional[int] = None # legacy
+    eval_episodes: Optional[int] = None
+    async_video: Optional[bool] = None
 
 
 @dataclass
 class VisualizeConfig:
-    renderer: str = "slow"       # "fast" for OpenCV, "slow" for Matplotlib
+    renderer: str = "fast"              # LEGACY fallback; prefer explicit params below
+    train_eval_renderer: str = "fast"   # renderer used for mid-training single-episode videos
+    final_eval_renderer: str = "fast"   # renderer used for final eval / standalone evaluate.py
+
+    # --- Eval rendering control ---
+    selective_eval_render: bool = False  # False = legacy mode; True = selective bucket mode
+
+    # if selective_eval_render=False:
+    eval_render_videos: int = 1          # episodes to compute AND render immediately (legacy)
+
+    # if selective_eval_render=True:
+    eval_max_compute_episodes: int = 100  # hard ceiling on episodes simulated
+    eval_render_successes: int = 0       # SUCCESS_ bucket target  (0 = skip success renders)
+    eval_render_failures:  int = 3       # FAIL_ bucket target     (0 = skip fail renders)
+    # Note: both buckets=0 is valid → runs eval_max_compute_episodes, prints full stats, no videos.
+
     comm_color: str = "#03fbff"
     comm_fill_alpha: float = 0.02
     comm_edge_alpha: float = 0.50
     vis_color: str = "#03fbff"
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
+    render_conn_matrix: bool = True       # if True, render the connections matrix in the legend
 
 
 @dataclass
@@ -208,9 +247,39 @@ def compute_action_dim(_cfg: DictConfig) -> int:
     return 2
 
 
+def calculate_optimal_minibatches(
+    num_envs: int,
+    num_steps: int,
+    recurrent: bool,
+    max_transitions_per_mb: int = 30000
+) -> int:
+    """
+    Calculate the optimal number of minibatches to keep transitions per minibatch
+    under the specified VRAM safety limit, ensuring divisibility requirements are met.
+    """
+    import math
+    total_batch_size = num_envs * num_steps
+    
+    if recurrent:
+        min_mb = math.ceil(total_batch_size / max_transitions_per_mb)
+        mb = max(1, min_mb)
+        if mb > num_envs:
+            mb = num_envs
+        while num_envs % mb != 0:
+            mb += 1
+    else:
+        min_mb = math.ceil(total_batch_size / max_transitions_per_mb)
+        mb = max(1, min_mb)
+        while total_batch_size % mb != 0:
+            mb += 1
+            
+    return mb
+
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
+
 
 def load_config(
     config_path: str | Path | None = None,
@@ -288,6 +357,70 @@ def load_config(
         # Merge standard CLI key=value overrides
         cfg = OmegaConf.merge(cfg, cli_cfg)
 
+    # ---------------------------------------------------------------------------
+    # Dynamic Minibatch Calculation & VRAM warnings
+    # ---------------------------------------------------------------------------
+    if cfg.training.num_minibatches is None:
+        actor_memory = bool(cfg.network.actor_memory)
+        critic_memory = bool(cfg.network.critic_memory)
+        recurrent = actor_memory or critic_memory
+        
+        # Calculate safety target based on vram_limit_gb (e.g. 1500 transitions/GB -> 30,000 transitions for 20GB)
+        safety_target = int(cfg.training.vram_limit_gb * 1500)
+        
+        mb = calculate_optimal_minibatches(
+            num_envs=int(cfg.training.num_envs),
+            num_steps=int(cfg.training.num_steps),
+            recurrent=recurrent,
+            max_transitions_per_mb=safety_target
+        )
+        
+        # Temporarily allow modifying
+        OmegaConf.set_readonly(cfg, False)
+        cfg.training.num_minibatches = mb
+        
+        total_batch_size = int(cfg.training.num_envs) * int(cfg.training.num_steps)
+        transitions_per_mb = total_batch_size // mb
+        print(f"  [config] Auto-calculated training.num_minibatches = {mb} "
+              f"({transitions_per_mb:,} transitions/mb, safety target: {safety_target:,})")
+
+    elif cfg.training.warn_vram_limit:
+        mb = int(cfg.training.num_minibatches)
+        num_envs = int(cfg.training.num_envs)
+        num_steps = int(cfg.training.num_steps)
+        total_batch_size = num_envs * num_steps
+        transitions_per_mb = total_batch_size // mb
+        
+        # Safety warning threshold: e.g. 1550 transitions/GB -> 31,000 transitions for 20GB
+        limit = int(cfg.training.vram_limit_gb * 1550)
+        
+        if transitions_per_mb > limit:
+            actor_memory = bool(cfg.network.actor_memory)
+            critic_memory = bool(cfg.network.critic_memory)
+            recurrent = actor_memory or critic_memory
+            
+            safety_target = int(cfg.training.vram_limit_gb * 1500)
+            safe_mb = calculate_optimal_minibatches(
+                num_envs=num_envs,
+                num_steps=num_steps,
+                recurrent=recurrent,
+                max_transitions_per_mb=safety_target
+            )
+            
+            print("\n" + "!" * 80)
+            print(f"⚠️  WARNING: VRAM Safety Limit Exceeded check failed!")
+            print(f"   Current configuration: num_minibatches = {mb}")
+            print(f"   This results in {transitions_per_mb:,} transitions per minibatch.")
+            print(f"   This exceeds the safety limit of {limit:,} transitions per minibatch ({cfg.training.vram_limit_gb} GiB usable VRAM constraint).")
+            print(f"   It is highly likely to cause an Out-Of-Memory (OOM) error on RTX 4090.")
+            print(f"👉  Recommended safe choice: training.num_minibatches={safe_mb} "
+                  f"({total_batch_size // safe_mb:,} transitions/mb)")
+            print("!" * 80 + "\n")
+
+            if cfg.training.abort_on_vram_limit:
+                import sys
+                sys.exit(1)
+
     if cfg.logging.run_name:
         print(f"  Run Name         : {cfg.logging.run_name}")
 
@@ -297,10 +430,37 @@ def load_config(
     elif cfg.reward.only_explor_individual:
         cfg.reward.only_shortest_path_chain_reward = False
 
+    # Automatically enable adjacency matrix logging for render, evaluate, and test_physics scripts
+    # (since the matrix is only needed for rendering visuals, and we want to keep training performant)
+    import sys
+    if sys.argv and len(sys.argv[0]) > 0:
+        script_name = Path(sys.argv[0]).name
+        if any(word in script_name for word in ["evaluate", "render", "preview", "test_physics"]):
+            OmegaConf.set_readonly(cfg, False)
+            cfg.env.log_adjacency_matrix = True
+
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)
 
     return cfg
+
+
+def find_closest_divisors(num_envs: int, target_mb: int) -> tuple[Optional[int], Optional[int]]:
+    # Find divisors below target
+    below = None
+    for i in range(target_mb - 1, 0, -1):
+        if num_envs % i == 0:
+            below = i
+            break
+            
+    # Find divisors above target
+    above = None
+    for i in range(target_mb + 1, num_envs + 1):
+        if num_envs % i == 0:
+            above = i
+            break
+            
+    return below, above
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +485,38 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0
     assert 0 < cfg.training.gae_lambda <= 1.0
+    # Visualize / eval rendering
+    assert str(cfg.visualize.train_eval_renderer) in ("fast", "slow"), \
+        "visualize.train_eval_renderer must be 'fast' or 'slow'"
+    assert str(cfg.visualize.final_eval_renderer) in ("fast", "slow"), \
+        "visualize.final_eval_renderer must be 'fast' or 'slow'"
+    assert int(cfg.visualize.eval_render_videos) >= 1, \
+        "visualize.eval_render_videos must be >= 1"
+    if bool(cfg.visualize.selective_eval_render):
+        assert int(cfg.visualize.eval_max_compute_episodes) > 0, \
+            "visualize.eval_max_compute_episodes must be > 0 when selective_eval_render=True"
+        assert int(cfg.visualize.eval_render_successes) >= 0, \
+            "visualize.eval_render_successes must be >= 0"
+        assert int(cfg.visualize.eval_render_failures) >= 0, \
+            "visualize.eval_render_failures must be >= 0"
+        # Both buckets=0 is valid: compute episodes, print stats, render nothing.
     if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
-        if int(cfg.training.num_envs) % int(cfg.training.num_minibatches) != 0:
-            raise ValueError("Recurrent MAPPO requires training.num_envs divisible by training.num_minibatches.")
+        num_envs = int(cfg.training.num_envs)
+        mb = int(cfg.training.num_minibatches)
+        if num_envs % mb != 0:
+            below, above = find_closest_divisors(num_envs, mb)
+            suggestions = []
+            if below is not None:
+                suggestions.append(str(below))
+            if above is not None:
+                suggestions.append(str(above))
+            sugg_str = " or ".join(suggestions)
+            sugg_msg = f"\n\n ⚠️  Suggested valid choices close to {mb}: {sugg_str}. ⚠️" if suggestions else ""
+            raise ValueError(
+                f"Recurrent MAPPO requires training.num_envs ({num_envs}) divisible by training.num_minibatches ({mb}).{sugg_msg}"
+            )
 
 
 if __name__ == "__main__":

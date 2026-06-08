@@ -89,8 +89,8 @@ def make_obs_fns(cfg: DictConfig, resolved_W: float, resolved_H: float, occ_grid
     W, H      = float(resolved_W), float(resolved_H)
     max_dim   = math.sqrt(W ** 2 + H ** 2)
     use_task        = (int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
-    sampling_radius = float(cfg.env.exploration_sampling_radius)
     vis_r           = float(cfg.env.visual_radius)
+    sampling_radius = vis_r + 1.0
     comm_r          = float(cfg.env.comm_radius)
     comm_r_base     = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     v_max           = float(cfg.env.max_speed)

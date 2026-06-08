@@ -35,7 +35,7 @@ def dda_raycast(p1: jax.Array, p2: jax.Array, occupancy_grid: jax.Array) -> jax.
     def cond_fn(val):
         ix, iy, t_max_x_val, t_max_y_val, steps, hit = val
         in_bounds = (ix >= 0) & (ix < G_x) & (iy >= 0) & (iy < G_y)
-        not_reached = (steps < max_steps) & (jnp.maximum(t_max_x_val, t_max_y_val) < 1.0 + eps)
+        not_reached = (steps < max_steps) & (jnp.minimum(t_max_x_val, t_max_y_val) < 1.0 - eps)
         return in_bounds & (~hit) & not_reached
 
     def body_fn(val):
@@ -45,7 +45,7 @@ def dda_raycast(p1: jax.Array, p2: jax.Array, occupancy_grid: jax.Array) -> jax.
         new_ix = jnp.where(is_x_step, ix + step_x, ix)
         new_iy = jnp.where(is_x_step, iy, iy + step_y)
         new_t_max_x = jnp.where(is_x_step, t_max_x_val + t_delta_x, t_max_x_val)
-        new_t_max_y = jnp.where(is_x_step, t_max_x_val, t_max_y_val + t_delta_y)
+        new_t_max_y = jnp.where(is_x_step, t_max_y_val, t_max_y_val + t_delta_y)
         
         n_ix, n_iy = new_ix.astype(jnp.int32), new_iy.astype(jnp.int32)
         oob = (n_ix < 0) | (n_ix >= G_x) | (n_iy < 0) | (n_iy >= G_y)
@@ -252,5 +252,66 @@ def compute_local_visibility(
     vis_flat = vis_flat.at[flat_patch_idx.ravel()].max(visible_paths.ravel().astype(jnp.int32))
     
     return vis_flat.reshape(size, size).astype(bool)
+
+
+def dda_raycast_np(p1, p2, occupancy_grid) -> bool:
+    """
+    Check for line-of-sight between p1 and p2 on a 2D occupancy grid using NumPy DDA.
+    Returns True if clear, False if blocked by a wall.
+    This matches the exact logic of JAX dda_raycast.
+    """
+    G_x, G_y = occupancy_grid.shape
+    x0, y0 = p1
+    x1, y1 = p2
+    dx, dy = x1 - x0, y1 - y0
+    
+    step_x = float(np.sign(dx))
+    step_y = float(np.sign(dy))
+    eps = 1e-8
+    t_delta_x = abs(1.0 / (dx + eps))
+    t_delta_y = abs(1.0 / (dy + eps))
+    
+    if step_x > 0:
+        dist_to_boundary_x = np.floor(x0 + 1) - x0
+    else:
+        dist_to_boundary_x = x0 - np.ceil(x0 - 1)
+        
+    if step_y > 0:
+        dist_to_boundary_y = np.floor(y0 + 1) - y0
+    else:
+        dist_to_boundary_y = y0 - np.ceil(y0 - 1)
+        
+    t_max_x = float(dist_to_boundary_x * t_delta_x)
+    t_max_y = float(dist_to_boundary_y * t_delta_y)
+    max_steps = G_x + G_y
+    
+    ix = int(np.floor(x0))
+    iy = int(np.floor(y0))
+    
+    if ix < 0 or ix >= G_x or iy < 0 or iy >= G_y:
+        return False
+    if occupancy_grid[ix, iy]:
+        return False
+        
+    steps = 0
+    hit = False
+    
+    while (ix >= 0) and (ix < G_x) and (iy >= 0) and (iy < G_y) and (not hit) and (steps < max_steps) and (min(t_max_x, t_max_y) < 1.0 - eps):
+        is_x_step = t_max_x < t_max_y
+        if is_x_step:
+            ix += int(step_x)
+            t_max_x += t_delta_x
+        else:
+            iy += int(step_y)
+            t_max_y += t_delta_y
+            
+        if ix < 0 or ix >= G_x or iy < 0 or iy >= G_y:
+            break
+            
+        hit = bool(occupancy_grid[ix, iy])
+        steps += 1
+        
+    return not hit
+
 
 

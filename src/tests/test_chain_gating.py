@@ -69,7 +69,8 @@ def run_test():
     state_s1 = state.replace(pos=pos_behind)
     
     compute_reward_baseline = make_reward_fn(cfg)
-    _, info_s1 = compute_reward_baseline(state_s1, state_s1, jnp.bool_(False))
+    state_s1_next = env_step(state_s1, jnp.zeros((4, 2)))
+    _, info_s1 = compute_reward_baseline(state_s1, state_s1_next, jnp.bool_(False))
     
     prog = info_s1["chain_progress_pct"]
     print(f"  Drone located at X=210 (Target at X=200).")
@@ -93,7 +94,8 @@ def run_test():
     ])
     state_s2 = state.replace(pos=pos_lateral)
     
-    _, info_s2 = compute_reward_baseline(state_s2, state_s2, jnp.bool_(False))
+    state_s2_next = env_step(state_s2, jnp.zeros((4, 2)))
+    _, info_s2 = compute_reward_baseline(state_s2, state_s2_next, jnp.bool_(False))
     
     # If using Euclidean selection, Drone 0 is the tip (dist 150). Gap = 150.
     # If using 1D selection, Drone 1 is the tip. Gap = 152.
@@ -128,15 +130,17 @@ def run_test():
         target_known=jnp.array([False, False, False, True]) 
     )
 
+    state_s3_next = env_step(state_s3, jnp.zeros((4, 2)))
+
     # 1. Baseline (Toggle OFF)
     cfg.reward.only_shortest_path_chain_reward = False
     reward_fn_off = make_reward_fn(cfg)
-    r_off, info_off = reward_fn_off(state_s3, state_s3, jnp.bool_(False))
+    r_off, info_off = reward_fn_off(state_s3, state_s3_next, jnp.bool_(False))
     
     # 2. Strict (Toggle ON)
     cfg.reward.only_shortest_path_chain_reward = True
     reward_fn_on = make_reward_fn(cfg)
-    r_on, info_on = reward_fn_on(state_s3, state_s3, jnp.bool_(False))
+    r_on, info_on = reward_fn_on(state_s3, state_s3_next, jnp.bool_(False))
     
     print(f"  Setup: Base -> D0 -> D1 ... [140m gap] ... D3 -> Target")
     print(f"  D2 is at (-10, 50) acting as a useless dead-end.")

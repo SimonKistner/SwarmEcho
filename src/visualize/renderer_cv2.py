@@ -97,6 +97,8 @@ class _FrameData(NamedTuple):
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
+    base_target_known: bool | None
+    adj_matrix:    np.ndarray | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -112,30 +114,12 @@ def _bfs(adj: np.ndarray, source: int) -> set[int]:
     return visited
 
 
+from env.raycast import dda_raycast_np
+
 def _dda_raycast_np(p1, p2, occ_grid):
     """NumPy version of DDA raycast for the renderer."""
-    gx0, gy0 = p1; gx1, gy1 = p2
-    dx = gx1 - gx0; dy = gy1 - gy0
-    steps = int(max(abs(dx), abs(dy), 1) * 2) # Over-sample for safety in drawing
-    if steps > 1000: steps = 1000
+    return dda_raycast_np(p1, p2, occ_grid)
 
-    xs = np.linspace(gx0, gx1, steps)
-    ys = np.linspace(gy0, gy1, steps)
-
-    ixs = np.floor(xs).astype(int)
-    iys = np.floor(ys).astype(int)
-
-    # Clip to bounds
-    W, H = occ_grid.shape
-    mask = (ixs >= 0) & (ixs < W) & (iys >= 0) & (iys < H)
-    if not np.all(mask):
-        # We allow out of bounds rays as long as they don't hit a wall
-        # but realistically they shouldn't happen much.
-        ixs = np.clip(ixs, 0, W-1)
-        iys = np.clip(iys, 0, H-1)
-
-    hit = occ_grid[ixs, iys]
-    return not np.any(hit)
 
 def _build_adjacency(pos, base_pos, target_pos, comm_r, vis_r, occ_grid, world_size):
     N = pos.shape[0];  M = N + 2
@@ -210,14 +194,22 @@ def _cfg_bgr(color_str: str, fallback: tuple) -> tuple:
 # Drawing Utilities
 # ---------------------------------------------------------------------------
 
-def _draw_text(img, text, pos, scale, color, thickness=1, center=False):
-    font = cv2.FONT_HERSHEY_DUPLEX  # Cleaner font than SIMPLEX
+def _draw_text(img, text, pos, scale, color, thickness=1, center=False, font=cv2.FONT_HERSHEY_DUPLEX):
     size, baseline = cv2.getTextSize(text, font, scale, thickness)
     x, y = pos
     if center:
         x -= size[0] // 2
         y += size[1] // 2
     cv2.putText(img, text, (int(x), int(y)), font, scale, color, thickness, cv2.LINE_AA)
+
+def _draw_monospace_text(img, text, pos, scale, color, thickness=1):
+    x, y = pos
+    # Measure a reference character to determine spacing
+    (w, h), _ = cv2.getTextSize("0", cv2.FONT_HERSHEY_DUPLEX, scale, thickness)
+    char_step = w + int(4 * scale)
+    for i, char in enumerate(text):
+        if char != " ":
+            cv2.putText(img, char, (int(x + i * char_step), int(y)), cv2.FONT_HERSHEY_DUPLEX, scale, color, thickness, cv2.LINE_AA)
 
 def _draw_dashed_line(img, pt1, pt2, color, thickness=1, gap=10):
     dist = np.linalg.norm(np.array(pt1) - np.array(pt2))
@@ -693,13 +685,50 @@ def _draw_frame_cv2(
         known_indices.sort()
 
     ly += int(20 * scale)
+    has_any = False
+    if getattr(frame, "base_target_known", False):
+        _draw_text(img, "- Base station", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text"])
+        ly += int(20 * scale)
+        has_any = True
+
     if known_indices:
         for idx in known_indices:
             _draw_text(img, f"- Drone {idx}", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text"])
             ly += int(20 * scale)
-    else:
+        has_any = True
+
+    if not has_any:
         _draw_text(img, "  (none)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
         ly += int(20 * scale)
+
+    # ── Connections matrix ───────────────────────────────────────────────
+    render_conn = bool(cfg.visualize.get("render_conn_matrix", True))
+    if render_conn:
+        ly += int(15 * scale)
+        _draw_text(img, "Connections (0..N-1, B):", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 1.05, _C["text"])
+        ly += int(20 * scale)
+
+        if frame.adj_matrix is not None and frame.adj_matrix.size > 0:
+            adj = frame.adj_matrix
+            # Header
+            header = "   " + " ".join(str(i) for i in range(N)) + " B"
+            _draw_monospace_text(img, header, (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 0.8, _C["text"])
+            ly += int(18 * scale)
+
+            for i in range(N + 1):
+                row_label = f"{i} " if i < N else "B "
+                row_vals = []
+                for j in range(N + 1):
+                    if i == j:
+                        row_vals.append(".")
+                    else:
+                        row_vals.append("1" if bool(adj[i, j]) else "0")
+                row_str = f"{row_label} " + " ".join(row_vals)
+                _draw_monospace_text(img, row_str, (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 0.8, _C["text"])
+                ly += int(16 * scale)
+        else:
+            _draw_text(img, "  (not available)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
+            ly += int(20 * scale)
 
     # ── Reward plot ───────────────────────────────────────────────────────
     if lay.has_reward and rewards_so_far is not None:
@@ -883,6 +912,8 @@ def render_video_cv2(
             box_height    = float(traj_cpu.box_height[t]),
             extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
             target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
+            base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
+            adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
         ))
 
     # 2. Determine parallelism (daemonic processes cannot spawn children)

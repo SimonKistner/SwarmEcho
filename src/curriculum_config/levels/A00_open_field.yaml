@@ -23,6 +23,6 @@ network:
   critic_type: "agent_centric" # "agent_centric" (recommended) | "global_mean"
 
 logging:
-  video_freq: 50
+  eval_freq: 50
 
 

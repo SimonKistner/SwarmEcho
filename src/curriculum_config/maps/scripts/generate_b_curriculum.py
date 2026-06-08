@@ -180,7 +180,7 @@ def generate_level(
             "num_minibatches": num_minibatches,
         },
         "logging": {
-            "video_freq": 50,
+            "eval_freq": 50,
         },
     }
 

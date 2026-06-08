@@ -114,58 +114,7 @@ def make_reward_fn(cfg: DictConfig):
     )
     chain_rewards_global = only_explor_individual or every_reward_global
 
-    # Reachability matrix squarings
-
-    _n_reach = max(1, math.ceil(math.log2(N + 2)))
-    _eye_Np1 = jnp.eye(N + 1, dtype=jnp.float32)
-
-    # ---- Internal: graph connectivity ------------------------------------
-
-    def _compute_connectivity(state: EnvState):
-        """
-        Returns
-        -------
-        is_conn_base   : (N,) bool
-        is_conn_target : (N,) bool
-
-        Rule: the FIRST hop to base or target requires vis_r (visual contact).
-              Subsequent drone↔drone hops use comm_r.
-        """
-        diff_pp        = state.pos[:, None, :] - state.pos[None, :, :]
-        pairwise_dists = jnp.linalg.norm(diff_pp, axis=-1)
-
-        # Drone↔drone edges: comm_r
-        adj_dd = (
-            (pairwise_dists <= comm_r)
-            & ~jnp.eye(N, dtype=bool)
-            & state.active[:, None]
-            & state.active[None, :]
-        ).astype(jnp.float32)
-
-        # Base first-hop: comm_r_base  (configurable, defaults to comm_r)
-        base_dists = jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
-        adj_db     = ((base_dists <= comm_r_base) & state.active).astype(jnp.float32)
-
-        A_top  = jnp.concatenate([adj_dd, adj_db[:, None]], axis=-1)
-        A_bot  = jnp.concatenate([adj_db[None, :], jnp.zeros((1, 1))], axis=-1)
-        A_full = jnp.concatenate([A_top, A_bot], axis=0) + _eye_Np1
-
-        def _square(R, _):
-            return jnp.clip(R @ R, 0.0, 1.0), None
-
-        R, _ = jax.lax.scan(_square, jnp.clip(A_full, 0.0, 1.0), None, length=_n_reach)
-
-        is_conn_base = R[:N, N] > 0.5
-
-        # Target first-hop: vis_r  (unchanged)
-        target_pos_agents = state.target_pos if state.target_pos.ndim == 2 else jnp.tile(state.target_pos[None, :], (N, 1))
-        target_dists    = jnp.linalg.norm(state.pos - target_pos_agents, axis=-1)
-        directly_sees   = (target_dists <= vis_r) & state.active
-        is_conn_target  = jnp.any(
-            (R[:N, :N] > 0.5) & directly_sees[None, :], axis=-1
-        )
-
-        return is_conn_base, is_conn_target
+    # ---- Internal: shortest path calculation -----------------------------
 
     def _compute_shortest_paths(state: EnvState, idx_b, idx_t, has_b_chain, has_t_chain):
         """
@@ -179,7 +128,7 @@ def make_reward_fn(cfg: DictConfig):
         diff_pp = state.pos[:, None, :] - state.pos[None, :, :]
         pairwise_dists = jnp.linalg.norm(diff_pp, axis=-1)
 
-        # FIX: Added ~jnp.eye(N, dtype=bool) to prevent self-loops overriding the 0 diagonal
+        # Added ~jnp.eye(N, dtype=bool) to prevent self-loops overriding the 0 diagonal
         adj_dd = (pairwise_dists <= comm_r) & ~jnp.eye(N, dtype=bool) & state.active[:, None] & state.active[None, :]
         H = H.at[:N, :N].set(jnp.where(adj_dd, 1, H[:N, :N]))
 
@@ -201,7 +150,7 @@ def make_reward_fn(cfg: DictConfig):
         n_steps = math.ceil(math.log2(V))
         H_final, _ = jax.lax.scan(_min_plus_step, H, None, length=n_steps)
 
-        # FIX: Safe gating. Only check path equality if the chain actually exists.
+        # Safe gating. Only check path equality if the chain actually exists.
         is_on_base_path = jnp.where(
             has_b_chain,
             (H_final[N, :N] + H_final[:N, idx_b] == H_final[N, idx_b]),
@@ -241,11 +190,13 @@ def make_reward_fn(cfg: DictConfig):
         w_gap = jnp.where(bt_dist > 0, p_gap_max / bt_dist, 0.0)
 
         # ---- 2. Global Target Found --------------------------------------
+        # Wall-occluded base first-hop is inferred via is_conn_base and Euclidean distance
         dist_to_base = jnp.linalg.norm(new_state.pos - new_state.base_pos[None, :], axis=-1)
-        adj_db = (dist_to_base <= comm_r_base) & new_state.active
+        adj_db = new_state.is_conn_base & (dist_to_base <= comm_r_base) & new_state.active
 
+        # Wall-occluded target first-hop (is_visible) is inferred via is_conn_target and Euclidean distance
         dist_to_target = jnp.linalg.norm(new_state.pos - target_pos_agents, axis=-1)
-        is_visible = (dist_to_target <= vis_r) & new_state.active
+        is_visible = new_state.is_conn_target & (dist_to_target <= vis_r) & new_state.active
 
         knew_or_sees_target = old_state.target_known | is_visible
         actual_deliverers = adj_db & knew_or_sees_target
@@ -291,21 +242,12 @@ def make_reward_fn(cfg: DictConfig):
         r_coverage = (delta_cells * (cell_s**2) * w_exp) * (~new_state.target_known)
 
         # ---- 4. Chain Gap Distance ---------------------------------------
-        is_conn_base, is_conn_target = _compute_connectivity(new_state)
+        is_conn_base, is_conn_target = new_state.is_conn_base, new_state.is_conn_target
         fully_connected = jnp.any(is_conn_base & is_conn_target)
-
-        bt_vec = primary_target_pos - new_state.base_pos
-        bt_dist = jnp.linalg.norm(bt_vec)
-        # Avoid division by zero if base == target
-        bt_unit = jnp.where(bt_dist > 0, bt_vec / bt_dist, jnp.array([1.0, 0.0], dtype=jnp.float32))
-
-        # Normalized gap weight
-        w_gap = jnp.where(bt_dist > 0, p_gap_max / bt_dist, 0.0)
 
         # Base Chain "Tip" (Drone closest to Target)
         is_base_chain = is_conn_base & new_state.active
         any_base_chain = jnp.any(is_base_chain)
-        dist_to_target = jnp.linalg.norm(new_state.pos - target_pos_agents, axis=-1)
         idx_b = jnp.argmin(jnp.where(is_base_chain, dist_to_target, 1e9))
         pos_b = jnp.where(any_base_chain, new_state.pos[idx_b], new_state.base_pos)
 
@@ -334,8 +276,6 @@ def make_reward_fn(cfg: DictConfig):
             100.0,
             jnp.clip(100.0 * (1.0 - chain_gap_dist / (bt_dist + 1e-6)), 0.0, 100.0)
         )
-
-
 
         # Chain gap is the primary timer/incentive.
         use_dynamic_gap = jnp.logical_or(global_target_found, jnp.logical_not(use_task))
@@ -447,7 +387,6 @@ if __name__ == "__main__":
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-    import jax
     from core.config import load_config, validate_config
     from env.physics import make_env_fns
 
@@ -461,7 +400,6 @@ if __name__ == "__main__":
     validate_config(cfg)
 
     N = cfg.env.num_agents
-    # G = cfg.env.grid_resolution  # REMOVED: using rectangular grid
 
     env_step, reset, _, _  = make_env_fns(cfg)
     compute_reward       = make_reward_fn(cfg)
