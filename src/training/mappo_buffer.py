@@ -34,6 +34,10 @@ class MAPPOTransition(NamedTuple):
     rewards:   np.ndarray   # (E,)
     dones:     np.ndarray   # (E,)
     rnn_resets: Optional[np.ndarray] = None  # (E, N), recurrent path only
+    comm_masks: Optional[np.ndarray] = None  # (E, N, N), actor memory communication
+    active_masks: Optional[np.ndarray] = None  # (E, N), actor memory communication
+    base_memories: Optional[np.ndarray] = None  # (E, H), actor memory communication
+    base_memory_masks: Optional[np.ndarray] = None  # (E, N), actor memory communication
 
 
 class MAPPORolloutBuffer:
@@ -94,6 +98,10 @@ class MAPPORolloutBuffer:
             self._values = np.zeros((self.T, self.E),  dtype=np.float32)
 
         self._rnn_resets = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._comm_masks = np.zeros((self.T, self.E, self.N, self.N), dtype=bool)
+        self._active_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._base_memories = np.zeros((self.T, self.E, self.hidden_dim), dtype=np.float32)
+        self._base_memory_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
         self._initial_actor_h = None
         self._initial_critic_h = None
 
@@ -132,6 +140,14 @@ class MAPPORolloutBuffer:
         self._dones[self._ptr]     = np.asarray(tr.dones)
         if self.recurrent and tr.rnn_resets is not None:
             self._rnn_resets[self._ptr] = np.asarray(tr.rnn_resets).astype(bool)
+        if self.recurrent and tr.comm_masks is not None:
+            self._comm_masks[self._ptr] = np.asarray(tr.comm_masks).astype(bool)
+        if self.recurrent and tr.active_masks is not None:
+            self._active_masks[self._ptr] = np.asarray(tr.active_masks).astype(bool)
+        if self.recurrent and tr.base_memories is not None:
+            self._base_memories[self._ptr] = np.asarray(tr.base_memories, dtype=np.float32)
+        if self.recurrent and tr.base_memory_masks is not None:
+            self._base_memory_masks[self._ptr] = np.asarray(tr.base_memory_masks).astype(bool)
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -297,5 +313,9 @@ class MAPPORolloutBuffer:
                 "rnn_resets":      jnp.array(self._rnn_resets[:, idx]),
                 "initial_actor_h":  jnp.array(actor_h[idx]),
                 "initial_critic_h": jnp.array(critic_h[idx]),
+                "comm_masks":       jnp.array(self._comm_masks[:, idx]),
+                "active_masks":     jnp.array(self._active_masks[:, idx]),
+                "base_memories":    jnp.array(self._base_memories[:, idx]),
+                "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
             })
         return minibatches

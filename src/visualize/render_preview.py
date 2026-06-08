@@ -155,6 +155,13 @@ def render_svg(
         px2, py2 = x2 * scale, (height - y2) * scale
         svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#1f2937" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
 
+    # Mesh walls: movement/visual blockers, but communication-transparent.
+    for seg in data.get("mesh_walls", data.get("mesh", [])):
+        x1, y1, x2, y2 = seg
+        px1, py1 = x1 * scale, (height - y1) * scale
+        px2, py2 = x2 * scale, (height - y2) * scale
+        svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#0ea5e9" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
+
     # Zones
     if show_zones:
         zones = data.get("spawn_zones", {})
@@ -280,6 +287,13 @@ def render_png(
         p1 = (int(x1 * scale), int((height - y1) * scale))
         p2 = (int(x2 * scale), int((height - y2) * scale))
         cv2.line(img, p1, p2, (55, 41, 31), wall_width, cv2.LINE_AA)
+
+    # Mesh walls: movement/visual blockers, but communication-transparent.
+    for seg in data.get("mesh_walls", data.get("mesh", [])):
+        x1, y1, x2, y2 = seg
+        p1 = (int(x1 * scale), int((height - y1) * scale))
+        p2 = (int(x2 * scale), int((height - y2) * scale))
+        cv2.line(img, p1, p2, (235, 165, 14), wall_width, cv2.LINE_AA)
 
     # 6. Spawn Zones
     if show_zones:
@@ -500,7 +514,7 @@ def main() -> None:
     env_step = None
     map_def = None
     try:
-        env_step, env_reset, _, (W, H, occ_grid) = make_env_fns(cfg)
+        env_step, env_reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
         state = env_reset(jax.random.PRNGKey(args.seed))
         map_def = MapDefinition.load(map_path, cell_size=1.0)
     except Exception as e:

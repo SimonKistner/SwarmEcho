@@ -192,6 +192,8 @@ def _collect_rollout_mappo(
     actor_h = None,
     critic_h = None,
     last_dones = None,
+    base_memory = None,
+    base_memory_valid = None,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
@@ -202,6 +204,11 @@ def _collect_rollout_mappo(
         last_dones = np.zeros(buf.E, dtype=bool)
     buf.reset(actor_h, critic_h)
     E, N = buf.E, buf.N
+    if model.actor_memory and model.memory_comm_enabled:
+        if base_memory is None:
+            base_memory = jnp.zeros((E, model.hidden_dim), dtype=jnp.float32)
+        if base_memory_valid is None:
+            base_memory_valid = jnp.zeros((E,), dtype=bool)
 
     ep_ret_accum     = ep_trackers["ret"]
     ep_len_accum     = ep_trackers["len"]
@@ -250,15 +257,38 @@ def _collect_rollout_mappo(
             if model.critic_memory and critic_h is None:
                 critic_h = model.initial_critic_hidden((E_,))
 
-            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
                 return model.rollout_step_recurrent(
-                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    comm_mask=comm_mask_n,
+                    active=active_n,
+                    base_memory=base_memory_n,
+                    base_memory_mask=base_memory_mask_n,
                 )
 
             actor_h_in = actor_h if actor_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
             critic_h_in = critic_h if critic_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
+            raw_adj_b = states.adj_matrix[:, :N_, :N_] if states.adj_matrix.shape[-1] else jnp.zeros((E_, N_, N_), dtype=bool)
+            step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
+            comm_mask_b = raw_adj_b & jnp.asarray(step_share)
+            active_mask_b = states.active
+            base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
+            base_receiver_mask_b = (
+                states.adj_matrix[:, :N_, N_]
+                if states.adj_matrix.shape[-1]
+                else jnp.zeros((E_, N_), dtype=bool)
+            )
+            # Base-memory relay is only offered to drones that do not already know the target.
+            # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
+            base_receiver_mask_b = (
+                base_receiver_mask_b
+                & ~states.target_known[:, :N_]
+                & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
+                & jnp.asarray(step_share)
+            )
             actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b
+                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
             )
             if not model.actor_memory:
                 actor_h = None
@@ -271,6 +301,19 @@ def _collect_rollout_mappo(
                 return actions, log_probs, value
 
             actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
+        if recurrent and model.actor_memory and model.memory_comm_enabled:
+            connected_to_base_b = states.adj_matrix[:, :N, N] if states.adj_matrix.shape[-1] else jnp.zeros((E, N), dtype=bool)
+            reporters_b = states.target_known & connected_to_base_b & states.active
+            # If multiple target-knowing drones reconnect on the same first step, choose the lowest-index reporter.
+            # After base_memory_valid becomes true, later reporters cannot overwrite the first stored memory.
+            first_idx_b = jnp.argmax(reporters_b.astype(jnp.int32), axis=-1)
+            has_reporter_b = jnp.any(reporters_b, axis=-1)
+            reported_memory_b = jnp.take_along_axis(actor_h, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
+            should_store_b = has_reporter_b & ~base_memory_valid
+            # TODO: Future extension: give the base its own learned attention/MLP aggregation module. The base could receive observations or memories from drones as they connect, learn a larger-picture task representation, and share that representation with later incoming agents. For v1, keep the simpler behavior: store the memory of the first target-knowing agent that reconnects to base and relay that saved memory until episode end.
+            base_memory = jnp.where(should_store_b[:, None], reported_memory_b, base_memory)
+            base_memory_valid = base_memory_valid | should_store_b
+
         # actions_b: (E, N, A) — PRE-SQUASH samples u from actor.act()
         # Apply tanh squashing before scaling for the physics engine.
         # The buffer stores the raw pre-squash u for consistent PPO log-prob re-evaluation.
@@ -350,7 +393,15 @@ def _collect_rollout_mappo(
             rewards   = rewards_np,
             dones     = dones_np.astype(np.float32),
             rnn_resets = np.array(reset_agents_b) if recurrent else None,
+            comm_masks = np.array(comm_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            active_masks = np.array(active_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_memories = np.array(base_memory_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_memory_masks = np.array(base_receiver_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
         ))
+        if recurrent and model.actor_memory and model.memory_comm_enabled:
+            done_j = jnp.asarray(dones_np, dtype=bool)
+            base_memory = jnp.where(done_j[:, None], jnp.zeros_like(base_memory), base_memory)
+            base_memory_valid = jnp.where(done_j, False, base_memory_valid)
         last_dones = dones_np
 
     # Bootstrap value for last state
@@ -384,7 +435,7 @@ def _collect_rollout_mappo(
     ep_trackers["coverage"]   = cov_accum
 
     return (
-        states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool),
+        states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool), base_memory, base_memory_valid,
         completed_returns, completed_lengths, completed_success,
         completed_found, completed_gaps, completed_prog_pcts,
         completed_r_coverage, completed_r_gap, completed_r_coll,
@@ -429,6 +480,8 @@ def _evaluate(
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
         actor_h = model.initial_actor_hidden(()) if model.actor_memory else None
+        base_memory = jnp.zeros((model.hidden_dim,), dtype=jnp.float32) if model.actor_memory else None
+        base_memory_valid = jnp.bool_(False)
         ep_ret  = ep_gap = ep_prog_pct = 0.0
         ep_success = ep_found = False
         ep_states, ep_rewards = [], []
@@ -442,11 +495,41 @@ def _evaluate(
             if model.actor_memory:
                 resets = jnp.logical_not(state.active)
 
-                def _act_eval(o, h, r):
-                    h, mu, _ = model.actor(o, h, r)
-                    return h, mu
+                if model.memory_comm_enabled:
+                    N_eval = obs.shape[0]
+                    step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
+                    comm_mask = (state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)) & jnp.asarray(step_share)
+                    # Base-memory relay is only offered to drones that do not already know the target.
+                    # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
+                    base_mask = (
+                        (
+                            state.adj_matrix[:N_eval, N_eval]
+                            if state.adj_matrix.shape[-1]
+                            else jnp.zeros((N_eval,), dtype=bool)
+                        )
+                        & ~state.target_known[:N_eval]
+                        & base_memory_valid
+                        & jnp.asarray(step_share)
+                    )
+                    actor_h, actions, _ = model.actor.__call_team__(
+                        obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
+                    )
+                    connected_to_base = state.adj_matrix[:N_eval, N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval,), dtype=bool)
+                    reporters = state.target_known & connected_to_base & state.active
+                    # If multiple target-knowing drones reconnect on the same first step, choose the lowest-index reporter.
+                    # After base_memory_valid becomes true, later reporters cannot overwrite the first stored memory.
+                    first_idx = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
+                    has_reporter = jnp.any(reporters)
+                    reported_memory = actor_h[first_idx]
+                    should_store = has_reporter & ~base_memory_valid
+                    base_memory = jnp.where(should_store, reported_memory, base_memory)
+                    base_memory_valid = base_memory_valid | should_store
+                else:
+                    def _act_eval(o, h, r):
+                        h, mu, _ = model.actor(o, h, r)
+                        return h, mu
 
-                actor_h, actions = jax.vmap(_act_eval)(obs, actor_h, resets)
+                    actor_h, actions = jax.vmap(_act_eval)(obs, actor_h, resets)
             else:
                 actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu in pre-squash space
             actions = jnp.tanh(actions) * max_force                # squash + scale to physics
@@ -709,8 +792,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     print()
 
     # ── Environment ───────────────────────────────────────────────────────
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
-    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
+    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
     compute_reward     = make_reward_fn(cfg)
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
@@ -736,6 +819,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         actor_memory     = actor_memory,
         critic_memory    = critic_memory,
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
+        memory_comm_variant = str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
     )
     trainer = MAPPOTrainer(
         model         = model,
@@ -792,6 +880,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     actor_h = model.initial_actor_hidden((E,)) if actor_memory else None
     critic_h = model.initial_critic_hidden((E,)) if critic_memory else None
+    base_memory = jnp.zeros((E, int(cfg.network.hidden_dim)), dtype=jnp.float32) if actor_memory else None
+    base_memory_valid = jnp.zeros((E,), dtype=bool) if actor_memory else None
     rollout_last_dones = np.zeros(E, dtype=bool)
 
     # ── Run directory & Name ──────────────────────────────────────────────
@@ -901,14 +991,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── Rollout ───────────────────────────────────────────────────────
             (states, collect_key,
-             last_values, last_dones, actor_h, critic_h, rollout_last_dones,
+             last_values, last_dones, actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
              raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
-                actor_h, critic_h, rollout_last_dones,
+                actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
