@@ -77,6 +77,7 @@ class MAPPOModel(nnx.Module):
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
         self.memory_comm_enabled = memory_comm_enabled
+        self.memory_comm_variant = memory_comm_variant
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
 
         if actor_memory:

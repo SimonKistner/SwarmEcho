@@ -194,6 +194,7 @@ def _collect_rollout_mappo(
     last_dones = None,
     base_memory = None,
     base_memory_valid = None,
+    track_heatmap_data: bool = False,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
@@ -288,9 +289,33 @@ def _collect_rollout_mappo(
                     & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
                     & jnp.asarray(step_share)
                 )
-                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                    comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
+                def _rollout_one_env_no_comm(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                    return model.rollout_step_recurrent(
+                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    )
+
+                def _rollout_with_comm(_):
+                    return jax.vmap(_rollout_one_env)(
+                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                        comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
+                    )
+
+                def _rollout_without_comm(_):
+                    return jax.vmap(_rollout_one_env_no_comm)(
+                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                    )
+
+                has_drone_receiver = jnp.any(comm_mask_b)
+                # base_receiver_mask_b already includes base_memory_valid, so drones connected to
+                # an empty base do not force the attention path at episode start.
+                has_base_memory_receiver = jnp.any(base_receiver_mask_b)
+                can_skip_empty_comm = str(model.memory_comm_variant) != "self_attention"
+                use_attention_path = (has_drone_receiver | has_base_memory_receiver) | jnp.asarray(not can_skip_empty_comm)
+                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.lax.cond(
+                    use_attention_path,
+                    _rollout_with_comm,
+                    _rollout_without_comm,
+                    operand=None,
                 )
             else:
                 def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
@@ -373,13 +398,14 @@ def _collect_rollout_mappo(
             completed_coverage.append(float(cov_accum[e]))
 
             # Append terminal target data
-            t_pos = np.array(info["terminal_target_pos"][e])
-            if t_pos.ndim == 2:
-                t_pos = t_pos[0]
-            completed_target_pos.append(t_pos.tolist())
-            completed_target_success.append(bool(ep_success_accum[e] > 0.5))
-            completed_target_delivered.append(bool(info["terminal_delivered"][e]))
-            completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
+            if track_heatmap_data:
+                t_pos = np.array(info["terminal_target_pos"][e])
+                if t_pos.ndim == 2:
+                    t_pos = t_pos[0]
+                completed_target_pos.append(t_pos.tolist())
+                completed_target_success.append(bool(ep_success_accum[e] > 0.5))
+                completed_target_delivered.append(bool(info["terminal_delivered"][e]))
+                completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
 
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
         ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
@@ -995,6 +1021,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     completed_eps_count = 0
 
+    track_heatmap_data = bool(
+        cfg.logging.get("eval_failed_chain_heatmap", False) or
+        cfg.logging.get("eval_not_delivered_heatmap", False) or
+        cfg.logging.get("eval_not_visually_found_heatmap", False)
+    )
+
     t_start = time.perf_counter()
 
     try:
@@ -1012,6 +1044,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
+                track_heatmap_data=track_heatmap_data,
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
@@ -1130,6 +1163,16 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"succ={_s}  "
                     f"eta={eta_str}"
                 )
+
+                if not window_full:
+                    current_steps = np.array(states.step)
+                    min_step = int(current_steps.min())
+                    max_step = int(current_steps.max())
+                    mean_step = float(current_steps.mean())
+                    print(
+                        f"         [warmup] completed_episodes={len(window_ret)}/{window_ret.maxlen} | "
+                        f"env_steps: min={min_step} mean={mean_step:.1f} max={max_step}"
+                    )
 
             # ── W&B logging ──────────────────────────────────────────────────
             if wandb_run:

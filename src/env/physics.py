@@ -146,8 +146,15 @@ def make_env_fns(cfg: DictConfig):
                 ty = (map_def.target_spawn_zone[1] + map_def.target_spawn_zone[3]) / 2.0
                 TARGET_POS_FIXED = jnp.array([tx, ty], dtype=jnp.float32)
             # MEM_T8-only diagnostic scaffolding: paired anti-target slots.
-            if map_def.anti_target_spawn_points is not None and len(map_def.anti_target_spawn_points) >= N:
-                ANTI_TARGET_POINTS = map_def.anti_target_spawn_points[:N]
+            if map_def.anti_target_spawn_points is not None:
+                if len(map_def.anti_target_spawn_points) >= N:
+                    ANTI_TARGET_POINTS = map_def.anti_target_spawn_points[:N]
+                else:
+                    scale = N // len(map_def.anti_target_spawn_points)
+                    anti_indices = jnp.arange(N) // scale
+                    mapped_points = map_def.anti_target_spawn_points[anti_indices]
+                    is_receiver = (jnp.arange(N) % 2 == 1)[:, None]
+                    ANTI_TARGET_POINTS = jnp.where(is_receiver, mapped_points, 0.0)
         else:
             raise FileNotFoundError(f"Map file not found: {map_path}")
 
@@ -188,6 +195,27 @@ def make_env_fns(cfg: DictConfig):
 
     _drone_indices = jnp.arange(N, dtype=jnp.int32)
     _eye = jnp.eye(N, dtype=jnp.float32)
+
+    # ── Static Base Pre-Coverage Precomputation ──────────────────
+    STATIC_PRECOVERED = None
+    if precover_base_comm and not use_random_base_spawn:
+        fixed_base_pos = (
+            BASE_POS_FIXED
+            if BASE_POS_FIXED is not None
+            else jnp.array([float(W) / 2.0, float(H) / 2.0], dtype=jnp.float32)
+        )
+        dists = jnp.linalg.norm(CELL_CENTRES - fixed_base_pos[None, None, :], axis=-1)
+        in_range = dists <= comm_r_base
+
+        def _check_cell(c_pos, ir):
+            return jax.lax.cond(
+                ir,
+                lambda op: dda_raycast(op[0] / cell_size, op[1] / cell_size, occ_grid),
+                lambda _: jnp.bool_(False),
+                operand=(c_pos, fixed_base_pos)
+            )
+
+        STATIC_PRECOVERED = jax.vmap(jax.vmap(_check_cell))(CELL_CENTRES, in_range)
 
     # ------------------------------------------------------------------
     # update_coverage
@@ -416,7 +444,14 @@ def make_env_fns(cfg: DictConfig):
             elif use_task:  # fallback to "map_defined"
                 # MEM_T8-only diagnostic path: fixed per-agent target slots.
                 if map_def.target_spawn_points is not None and int(cfg.env.num_targets) > 1:
-                    target_pos = map_def.target_spawn_points[:N]
+                    if len(map_def.target_spawn_points) >= N:
+                        target_pos = map_def.target_spawn_points[:N]
+                    else:
+                        scale = N // len(map_def.target_spawn_points)
+                        target_indices = jnp.arange(N) // scale
+                        mapped_pos = map_def.target_spawn_points[target_indices]
+                        is_receiver = (jnp.arange(N) % 2 == 1)[:, None]
+                        target_pos = jnp.where(is_receiver, mapped_pos, 0.0)
                 else:
                     target_pos = map_def.sample_target(k2)
             else:
@@ -438,19 +473,22 @@ def make_env_fns(cfg: DictConfig):
         coverage_grid = jnp.zeros((GW, GH), dtype=jnp.bool_)
 
         if precover_base_comm:
-            dists = jnp.linalg.norm(CELL_CENTRES - base_pos[None, None, :], axis=-1)
-            in_range = dists <= comm_r_base
+            if STATIC_PRECOVERED is not None:
+                coverage_grid = coverage_grid | STATIC_PRECOVERED
+            else:
+                dists = jnp.linalg.norm(CELL_CENTRES - base_pos[None, None, :], axis=-1)
+                in_range = dists <= comm_r_base
 
-            def _check_cell(c_pos, ir):
-                return jax.lax.cond(
-                    ir,
-                    lambda op: dda_raycast(op[0] / cell_size, op[1] / cell_size, occ_grid),
-                    lambda _: jnp.bool_(False),
-                    operand=(c_pos, base_pos)
-                )
+                def _check_cell(c_pos, ir):
+                    return jax.lax.cond(
+                        ir,
+                        lambda op: dda_raycast(op[0] / cell_size, op[1] / cell_size, occ_grid),
+                        lambda _: jnp.bool_(False),
+                        operand=(c_pos, base_pos)
+                    )
 
-            precovered = jax.vmap(jax.vmap(_check_cell))(CELL_CENTRES, in_range)
-            coverage_grid = coverage_grid | precovered
+                precovered = jax.vmap(jax.vmap(_check_cell))(CELL_CENTRES, in_range)
+                coverage_grid = coverage_grid | precovered
 
 
         if spawn_delay > 0:

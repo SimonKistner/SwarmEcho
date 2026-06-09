@@ -38,8 +38,8 @@ network:
   critic_type: "agent_centric"
   actor_memory: true
   critic_memory: true
-  num_layers: 4    # critic depth
-  actor_num_layers: 4    # actor depth (lighter, separate)
+  num_layers: 3    # critic depth
+  actor_num_layers: 3    # actor depth (lighter, separate)
 
 curriculum:
   success_threshold: 0.99

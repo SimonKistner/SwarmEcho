@@ -85,8 +85,9 @@ def make_reward_fn(cfg: DictConfig):
     """
 
     # ---- Extract scalars (XLA compile-time constants) --------------------
-    N      = int(cfg.env.num_agents)
-    comm_r = float(cfg.env.comm_radius)
+    N           = int(cfg.env.num_agents)
+    num_targets = int(cfg.env.num_targets)
+    comm_r      = float(cfg.env.comm_radius)
     # Base station uses its own comm radius for the first hop.
     # Defaults to comm_radius if not set, so old configs are fully backward-compatible.
     comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
@@ -345,7 +346,7 @@ def make_reward_fn(cfg: DictConfig):
         # for eight independent cue/choice tasks. Normal levels stay binary.
         target_found_fraction = jnp.where(
             per_agent_targets,
-            jnp.mean(new_state.target_known.astype(jnp.float32)),
+            jnp.sum(new_state.target_known.astype(jnp.float32)) / num_targets,
             global_target_found.astype(jnp.float32),
         )
 
