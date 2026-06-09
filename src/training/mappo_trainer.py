@@ -131,10 +131,14 @@ def recurrent_mappo_loss(
     rnn_resets:      jax.Array,   # (T, B, N)
     initial_actor_h: jax.Array,   # (B, N, H)
     initial_critic_h:jax.Array,   # (B, N, H)
-    clip_eps:        float,
-    vf_coef:         float,
-    ent_coef:        float,
-    per_agent:       bool,
+    comm_masks:      jax.Array | None = None,
+    active_masks:    jax.Array | None = None,
+    base_memories:   jax.Array | None = None,
+    base_memory_masks: jax.Array | None = None,
+    clip_eps:        float = 0.2,
+    vf_coef:         float = 0.5,
+    ent_coef:        float = 0.01,
+    per_agent:       bool = True,
 ) -> tuple[jax.Array, MAPPOStats]:
     """
     Recurrent MAPPO loss over full rollout sequences.
@@ -145,18 +149,43 @@ def recurrent_mappo_loss(
     T, B, N, D = obs.shape
 
     if model.actor_memory:
-        obs_actor = obs.reshape(T, B * N, D)
-        actions_actor = actions.reshape(T, B * N, actions.shape[-1])
-        resets_actor = rnn_resets.reshape(T, B * N)
-        init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
-        _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
-            obs_actor,
-            actions_actor,
-            init_actor,
-            resets_actor,
-        )
-        new_log_probs = log_probs_flat.reshape(T, B, N)
-        entropy = entropy_flat.reshape(T, B, N)
+        if model.memory_comm_enabled:
+            def _eval_env(obs_env, act_env, reset_env, init_h_env, comm_env, active_env, base_mem_env, base_mask_env):
+                return model.actor.evaluate_actions_sequence(
+                    obs_env,
+                    act_env,
+                    init_h_env,
+                    reset_env,
+                    comm_env,
+                    active_env,
+                    base_mem_env,
+                    base_mask_env,
+                )
+            _, log_probs_flat, entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 1, 1, 1, 1))(
+                obs,
+                actions,
+                rnn_resets,
+                initial_actor_h,
+                comm_masks,
+                active_masks,
+                base_memories,
+                base_memory_masks,
+            )
+            new_log_probs = jnp.swapaxes(log_probs_flat, 0, 1)
+            entropy = jnp.swapaxes(entropy_flat, 0, 1)
+        else:
+            obs_actor = obs.reshape(T, B * N, D)
+            actions_actor = actions.reshape(T, B * N, actions.shape[-1])
+            resets_actor = rnn_resets.reshape(T, B * N)
+            init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
+            _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
+                obs_actor,
+                actions_actor,
+                init_actor,
+                resets_actor,
+            )
+            new_log_probs = log_probs_flat.reshape(T, B, N)
+            entropy = entropy_flat.reshape(T, B, N)
     else:
         obs_flat = obs.reshape(T * B * N, D)
         actions_flat = actions.reshape(T * B * N, -1)
@@ -248,6 +277,10 @@ def _recurrent_mappo_step(
     rnn_resets:      jax.Array,
     initial_actor_h: jax.Array,
     initial_critic_h:jax.Array,
+    comm_masks:      jax.Array | None = None,
+    active_masks:    jax.Array | None = None,
+    base_memories:   jax.Array | None = None,
+    base_memory_masks: jax.Array | None = None,
     *,
     clip_eps:  float,
     vf_coef:   float,
@@ -259,6 +292,7 @@ def _recurrent_mappo_step(
             m, obs, actions, old_log_probs, old_values,
             advantages, returns, rnn_resets,
             initial_actor_h, initial_critic_h,
+            comm_masks, active_masks, base_memories, base_memory_masks,
             clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -345,6 +379,10 @@ class MAPPOTrainer:
                         mb["rnn_resets"],
                         mb["initial_actor_h"],
                         mb["initial_critic_h"],
+                        mb["comm_masks"],
+                        mb["active_masks"],
+                        mb["base_memories"],
+                        mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )
                 all_stats.append(stats)

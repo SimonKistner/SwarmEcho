@@ -70,6 +70,8 @@ class EnvConfig:
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
+    observe_target_vector: bool = True            # if False, remove target odometry vector from actor observations
+    observe_base_vector: bool = True              # if False, remove base odometry vector from actor observations
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
 
 
@@ -124,6 +126,11 @@ class NetworkConfig:
     critic_type:      str = "agent_centric"  # "agent_centric" | "global_mean"
     actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
+    memory_comm_enabled: bool = False
+    memory_comm_gradient_mode: str = "rial"  # "rial" | "dial"
+    memory_comm_variant: str = "cross_attention_residual"  # "cross_attention_residual" | "cross_attention_concat" | "self_attention"
+    memory_comm_every_k_steps: int = 10
+    memory_comm_num_heads: int = 4
 
 
 @dataclass
@@ -236,10 +243,17 @@ def compute_obs_dim(cfg: DictConfig) -> int:
         ├─ inv_dist_target_conn_drone             (1)   target-chain drones, norm by comm_r
         └─ inv_dist_base_conn_drone               (1)   base-chain drones, norm by comm_r
 
-    Total: 9 + 16 + B * 4
+    Total: 9 + 16 + B * 4 by default. The base and target odometry vectors
+    can be removed independently with env.observe_base_vector and
+    env.observe_target_vector; the target-known flag remains present.
     """
     B = cfg.env.radar_bins
-    return 9 + 16 + B * 4
+    self_dim = 9
+    if not bool(cfg.env.get("observe_base_vector", True)):
+        self_dim -= 2
+    if not bool(cfg.env.get("observe_target_vector", True)):
+        self_dim -= 2
+    return self_dim + 16 + B * 4
 
 
 def compute_action_dim(_cfg: DictConfig) -> int:
@@ -430,8 +444,14 @@ def load_config(
     elif cfg.reward.only_explor_individual:
         cfg.reward.only_shortest_path_chain_reward = False
 
+    if bool(cfg.network.memory_comm_enabled):
+        # Memory communication already requires the direct adjacency matrix to build
+        # sender/receiver masks, so expose it in EnvState/logging as well.
+        OmegaConf.set_readonly(cfg, False)
+        cfg.env.log_adjacency_matrix = True
+
     # Automatically enable adjacency matrix logging for render, evaluate, and test_physics scripts
-    # (since the matrix is only needed for rendering visuals, and we want to keep training performant)
+    # (since the matrix is needed for visuals/diagnostics in those entry points)
     import sys
     if sys.argv and len(sys.argv[0]) > 0:
         script_name = Path(sys.argv[0]).name
@@ -502,6 +522,16 @@ def validate_config(cfg: DictConfig) -> None:
         # Both buckets=0 is valid: compute episodes, print stats, render nothing.
     if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
+    if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
+        raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
+    if str(cfg.network.memory_comm_gradient_mode) not in ("rial", "dial"):
+        raise ValueError("network.memory_comm_gradient_mode must be 'rial' or 'dial'.")
+    if str(cfg.network.memory_comm_variant) not in ("cross_attention_residual", "cross_attention_concat", "self_attention"):
+        raise ValueError("network.memory_comm_variant must be a supported memory communication variant.")
+    if int(cfg.network.memory_comm_every_k_steps) < 1:
+        raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
+    if int(cfg.network.memory_comm_num_heads) < 1:
+        raise ValueError("network.memory_comm_num_heads must be >= 1.")
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
         num_envs = int(cfg.training.num_envs)
         mb = int(cfg.training.num_minibatches)

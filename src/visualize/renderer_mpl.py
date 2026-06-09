@@ -97,6 +97,8 @@ class _FrameData(NamedTuple):
     active:        np.ndarray | None
     collides:      np.ndarray | None
     occ_grid:      np.ndarray | None
+    comm_occ_grid: np.ndarray | None
+    mesh_walls:    np.ndarray | None
     box_width:     float
     box_height:    float
     extra_metrics: dict[str, any]
@@ -330,6 +332,10 @@ def _draw_frame(
         ax.imshow(occ.T, extent=(0, W, 0, H), origin="lower", 
                   cmap="Greys", alpha=0.5, interpolation="nearest", zorder=1)
 
+    if frame.mesh_walls is not None:
+        for x1, y1, x2, y2 in np.asarray(frame.mesh_walls):
+            ax.plot([x1, x2], [y1, y2], color="#0ea5e9", lw=2.0, solid_capstyle="butt", zorder=2)
+
     # ── Coverage ──────────────────────────────────────────────────────────
     if frame.coverage_grid.any():
         cell_size = 1.0
@@ -354,7 +360,7 @@ def _draw_frame(
     # ── Adjacency ─────────────────────────────────────────────────────────
     adj, base_idx, target_idx, target_indices, drone_start, ents, dists = _build_adjacency(
         frame.pos, frame.base_pos, frame.target_pos, 
-        comm_r, vis_r, comm_r_base, frame.occ_grid, (W, H), cfg
+        comm_r, vis_r, comm_r_base, frame.comm_occ_grid if frame.comm_occ_grid is not None else frame.occ_grid, (W, H), cfg
     )
     M = len(ents)
     
@@ -829,6 +835,8 @@ def render_video(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    comm_occ_grid_static = None
+    mesh_walls_static = None
     anti_target_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
@@ -836,6 +844,8 @@ def render_video(
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = np.array(map_def.occupancy_grid)
+            comm_occ_grid_static = np.array(map_def.communication_occupancy_grid)
+            mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -860,6 +870,8 @@ def render_video(
                     active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
                     collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
                     occ_grid      = occ_grid_static,
+                    comm_occ_grid = comm_occ_grid_static,
+                    mesh_walls    = mesh_walls_static,
                     box_width     = float(traj_cpu.box_width[t]),
                     extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
                     target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),

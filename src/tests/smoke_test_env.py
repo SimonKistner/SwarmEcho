@@ -20,7 +20,7 @@ def smoke_test():
     print("✅ Config loaded.")
     
     # 2. Setup env
-    env_step, env_reset, _ = make_env_fns(cfg)
+    env_step, env_reset, _, _ = make_env_fns(cfg)
     print("✅ Physics functions created.")
     
     # 3. Setup obs
