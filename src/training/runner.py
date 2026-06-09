@@ -194,6 +194,7 @@ def _collect_rollout_mappo(
     last_dones = None,
     base_memory = None,
     base_memory_valid = None,
+    track_heatmap_data: bool = False,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
@@ -397,13 +398,14 @@ def _collect_rollout_mappo(
             completed_coverage.append(float(cov_accum[e]))
 
             # Append terminal target data
-            t_pos = np.array(info["terminal_target_pos"][e])
-            if t_pos.ndim == 2:
-                t_pos = t_pos[0]
-            completed_target_pos.append(t_pos.tolist())
-            completed_target_success.append(bool(ep_success_accum[e] > 0.5))
-            completed_target_delivered.append(bool(info["terminal_delivered"][e]))
-            completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
+            if track_heatmap_data:
+                t_pos = np.array(info["terminal_target_pos"][e])
+                if t_pos.ndim == 2:
+                    t_pos = t_pos[0]
+                completed_target_pos.append(t_pos.tolist())
+                completed_target_success.append(bool(ep_success_accum[e] > 0.5))
+                completed_target_delivered.append(bool(info["terminal_delivered"][e]))
+                completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
 
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
         ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
@@ -1019,6 +1021,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     completed_eps_count = 0
 
+    track_heatmap_data = bool(
+        cfg.logging.get("eval_failed_chain_heatmap", False) or
+        cfg.logging.get("eval_not_delivered_heatmap", False) or
+        cfg.logging.get("eval_not_visually_found_heatmap", False)
+    )
+
     t_start = time.perf_counter()
 
     try:
@@ -1036,6 +1044,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
+                actor_h, critic_h, rollout_last_dones,
+                track_heatmap_data=track_heatmap_data,
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
@@ -1154,6 +1164,16 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"succ={_s}  "
                     f"eta={eta_str}"
                 )
+
+                if not window_full:
+                    current_steps = np.array(states.step)
+                    min_step = int(current_steps.min())
+                    max_step = int(current_steps.max())
+                    mean_step = float(current_steps.mean())
+                    print(
+                        f"         [warmup] completed_episodes={len(window_ret)}/{window_ret.maxlen} | "
+                        f"env_steps: min={min_step} mean={mean_step:.1f} max={max_step}"
+                    )
 
             # ── W&B logging ──────────────────────────────────────────────────
             if wandb_run:

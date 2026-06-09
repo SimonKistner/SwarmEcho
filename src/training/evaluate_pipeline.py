@@ -292,8 +292,8 @@ def setup_model_and_env(cfg, checkpoint_path):
     return model, env_step, reset, compute_obs, compute_reward
 
 
-def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward):
-    """Runs a high-throughput parallel evaluation sweep in JAX/XLA, tracking success and target-found flags."""
+def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, track_delivered=True, track_visual=True):
+    """Runs a high-throughput parallel evaluation sweep in JAX/XLA, tracking success and optionally target-found flags."""
     print(f"Running parallel evaluation sweep over {NUM_ENVS} environments...")
     max_steps = int(cfg.env.max_steps)
     max_force = float(cfg.env.max_force)
@@ -336,11 +336,17 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward):
         new_has_succeeded = has_succeeded | success_achieved
 
         # Track base target known (delivered) and target visual discovery (visual)
-        delivered = next_state.base_target_known
-        visually_found = jnp.any(next_state.target_known, axis=-1)
+        if track_delivered:
+            delivered = next_state.base_target_known
+            new_has_found_delivered = has_found_delivered | delivered
+        else:
+            new_has_found_delivered = has_found_delivered
 
-        new_has_found_delivered = has_found_delivered | delivered
-        new_has_found_visual = has_found_visual | visually_found
+        if track_visual:
+            visually_found = jnp.any(next_state.target_known, axis=-1)
+            new_has_found_visual = has_found_visual | visually_found
+        else:
+            new_has_found_visual = has_found_visual
 
         return next_state, actor_h, new_has_succeeded, new_has_found_delivered, new_has_found_visual
 
@@ -382,17 +388,6 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward):
     num_success = int(jnp.sum(final_has_succeeded))
     num_fail = NUM_ENVS - num_success
     success_rate = (num_success / NUM_ENVS) * 100.0
-
-    num_delivered = int(jnp.sum(final_has_found_delivered))
-    num_not_delivered = NUM_ENVS - num_delivered
-    delivered_rate = (num_delivered / NUM_ENVS) * 100.0
-
-    num_visually_found = int(jnp.sum(final_has_found_visual))
-    num_not_visually_found = NUM_ENVS - num_visually_found
-    visually_found_rate = (num_visually_found / NUM_ENVS) * 100.0
-
-    print(f"Results: Visually Found: {num_visually_found}/{NUM_ENVS} ({visually_found_rate:.2f}%)")
-    print(f"         Delivered:      {num_delivered}/{NUM_ENVS} ({delivered_rate:.2f}%)")
     print(f"         Successes:      {num_success}/{NUM_ENVS} ({success_rate:.2f}%)")
 
     # Extract target positions
@@ -403,11 +398,31 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward):
     failed_mask = np.array(~final_has_succeeded)
     failed_positions = target_positions[failed_mask]
 
-    not_delivered_mask = np.array(~final_has_found_delivered)
-    not_delivered_positions = target_positions[not_delivered_mask]
+    if track_delivered:
+        num_delivered = int(jnp.sum(final_has_found_delivered))
+        num_not_delivered = NUM_ENVS - num_delivered
+        delivered_rate = (num_delivered / NUM_ENVS) * 100.0
+        print(f"         Delivered:      {num_delivered}/{NUM_ENVS} ({delivered_rate:.2f}%)")
+        not_delivered_mask = np.array(~final_has_found_delivered)
+        not_delivered_positions = target_positions[not_delivered_mask]
+    else:
+        num_delivered = 0
+        num_not_delivered = 0
+        delivered_rate = 0.0
+        not_delivered_positions = np.zeros((0, 2))
 
-    not_visually_found_mask = np.array(~final_has_found_visual)
-    not_visually_found_positions = target_positions[not_visually_found_mask]
+    if track_visual:
+        num_visually_found = int(jnp.sum(final_has_found_visual))
+        num_not_visually_found = NUM_ENVS - num_visually_found
+        visually_found_rate = (num_visually_found / NUM_ENVS) * 100.0
+        print(f"Results: Visually Found: {num_visually_found}/{NUM_ENVS} ({visually_found_rate:.2f}%)")
+        not_visually_found_mask = np.array(~final_has_found_visual)
+        not_visually_found_positions = target_positions[not_visually_found_mask]
+    else:
+        num_visually_found = 0
+        num_not_visually_found = 0
+        visually_found_rate = 0.0
+        not_visually_found_positions = np.zeros((0, 2))
 
     return (
         failed_positions, not_delivered_positions, not_visually_found_positions,
@@ -934,7 +949,9 @@ def main():
         (failed_positions, not_delivered_positions, not_visually_found_positions,
          success_rate, delivered_rate, visually_found_rate,
          num_fail, num_not_delivered, num_not_visually_found) = run_parallel_eval(
-            model, cfg, env_step, reset, compute_obs, compute_reward
+            model, cfg, env_step, reset, compute_obs, compute_reward,
+            track_delivered=CREATE_NOT_DELIVERED_HEATMAP,
+            track_visual=CREATE_NOT_VISUALLY_FOUND_HEATMAP
         )
         
         print("\n--- Phase 2: Processing Swept Coordinates ---")
