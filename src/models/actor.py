@@ -314,13 +314,6 @@ class RecurrentDecentralizedActor(nnx.Module):
                 return context
             raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
 
-        if self.memory_comm_variant in ("cross_attention_residual", "cross_attention_concat"):
-            return jax.lax.cond(
-                jnp.any(has_any),
-                lambda _: _attended_state(),
-                lambda _: _empty_cross_attention_state(),
-                operand=None,
-            )
         return _attended_state()
 
     def __call_team__(

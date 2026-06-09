@@ -1,14 +1,14 @@
 env:
   map_names: ["memory_share_t_maze_8"]
   num_agents: 8
-  num_targets: 8
-  num_bases: 1
+  num_targets: 4
+  num_bases: 0
   max_steps: 50
   visual_radius: 8.0
   comm_radius: 45.0
   comm_radius_base: 0.01
   spawn_delay: 0
-  use_random_base_spawn: true
+  use_random_base_spawn: false
   use_random_drone_spawn: true
   target_spawn_method: "map_defined"
   precover_base_comm: false
@@ -21,7 +21,7 @@ training:
   num_envs: 4000
   num_steps: 50
   num_epochs: 2
-  num_minibatches: 10
+  num_minibatches: 20
 
 reward:
   exploration_bonus: 0.05
@@ -42,14 +42,14 @@ network:
   critic_type: "agent_centric"
   actor_memory: true
   critic_memory: true
-  memory_comm_enabled: false
-  memory_comm_gradient_mode: "rial"
+  memory_comm_enabled: true
+  memory_comm_gradient_mode: "rial" #RIAL = blocked |DIAL = Gradients flow
   memory_comm_variant: "cross_attention_residual"
   memory_comm_every_k_steps: 1
   memory_comm_num_heads: 4
 
-  num_layers:  4    # critic depth
-  actor_num_layers:  4    # actor depth (lighter, separate)
+  num_layers:  3    # critic depth
+  actor_num_layers:  3    # actor depth (lighter, separate)
 
 logging:
   eval_freq: 10

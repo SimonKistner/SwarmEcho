@@ -157,6 +157,11 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm
     target_points = np.asarray(target_pos)
     if target_points.ndim == 1:
         target_points = target_points[None, :]
+    elif target_points.ndim == 2:
+        mask = ~np.all(target_points == 0.0, axis=1)
+        target_points = target_points[mask]
+        _, indices = np.unique(target_points, axis=0, return_index=True)
+        target_points = target_points[np.sort(indices)]
 
     base_idx = -1; target_idx = -1; target_indices = []
     if num_bases > 0: 
@@ -515,6 +520,11 @@ def _draw_frame(
         target_points = np.asarray(frame.target_pos)
         if target_points.ndim == 1:
             target_points = target_points[None, :]
+        elif target_points.ndim == 2:
+            mask = ~np.all(target_points == 0.0, axis=1)
+            target_points = target_points[mask]
+            _, indices = np.unique(target_points, axis=0, return_index=True)
+            target_points = target_points[np.sort(indices)]
         for k, tp in enumerate(target_points):
             tx, ty = tp
             ax.scatter(tx, ty, s=RendererConfig.MPL_TARGET_S, marker="*", color="#dc2626",
@@ -529,6 +539,11 @@ def _draw_frame(
         anti_points = np.asarray(frame.anti_target_pos)
         if anti_points.ndim == 1:
             anti_points = anti_points[None, :]
+        elif anti_points.ndim == 2:
+            mask = ~np.all(anti_points == 0.0, axis=1)
+            anti_points = anti_points[mask]
+            _, indices = np.unique(anti_points, axis=0, return_index=True)
+            anti_points = anti_points[np.sort(indices)]
         for k, ap in enumerate(anti_points):
             anti_x, anti_y = ap
             ax.scatter(anti_x, anti_y, s=RendererConfig.MPL_TARGET_S * 0.75, marker="X",

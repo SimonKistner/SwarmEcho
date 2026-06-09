@@ -1044,7 +1044,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 states, model, buf, autoreset_step_v, obs_fn_v,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
-                actor_h, critic_h, rollout_last_dones,
                 track_heatmap_data=track_heatmap_data,
             )
 
