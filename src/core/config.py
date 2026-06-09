@@ -155,9 +155,9 @@ class LoggingConfig:
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
-    eval_failed_chain_heatmap: bool = True  # Generate heatmap of target positions for failed chain deliveries from sliding window
-    eval_not_delivered_heatmap: bool = True  # Generate heatmap of target positions not delivered to base from sliding window
-    eval_not_visually_found_heatmap: bool = True  # Generate heatmap of target positions not visually found from sliding window
+    eval_failed_chain_heatmap: bool = False  # Generate heatmap of target positions for failed chain deliveries from sliding window
+    eval_not_delivered_heatmap: bool = False  # Generate heatmap of target positions not delivered to base from sliding window
+    eval_not_visually_found_heatmap: bool = False  # Generate heatmap of target positions not visually found from sliding window
 
     # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
     video_freq: Optional[int] = None # legacy
@@ -189,7 +189,7 @@ class VisualizeConfig:
     vis_color: str = "#03fbff"
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
-    render_conn_matrix: bool = True       # if True, render the connections matrix in the legend
+    render_conn_matrix: bool = False       # if True, render the connections matrix in the legend
 
 
 @dataclass
