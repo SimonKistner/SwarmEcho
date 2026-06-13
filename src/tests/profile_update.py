@@ -72,8 +72,7 @@ def main():
         rngs=rngs,
         memory_comm_enabled=True,
         memory_comm_gradient_mode=gradient_mode,
-        memory_comm_variant=str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
-        memory_comm_every_k_steps=int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_every_k_steps=int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads=int(cfg.network.get("memory_comm_num_heads", 4)),
     )
     

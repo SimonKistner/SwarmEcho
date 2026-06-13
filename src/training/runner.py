@@ -286,32 +286,9 @@ def _batched_rollout_and_memory_step_impl(
                     base_memory_mask=base_memory_mask_n,
                 )
 
-            def _rollout_one_env_no_comm(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
-                return model.rollout_step_recurrent(
-                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
-                )
-
-            def _rollout_with_comm(_):
-                return jax.vmap(_rollout_one_env)(
-                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                    comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
-                )
-
-            def _rollout_without_comm(_):
-                return jax.vmap(_rollout_one_env_no_comm)(
-                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                )
-
-            has_drone_receiver = jnp.any(comm_mask_b)
-            has_base_memory_receiver = jnp.any(base_receiver_mask_b)
-            can_skip_empty_comm = str(model.memory_comm_variant) != "self_attention"
-            use_attention_path = (has_drone_receiver | has_base_memory_receiver) | jnp.asarray(not can_skip_empty_comm)
-
-            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.lax.cond(
-                use_attention_path,
-                _rollout_with_comm,
-                _rollout_without_comm,
-                operand=None,
+            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
             )
             
             # Base memory update logic
@@ -989,8 +966,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         rngs             = rngs,
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
-        memory_comm_variant = str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
-        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
     )
     trainer = MAPPOTrainer(

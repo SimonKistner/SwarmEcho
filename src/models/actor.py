@@ -226,42 +226,49 @@ class RecurrentDecentralizedActor(nnx.Module):
         rngs:             nnx.Rngs,
         memory_comm_enabled: bool = False,
         memory_comm_gradient_mode: str = "rial",
-        memory_comm_variant: str = "cross_attention_residual",
         memory_comm_num_heads: int = 4,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_gradient_mode = memory_comm_gradient_mode
-        self.memory_comm_variant = memory_comm_variant
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
         self.gru = GRUCell(hidden_dim, hidden_dim, rngs)
-        decision_dim = hidden_dim * 2 if memory_comm_variant == "cross_attention_concat" else hidden_dim
         if memory_comm_enabled:
+            self.memory_query_proj = nnx.Linear(hidden_dim * 2, hidden_dim, rngs=rngs)
+            self.memory_gru_input_proj = nnx.Linear(hidden_dim * 2, hidden_dim, rngs=rngs)
             self.memory_attention = nnx.MultiHeadAttention(
                 num_heads=memory_comm_num_heads,
                 in_features=hidden_dim,
                 rngs=rngs,
             )
-        self.policy_trunk = MLP(decision_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+        self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
         self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
         self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
 
 
-    def _decision_state(
+    def _comm_context(
         self,
-        hidden: jax.Array,
+        prev_hidden: jax.Array,
+        encoded: jax.Array,
         comm_mask: jax.Array | None = None,
         active: jax.Array | None = None,
         base_memory: jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
         deterministic: bool = True,
     ) -> jax.Array:
-        """Apply optional receiver-conditioned actor-memory communication."""
-        if not self.memory_comm_enabled:
-            return hidden
+        """Return received actor-memory context from previous hidden states.
 
-        N = hidden.shape[-2]
+        Communication uses h_{t-1} as the transmitted payload and conditions the
+        receiver query on both h_{t-1} and the current encoded observation.  The
+        resulting context is merged into the GRU input by __call_team__, making
+        received information persistent in h_t without same-step circular
+        dependencies between agents.
+        """
+        if not self.memory_comm_enabled:
+            return jnp.zeros_like(prev_hidden)
+
+        N = prev_hidden.shape[-2]
         if comm_mask is None:
             comm_mask = ~jnp.eye(N, dtype=bool)
         if active is None:
@@ -269,40 +276,29 @@ class RecurrentDecentralizedActor(nnx.Module):
         active_pair = active[:, None] & active[None, :]
         share_mask = comm_mask & active_pair & ~jnp.eye(N, dtype=bool)
 
-        # TODO: Later extension: add an optional sender-side message encoder or bottleneck before transmission. For the first implementation, send the raw post-GRU hidden state and let the receiver-side attention block handle Q/K/V projections internally.
-        kv = jax.lax.stop_gradient(hidden) if self.memory_comm_gradient_mode == "rial" else hidden
+        query = self.memory_query_proj(jnp.concatenate([prev_hidden, encoded], axis=-1))
+        kv = (
+            jax.lax.stop_gradient(prev_hidden)
+            if self.memory_comm_gradient_mode == "rial"
+            else prev_hidden
+        )
         mask = share_mask
         if base_memory is not None and base_memory_mask is not None:
             base_token = base_memory[None, :]
             kv = jnp.concatenate([kv, base_token], axis=-2)
             mask = jnp.concatenate([mask, base_memory_mask[:, None] & active[:, None]], axis=-1)
 
-        if self.memory_comm_variant == "self_attention":
-            self_token = hidden
-            kv_self = jax.lax.stop_gradient(self_token) if self.memory_comm_gradient_mode == "rial" else self_token
-            kv = jnp.concatenate([kv_self, kv], axis=-2)
-            self_mask = jnp.eye(N, dtype=bool) & active[:, None]
-            mask = jnp.concatenate([self_mask, mask], axis=-1)
-
         has_any = jnp.any(mask, axis=-1, keepdims=True)
         first_key = jnp.arange(mask.shape[-1]) == 0
         safe_mask = mask | ((~has_any) & first_key[None, :])
         context = self.memory_attention(
-            hidden,
+            query,
             kv,
             mask=safe_mask,
             decode=False,
             deterministic=deterministic,
         )
-
-        context = jnp.where(has_any, context, jnp.zeros_like(context))
-        if self.memory_comm_variant == "cross_attention_residual":
-            return hidden + context
-        if self.memory_comm_variant == "cross_attention_concat":
-            return jnp.concatenate([hidden, context], axis=-1)
-        if self.memory_comm_variant == "self_attention":
-            return context
-        raise ValueError(f"Unknown memory_comm_variant '{self.memory_comm_variant}'.")
+        return jnp.where(has_any, context, jnp.zeros_like(context))
 
     def __call_team__(
         self,
@@ -315,15 +311,22 @@ class RecurrentDecentralizedActor(nnx.Module):
         base_memory_mask: jax.Array | None = None,
         deterministic: bool = True,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """Team actor pass with optional receiver-conditioned memory attention."""
+        """Team actor pass with persistent pre-GRU memory communication."""
         if reset is not None:
             hidden = jnp.where(reset[..., None], jnp.zeros_like(hidden), hidden)
+        prev_hidden = hidden
         encoded = self.encoder(obs)
-        hidden = self.gru(hidden, encoded)
-        decision_state = self._decision_state(
-            hidden, comm_mask, active, base_memory, base_memory_mask, deterministic
-        )
-        feat = self.policy_trunk(decision_state)
+        if self.memory_comm_enabled:
+            comm_context = self._comm_context(
+                prev_hidden, encoded, comm_mask, active, base_memory, base_memory_mask, deterministic
+            )
+            gru_input = self.memory_gru_input_proj(
+                jnp.concatenate([encoded, comm_context], axis=-1)
+            )
+        else:
+            gru_input = encoded
+        hidden = self.gru(prev_hidden, gru_input)
+        feat = self.policy_trunk(hidden)
         mu = self.mu_head(feat)
         log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
         return hidden, mu, log_std
