@@ -17,12 +17,15 @@ env:
   observe_base_vector: false
 
 training:
-  total_timesteps: 50_000_000
+  total_timesteps: 35_000_000
   num_envs: 4000
   num_steps: 50
-  num_epochs: 2
+  num_epochs: 1
   num_minibatches: 20
-  seed: 55
+  seed: 5555
+  #lr: 1e-4
+  #ent_coef: 0.0
+  #num_epochs: 5
 
 reward:
   exploration_bonus: 0.01

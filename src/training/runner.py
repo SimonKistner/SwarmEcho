@@ -1111,26 +1111,26 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     }
 
     # Sliding window for stable logging metrics
-    window_ret  = deque(maxlen=2000)
-    window_len  = deque(maxlen=2000)
-    window_succ = deque(maxlen=2000)
-    window_fnd  = deque(maxlen=2000)
-    window_gap  = deque(maxlen=2000)
-    window_prog_pct = deque(maxlen=2000)
+    window_ret  = deque(maxlen=E)
+    window_len  = deque(maxlen=E)
+    window_succ = deque(maxlen=E)
+    window_fnd  = deque(maxlen=E)
+    window_gap  = deque(maxlen=E)
+    window_prog_pct = deque(maxlen=E)
 
     # Sliding window for evaluation heatmaps
-    window_target_pos = deque(maxlen=2000)
-    window_target_success = deque(maxlen=2000)
-    window_target_delivered = deque(maxlen=2000)
-    window_target_visually_found = deque(maxlen=2000)
+    window_target_pos = deque(maxlen=E)
+    window_target_success = deque(maxlen=E)
+    window_target_delivered = deque(maxlen=E)
+    window_target_visually_found = deque(maxlen=E)
 
-    window_r_cov   = deque(maxlen=2000)
-    window_r_gap   = deque(maxlen=2000)
-    window_r_coll  = deque(maxlen=2000)
-    window_r_prox  = deque(maxlen=2000)
-    window_r_found = deque(maxlen=2000)
-    window_r_succ  = deque(maxlen=2000)
-    window_cov     = deque(maxlen=2000)
+    window_r_cov   = deque(maxlen=E)
+    window_r_gap   = deque(maxlen=E)
+    window_r_coll  = deque(maxlen=E)
+    window_r_prox  = deque(maxlen=E)
+    window_r_found = deque(maxlen=E)
+    window_r_succ  = deque(maxlen=E)
+    window_cov     = deque(maxlen=E)
 
     completed_eps_count = 0
 
