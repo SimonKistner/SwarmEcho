@@ -27,19 +27,13 @@ reward:
   only_explor_individual: false
   only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
+  back_to_target_after_delivery: true
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
-  collision_penalty: 0.5
-  finder_bonus: 50.0
-
-  # --- Global Rewards (Divided by N) ---
-  max_gap_penalty: 5.0       # absolute penalty when gap is at its maximum
-  target_found_bonus: 100.0
-  success_bonus: 500.0
 
 training:
-  total_timesteps: 300_000_000
+  total_timesteps: 200_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -51,7 +45,7 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
-  memory_comm_every_k_steps: 1
+  memory_comm_every_k_steps: 5
   memory_comm_num_heads: 4
 
   num_layers: 3    # critic depth
@@ -61,4 +55,4 @@ curriculum:
   success_threshold: 0.99
 
 logging:
-  eval_freq: 50
+  eval_freq: 100

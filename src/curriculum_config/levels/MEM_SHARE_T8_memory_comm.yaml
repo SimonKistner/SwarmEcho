@@ -3,7 +3,7 @@ env:
   num_agents: 8
   num_targets: 4
   num_bases: 0
-  max_steps: 60
+  max_steps: 50
   visual_radius: 8.0
   comm_radius: 45.0
   comm_radius_base: 0.01
@@ -17,9 +17,9 @@ env:
   observe_base_vector: false
 
 training:
-  total_timesteps: 100_000_000
+  total_timesteps: 50_000_000
   num_envs: 4000
-  num_steps: 60
+  num_steps: 50
   num_epochs: 2
   num_minibatches: 20
   seed: 55
@@ -45,7 +45,7 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
-  memory_comm_every_k_steps: 1
+  memory_comm_every_k_steps: 5
   memory_comm_num_heads: 4
 
   num_layers:  3    # critic depth
