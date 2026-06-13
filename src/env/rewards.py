@@ -106,6 +106,7 @@ def make_reward_fn(cfg: DictConfig):
     w_target_prox = float(cfg.reward.get("target_proximity_bonus", 0.0))
     use_task     = bool(int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
     target_found_requires_delivery = bool(cfg.reward.get("target_found_requires_delivery", True))
+    back_to_target_after_delivery = bool(cfg.reward.get("back_to_target_after_delivery", False))
     every_reward_global = bool(cfg.reward.get("every_reward_global", False))
     only_explor_individual = bool(cfg.reward.get("only_explor_individual", False)) and not every_reward_global
     only_shortest_path_chain_reward = (
@@ -203,29 +204,55 @@ def make_reward_fn(cfg: DictConfig):
         actual_deliverers = adj_db & knew_or_sees_target
 
         finder_bonus_value = w_finder if (use_task and not chain_rewards_global) else 0.0
+        delivery_finder_bonus_value = jnp.where(
+            back_to_target_after_delivery,
+            finder_bonus_value / 2.0,
+            finder_bonus_value,
+        )
+        target_revisit_bonus_value = jnp.where(
+            back_to_target_after_delivery,
+            finder_bonus_value / 2.0,
+            0.0,
+        )
+
+        def _first_agent_mask(candidates):
+            any_candidate = jnp.any(candidates)
+            first_idx = jnp.argmax(candidates.astype(jnp.int32))
+            return any_candidate & (jnp.arange(N) == first_idx)
+
         if per_agent_targets:
             # MEM_T8-only diagnostic path: one fixed target slot per agent.
             if target_found_requires_delivery:
                 newly_found_agents = actual_deliverers & ~old_state.target_known
+                newly_found_agents = jnp.where(
+                    back_to_target_after_delivery,
+                    _first_agent_mask(newly_found_agents),
+                    newly_found_agents,
+                )
             else:
                 newly_found_agents = new_state.target_known & ~old_state.target_known
             was_target_found = jnp.any(old_state.target_known)
             global_target_found = jnp.any(new_state.target_known)
             just_found = global_target_found & ~was_target_found
             r_target_found_shared = jnp.where(use_task & just_found, w_found, 0.0)
-            r_target_found_local = jnp.where(newly_found_agents, finder_bonus_value, 0.0)
+            r_target_found_local = jnp.where(newly_found_agents, delivery_finder_bonus_value, 0.0)
         else:
             if target_found_requires_delivery:
                 was_target_found = old_state.base_target_known
                 global_target_found = new_state.base_target_known
                 target_found_local_receivers = actual_deliverers
+                target_found_local_receivers = jnp.where(
+                    back_to_target_after_delivery,
+                    _first_agent_mask(target_found_local_receivers),
+                    target_found_local_receivers,
+                )
             else:
                 was_target_found = jnp.any(old_state.target_known)
                 global_target_found = jnp.any(new_state.target_known)
                 target_found_local_receivers = is_visible & ~old_state.target_known
             just_found = global_target_found & ~was_target_found
             r_target_found_shared = jnp.where(use_task & just_found, w_found, 0.0)
-            r_target_found_local = jnp.where(just_found & target_found_local_receivers, finder_bonus_value, 0.0)
+            r_target_found_local = jnp.where(just_found & target_found_local_receivers, delivery_finder_bonus_value, 0.0)
 
         # MEM_T8-only diagnostic path: paired wrong-branch decoys.
         if per_agent_targets and new_state.anti_target_known.size:
@@ -235,8 +262,23 @@ def make_reward_fn(cfg: DictConfig):
             newly_found_anti = jnp.zeros(N, dtype=jnp.bool_)
             r_anti_target = jnp.zeros(N, dtype=jnp.float32)
 
+        target_revisit_candidates = (
+            back_to_target_after_delivery
+            & ~per_agent_targets
+            & old_state.base_target_known
+            & ~old_state.target_revisit_reward_claimed
+            & new_state.target_revisit_reward_claimed
+            & new_state.target_known
+            & is_visible
+        )
+        r_target_revisit = jnp.where(
+            _first_agent_mask(target_revisit_candidates),
+            target_revisit_bonus_value,
+            0.0,
+        )
+
         # Shared component is divided by N to be agent-invariant
-        r_target_found = (r_target_found_shared / N) + r_target_found_local + r_anti_target
+        r_target_found = (r_target_found_shared / N) + r_target_found_local + r_target_revisit + r_anti_target
 
         delta_cells = new_state.last_cov_delta.astype(jnp.float32)
         # Stop exploration reward for drones that know the target position
@@ -355,6 +397,7 @@ def make_reward_fn(cfg: DictConfig):
             "r_target_found": jnp.sum(r_target_found),
             # MEM_T8-only diagnostic component; zero for normal one-target levels.
             "r_anti_target":  jnp.sum(r_anti_target),
+            "r_target_revisit": jnp.sum(r_target_revisit),
             "r_chain_gap":    jnp.sum(r_chain_gap),
             "r_proximity":    jnp.sum(r_proximity),
             "r_collision":    jnp.sum(r_collision),

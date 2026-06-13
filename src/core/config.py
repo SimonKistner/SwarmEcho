@@ -91,6 +91,7 @@ class RewardConfig:
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
     target_found_requires_delivery: bool = True
+    back_to_target_after_delivery: bool = False
     only_shortest_path_chain_reward: bool = False
     only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
     every_reward_global: bool = False     # share every reward/penalty equally across agents

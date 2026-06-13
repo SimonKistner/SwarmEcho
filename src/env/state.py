@@ -50,6 +50,7 @@ class EnvState:
     box_width     : ()      float32 — dynamic world width
     box_height    : ()      float32 — dynamic world height
     base_target_known: ()   bool  — persistent: True once base is informed
+    target_revisit_reward_claimed: () bool — True after the post-delivery target revisit bonus is claimed
     chain_held_steps:  ()   int32 — consecutive timesteps chain has been held
     is_conn_base  : (N,)    bool  — True if agent is connected to base
     is_conn_target: (N,)    bool  — True if agent is connected to target
@@ -82,6 +83,9 @@ class EnvState:
     anti_target_known: jax.Array = dataclasses.field(
         default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
     )
+    target_revisit_reward_claimed: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.bool_(False)
+    )
     # (Removed static world data from PyTree to save VRAM)
 
     def replace(self, **kwargs) -> EnvState:
@@ -97,7 +101,7 @@ jax.tree_util.register_dataclass(
         "active", "target_known", "collides", "last_cov_delta",
         "box_width", "box_height", "base_target_known", "chain_held_steps",
         "is_conn_base", "is_conn_target", "adj_matrix",
-        "anti_target_known",
+        "anti_target_known", "target_revisit_reward_claimed",
     ],
     meta_fields=[],
 )
@@ -127,6 +131,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(state.collides,      (N,))
     chex.assert_shape(state.last_cov_delta, (N,))
     chex.assert_shape(state.base_target_known, ())
+    chex.assert_shape(state.target_revisit_reward_claimed, ())
     chex.assert_shape(state.chain_held_steps, ())
     chex.assert_shape(state.is_conn_base, (N,))
     chex.assert_shape(state.is_conn_target, (N,))
@@ -145,6 +150,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
         chex.assert_type(state.anti_target_known, jnp.bool_)
     chex.assert_type(state.collides,      jnp.bool_)
     chex.assert_type(state.base_target_known, jnp.bool_)
+    chex.assert_type(state.target_revisit_reward_claimed, jnp.bool_)
     chex.assert_type(state.chain_held_steps, jnp.int32)
     chex.assert_type(state.is_conn_base, jnp.bool_)
     chex.assert_type(state.is_conn_target, jnp.bool_)

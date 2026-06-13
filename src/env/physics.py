@@ -370,6 +370,21 @@ def make_env_fns(cfg: DictConfig):
 
         return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix
 
+    def _target_revisit_candidates(state: EnvState, target_known: jax.Array) -> jax.Array:
+        """Agents that know and visually observe the target after base delivery."""
+        per_agent_targets = (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+
+        def _sees_target(i):
+            target_i = target_pos_agents[i]
+            dist = jnp.linalg.norm(state.pos[i] - target_i)
+            in_range = (dist <= vis_r) & state.active[i]
+            can_see = dda_raycast(state.pos[i] / cell_size, target_i / cell_size, occ_grid)
+            return in_range & can_see
+
+        sees_target = jax.vmap(_sees_target)(jnp.arange(N))
+        return state.base_target_known & target_known & sees_target
+
     def _update_anti_target_known(state: EnvState) -> jax.Array:
         if ANTI_TARGET_POINTS is None or state.anti_target_known.size == 0:
             return jnp.zeros(N, dtype=jnp.bool_)
@@ -517,6 +532,7 @@ def make_env_fns(cfg: DictConfig):
             box_width     = jnp.float32(W),
             box_height    = jnp.float32(H),
             base_target_known = jnp.bool_(False),
+            target_revisit_reward_claimed = jnp.bool_(False),
             chain_held_steps = jnp.int32(0),
             is_conn_base      = jnp.zeros(N, dtype=jnp.bool_),
             is_conn_target    = jnp.zeros(N, dtype=jnp.bool_),
@@ -653,11 +669,16 @@ def make_env_fns(cfg: DictConfig):
         new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix = _update_target_known(mid_state)
         # MEM_T8-only diagnostic state update; no-op for normal levels.
         new_anti_target_known = _update_anti_target_known(mid_state)
+        target_revisit_candidates = _target_revisit_candidates(mid_state, new_target_known)
+        new_target_revisit_reward_claimed = (
+            state.target_revisit_reward_claimed | jnp.any(target_revisit_candidates)
+        )
 
         return dataclasses.replace(
             mid_state,
             target_known=new_target_known,
             base_target_known=new_base_target_known,
+            target_revisit_reward_claimed=new_target_revisit_reward_claimed,
             anti_target_known=new_anti_target_known,
             is_conn_base=is_conn_base,
             is_conn_target=is_conn_target,
