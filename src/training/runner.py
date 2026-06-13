@@ -46,6 +46,7 @@ Run organisation
 
 from __future__ import annotations
 
+import functools
 import os
 import time
 from collections import deque
@@ -103,6 +104,62 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
     import wandb
     run = wandb.init(**wandb_kwargs)
     return run
+
+
+# ---------------------------------------------------------------------------
+# Resolve step offset from checkpoint path
+# ---------------------------------------------------------------------------
+
+def _get_checkpoint_step_offset(cfg: DictConfig, E: int, T: int) -> int:
+    """
+    Resolve step offset for W&B logging and print statements.
+    If checkpoint_step_offset is configured, use it directly.
+    Otherwise, if resuming from a checkpoint, try to parse the number of steps/updates.
+    """
+    offset = cfg.training.get("checkpoint_step_offset", None)
+    if offset is not None:
+        return int(offset)
+
+    ckpt_path_str = cfg.training.get("checkpoint_path", None)
+    if ckpt_path_str:
+        try:
+            import re
+            path_name = Path(ckpt_path_str).name
+            
+            # Case 1: Standard checkpoint folder name: ckpt_000500, ckpt_early_000500, ckpt_final_000500
+            match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
+            if match:
+                val = int(match.group(1))
+                steps_per_update = E * T
+                calculated_steps = val * steps_per_update
+                print(f"  [W&B step offset] Auto-detected update {val} from checkpoint name '{path_name}'. "
+                      f"Using calculated step offset: {calculated_steps:,} ({val} updates x {steps_per_update:,} steps/update)")
+                return calculated_steps
+
+            # Case 2: Explicit step count: steps_100000000, step_5000000
+            match = re.search(r'step(?:s)?_?(\d+)', path_name, re.IGNORECASE)
+            if match:
+                val = int(match.group(1))
+                print(f"  [W&B step offset] Auto-detected step count {val} from checkpoint name '{path_name}'. Using as step offset.")
+                return val
+
+            # Case 3: Folder name is just a number
+            if path_name.isdigit():
+                val = int(path_name)
+                if val < 100000:
+                    steps_per_update = E * T
+                    calculated_steps = val * steps_per_update
+                    print(f"  [W&B step offset] Auto-detected update index {val} from checkpoint name '{path_name}'. "
+                          f"Using calculated step offset: {calculated_steps:,}")
+                    return calculated_steps
+                else:
+                    print(f"  [W&B step offset] Auto-detected step count {val} from checkpoint name '{path_name}'. Using as step offset.")
+                    return val
+
+        except Exception as e:
+            print(f"  [W&B step offset] Failed to parse step offset from checkpoint path '{ckpt_path_str}': {e}")
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +233,122 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
 
 
 # ---------------------------------------------------------------------------
+# Batched Rollout Step helper (JIT Compiled)
+# ---------------------------------------------------------------------------
+
+def _batched_rollout_and_memory_step_impl(
+    model: MAPPOModel,
+    obs_batch,
+    act_keys,
+    actor_h_in,
+    critic_h_in,
+    reset_agents_b,
+    max_force,
+    states_adj_matrix=None,
+    states_active=None,
+    states_target_known=None,
+    base_memory=None,
+    base_memory_valid=None,
+    t=None,
+    *,
+    recurrent: bool,
+    memory_comm_enabled: bool,
+):
+    E_ = obs_batch.shape[0]
+    N = obs_batch.shape[1]
+
+    if recurrent:
+        if memory_comm_enabled:
+            raw_adj_b = states_adj_matrix[:, :N, :N] if states_adj_matrix.shape[-1] > 0 else jnp.zeros((E_, N, N), dtype=bool)
+            step_share = (int(model.memory_comm_every_k_steps) <= 1) | ((t % int(model.memory_comm_every_k_steps)) == jnp.int32(0))
+            comm_mask_b = raw_adj_b & step_share
+            active_mask_b = states_active
+            base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
+            
+            base_receiver_mask_b = (
+                states_adj_matrix[:, :N, N]
+                if states_adj_matrix.shape[-1] > N
+                else jnp.zeros((E_, N), dtype=bool)
+            )
+            base_receiver_mask_b = (
+                base_receiver_mask_b
+                & ~states_target_known[:, :N]
+                & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
+                & step_share
+            )
+
+            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
+                return model.rollout_step_recurrent(
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    comm_mask=comm_mask_n,
+                    active=active_n,
+                    base_memory=base_memory_n,
+                    base_memory_mask=base_memory_mask_n,
+                )
+
+            def _rollout_one_env_no_comm(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                return model.rollout_step_recurrent(
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                )
+
+            def _rollout_with_comm(_):
+                return jax.vmap(_rollout_one_env)(
+                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                    comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
+                )
+
+            def _rollout_without_comm(_):
+                return jax.vmap(_rollout_one_env_no_comm)(
+                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                )
+
+            has_drone_receiver = jnp.any(comm_mask_b)
+            has_base_memory_receiver = jnp.any(base_receiver_mask_b)
+            can_skip_empty_comm = str(model.memory_comm_variant) != "self_attention"
+            use_attention_path = (has_drone_receiver | has_base_memory_receiver) | jnp.asarray(not can_skip_empty_comm)
+
+            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.lax.cond(
+                use_attention_path,
+                _rollout_with_comm,
+                _rollout_without_comm,
+                operand=None,
+            )
+            
+            # Base memory update logic
+            connected_to_base_b = states_adj_matrix[:, :N, N] if states_adj_matrix.shape[-1] > N else jnp.zeros((E_, N), dtype=bool)
+            reporters_b = states_target_known[:, :N] & connected_to_base_b & states_active[:, :N]
+            first_idx_b = jnp.argmax(reporters_b.astype(jnp.int32), axis=-1)
+            has_reporter_b = jnp.any(reporters_b, axis=-1)
+            reported_memory_b = jnp.take_along_axis(actor_h, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
+            should_store_b = has_reporter_b & ~base_memory_valid
+            base_memory = jnp.where(should_store_b[:, None], reported_memory_b, base_memory)
+            base_memory_valid = base_memory_valid | should_store_b
+            
+            return (
+                actor_h, critic_h, actions_b, log_probs_b, values_b, base_memory, base_memory_valid,
+                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b
+            )
+            
+        else:
+            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+                return model.rollout_step_recurrent(
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                )
+
+            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+            )
+            return actor_h, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None
+    else:
+        def _rollout_one_env(obs_n, keys_n):
+            actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
+            return actions, log_probs, value
+
+        actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
+        return None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None
+
+
+# ---------------------------------------------------------------------------
 # Rollout collection — MAPPO
 # ---------------------------------------------------------------------------
 
@@ -185,6 +358,7 @@ def _collect_rollout_mappo(
     buf:              MAPPORolloutBuffer,
     autoreset_step_v,
     obs_fn_v,
+    batched_rollout_step_jit,
     key:              jax.Array,
     max_force:        float,
     T:                int,
@@ -262,69 +436,32 @@ def _collect_rollout_mappo(
             critic_h_in = critic_h if critic_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
 
             if model.actor_memory and model.memory_comm_enabled:
-                def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
-                    return model.rollout_step_recurrent(
-                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
-                        comm_mask=comm_mask_n,
-                        active=active_n,
-                        base_memory=base_memory_n,
-                        base_memory_mask=base_memory_mask_n,
-                    )
-
-                raw_adj_b = states.adj_matrix[:, :N_, :N_] if states.adj_matrix.shape[-1] else jnp.zeros((E_, N_, N_), dtype=bool)
-                step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
-                comm_mask_b = raw_adj_b & jnp.asarray(step_share)
-                active_mask_b = states.active
-                base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
-                base_receiver_mask_b = (
-                    states.adj_matrix[:, :N_, N_]
-                    if states.adj_matrix.shape[-1]
-                    else jnp.zeros((E_, N_), dtype=bool)
-                )
-                # Base-memory relay is only offered to drones that do not already know the target.
-                # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
-                base_receiver_mask_b = (
-                    base_receiver_mask_b
-                    & ~states.target_known[:, :N_]
-                    & (base_memory_valid[:, None] if base_memory_valid is not None else jnp.zeros((E_, 1), dtype=bool))
-                    & jnp.asarray(step_share)
-                )
-                def _rollout_one_env_no_comm(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
-                    return model.rollout_step_recurrent(
-                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
-                    )
-
-                def _rollout_with_comm(_):
-                    return jax.vmap(_rollout_one_env)(
-                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                        comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
-                    )
-
-                def _rollout_without_comm(_):
-                    return jax.vmap(_rollout_one_env_no_comm)(
-                        obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                    )
-
-                has_drone_receiver = jnp.any(comm_mask_b)
-                # base_receiver_mask_b already includes base_memory_valid, so drones connected to
-                # an empty base do not force the attention path at episode start.
-                has_base_memory_receiver = jnp.any(base_receiver_mask_b)
-                can_skip_empty_comm = str(model.memory_comm_variant) != "self_attention"
-                use_attention_path = (has_drone_receiver | has_base_memory_receiver) | jnp.asarray(not can_skip_empty_comm)
-                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.lax.cond(
-                    use_attention_path,
-                    _rollout_with_comm,
-                    _rollout_without_comm,
-                    operand=None,
+                (actor_h, critic_h, actions_b, log_probs_b, values_b, base_memory, base_memory_valid,
+                 comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+                    model,
+                    obs_batch,
+                    act_keys,
+                    actor_h_in,
+                    critic_h_in,
+                    reset_agents_b,
+                    max_force,
+                    states.adj_matrix,
+                    states.active,
+                    states.target_known,
+                    base_memory,
+                    base_memory_valid,
+                    jnp.int32(t),
                 )
             else:
-                def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
-                    return model.rollout_step_recurrent(
-                        obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
-                    )
-
-                actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                    obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                (actor_h, critic_h, actions_b, log_probs_b, values_b, _, _,
+                 comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+                    model,
+                    obs_batch,
+                    act_keys,
+                    actor_h_in,
+                    critic_h_in,
+                    reset_agents_b,
+                    max_force,
                 )
 
             if not model.actor_memory:
@@ -332,24 +469,16 @@ def _collect_rollout_mappo(
             if not model.critic_memory:
                 critic_h = None
         else:
-            def _rollout_one_env(obs_n, keys_n):
-                # Returns normalised actions [-1,1], log_probs, value
-                actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
-                return actions, log_probs, value
-
-            actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
-        if recurrent and model.actor_memory and model.memory_comm_enabled:
-            connected_to_base_b = states.adj_matrix[:, :N, N] if states.adj_matrix.shape[-1] else jnp.zeros((E, N), dtype=bool)
-            reporters_b = states.target_known & connected_to_base_b & states.active
-            # If multiple target-knowing drones reconnect on the same first step, choose the lowest-index reporter.
-            # After base_memory_valid becomes true, later reporters cannot overwrite the first stored memory.
-            first_idx_b = jnp.argmax(reporters_b.astype(jnp.int32), axis=-1)
-            has_reporter_b = jnp.any(reporters_b, axis=-1)
-            reported_memory_b = jnp.take_along_axis(actor_h, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
-            should_store_b = has_reporter_b & ~base_memory_valid
-            # TODO: Future extension: give the base its own learned attention/MLP aggregation module. The base could receive observations or memories from drones as they connect, learn a larger-picture task representation, and share that representation with later incoming agents. For v1, keep the simpler behavior: store the memory of the first target-knowing agent that reconnects to base and relay that saved memory until episode end.
-            base_memory = jnp.where(should_store_b[:, None], reported_memory_b, base_memory)
-            base_memory_valid = base_memory_valid | should_store_b
+            (_, _, actions_b, log_probs_b, values_b, _, _,
+             comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+                model,
+                obs_batch,
+                act_keys,
+                None,
+                None,
+                None,
+                max_force,
+            )
 
         # actions_b: (E, N, A) — PRE-SQUASH samples u from actor.act()
         # Apply tanh squashing before scaling for the physics engine.
@@ -789,6 +918,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     per_agent   = (critic_type == "agent_centric")
     actor_memory = bool(cfg.network.get("actor_memory", False))
     critic_memory = bool(cfg.network.get("critic_memory", False))
+    recurrent   = actor_memory or critic_memory
 
     print("\n══════════════════════════════════════════════════════")
     print(f"  SwarmEcho — MAPPO  [{critic_type} critic]")
@@ -897,7 +1027,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     # ── Checkpoint Resumption ─────────────────────────────────────────────
     import orbax.checkpoint as ocp
     if cfg.training.checkpoint_path:
-        checkpoint_path = Path(cfg.training.checkpoint_path).absolute()
+        checkpoint_path = Path(str(cfg.training.checkpoint_path).replace("\\", "/")).absolute()
         print(f"  Resuming from: {checkpoint_path}")
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -922,6 +1052,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     base_memory = jnp.zeros((E, int(cfg.network.hidden_dim)), dtype=jnp.float32) if use_memory_comm else None
     base_memory_valid = jnp.zeros((E,), dtype=bool) if use_memory_comm else None
     rollout_last_dones = np.zeros(E, dtype=bool)
+
+    batched_rollout_step_fn = functools.partial(
+        _batched_rollout_and_memory_step_impl,
+        recurrent=recurrent,
+        memory_comm_enabled=use_memory_comm,
+    )
+    batched_rollout_step_jit = nnx.jit(batched_rollout_step_fn)
 
     # ── Run directory & Name ──────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1028,11 +1165,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     )
 
     t_start = time.perf_counter()
+    step_offset = _get_checkpoint_step_offset(cfg, E, T)
 
     try:
         for update in range(1, n_updates + 1):
             master_key, collect_key = jax.random.split(master_key)
-            steps_done = update * E * T
+            steps_done = update * E * T + step_offset
 
             # ── Rollout ───────────────────────────────────────────────────────
             (states, collect_key,
@@ -1041,7 +1179,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
              raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found) = _collect_rollout_mappo(
-                states, model, buf, autoreset_step_v, obs_fn_v,
+                states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
                 track_heatmap_data=track_heatmap_data,
@@ -1185,6 +1323,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     "ppo/clip_fraction":        ppo_stats["clip_fraction"],
                     "perf/sps":                 sps,
                     "perf/ppo_updates":         update,
+                    "perf/global_step":         steps_done,
                 }
                 if len(window_ret) == window_ret.maxlen:
                     logs.update({

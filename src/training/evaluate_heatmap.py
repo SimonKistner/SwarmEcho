@@ -65,7 +65,7 @@ def main():
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         elif arg.startswith("--render-failed-csv="):
             render_failed_csv = int(arg.split("=", 1)[1])
         elif arg.startswith("render_failed_csv="):

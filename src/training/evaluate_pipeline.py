@@ -56,8 +56,8 @@ CREATE_CSV = True                    # Save coordinates of failed episodes to CS
 CREATE_FAILED_CHAIN_HEATMAP = True   # Render failed targets chain heatmap overlay image
 CREATE_NOT_DELIVERED_HEATMAP = True  # Render heatmap showing target positions as dots when NOT delivered to base
 CREATE_NOT_VISUALLY_FOUND_HEATMAP = True # Render heatmap showing target positions as dots when NOT visually found by any drone
-CREATE_CLUSTER_MAP = False            # Run failure clustering and save colored overlay image
-CREATE_CLUSTER_VIDEOS = False         # Simulate and render rollout videos for cluster representatives
+CREATE_CLUSTER_MAP = True            # Run failure clustering and save colored overlay image
+CREATE_CLUSTER_VIDEOS = True         # Simulate and render rollout videos for cluster representatives
 
 # ==============================================================================
 # Pipeline Configuration Constants
@@ -103,7 +103,7 @@ CLUSTER_COLORS = [
 ]
 
 # 4. Representative rollout parameters
-RENDER_NUM_CLUSTERS = 2    # Number of cluster representatives to render. None = all.
+RENDER_NUM_CLUSTERS = 5    # Number of cluster representatives to render. None = all.
 
 
 # ==============================================================================
@@ -862,7 +862,9 @@ def main():
     # Generate Run-Start Timestamp for consistent output file labeling
     run_timestamp = time.strftime("%Y_%m_%d_%H_%M")
 
-    # Parse CLI Arguments (checkpoint path and legacy csv replays only)
+    global CREATE_CSV, CREATE_FAILED_CHAIN_HEATMAP, CREATE_NOT_DELIVERED_HEATMAP, CREATE_NOT_VISUALLY_FOUND_HEATMAP, CREATE_CLUSTER_MAP, CREATE_CLUSTER_VIDEOS
+
+    # Parse CLI Arguments
     args = sys.argv[1:]
     checkpoint_path = None
     render_failed_csv = None
@@ -870,11 +872,41 @@ def main():
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         elif arg.startswith("--render-failed-csv="):
             render_failed_csv = int(arg.split("=", 1)[1])
         elif arg.startswith("render_failed_csv="):
             render_failed_csv = int(arg.split("=", 1)[1])
+        elif arg.lower() in ["obs_log=true", "obs_saving=true", "--obs-log", "--obs-saving"]:
+            overrides.append("logging.obs_log=true")
+        elif arg.lower() in ["obs_log=false", "obs_saving=false", "--no-obs-log", "--no-obs-saving"]:
+            overrides.append("logging.obs_log=false")
+        elif arg.lower() in ["connectivity=true", "conn_matrix=true", "--connectivity", "--conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=true")
+            overrides.append("env.log_adjacency_matrix=true")
+        elif arg.lower() in ["connectivity=false", "conn_matrix=false", "--no-connectivity", "--no-conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=false")
+            overrides.append("env.log_adjacency_matrix=false")
+        elif arg.lower() in ["csv=true", "--csv"]:
+            CREATE_CSV = True
+        elif arg.lower() in ["csv=false", "--no-csv"]:
+            CREATE_CSV = False
+        elif arg.lower() in ["heatmap=true", "--heatmap"]:
+            CREATE_FAILED_CHAIN_HEATMAP = True
+            CREATE_NOT_DELIVERED_HEATMAP = True
+            CREATE_NOT_VISUALLY_FOUND_HEATMAP = True
+        elif arg.lower() in ["heatmap=false", "--no-heatmap"]:
+            CREATE_FAILED_CHAIN_HEATMAP = False
+            CREATE_NOT_DELIVERED_HEATMAP = False
+            CREATE_NOT_VISUALLY_FOUND_HEATMAP = False
+        elif arg.lower() in ["cluster=true", "--cluster"]:
+            CREATE_CLUSTER_MAP = True
+        elif arg.lower() in ["cluster=false", "--no-cluster"]:
+            CREATE_CLUSTER_MAP = False
+        elif arg.lower() in ["videos=true", "--videos"]:
+            CREATE_CLUSTER_VIDEOS = True
+        elif arg.lower() in ["videos=false", "--no-videos"]:
+            CREATE_CLUSTER_VIDEOS = False
         else:
             overrides.append(arg)
 

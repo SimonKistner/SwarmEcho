@@ -47,7 +47,7 @@ from visualize.renderer import render_video
 
 
 def _resolve_map_path(name_or_path: str) -> Path:
-    path = Path(name_or_path)
+    path = Path(name_or_path.replace("\\", "/"))
     if path.suffix in {".yaml", ".yml"}:
         return path if path.is_absolute() else (Path.cwd() / path).resolve()
     return MAP_DIR / f"{name_or_path}.yaml"

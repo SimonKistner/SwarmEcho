@@ -3,7 +3,7 @@ env:
   num_agents: 8
   num_targets: 4
   num_bases: 0
-  max_steps: 50
+  max_steps: 60
   visual_radius: 8.0
   comm_radius: 45.0
   comm_radius_base: 0.01
@@ -17,14 +17,15 @@ env:
   observe_base_vector: false
 
 training:
-  total_timesteps: 20_000_000
+  total_timesteps: 100_000_000
   num_envs: 4000
-  num_steps: 50
+  num_steps: 60
   num_epochs: 2
   num_minibatches: 20
+  seed: 55
 
 reward:
-  exploration_bonus: 0.05
+  exploration_bonus: 0.01
   target_found_requires_delivery: false
   target_found_bonus: 0.0
   finder_bonus: 50.0
@@ -43,7 +44,7 @@ network:
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
-  memory_comm_gradient_mode: "rial" #RIAL = blocked |DIAL = Gradients flow
+  memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
   memory_comm_variant: "cross_attention_residual"
   memory_comm_every_k_steps: 1
   memory_comm_num_heads: 4
@@ -52,7 +53,7 @@ network:
   actor_num_layers:  3    # actor depth (lighter, separate)
 
 logging:
-  eval_freq: 10
+  eval_freq: 50
   obs_log: false
   eval_video: true
   eval_failed_chain_heatmap: false

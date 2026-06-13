@@ -213,7 +213,7 @@ def main():
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         else:
             overrides.append(arg)
 

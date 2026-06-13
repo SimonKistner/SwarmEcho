@@ -79,7 +79,7 @@ def main():
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         elif arg.startswith("--renderer="):
             renderer_override = arg.split("=", 1)[1]
         elif arg.lower() in ["video=false", "--no-video"]:
@@ -105,6 +105,12 @@ def main():
             overrides.append("logging.obs_log=true")
         elif arg.lower() in ["obs_log=false", "obs_saving=false", "--no-obs-log", "--no-obs-saving"]:
             overrides.append("logging.obs_log=false")
+        elif arg.lower() in ["connectivity=true", "conn_matrix=true", "--connectivity", "--conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=true")
+            overrides.append("env.log_adjacency_matrix=true")
+        elif arg.lower() in ["connectivity=false", "conn_matrix=false", "--no-connectivity", "--no-conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=false")
+            overrides.append("env.log_adjacency_matrix=false")
         else:
             overrides.append(arg)
 

@@ -112,8 +112,9 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     total_timesteps: int = 50_000_000
     checkpoint_path: Optional[str] = None  # if set, resumes training from this path
-    warn_vram_limit: bool = True
-    abort_on_vram_limit: bool = True
+    checkpoint_step_offset: Optional[int] = None  # if set, starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
+    warn_vram_limit: bool = False
+    abort_on_vram_limit: bool = False
     vram_limit_gb: float = 20.0
 
 
@@ -129,7 +130,7 @@ class NetworkConfig:
     memory_comm_enabled: bool = False
     memory_comm_gradient_mode: str = "rial"  # "rial" | "dial"
     memory_comm_variant: str = "cross_attention_residual"  # "cross_attention_residual" | "cross_attention_concat" | "self_attention"
-    memory_comm_every_k_steps: int = 10
+    memory_comm_every_k_steps: int = 5
     memory_comm_num_heads: int = 4
 
 
@@ -456,8 +457,15 @@ def load_config(
     if sys.argv and len(sys.argv[0]) > 0:
         script_name = Path(sys.argv[0]).name
         if any(word in script_name for word in ["evaluate", "render", "preview", "test_physics"]):
-            OmegaConf.set_readonly(cfg, False)
-            cfg.env.log_adjacency_matrix = True
+            # Respect explicit disabled settings in overrides
+            explicit_false = False
+            if overrides is not None:
+                for o in overrides:
+                    if "env.log_adjacency_matrix=false" in o.lower():
+                        explicit_false = True
+            if not explicit_false:
+                OmegaConf.set_readonly(cfg, False)
+                cfg.env.log_adjacency_matrix = True
 
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)
