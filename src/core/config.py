@@ -129,7 +129,6 @@ class NetworkConfig:
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
     memory_comm_enabled: bool = False
     memory_comm_gradient_mode: str = "rial"  # "rial" | "dial"
-    memory_comm_variant: str = "cross_attention_residual"  # "cross_attention_residual" | "cross_attention_concat" | "self_attention"
     memory_comm_every_k_steps: int = 5
     memory_comm_num_heads: int = 4
 
@@ -534,8 +533,6 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
     if str(cfg.network.memory_comm_gradient_mode) not in ("rial", "dial"):
         raise ValueError("network.memory_comm_gradient_mode must be 'rial' or 'dial'.")
-    if str(cfg.network.memory_comm_variant) not in ("cross_attention_residual", "cross_attention_concat", "self_attention"):
-        raise ValueError("network.memory_comm_variant must be a supported memory communication variant.")
     if int(cfg.network.memory_comm_every_k_steps) < 1:
         raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
     if int(cfg.network.memory_comm_num_heads) < 1:

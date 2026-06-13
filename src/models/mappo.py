@@ -65,8 +65,7 @@ class MAPPOModel(nnx.Module):
         critic_memory:    bool = False,
         memory_comm_enabled: bool = False,
         memory_comm_gradient_mode: str = "rial",
-        memory_comm_variant: str = "cross_attention_residual",
-        memory_comm_every_k_steps: int = 10,
+        memory_comm_every_k_steps: int = 5,
         memory_comm_num_heads: int = 4,
     ) -> None:
         self.num_agents  = num_agents
@@ -77,7 +76,6 @@ class MAPPOModel(nnx.Module):
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
         self.memory_comm_enabled = memory_comm_enabled
-        self.memory_comm_variant = memory_comm_variant
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
 
         if actor_memory:
@@ -89,7 +87,6 @@ class MAPPOModel(nnx.Module):
                 rngs             = rngs,
                 memory_comm_enabled = memory_comm_enabled,
                 memory_comm_gradient_mode = memory_comm_gradient_mode,
-                memory_comm_variant = memory_comm_variant,
                 memory_comm_num_heads = memory_comm_num_heads,
             )
         else:
@@ -304,8 +301,7 @@ if __name__ == "__main__":
         rngs             = rngs,
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
-        memory_comm_variant = str(cfg.network.get("memory_comm_variant", "cross_attention_residual")),
-        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 10)),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
     )
 

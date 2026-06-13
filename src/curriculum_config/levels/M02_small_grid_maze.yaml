@@ -51,7 +51,6 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
-  memory_comm_variant: "cross_attention_residual"
   memory_comm_every_k_steps: 1
   memory_comm_num_heads: 4
 
