@@ -31,7 +31,7 @@ from flax import nnx
 
 from models.recurrent import GRUCell
 
-LOG_STD_MIN = -1.0
+LOG_STD_MIN = -5.0
 LOG_STD_MAX =  2.0
 
 # Small epsilon added inside log(1 - tanh²(x)) to prevent log(0)
