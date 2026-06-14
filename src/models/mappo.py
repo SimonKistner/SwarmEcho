@@ -67,6 +67,7 @@ class MAPPOModel(nnx.Module):
         memory_comm_gradient_mode: str = "rial",
         memory_comm_every_k_steps: int = 5,
         memory_comm_num_heads: int = 4,
+        memory_comm_msg_dim: int | None = None,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -77,6 +78,7 @@ class MAPPOModel(nnx.Module):
         self.critic_memory = critic_memory
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
+        self.memory_comm_msg_dim = memory_comm_msg_dim if memory_comm_msg_dim is not None else hidden_dim
 
         if actor_memory:
             self.actor = RecurrentDecentralizedActor(
@@ -88,6 +90,7 @@ class MAPPOModel(nnx.Module):
                 memory_comm_enabled = memory_comm_enabled,
                 memory_comm_gradient_mode = memory_comm_gradient_mode,
                 memory_comm_num_heads = memory_comm_num_heads,
+                memory_comm_msg_dim = memory_comm_msg_dim,
             )
         else:
             self.actor = DecentralizedActor(
@@ -303,6 +306,7 @@ if __name__ == "__main__":
         memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
+        memory_comm_msg_dim = cfg.network.get("memory_comm_msg_dim", None),
     )
 
     _, params = nnx.split(model)
