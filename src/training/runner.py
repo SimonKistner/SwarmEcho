@@ -395,19 +395,6 @@ def _collect_rollout_mappo(
     completed_r_succ     = []
     completed_coverage   = []
 
-    comm_stats = {
-        "agent_edges": 0.0,
-        "possible_agent_edges": 0.0,
-        "receivers_with_agent": 0.0,
-        "receivers_with_any": 0.0,
-        "base_receivers": 0.0,
-        "active_receivers": 0.0,
-        "base_memory_valid_envs": 0.0,
-        "active_agents": 0.0,
-        "total_agents": 0.0,
-        "steps": 0.0,
-    }
-
     for t in range(T):
         key, act_key = jax.random.split(key)
 
@@ -469,27 +456,6 @@ def _collect_rollout_mappo(
                 None,
                 max_force,
             )
-
-        if recurrent and model.actor_memory and model.memory_comm_enabled:
-            comm_np = np.array(comm_mask_b, dtype=bool)
-            active_np = np.array(active_mask_b, dtype=bool)
-            base_recv_np = np.array(base_receiver_mask_b, dtype=bool)
-            possible_np = active_np[:, :, None] & active_np[:, None, :]
-            eye = np.eye(N_, dtype=bool)[None, :, :]
-            possible_np = possible_np & ~eye
-            receivers_with_agent_np = np.any(comm_np, axis=-1)
-            receivers_with_any_np = receivers_with_agent_np | base_recv_np
-
-            comm_stats["agent_edges"] += float(np.sum(comm_np))
-            comm_stats["possible_agent_edges"] += float(np.sum(possible_np))
-            comm_stats["receivers_with_agent"] += float(np.sum(receivers_with_agent_np & active_np))
-            comm_stats["receivers_with_any"] += float(np.sum(receivers_with_any_np & active_np))
-            comm_stats["base_receivers"] += float(np.sum(base_recv_np & active_np))
-            comm_stats["active_receivers"] += float(np.sum(active_np))
-            comm_stats["base_memory_valid_envs"] += float(np.sum(np.array(base_memory_valid, dtype=bool)))
-            comm_stats["active_agents"] += float(np.sum(active_np))
-            comm_stats["total_agents"] += float(active_np.size)
-            comm_stats["steps"] += 1.0
 
         # actions_b: (E, N, A) — PRE-SQUASH samples u from actor.act()
         # Apply tanh squashing before scaling for the physics engine.
@@ -612,18 +578,8 @@ def _collect_rollout_mappo(
     ep_trackers["r_succ"]     = r_succ_accum
     ep_trackers["coverage"]   = cov_accum
 
-    if comm_stats["steps"] > 0.0:
-        comm_summary = {
-            "comm/agent_edge_density": comm_stats["agent_edges"] / max(comm_stats["possible_agent_edges"], 1.0),
-            "comm/agent_receiver_coverage": comm_stats["receivers_with_agent"] / max(comm_stats["active_receivers"], 1.0),
-            "comm/any_receiver_coverage": comm_stats["receivers_with_any"] / max(comm_stats["active_receivers"], 1.0),
-            "comm/base_receiver_rate": comm_stats["base_receivers"] / max(comm_stats["active_receivers"], 1.0),
-            "comm/base_memory_valid_rate": comm_stats["base_memory_valid_envs"] / max(comm_stats["steps"] * E, 1.0),
-            "comm/active_agent_frac": comm_stats["active_agents"] / max(comm_stats["total_agents"], 1.0),
-            "comm/message_dim": float(getattr(model, "memory_comm_msg_dim", model.hidden_dim)),
-        }
-    else:
-        comm_summary = {}
+    comm_summary = {}
+
 
     return (
         states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool), base_memory, base_memory_valid,
@@ -1146,7 +1102,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
-        memory_comm_msg_dim = cfg.network.get("memory_comm_msg_dim", None),
+        memory_comm_merge = str(cfg.network.get("memory_comm_merge", "residual")),
+        memory_comm_attention_mode = str(cfg.network.get("memory_comm_attention_mode", "attend_global_learned_query")),
     )
     trainer = MAPPOTrainer(
         model         = model,

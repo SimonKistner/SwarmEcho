@@ -128,7 +128,8 @@ def main():
         memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
-        memory_comm_msg_dim = cfg.network.get("memory_comm_msg_dim", None),
+        memory_comm_merge = str(cfg.network.get("memory_comm_merge", "residual")),
+        memory_comm_attention_mode = str(cfg.network.get("memory_comm_attention_mode", "attend_global_learned_query")),
     )
 
     # ── Load Checkpoint ───────────────────────────────────────────────────
