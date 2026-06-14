@@ -23,6 +23,9 @@ training:
   num_epochs: 1
   num_minibatches: 20
   seed: 5555
+  eval_parallel: true
+  eval_parallel_envs: 4000
+  eval_parallel_early_exit_threshold: 1.0
   #lr: 1e-4
   #ent_coef: 0.0
   #num_epochs: 5
@@ -55,9 +58,11 @@ network:
   actor_num_layers:  3    # actor depth (lighter, separate)
 
 logging:
-  eval_freq: 50
-  obs_log: false
+  eval_freq: 10         # Run high-throughput parallel numerical eval + W&B logging every 50 updates
+
+  eval_video_freq: 50  # Only render a single-episode tracking video every 200 updates
   eval_video: true
+  obs_log: false
   eval_failed_chain_heatmap: false
   eval_not_delivered_heatmap: false
   eval_not_visually_found_heatmap: false

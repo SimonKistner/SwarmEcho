@@ -31,7 +31,7 @@ from flax import nnx
 
 from models.recurrent import GRUCell
 
-LOG_STD_MIN = -5.0
+LOG_STD_MIN = -1.0
 LOG_STD_MAX =  2.0
 
 # Small epsilon added inside log(1 - tanh²(x)) to prevent log(0)
@@ -165,7 +165,10 @@ class DecentralizedActor(nnx.Module):
             ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
         )
 
-        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+        # True squashed entropy = Gaussian entropy + log(1 - tanh^2(u))
+        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+        jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
+        entropy = ent_gaussian + jnp.sum(jacobian)
 
         # Return the pre-squash sample as the "stored action" so evaluate_actions
         # can recompute the same log-prob exactly (buffer stores u, not tanh(u)).
@@ -196,7 +199,9 @@ class DecentralizedActor(nnx.Module):
             axis=-1,
         )
 
-        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        jacobian = 2.0 * (jnp.log(2.0) - actions - jax.nn.softplus(-2.0 * actions))
+        entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
         return log_prob, entropy
 
 
@@ -349,7 +354,9 @@ class RecurrentDecentralizedActor(nnx.Module):
         std = jnp.exp(log_std)
         u = jnp.where(deterministic, mu, mu + std * jax.vmap(lambda k: jax.random.normal(k, mu.shape[-1:]))(keys))
         log_prob = -0.5 * jnp.sum(((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+        jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
+        entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
         return hidden, u, log_prob, entropy
 
     def __call__(
@@ -394,7 +401,9 @@ class RecurrentDecentralizedActor(nnx.Module):
         log_prob = -0.5 * jnp.sum(
             ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
         )
-        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
+        jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
+        entropy = ent_gaussian + jnp.sum(jacobian)
         return hidden, u, log_prob, entropy
 
     def evaluate_actions_sequence(
@@ -418,7 +427,9 @@ class RecurrentDecentralizedActor(nnx.Module):
                 )
                 std = jnp.exp(log_std)
                 log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-                entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+                ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+                jacobian = 2.0 * (jnp.log(2.0) - act_t - jax.nn.softplus(-2.0 * act_t))
+                entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
                 return hidden, (log_prob, entropy)
             final_hidden, (log_probs, entropy) = jax.lax.scan(
                 _step,
@@ -432,7 +443,9 @@ class RecurrentDecentralizedActor(nnx.Module):
             hidden, mu, log_std = self(obs_t, hidden, reset_t)
             std = jnp.exp(log_std)
             log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-            entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+            ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
+            jacobian = 2.0 * (jnp.log(2.0) - act_t - jax.nn.softplus(-2.0 * act_t))
+            entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
             return hidden, (log_prob, entropy)
 
         final_hidden, (log_probs, entropy) = jax.lax.scan(_step, init_hidden, (obs, actions, resets))

@@ -760,6 +760,136 @@ def _evaluate(
     )
 
 
+def _evaluate_parallel(
+    model:        MAPPOModel,
+    reset,
+    env_step,
+    obs_fn,
+    reward_fn,
+    cfg:          DictConfig,
+    key:          jax.Array,
+    num_envs:     int = 4000,
+) -> tuple:
+    """
+    Run deterministic evaluation episodes in parallel using jax.vmap and jax.lax.scan.
+
+    Returns:
+      rets, lengths, gaps, progs, succs, fnds, final_state, final_succs, final_delivered, final_visual
+    """
+    max_steps = int(cfg.env.max_steps)
+    hold_chain_for = int(cfg.env.get("hold_chain_for", 0))
+    actor_memory = bool(cfg.network.get("actor_memory", False))
+    memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False))
+    memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5))
+    max_force = float(cfg.env.max_force)
+
+    env_keys = jax.random.split(key, num_envs)
+
+    def run_single_env_rollout(env_key):
+        state = reset(env_key)
+
+        actor_h = model.initial_actor_hidden(()) if actor_memory else None
+        base_memory = jnp.zeros((model.hidden_dim,), dtype=jnp.float32) if (actor_memory and memory_comm_enabled) else None
+        base_memory_valid = jnp.bool_(False) if (actor_memory and memory_comm_enabled) else None
+
+        init_carry = (
+            state,
+            actor_h,
+            base_memory,
+            base_memory_valid,
+            jnp.bool_(False),  # has_succeeded
+            jnp.bool_(False),  # has_found_delivered
+            jnp.bool_(False),  # has_found_visual
+            jnp.float32(0.0),  # max_found
+            jnp.float32(0.0),  # returns
+            jnp.int32(0),      # lengths
+        )
+
+        def eval_step(carry, t):
+            state, actor_h, base_memory, base_memory_valid, has_succeeded, has_found_delivered, has_found_visual, max_found, returns, lengths = carry
+
+            obs = obs_fn(state)
+
+            if actor_memory:
+                resets = jnp.logical_not(state.active)
+                if memory_comm_enabled:
+                    N_eval = obs.shape[0]
+                    step_share = (memory_comm_every_k_steps <= 1) | ((t % memory_comm_every_k_steps) == 0)
+                    comm_mask = (state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)) & step_share
+                    base_mask = (
+                        (
+                            state.adj_matrix[:N_eval, N_eval]
+                            if state.adj_matrix.shape[-1]
+                            else jnp.zeros((N_eval,), dtype=bool)
+                        )
+                        & ~state.target_known[:N_eval]
+                        & base_memory_valid
+                        & step_share
+                    )
+                    actor_h, actions, _ = model.actor.__call_team__(
+                        obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
+                    )
+                    connected_to_base = state.adj_matrix[:N_eval, N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval,), dtype=bool)
+                    reporters = state.target_known & connected_to_base & state.active
+                    first_idx = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
+                    has_reporter = jnp.any(reporters)
+                    reported_memory = actor_h[first_idx]
+                    should_store = has_reporter & ~base_memory_valid
+                    base_memory = jnp.where(should_store, reported_memory, base_memory)
+                    base_memory_valid = base_memory_valid | should_store
+                else:
+                    def _act_eval(o, h, r):
+                        h, mu, _ = model.actor(o, h, r)
+                        return h, mu
+                    actor_h, actions = jax.vmap(_act_eval)(obs, actor_h, resets)
+            else:
+                actions = jax.vmap(lambda o: model.actor(o)[0])(obs)
+
+            actions = jnp.tanh(actions) * max_force
+            old_state = state
+            state = env_step(state, actions)
+
+            rew, info = reward_fn(old_state, state, jnp.bool_(False))
+
+            fully_connected = info["fully_connected"] > 0.5
+            new_chain_held_steps = jnp.where(
+                fully_connected,
+                state.chain_held_steps + jnp.int32(1),
+                jnp.int32(0)
+            )
+            state = dataclasses.replace(state, chain_held_steps=new_chain_held_steps)
+            success_achieved = new_chain_held_steps >= (hold_chain_for + 1)
+
+            _, info_terminal = reward_fn(old_state, state, jnp.bool_(True))
+            success_bonus_per_agent = info_terminal["r_success"] / rew.shape[0]
+            rew = jnp.where(success_achieved & ~has_succeeded, rew + success_bonus_per_agent, rew)
+
+            new_has_succeeded = has_succeeded | success_achieved
+            new_has_found_delivered = has_found_delivered | state.base_target_known
+            new_has_found_visual = has_found_visual | jnp.any(state.target_known, axis=-1)
+
+            found_metric = info.get("target_found_fraction", info["global_target_found"])
+            new_max_found = jnp.maximum(max_found, found_metric)
+
+            new_returns = returns + rew.sum()
+            new_lengths = jnp.where(new_has_succeeded, lengths, lengths + 1)
+
+            new_carry = (state, actor_h, base_memory, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths)
+            return new_carry, (info["chain_gap_dist"], info["chain_progress_pct"])
+
+        final_carry, scan_outs = jax.lax.scan(eval_step, init_carry, jnp.arange(max_steps))
+        state_f, _, _, _, succ, delivered, visual, fnd, ret, length = final_carry
+        gap_dists, progress_pcts = scan_outs
+
+        return ret, length, gap_dists[-1], progress_pcts[-1], succ, fnd, state_f, succ, delivered, visual
+
+    @nnx.jit
+    def run_parallel_eval_jit(model, keys):
+        return jax.vmap(run_single_env_rollout)(keys)
+
+    return run_parallel_eval_jit(model, env_keys)
+
+
 # ---------------------------------------------------------------------------
 # Selective eval render callback factory
 # ---------------------------------------------------------------------------
@@ -1097,6 +1227,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     # ── Training loop ─────────────────────────────────────────────────────
     eval_every  = int(cfg.logging.get("eval_freq", cfg.logging.get("video_freq", 30) or 30))
+    eval_video_freq = cfg.logging.get("eval_video_freq", None)
+    eval_video_every = int(eval_video_freq) if eval_video_freq is not None else eval_every
     num_ckpt    = int(cfg.logging.get("num_checkpoints", 20))
     ckpt_every  = max(1, n_updates // num_ckpt)
     log_every   = max(1, n_updates // 200)
@@ -1322,37 +1454,158 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     })
                 wandb.log(logs, step=steps_done)
 
-            # ── Mid-training eval + single video ─────────────────────────────
-            if update % eval_every == 0 and update != n_updates:
-                master_key, eval_key = jax.random.split(master_key)
-                (ep_states_list, ep_rewards_list, all_metrics_list,
-                 eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
-                    model, reset_s,
-                    jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
-                    cfg, eval_key, num_episodes=1,
-                )
+            is_eval_step = (update % eval_every == 0)
+            is_video_step = (eval_video and (update % eval_video_every == 0))
 
+            # ── Mid-training eval + single video ─────────────────────────────
+            if (is_eval_step or is_video_step) and update != n_updates:
                 eval_timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
 
-                if eval_video:
-                    stem = f"{eval_timestamp}_eval_update_{update:06d}"
-                    render_eval_video(
-                        ep_states  = ep_states_list[0],
-                        ep_rewards = ep_rewards_list[0],
-                        ep_metrics = all_metrics_list[0],
-                        cfg        = cfg,
-                        out_dir    = train_video_dir,
-                        filename_stem = stem,
-                        renderer   = effective_train_renderer,
-                    )
+                if bool(cfg.training.get("eval_parallel", False)):
+                    if is_eval_step:
+                        master_key, eval_key = jax.random.split(master_key)
+                        (rets, lengths, gaps, progs, succs, fnds,
+                         final_state, _, _, _) = _evaluate_parallel(
+                            model, reset, env_step, compute_obs, compute_reward,
+                            cfg, eval_key, num_envs=int(cfg.training.eval_parallel_envs),
+                        )
+                        eval_ret = float(jnp.mean(rets))
+                        eval_len = float(jnp.mean(lengths))
+                        eval_gap = float(jnp.mean(gaps))
+                        eval_prog_pct = float(jnp.mean(progs))
+                        eval_success = float(jnp.mean(succs))
+                        eval_found = float(jnp.mean(fnds))
+                        eval_cov = float(jnp.mean(final_state.coverage_grid.astype(jnp.float32)))
 
-                print(
-                    f"  [eval-train] update={update}  "
-                    f"steps={steps_done:,}  "
-                    f"ep_return={eval_ret:.2f}  "
-                    f"chain={eval_prog_pct:.1f}%  "
-                    f"success={eval_success:.1%}"
-                )
+                        eval_prefix = "[EVAL]" + " " * 50
+                        _l_eval = f"{eval_len:>6.0f}"
+                        _cov_eval = f"{eval_cov:>5.1%}"
+                        _f_eval = f"{eval_found:>5.1%}"
+                        _prog_eval = f"{eval_prog_pct:>5.1f}%"
+                        _s_eval = f"{eval_success:>5.1%}"
+
+                        num_envs = int(cfg.training.eval_parallel_envs)
+                        if num_envs >= 1000:
+                            if num_envs % 1000 == 0:
+                                par_envs_val = f"{num_envs // 1000}k"
+                            else:
+                                par_envs_val = f"{num_envs / 1000:.1f}k"
+                        else:
+                            par_envs_val = str(num_envs)
+
+                        print(
+                            f"{eval_prefix}"
+                            f"ep_len={_l_eval}  "
+                            f"cov={_cov_eval}  "
+                            f"found={_f_eval}  "
+                            f"chain={_prog_eval}  "
+                            f"succ={_s_eval}  "
+                            f"par_envs={par_envs_val}"
+                        )
+
+                        if wandb_run:
+                            import wandb
+                            wandb.log({
+                                "eval/ep_return":           eval_ret,
+                                "eval/ep_length":           eval_len,
+                                "eval/chain_gap_dist":      eval_gap,
+                                "eval/chain_progress_pct":  eval_prog_pct,
+                                "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
+                                "eval/success_rate":        eval_success,
+                                "eval/target_found_rate":   eval_found,
+                                "eval/map_coverage_pct":    eval_cov * 100.0,
+                            }, step=steps_done)
+
+                        # Check for parallel evaluation early exit
+                        eval_success_metric = eval_found if int(cfg.env.get("num_bases", 1)) == 0 else eval_success
+                        early_exit_thresh = cfg.training.get("eval_parallel_early_exit_threshold", None)
+                        if early_exit_thresh is not None and eval_success_metric >= float(early_exit_thresh):
+                            print(
+                                f"\n  [eval-early-exit] Evaluation success metric {eval_success_metric:.1%} >= "
+                                f"threshold {early_exit_thresh:.1%} -- concluding training early."
+                            )
+                            early_ckpt_str = ""
+                            if save_model:
+                                import orbax.checkpoint as ocp
+                                import shutil
+                                early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                                if early_ckpt.exists():
+                                    shutil.rmtree(early_ckpt)
+                                _, state_dict = nnx.split(model)
+                                checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                                checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                print(f"  [ckpt-early] saved -> {early_ckpt}")
+                                early_ckpt_str = str(early_ckpt)
+
+                            if eval_video:
+                                master_key, eval_key = jax.random.split(master_key)
+                                _run_eval_with_render(
+                                    model=model, reset_s=reset_s, env_step=env_step,
+                                    compute_obs=compute_obs, compute_reward=compute_reward,
+                                    cfg=cfg, eval_key=eval_key,
+                                    out_dir=eval_video_dir,
+                                    ckpt_name=f"early_{update:06d}",
+                                    renderer=effective_final_renderer,
+                                    selective=selective_eval_render,
+                                    eval_render_videos=eval_render_videos,
+                                    eval_max_compute=eval_max_compute_episodes,
+                                    n_success=eval_render_successes,
+                                    n_fail=eval_render_failures,
+                                    wandb_run=wandb_run,
+                                    steps_done=steps_done,
+                                    max_steps=max_steps,
+                                    label="eval-early",
+                                )
+                            return early_ckpt_str
+
+                    if is_video_step:
+                        master_key, video_key = jax.random.split(master_key)
+                        (ep_states_list, ep_rewards_list, all_metrics_list,
+                         _, _, _, _, _, _) = _evaluate(
+                            model, reset_s,
+                            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+                            cfg, video_key, num_episodes=1,
+                        )
+                        stem = f"{eval_timestamp}_eval_update_{update:06d}"
+                        render_eval_video(
+                            ep_states  = ep_states_list[0],
+                            ep_rewards = ep_rewards_list[0],
+                            ep_metrics = all_metrics_list[0],
+                            cfg        = cfg,
+                            out_dir    = train_video_dir,
+                            filename_stem = stem,
+                            renderer   = effective_train_renderer,
+                        )
+                else:
+                    if is_eval_step or is_video_step:
+                        master_key, eval_key = jax.random.split(master_key)
+                        (ep_states_list, ep_rewards_list, all_metrics_list,
+                         eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
+                            model, reset_s,
+                            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+                            cfg, eval_key, num_episodes=1,
+                        )
+
+                        if is_video_step:
+                            stem = f"{eval_timestamp}_eval_update_{update:06d}"
+                            render_eval_video(
+                                ep_states  = ep_states_list[0],
+                                ep_rewards = ep_rewards_list[0],
+                                ep_metrics = all_metrics_list[0],
+                                cfg        = cfg,
+                                out_dir    = train_video_dir,
+                                filename_stem = stem,
+                                renderer   = effective_train_renderer,
+                            )
+
+                        if is_eval_step:
+                            print(
+                                f"  [eval-train] update={update}  "
+                                f"steps={steps_done:,}  "
+                                f"ep_return={eval_ret:.2f}  "
+                                f"chain={eval_prog_pct:.1f}%  "
+                                f"success={eval_success:.1%}"
+                            )
 
                 # Generate mid-run evaluation heatmaps if toggled in LoggingConfig
                 generate_any_heatmap = bool(
@@ -1617,18 +1870,4 @@ def _run_eval_with_render(
         found_rate=eval_found,
     )
 
-    # TODO: Mid-training eval W&B metrics are based on very few episodes and carry
-    #       little statistical weight. Replace with a proper multi-episode test
-    #       harness before re-enabling. For now only training window metrics are
-    #       logged to W&B.
-    # if wandb_run:
-    #     import wandb
-    #     wandb.log({
-    #         "eval/ep_return":           eval_ret,
-    #         "eval/ep_length":           eval_len,
-    #         "eval/chain_gap_dist":      eval_gap,
-    #         "eval/chain_progress_pct":  eval_prog_pct,
-    #         "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-    #         "eval/success_rate":        eval_success,
-    #         "eval/target_found":        eval_found,
-    #     }, step=steps_done)
+

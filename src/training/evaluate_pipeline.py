@@ -44,7 +44,7 @@ from env.physics import make_env_fns
 from env.observations import make_obs_fns
 from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
-from training.runner import _evaluate
+from training.runner import _evaluate, _evaluate_parallel
 from training.video_worker import render_eval_video
 from env.maps import MapDefinition
 from visualize.render_preview import render_png, _resolve_map_path
@@ -292,99 +292,22 @@ def setup_model_and_env(cfg, checkpoint_path):
 
 
 def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, track_delivered=True, track_visual=True):
-    """Runs a high-throughput parallel evaluation sweep in JAX/XLA, tracking success and optionally target-found flags."""
-    print(f"Running parallel evaluation sweep over {NUM_ENVS} environments...")
+    """Unified wrapper that runs _evaluate_parallel to satisfy DRY compliance and fix memory-communication evaluation."""
     max_steps = int(cfg.env.max_steps)
-    max_force = float(cfg.env.max_force)
-    hold_chain_for = int(cfg.env.get("hold_chain_for", 0))
+    eval_key = jax.random.PRNGKey(SEED)
 
-    # Vectorize env and model calls
-    env_step_v = jax.vmap(env_step)
-    reset_v    = jax.vmap(reset)
-    obs_v      = jax.vmap(compute_obs)
-    reward_v   = jax.vmap(compute_reward)
-
-    def step_batch(state, actor_h, has_succeeded, has_found_delivered, has_found_visual):
-        obs = obs_v(state)
-        if model.actor_memory:
-            resets = jnp.logical_not(state.active)
-            def _act(o, h, r):
-                h, mu, _ = model.actor(o, h, r)
-                return h, mu
-            actor_h, actions = jax.vmap(_act)(obs, actor_h, resets)
-        else:
-            actions = jax.vmap(lambda o: model.actor(o)[0])(obs)
-
-        actions = jnp.tanh(actions) * max_force
-        old_state = state
-        next_state = env_step_v(state, actions)
-
-        # Compute rewards, success check, and target-found status
-        dummy_dones = jnp.zeros(NUM_ENVS, dtype=jnp.bool_)
-        _, info = reward_v(old_state, next_state, dummy_dones)
-
-        fully_connected = info["fully_connected"] > 0.5
-        new_chain_held_steps = jnp.where(
-            fully_connected,
-            next_state.chain_held_steps + jnp.int32(1),
-            jnp.int32(0)
-        )
-        next_state = next_state.replace(chain_held_steps=new_chain_held_steps)
-
-        success_achieved = new_chain_held_steps >= (hold_chain_for + 1)
-        new_has_succeeded = has_succeeded | success_achieved
-
-        # Track base target known (delivered) and target visual discovery (visual)
-        if track_delivered:
-            delivered = next_state.base_target_known
-            new_has_found_delivered = has_found_delivered | delivered
-        else:
-            new_has_found_delivered = has_found_delivered
-
-        if track_visual:
-            visually_found = jnp.any(next_state.target_known, axis=-1)
-            new_has_found_visual = has_found_visual | visually_found
-        else:
-            new_has_found_visual = has_found_visual
-
-        return next_state, actor_h, new_has_succeeded, new_has_found_delivered, new_has_found_visual
-
-    @jax.jit
-    def run_rollout(state, actor_h):
-        def scan_body(carry, _):
-            state, actor_h, has_succeeded, has_found_delivered, has_found_visual = carry
-            next_state, next_actor_h, next_has_succeeded, next_has_found_delivered, next_has_found_visual = step_batch(
-                state, actor_h, has_succeeded, has_found_delivered, has_found_visual
-            )
-            return (next_state, next_actor_h, next_has_succeeded, next_has_found_delivered, next_has_found_visual), None
-
-        init_carry = (
-            state,
-            actor_h,
-            jnp.zeros(NUM_ENVS, dtype=jnp.bool_),
-            jnp.zeros(NUM_ENVS, dtype=jnp.bool_),
-            jnp.zeros(NUM_ENVS, dtype=jnp.bool_)
-        )
-        (final_state, final_actor_h, final_has_succeeded, final_has_found_delivered, final_has_found_visual), _ = jax.lax.scan(
-            scan_body, init_carry, None, length=max_steps
-        )
-        return final_state, final_has_succeeded, final_has_found_delivered, final_has_found_visual
-
-    master_key = jax.random.PRNGKey(SEED)
-    env_keys = jax.random.split(master_key, NUM_ENVS)
-    state = reset_v(env_keys)
-
-    actor_h = model.initial_actor_hidden((NUM_ENVS,)) if model.actor_memory else None
-
-    # Run Rollout
     start_time = time.time()
-    final_state, final_has_succeeded, final_has_found_delivered, final_has_found_visual = run_rollout(state, actor_h)
-    final_has_succeeded.block_until_ready()
+    (rets, lengths, gaps, progs, succs, fnds,
+     final_state, final_succs, final_delivered, final_visual) = _evaluate_parallel(
+        model, reset, env_step, compute_obs, compute_reward,
+        cfg, eval_key, num_envs=NUM_ENVS
+    )
+    final_succs.block_until_ready()
     elapsed = time.time() - start_time
     print(f"Simulation completed in {elapsed:.2f} seconds.")
 
     # Calculate Stats
-    num_success = int(jnp.sum(final_has_succeeded))
+    num_success = int(jnp.sum(final_succs))
     num_fail = NUM_ENVS - num_success
     success_rate = (num_success / NUM_ENVS) * 100.0
     print(f"         Successes:      {num_success}/{NUM_ENVS} ({success_rate:.2f}%)")
@@ -394,15 +317,15 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
     if target_positions.ndim == 3:
         target_positions = target_positions[:, 0, :]  # fallback for MEM_T8
 
-    failed_mask = np.array(~final_has_succeeded)
+    failed_mask = np.array(~final_succs)
     failed_positions = target_positions[failed_mask]
 
     if track_delivered:
-        num_delivered = int(jnp.sum(final_has_found_delivered))
+        num_delivered = int(jnp.sum(final_delivered))
         num_not_delivered = NUM_ENVS - num_delivered
         delivered_rate = (num_delivered / NUM_ENVS) * 100.0
         print(f"         Delivered:      {num_delivered}/{NUM_ENVS} ({delivered_rate:.2f}%)")
-        not_delivered_mask = np.array(~final_has_found_delivered)
+        not_delivered_mask = np.array(~final_delivered)
         not_delivered_positions = target_positions[not_delivered_mask]
     else:
         num_delivered = 0
@@ -411,11 +334,11 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
         not_delivered_positions = np.zeros((0, 2))
 
     if track_visual:
-        num_visually_found = int(jnp.sum(final_has_found_visual))
+        num_visually_found = int(jnp.sum(final_visual))
         num_not_visually_found = NUM_ENVS - num_visually_found
         visually_found_rate = (num_visually_found / NUM_ENVS) * 100.0
         print(f"Results: Visually Found: {num_visually_found}/{NUM_ENVS} ({visually_found_rate:.2f}%)")
-        not_visually_found_mask = np.array(~final_has_found_visual)
+        not_visually_found_mask = np.array(~final_visual)
         not_visually_found_positions = target_positions[not_visually_found_mask]
     else:
         num_visually_found = 0

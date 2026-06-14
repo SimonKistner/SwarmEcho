@@ -117,6 +117,9 @@ class TrainingConfig:
     warn_vram_limit: bool = False
     abort_on_vram_limit: bool = False
     vram_limit_gb: float = 20.0
+    eval_parallel: bool = False
+    eval_parallel_envs: int = 4000
+    eval_parallel_early_exit_threshold: Optional[float] = None
 
 
 
@@ -151,6 +154,7 @@ class LoggingConfig:
     # --- Frequencies ---
     log_freq: int = 10
     eval_freq: int = 30           # Run evaluation and heatmap generation every N updates
+    eval_video_freq: Optional[int] = None # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
 
     # --- Model Checkpointing ---
     save_model: bool = True
