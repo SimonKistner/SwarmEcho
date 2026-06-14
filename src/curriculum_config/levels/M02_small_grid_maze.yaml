@@ -47,7 +47,8 @@ network:
   memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
   memory_comm_every_k_steps: 5
   memory_comm_num_heads: 4
-  memory_comm_msg_dim: 64
+  memory_comm_merge: "residual"
+  memory_comm_attention_mode: "attend_global_learned_query"
 
   num_layers: 3    # critic depth
   actor_num_layers: 3    # actor depth (lighter, separate)

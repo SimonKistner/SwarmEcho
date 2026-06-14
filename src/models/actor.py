@@ -232,27 +232,55 @@ class RecurrentDecentralizedActor(nnx.Module):
         memory_comm_enabled: bool = False,
         memory_comm_gradient_mode: str = "rial",
         memory_comm_num_heads: int = 4,
-        memory_comm_msg_dim: int | None = None,
+        memory_comm_merge: str = "residual",
+        memory_comm_attention_mode: str = "attend_global_learned_query",
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_gradient_mode = memory_comm_gradient_mode
-        self.memory_comm_msg_dim = memory_comm_msg_dim if memory_comm_msg_dim is not None else hidden_dim
+        self.memory_comm_merge = memory_comm_merge
+        self.memory_comm_attention_mode = memory_comm_attention_mode
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
-        self.gru = GRUCell(hidden_dim, hidden_dim, rngs)
+        if memory_comm_merge not in ("residual", "concat"):
+            raise ValueError("memory_comm_merge must be 'residual' or 'concat'.")
+        valid_attention_modes = (
+            "attend_global_learned_query",
+            "attend_cur_obs_query",
+            "attend_mem_query",
+            "attend_cur_obs_and_mem_query",
+        )
+        if memory_comm_attention_mode not in valid_attention_modes:
+            raise ValueError(
+                "memory_comm_attention_mode must be one of "
+                f"{', '.join(valid_attention_modes)}."
+            )
+
+        gru_input_dim = hidden_dim * 2 if memory_comm_enabled and memory_comm_merge == "concat" else hidden_dim
+        self.gru = GRUCell(gru_input_dim, hidden_dim, rngs)
         if memory_comm_enabled:
-            msg_dim = self.memory_comm_msg_dim
-            self.memory_msg_proj = nnx.Linear(hidden_dim, msg_dim, rngs=rngs)
-            self.memory_msg_norm = nnx.LayerNorm(msg_dim, rngs=rngs)
-            self.memory_query_proj = nnx.Linear(hidden_dim * 2, msg_dim, rngs=rngs)
-            self.memory_query_norm = nnx.LayerNorm(msg_dim, rngs=rngs)
-            self.memory_context_norm = nnx.LayerNorm(msg_dim, rngs=rngs)
-            self.memory_context_proj = nnx.Linear(msg_dim, hidden_dim, rngs=rngs)
-            self.memory_gru_input_proj = nnx.Linear(hidden_dim * 2, hidden_dim, rngs=rngs)
+            # Historical note:
+            # Earlier memory communication used a learned message bottleneck:
+            # sender hidden -> Linear(hidden_dim, msg_dim) -> attention ->
+            # Linear(msg_dim, hidden_dim). That made message dimensionality
+            # configurable but added extra learned transforms around
+            # communication. It was removed to establish a clear full-hidden-
+            # state communication baseline. A bottleneck can be reintroduced
+            # later as an explicit ablation if needed.
+            if memory_comm_attention_mode == "attend_global_learned_query":
+                self.memory_global_query = nnx.Param(jnp.zeros((hidden_dim,), dtype=jnp.float32))
+            elif memory_comm_attention_mode == "attend_cur_obs_query":
+                self.memory_query_proj = nnx.Linear(hidden_dim, hidden_dim, rngs=rngs)
+                self.memory_query_norm = nnx.LayerNorm(hidden_dim, rngs=rngs)
+            elif memory_comm_attention_mode == "attend_mem_query":
+                self.memory_query_proj = nnx.Linear(hidden_dim, hidden_dim, rngs=rngs)
+                self.memory_query_norm = nnx.LayerNorm(hidden_dim, rngs=rngs)
+            else:
+                self.memory_query_proj = nnx.Linear(hidden_dim * 2, hidden_dim, rngs=rngs)
+                self.memory_query_norm = nnx.LayerNorm(hidden_dim, rngs=rngs)
             self.memory_attention = nnx.MultiHeadAttention(
                 num_heads=memory_comm_num_heads,
-                in_features=msg_dim,
+                in_features=hidden_dim,
                 rngs=rngs,
             )
         self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
@@ -272,10 +300,10 @@ class RecurrentDecentralizedActor(nnx.Module):
     ) -> jax.Array:
         """Return received actor-memory context from previous hidden states.
 
-        Communication uses h_{t-1} as the transmitted payload and conditions the
-        receiver query on both h_{t-1} and the current encoded observation.  The
-        resulting context is merged into the GRU input by __call_team__, making
-        received information persistent in h_t without same-step circular
+        Communication uses h_{t-1} as the transmitted payload. The configured
+        attention mode chooses how receiver queries are formed. The resulting
+        full-hidden-state context is merged into the GRU input by __call_team__,
+        making received information persistent in h_t without same-step circular
         dependencies between agents.
         """
         if not self.memory_comm_enabled:
@@ -294,13 +322,20 @@ class RecurrentDecentralizedActor(nnx.Module):
             if self.memory_comm_gradient_mode == "rial"
             else prev_hidden
         )
-        query = self.memory_query_norm(
-            self.memory_query_proj(jnp.concatenate([prev_hidden, encoded], axis=-1))
-        )
-        kv = self.memory_msg_norm(self.memory_msg_proj(payload_hidden))
+        if self.memory_comm_attention_mode == "attend_global_learned_query":
+            query = jnp.broadcast_to(self.memory_global_query.value, prev_hidden.shape)
+        elif self.memory_comm_attention_mode == "attend_cur_obs_query":
+            query = self.memory_query_norm(self.memory_query_proj(encoded))
+        elif self.memory_comm_attention_mode == "attend_mem_query":
+            query = self.memory_query_norm(self.memory_query_proj(prev_hidden))
+        else:
+            query = self.memory_query_norm(
+                self.memory_query_proj(jnp.concatenate([prev_hidden, encoded], axis=-1))
+            )
+        kv = payload_hidden
         mask = share_mask
         if base_memory is not None and base_memory_mask is not None:
-            base_token = self.memory_msg_norm(self.memory_msg_proj(base_memory[None, :]))
+            base_token = base_memory[None, :]
             kv = jnp.concatenate([kv, base_token], axis=-2)
             mask = jnp.concatenate([mask, base_memory_mask[:, None] & active[:, None]], axis=-1)
 
@@ -314,7 +349,6 @@ class RecurrentDecentralizedActor(nnx.Module):
             decode=False,
             deterministic=deterministic,
         )
-        context = self.memory_context_proj(self.memory_context_norm(context))
         return jnp.where(has_any, context, jnp.zeros_like(context))
 
     def __call_team__(
@@ -337,9 +371,10 @@ class RecurrentDecentralizedActor(nnx.Module):
             comm_context = self._comm_context(
                 prev_hidden, encoded, comm_mask, active, base_memory, base_memory_mask, deterministic
             )
-            gru_input = self.memory_gru_input_proj(
-                jnp.concatenate([encoded, comm_context], axis=-1)
-            )
+            if self.memory_comm_merge == "residual":
+                gru_input = encoded + comm_context
+            else:
+                gru_input = jnp.concatenate([encoded, comm_context], axis=-1)
         else:
             gru_input = encoded
         hidden = self.gru(prev_hidden, gru_input)

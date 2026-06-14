@@ -135,7 +135,8 @@ class NetworkConfig:
     memory_comm_gradient_mode: str = "rial"  # "rial" | "dial"
     memory_comm_every_k_steps: int = 5
     memory_comm_num_heads: int = 4
-    memory_comm_msg_dim: Optional[int] = None  # None keeps full hidden-state communication
+    memory_comm_merge: str = "residual"  # "residual" | "concat"
+    memory_comm_attention_mode: str = "attend_global_learned_query"
 
 
 @dataclass
@@ -543,14 +544,21 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
     if int(cfg.network.memory_comm_num_heads) < 1:
         raise ValueError("network.memory_comm_num_heads must be >= 1.")
-    msg_dim = cfg.network.get("memory_comm_msg_dim", None)
-    if msg_dim is not None:
-        msg_dim = int(msg_dim)
-        num_heads = int(cfg.network.memory_comm_num_heads)
-        if msg_dim < 1:
-            raise ValueError("network.memory_comm_msg_dim must be >= 1 when set.")
-        if msg_dim % num_heads != 0:
-            raise ValueError("network.memory_comm_msg_dim must be divisible by network.memory_comm_num_heads.")
+    if int(cfg.network.hidden_dim) % int(cfg.network.memory_comm_num_heads) != 0:
+        raise ValueError("network.hidden_dim must be divisible by network.memory_comm_num_heads.")
+    if str(cfg.network.memory_comm_merge) not in ("residual", "concat"):
+        raise ValueError("network.memory_comm_merge must be 'residual' or 'concat'.")
+    valid_attention_modes = (
+        "attend_global_learned_query",
+        "attend_cur_obs_query",
+        "attend_mem_query",
+        "attend_cur_obs_and_mem_query",
+    )
+    if str(cfg.network.memory_comm_attention_mode) not in valid_attention_modes:
+        raise ValueError(
+            "network.memory_comm_attention_mode must be one of "
+            f"{', '.join(valid_attention_modes)}."
+        )
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
         num_envs = int(cfg.training.num_envs)
         mb = int(cfg.training.num_minibatches)
