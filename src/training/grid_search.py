@@ -35,7 +35,7 @@ MEM_SHARE_COMM_ATTENTION_MODES = [
 ]
 MEM_SHARE_COMM_GRADIENT_MODES = ["rial", "dial"]
 
-TIMEOUT_SECONDS = 1000 
+TIMEOUT_SECONDS = None  # Disabled (no wallclock limit) 
 
 def shorten_comm_mode(value):
     return {
@@ -98,7 +98,7 @@ def run_command_realtime_logging(cmd, timeout_seconds):
                     break
                     
             elapsed = time.perf_counter() - start_time
-            if elapsed > timeout_seconds:
+            if timeout_seconds is not None and elapsed > timeout_seconds:
                 timed_out = True
                 print(f"\n⚠️ Run exceeded timeout limit of {format_duration(timeout_seconds)}. Terminating...")
                 process.terminate()
@@ -398,7 +398,7 @@ def run_benchmarks():
         cmd = [
             "uv", "run", "python", "-u", "src/training/train.py",
             f"level={level}",
-            "training.total_timesteps=500000000",  # prevent natural exit
+            "training.total_timesteps=50000000",  # prevent natural exit
             f"logging.run_name={run_name}",
             f"logging.wandb_group=grid_search_{level}",
             "logging.use_timestamp_postfix=False",
@@ -431,7 +431,7 @@ def run_benchmarks():
                 print(f"✅ {run_name} timed out after the limit.")
             elif return_code == 0:
                 status = "SUCCESS"
-                details = "Completed budget (unlikely)"
+                details = "Completed budget or early exit"
                 print(f"✅ {run_name} completed successfully.")
             else:
                 oom_size = extract_oom_size(full_output)

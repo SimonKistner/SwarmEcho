@@ -64,7 +64,7 @@ logging:
   eval_freq: 10         # Run high-throughput parallel numerical eval + W&B logging every 50 updates
 
   eval_video_freq: 100000  # Only render a single-episode tracking video every 200 updates
-  eval_video: true
+  eval_video: false
   obs_log: false
   eval_failed_chain_heatmap: false
   eval_not_delivered_heatmap: false

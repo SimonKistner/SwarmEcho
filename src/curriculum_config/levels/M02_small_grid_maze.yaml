@@ -33,11 +33,16 @@ reward:
   exploration_bonus: 0.25
 
 training:
-  total_timesteps: 200_000_000
+  total_timesteps: 1_000_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
+  seed: 14141414
+
+  eval_parallel: true
+  eval_parallel_envs: 4000
+  eval_parallel_early_exit_threshold: 1.0
 
 network:
   critic_type: "agent_centric"
@@ -53,8 +58,10 @@ network:
   num_layers: 3    # critic depth
   actor_num_layers: 3    # actor depth (lighter, separate)
 
-curriculum:
-  success_threshold: 0.99
 
 logging:
   eval_freq: 100
+  obs_log: false
+
+  eval_video_freq: 100 # Only render a single-episode tracking video every 200 updates
+  eval_video: true

@@ -7,7 +7,7 @@ env:
   num_agents: 1
   num_targets: 1
   num_bases: 1
-  max_steps: 100
+  max_steps: 200
   visual_radius: 5.0
   comm_radius: 5.0
   comm_radius_base: 5.0
@@ -36,11 +36,11 @@ reward:
   collision_penalty: 0.1
 
 training:
-  total_timesteps: 10_000_000
-  num_envs: 4096
+  total_timesteps: 100_000_000
+  num_envs: 4000
   num_steps: 100
-  num_epochs: 4
-  num_minibatches: 16
+  num_epochs: 1
+  num_minibatches: 20
 
 network:
   critic_type: "agent_centric"
@@ -51,5 +51,8 @@ network:
   actor_num_layers: 3
 
 logging:
-  eval_freq: 10
-  obs_log: false
+  eval_freq: 100000
+  save_model: false
+
+  eval_video_freq: 75  # Only render a single-episode tracking video every 200 updates
+  eval_video: true
