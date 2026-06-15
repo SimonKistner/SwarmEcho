@@ -1249,8 +1249,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     # ── Training loop ─────────────────────────────────────────────────────
     eval_every  = int(cfg.logging.get("eval_freq", cfg.logging.get("video_freq", 30) or 30))
+    eval_offset = int(cfg.logging.get("eval_offset", 0) or 0)
     eval_video_freq = cfg.logging.get("eval_video_freq", None)
     eval_video_every = int(eval_video_freq) if eval_video_freq is not None else eval_every
+    eval_video_offset = int(cfg.logging.get("eval_video_offset", 0) or 0)
     num_ckpt    = int(cfg.logging.get("num_checkpoints", 20))
     ckpt_every  = max(1, n_updates // num_ckpt)
     log_every   = max(1, n_updates // 200)
@@ -1492,8 +1494,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 logs.update(comm_summary)
                 wandb.log(logs, step=steps_done)
 
-            is_eval_step = (update % eval_every == 0)
-            is_video_step = (eval_video and (update % eval_video_every == 0))
+            is_eval_step = ((update - eval_offset) % eval_every == 0)
+            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0))
 
             # ── Mid-training eval + single video ─────────────────────────────
             if (is_eval_step or is_video_step) and update != n_updates:
@@ -1553,6 +1555,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 "eval/target_found_rate":   eval_found,
                                 "eval/map_coverage_pct":    eval_cov * 100.0,
                             }, step=steps_done)
+                        time.sleep(1.0)
 
                         # Check for parallel evaluation early exit
                         eval_success_metric = eval_found if int(cfg.env.get("num_bases", 1)) == 0 else eval_success
@@ -1594,6 +1597,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                     max_steps=max_steps,
                                     label="eval-early",
                                 )
+                                time.sleep(1.0)
                             return early_ckpt_str
 
                     if is_video_step:
@@ -1614,6 +1618,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             filename_stem = stem,
                             renderer   = effective_train_renderer,
                         )
+                        time.sleep(1.0)
                 else:
                     if is_eval_step or is_video_step:
                         master_key, eval_key = jax.random.split(master_key)
@@ -1635,6 +1640,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 filename_stem = stem,
                                 renderer   = effective_train_renderer,
                             )
+                            time.sleep(1.0)
 
                         if is_eval_step:
                             print(
@@ -1644,6 +1650,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 f"chain={eval_prog_pct:.1f}%  "
                                 f"success={eval_success:.1%}"
                             )
+                            time.sleep(1.0)
 
                 # Generate mid-run evaluation heatmaps if toggled in LoggingConfig
                 generate_any_heatmap = bool(
@@ -1907,5 +1914,4 @@ def _run_eval_with_render(
         success_rate=eval_success,
         found_rate=eval_found,
     )
-
 
