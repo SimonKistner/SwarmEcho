@@ -118,11 +118,17 @@ def render_svg(
         '</defs>'
     ]
 
-    # Grid lines every 10m
-    for x in range(0, int(width) + 1, 10):
+    # Grid lines follow map-defined maze cells when provided. This must match
+    # the discrete finder-path reward/tracking grid rather than the 1 m physics grid.
+    maze_grid = data.get("maze_cell_grid") or {}
+    cols = int(maze_grid.get("cols", max(1, int(width // 10))))
+    rows = int(maze_grid.get("rows", max(1, int(height // 10))))
+    for i in range(cols + 1):
+        x = i * width / cols
         px = x * scale
         svg.append(f'<line x1="{px:.3f}" y1="0" x2="{px:.3f}" y2="{img_h:.3f}" stroke="#cbd5e1" stroke-opacity="0.45" stroke-width="1"/>')
-    for y in range(0, int(height) + 1, 10):
+    for i in range(rows + 1):
+        y = i * height / rows
         py = (height - y) * scale
         svg.append(f'<line x1="0" y1="{py:.3f}" x2="{img_w:.3f}" y2="{py:.3f}" stroke="#cbd5e1" stroke-opacity="0.45" stroke-width="1"/>')
 
@@ -244,11 +250,17 @@ def render_png(
     # 1. Blank background (light slate background)
     img = np.full((img_h, img_w, 3), (252, 250, 248), dtype=np.uint8)
 
-    # 2. Grid lines
-    for x in range(0, int(width) + 1, 10):
+    # 2. Grid lines follow map-defined maze cells when provided. This must
+    # match the discrete finder-path reward/tracking grid.
+    maze_grid = data.get("maze_cell_grid") or {}
+    cols = int(maze_grid.get("cols", max(1, int(width // 10))))
+    rows = int(maze_grid.get("rows", max(1, int(height // 10))))
+    for i in range(cols + 1):
+        x = i * width / cols
         px = int(x * scale)
         cv2.line(img, (px, 0), (px, img_h), (225, 213, 203), 1, cv2.LINE_AA)
-    for y in range(0, int(height) + 1, 10):
+    for i in range(rows + 1):
+        y = i * height / rows
         py = int((height - y) * scale)
         cv2.line(img, (0, py), (img_w, py), (225, 213, 203), 1, cv2.LINE_AA)
 

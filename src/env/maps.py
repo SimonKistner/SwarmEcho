@@ -34,6 +34,13 @@ class MapDefinition:
     target_spawn_zone: list[float]
     drone_spawn_zone:  list[float]
 
+    # Coarse logical maze grid used by discrete route features. This grid is
+    # intentionally separate from 1 m physics/coverage grids: finder-path
+    # tracking, discrete chain rewards, path rendering, and preview grid lines
+    # should all use these map-construction cells.
+    maze_cell_cols: int | None = None
+    maze_cell_rows: int | None = None
+
     # Optional per-zone wall-clearance distances (metres). Candidates within
     # this distance of any wall are excluded from the valid coord pool.
     target_wall_clearance: float = 0.0
@@ -84,6 +91,8 @@ class MapDefinition:
             name              = data["name"],
             width             = float(data["width"]),
             height            = float(data["height"]),
+            maze_cell_cols    = int(data["maze_cell_grid"]["cols"]) if data.get("maze_cell_grid") else None,
+            maze_cell_rows    = int(data["maze_cell_grid"]["rows"]) if data.get("maze_cell_grid") else None,
             base_spawn_zone   = data["spawn_zones"]["base"],
             target_spawn_zone = data["spawn_zones"]["target"],
             drone_spawn_zone  = data["spawn_zones"]["drone"],

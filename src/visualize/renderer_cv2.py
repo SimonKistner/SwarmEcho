@@ -101,6 +101,9 @@ class _FrameData(NamedTuple):
     target_known:  np.ndarray | None
     base_target_known: bool | None
     adj_matrix:    np.ndarray | None
+    finders_path:  np.ndarray | None
+    finders_path_len: int
+    maze_cell_grid: tuple[int, int] | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -316,6 +319,7 @@ def _draw_frame_cv2(
     rew_cfg = cfg.reward
     use_shortest_path_visuals = (
         bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and str(rew_cfg.get("chain_reward_system", "euclidean")) == "euclidean"
         and not bool(rew_cfg.get("only_explor_individual", False))
         and not bool(rew_cfg.get("every_reward_global", False))
     )
@@ -371,6 +375,24 @@ def _draw_frame_cv2(
         roi = img[lay.mt:lay.mt+lay.ph, lay.ml:lay.ml+lay.pw]
         blend = (roi.astype(np.float32) * 0.75 + cov_full.astype(np.float32) * 0.25).astype(np.uint8)
         roi[mask] = blend[mask]
+
+    if (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and frame.finders_path is not None
+        and frame.finders_path_len > 1
+        and frame.maze_cell_grid is not None
+    ):
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        pts = [
+            _w2p(float(c[0] + 0.5) * cell_w, float(c[1] + 0.5) * cell_h, lay)
+            for c in frame.finders_path[:frame.finders_path_len]
+        ]
+        overlay = img.copy()
+        for p1, p2 in zip(pts[:-1], pts[1:]):
+            cv2.line(overlay, p1, p2, _hex_to_bgr("#22c55e"), max(2, int(2 * scale)), cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
 
     # ── Connectivity ──────────────────────────────────────────────────────
     num_bases = int(cfg.env.num_bases or 0)
@@ -905,6 +927,7 @@ def render_video_cv2(
     comm_occ_grid_static = None
     mesh_walls_static = None
     anti_target_static = None
+    maze_cell_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
@@ -913,6 +936,8 @@ def render_video_cv2(
             occ_grid_static = map_def.occupancy_grid
             comm_occ_grid_static = map_def.communication_occupancy_grid
             mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
+            if map_def.maze_cell_cols and map_def.maze_cell_rows:
+                maze_cell_grid_static = (int(map_def.maze_cell_cols), int(map_def.maze_cell_rows))
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -939,6 +964,9 @@ def render_video_cv2(
             target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
             base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
             adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
+            finders_path  = (np.array(traj_cpu.finders_path[t]) if hasattr(traj_cpu, "finders_path") else None),
+            finders_path_len = (int(traj_cpu.finders_path_len[t]) if hasattr(traj_cpu, "finders_path_len") else 0),
+            maze_cell_grid = maze_cell_grid_static,
         ))
 
     # 2. Determine parallelism (daemonic processes cannot spawn children)

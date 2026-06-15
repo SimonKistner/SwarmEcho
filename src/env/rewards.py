@@ -107,6 +107,9 @@ def make_reward_fn(cfg: DictConfig):
     use_task     = bool(int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
     target_found_requires_delivery = bool(cfg.reward.get("target_found_requires_delivery", True))
     back_to_target_after_delivery = bool(cfg.reward.get("back_to_target_after_delivery", False))
+    chain_reward_system = str(cfg.reward.get("chain_reward_system", "euclidean"))
+    use_finders_path_reward = chain_reward_system == "discrete_finders_path"
+    only_reward_chain_from_target = bool(cfg.reward.get("only_reward_chain_from_target", False))
     every_reward_global = bool(cfg.reward.get("every_reward_global", False))
     only_explor_individual = bool(cfg.reward.get("only_explor_individual", False)) and not every_reward_global
     only_shortest_path_chain_reward = (
@@ -115,6 +118,18 @@ def make_reward_fn(cfg: DictConfig):
         and not every_reward_global
     )
     chain_rewards_global = only_explor_individual or every_reward_global
+    maze_cols = 1
+    maze_rows = 1
+    maze_cell_w = 1.0
+    maze_cell_h = 1.0
+    if use_finders_path_reward and cfg.env.get("map_names") and len(cfg.env.map_names) > 0:
+        from core.config import MAP_DIR
+        from env.maps import MapDefinition
+        map_def = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
+        maze_cols = int(map_def.maze_cell_cols or 1)
+        maze_rows = int(map_def.maze_cell_rows or 1)
+        maze_cell_w = float(map_def.width) / maze_cols
+        maze_cell_h = float(map_def.height) / maze_rows
 
     # ---- Internal: shortest path calculation -----------------------------
 
@@ -165,6 +180,68 @@ def make_reward_fn(cfg: DictConfig):
         )
 
         return is_on_base_path | is_on_tgt_path
+
+    def _maze_cell_from_pos(pos):
+        cx = jnp.clip(jnp.floor(pos[0] / maze_cell_w).astype(jnp.int32), 0, maze_cols - 1)
+        cy = jnp.clip(jnp.floor(pos[1] / maze_cell_h).astype(jnp.int32), 0, maze_rows - 1)
+        return cx, cy
+
+    def _path_cell_center(cell):
+        return jnp.array([
+            (cell[0].astype(jnp.float32) + 0.5) * maze_cell_w,
+            (cell[1].astype(jnp.float32) + 0.5) * maze_cell_h,
+        ], dtype=jnp.float32)
+
+    def _compute_finders_path_chain(new_state: EnvState, fully_connected):
+        cells_x, cells_y = jax.vmap(_maze_cell_from_pos)(new_state.pos)
+        path_idx = new_state.finders_path_index_grid[cells_x, cells_y].astype(jnp.int32)
+        on_path = path_idx >= 0
+        valid_len = jnp.maximum(new_state.finders_path_len.astype(jnp.int32), 1)
+
+        is_base_chain = new_state.is_conn_base & new_state.active & on_path
+        is_tgt_chain = new_state.is_conn_target & new_state.active & on_path
+        any_base_chain = jnp.any(is_base_chain)
+        any_tgt_chain = jnp.any(is_tgt_chain)
+
+        base_rank = jnp.where(is_base_chain, path_idx, -1)
+        base_best = jnp.max(base_rank)
+        base_tied = is_base_chain & (path_idx == base_best)
+        next_idx = jnp.minimum(base_best + 1, valid_len - 1)
+        next_cell = new_state.finders_path[next_idx]
+        next_center = _path_cell_center(next_cell)
+        base_tie_dist = jnp.linalg.norm(new_state.pos - next_center[None, :], axis=-1)
+        idx_b = jnp.argmin(jnp.where(base_tied, base_tie_dist, 1e9))
+
+        tgt_rank = jnp.where(is_tgt_chain, path_idx, valid_len + 1)
+        tgt_best = jnp.min(tgt_rank)
+        tgt_tied = is_tgt_chain & (path_idx == tgt_best)
+        prev_idx = jnp.maximum(tgt_best - 1, 0)
+        prev_cell = new_state.finders_path[prev_idx]
+        prev_center = _path_cell_center(prev_cell)
+        tgt_tie_dist = jnp.linalg.norm(new_state.pos - prev_center[None, :], axis=-1)
+        idx_t = jnp.argmin(jnp.where(tgt_tied, tgt_tie_dist, 1e9))
+
+        base_cells = jnp.where(any_base_chain, base_best + 1, 0)
+        tgt_cells = jnp.where(any_tgt_chain, valid_len - tgt_best, 0)
+        progress_cells = jnp.where(
+            only_reward_chain_from_target,
+            tgt_cells,
+            jnp.minimum(base_cells + tgt_cells, valid_len),
+        )
+        progress_cells = jnp.where(fully_connected, valid_len, progress_cells)
+        progress_frac = jnp.where(new_state.finders_path_valid, progress_cells.astype(jnp.float32) / valid_len.astype(jnp.float32), 0.0)
+        chain_progress_pct = 100.0 * progress_frac
+        chain_gap_dist = (1.0 - progress_frac) * jnp.sqrt(new_state.box_width**2 + new_state.box_height**2)
+        base_gap_penalty = -p_gap_max * (1.0 - progress_frac)
+
+        if only_reward_chain_from_target:
+            contrib = is_tgt_chain & (path_idx >= tgt_best)
+        else:
+            base_side = is_base_chain & (path_idx <= base_best)
+            tgt_side = is_tgt_chain & (path_idx >= tgt_best)
+            contrib = base_side | tgt_side
+        contrib = contrib & new_state.finders_path_valid
+        return chain_gap_dist, chain_progress_pct, base_gap_penalty, contrib, idx_b, idx_t, any_base_chain, any_tgt_chain
 
     # ---- Public: compute_reward ------------------------------------------
 
@@ -308,22 +385,26 @@ def make_reward_fn(cfg: DictConfig):
         rel_t = new_state.pos - target_pos_agents
         proj_t = jnp.clip(jnp.sum(rel_t * (-bt_unit[None, :]), axis=-1), 0.0, bt_dist)
 
-        # Gap calculation: direct Euclidean distance between the two tips
-        # If fully connected, we force gap to 0 to avoid the "flip" where tips jump to opposite ends
-        raw_gap_dist = jnp.linalg.norm(pos_b - pos_t)
-        chain_gap_dist = jnp.where(fully_connected, 0.0, raw_gap_dist)
-
-        # Progress tracking (Euclidean based)
-        chain_progress_pct = jnp.where(
-            fully_connected,
-            100.0,
-            jnp.clip(100.0 * (1.0 - chain_gap_dist / (bt_dist + 1e-6)), 0.0, 100.0)
-        )
-
-        # Chain gap is the primary timer/incentive.
-        use_dynamic_gap = jnp.logical_or(global_target_found, jnp.logical_not(use_task))
-        active_gap = jnp.where(use_dynamic_gap, chain_gap_dist, bt_dist)
-        base_gap_penalty = -active_gap * w_gap
+        # Gap/progress calculation selected once by the run config.
+        if use_finders_path_reward:
+            (chain_gap_dist, chain_progress_pct, base_gap_penalty, path_contributing,
+             idx_b, idx_t, any_base_chain, any_tgt_chain) = _compute_finders_path_chain(new_state, fully_connected)
+        else:
+            raw_gap_dist = jnp.where(
+                only_reward_chain_from_target,
+                jnp.linalg.norm(pos_t - new_state.base_pos),
+                jnp.linalg.norm(pos_b - pos_t),
+            )
+            chain_gap_dist = jnp.where(fully_connected, 0.0, raw_gap_dist)
+            chain_progress_pct = jnp.where(
+                fully_connected,
+                100.0,
+                jnp.clip(100.0 * (1.0 - chain_gap_dist / (bt_dist + 1e-6)), 0.0, 100.0)
+            )
+            use_dynamic_gap = jnp.logical_or(global_target_found, jnp.logical_not(use_task))
+            active_gap = jnp.where(use_dynamic_gap, chain_gap_dist, bt_dist)
+            base_gap_penalty = -active_gap * w_gap
+            path_contributing = jnp.zeros(N, dtype=jnp.bool_)
 
         # Only apply dynamic gap penalty to contributing drones unless chain
         # rewards are deliberately shared as a team signal.
@@ -332,9 +413,19 @@ def make_reward_fn(cfg: DictConfig):
             r_chain_gap = jnp.full((N,), base_gap_penalty / N, dtype=jnp.float32)
         else:
             if only_shortest_path_chain_reward:
-                is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
+                if use_finders_path_reward:
+                    is_contributing = path_contributing
+                elif only_reward_chain_from_target:
+                    is_contributing = _compute_shortest_paths(new_state, idx_t, idx_t, False, any_tgt_chain) & is_conn_target
+                else:
+                    is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
             else:
-                is_contributing = is_conn_base | is_conn_target
+                if use_finders_path_reward:
+                    is_contributing = path_contributing
+                elif only_reward_chain_from_target:
+                    is_contributing = is_conn_target
+                else:
+                    is_contributing = is_conn_base | is_conn_target
 
             r_chain_gap = jnp.where(
                 is_contributing,
@@ -408,6 +499,7 @@ def make_reward_fn(cfg: DictConfig):
             "is_contributing": is_contributing,
             "active_chain_drones": jnp.sum(is_contributing),
             "fully_connected": fully_connected.astype(jnp.float32),
+            "finder_returned_to_target_after_delivery": new_state.finder_returned_to_target.astype(jnp.float32),
             "global_target_found": global_target_found.astype(jnp.float32),
             # MEM_T8-only diagnostic metric; same as global_target_found normally.
             "target_found_fraction": target_found_fraction,

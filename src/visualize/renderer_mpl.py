@@ -105,6 +105,9 @@ class _FrameData(NamedTuple):
     target_known:  np.ndarray | None
     base_target_known: bool | None
     adj_matrix:    np.ndarray | None
+    finders_path:  np.ndarray | None
+    finders_path_len: int
+    maze_cell_grid: tuple[int, int] | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -296,6 +299,7 @@ def _draw_frame(
     rew_cfg = cfg.reward
     use_shortest_path_visuals = (
         bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and str(rew_cfg.get("chain_reward_system", "euclidean")) == "euclidean"
         and not bool(rew_cfg.get("only_explor_individual", False))
         and not bool(rew_cfg.get("every_reward_global", False))
     )
@@ -361,6 +365,21 @@ def _draw_frame(
         cov[cov_img_bool] = [0.04, 0.78, 0.73, 0.25]
         ax.imshow(cov, extent=[0, W, 0, H],
                   origin="lower", aspect="auto", zorder=1, interpolation="nearest")
+
+    if (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and frame.finders_path is not None
+        and frame.finders_path_len > 1
+        and frame.maze_cell_grid is not None
+    ):
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        pts = np.array([
+            [(c[0] + 0.5) * cell_w, (c[1] + 0.5) * cell_h]
+            for c in frame.finders_path[:frame.finders_path_len]
+        ], dtype=np.float32)
+        ax.plot(pts[:, 0], pts[:, 1], color="#22c55e", alpha=0.5, lw=3.0, zorder=2)
 
     # ── Adjacency ─────────────────────────────────────────────────────────
     adj, base_idx, target_idx, target_indices, drone_start, ents, dists = _build_adjacency(
@@ -853,6 +872,7 @@ def render_video(
     comm_occ_grid_static = None
     mesh_walls_static = None
     anti_target_static = None
+    maze_cell_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
@@ -861,6 +881,8 @@ def render_video(
             occ_grid_static = np.array(map_def.occupancy_grid)
             comm_occ_grid_static = np.array(map_def.communication_occupancy_grid)
             mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
+            if map_def.maze_cell_cols and map_def.maze_cell_rows:
+                maze_cell_grid_static = (int(map_def.maze_cell_cols), int(map_def.maze_cell_rows))
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -888,10 +910,14 @@ def render_video(
                     comm_occ_grid = comm_occ_grid_static,
                     mesh_walls    = mesh_walls_static,
                     box_width     = float(traj_cpu.box_width[t]),
+                    box_height    = float(traj_cpu.box_height[t]),
                     extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
                     target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
                     base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
                     adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
+                    finders_path  = (np.array(traj_cpu.finders_path[t]) if hasattr(traj_cpu, "finders_path") else None),
+                    finders_path_len = (int(traj_cpu.finders_path_len[t]) if hasattr(traj_cpu, "finders_path_len") else 0),
+                    maze_cell_grid = maze_cell_grid_static,
                 )
                 rew_hist = rewards_cpu[:t+1] if rewards_cpu is not None else None
 
@@ -928,5 +954,3 @@ def render_video(
     size_mb  = filename.stat().st_size / 1e6
     print(f"Saved {filename}  ({size_mb:.1f} MB, {n_out} frames @ {fps} fps)")
     return str(filename)
-
-
