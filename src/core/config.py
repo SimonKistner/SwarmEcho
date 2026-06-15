@@ -155,8 +155,10 @@ class LoggingConfig:
 
     # --- Frequencies ---
     log_freq: int = 10
-    eval_freq: int = 30           # Run evaluation and heatmap generation every N updates
-    eval_video_freq: Optional[int] = None # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
+    eval_freq: int = 50           # Run evaluation and heatmap generation every N updates
+    eval_offset: int = 25          # Offset for eval_freq modulo scheduling
+    eval_video_freq: Optional[int] = 50 # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
+    eval_video_offset: int = 0     # Offset for eval_video_freq modulo scheduling
 
     # --- Model Checkpointing ---
     save_model: bool = True
