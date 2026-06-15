@@ -92,6 +92,8 @@ class RewardConfig:
     success_bonus: float = 500.0
     target_found_requires_delivery: bool = True
     back_to_target_after_delivery: bool = False
+    chain_reward_system: str = "euclidean"  # "euclidean" | "discrete_finders_path"
+    only_reward_chain_from_target: bool = False
     only_shortest_path_chain_reward: bool = False
     only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
     every_reward_global: bool = False     # share every reward/penalty equally across agents
@@ -517,6 +519,8 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.env.spawn_delay >= 0, "spawn_delay must be >= 0."
     assert cfg.env.target_spawn_radius >= 0.0, "target_spawn_radius must be non-negative."
     assert 0.0 <= cfg.env.wall_restitution <= 1.0, "wall_restitution must be [0, 1]."
+    if str(cfg.reward.get("chain_reward_system", "euclidean")) not in ("euclidean", "discrete_finders_path"):
+        raise ValueError("reward.chain_reward_system must be 'euclidean' or 'discrete_finders_path'.")
     assert cfg.training.num_envs > 0
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0

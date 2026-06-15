@@ -368,6 +368,7 @@ def _collect_rollout_mappo(
     ep_found_accum   = ep_trackers["found"]
     ep_gap_accum     = ep_trackers["gap"]
     ep_prog_pct_accum = ep_trackers.get("prog_pct", np.zeros(E))
+    ep_finder_return_accum = ep_trackers.get("finder_return", np.zeros(E))
     r_coverage_accum = ep_trackers.get("r_coverage", np.zeros(E))
     r_gap_accum      = ep_trackers.get("r_gap",      np.zeros(E))
     r_coll_accum     = ep_trackers.get("r_coll",     np.zeros(E))
@@ -382,10 +383,13 @@ def _collect_rollout_mappo(
     completed_found    = []
     completed_gaps     = []
     completed_prog_pcts = []
+    completed_finder_returns = []
     completed_target_pos = []
     completed_target_success = []
     completed_target_delivered = []
     completed_target_visually_found = []
+    completed_diag_memories = []
+    completed_diag_targets = []
 
     completed_r_coverage = []
     completed_r_gap      = []
@@ -476,6 +480,10 @@ def _collect_rollout_mappo(
         ep_found_accum    = np.maximum(ep_found_accum, found_metric)
         ep_gap_accum      = np.array(info["chain_gap_dist"])
         ep_prog_pct_accum  = np.array(info["chain_progress_pct"])
+        ep_finder_return_accum = np.maximum(
+            ep_finder_return_accum,
+            np.array(info.get("finder_returned_to_target_after_delivery", 0.0)),
+        )
 
         # Track reward components
         r_coverage_accum += np.array(info["r_coverage"])
@@ -494,6 +502,7 @@ def _collect_rollout_mappo(
             completed_found.append(float(ep_found_accum[e]))
             completed_gaps.append(float(ep_gap_accum[e]))
             completed_prog_pcts.append(float(ep_prog_pct_accum[e]))
+            completed_finder_returns.append(float(ep_finder_return_accum[e]))
 
             completed_r_coverage.append(float(r_coverage_accum[e]))
             completed_r_gap.append(float(r_gap_accum[e]))
@@ -512,6 +521,17 @@ def _collect_rollout_mappo(
                 completed_target_success.append(bool(ep_success_accum[e] > 0.5))
                 completed_target_delivered.append(bool(info["terminal_delivered"][e]))
                 completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
+            if (
+                model.actor_memory and model.memory_comm_enabled
+                and base_memory is not None and base_memory_valid is not None
+                and bool(np.array(base_memory_valid)[e])
+                and bool(np.array(info["terminal_delivered"])[e])
+            ):
+                t_pos_diag = np.array(info["terminal_target_pos"][e])
+                if t_pos_diag.ndim == 2:
+                    t_pos_diag = t_pos_diag[0]
+                completed_diag_memories.append(np.array(base_memory)[e])
+                completed_diag_targets.append(t_pos_diag)
 
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
         ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
@@ -519,6 +539,7 @@ def _collect_rollout_mappo(
         ep_found_accum   = np.where(dones_np, 0.0, ep_found_accum)
         ep_gap_accum     = np.where(dones_np, 0.0, ep_gap_accum)  # reset so next ep starts clean
         ep_prog_pct_accum = np.where(dones_np, 0.0, ep_prog_pct_accum)
+        ep_finder_return_accum = np.where(dones_np, 0.0, ep_finder_return_accum)
 
         r_coverage_accum = np.where(dones_np, 0.0, r_coverage_accum)
         r_gap_accum      = np.where(dones_np, 0.0, r_gap_accum)
@@ -569,6 +590,7 @@ def _collect_rollout_mappo(
     ep_trackers["found"]   = ep_found_accum
     ep_trackers["gap"]     = ep_gap_accum
     ep_trackers["prog_pct"] = ep_prog_pct_accum
+    ep_trackers["finder_return"] = ep_finder_return_accum
 
     ep_trackers["r_coverage"] = r_coverage_accum
     ep_trackers["r_gap"]      = r_gap_accum
@@ -589,7 +611,10 @@ def _collect_rollout_mappo(
         completed_r_coverage, completed_r_gap, completed_r_coll,
         completed_r_prox, completed_r_found, completed_r_succ,
         completed_coverage,
-        completed_target_pos, completed_target_success, completed_target_delivered, completed_target_visually_found
+        completed_target_pos, completed_target_success, completed_target_delivered, completed_target_visually_found,
+        completed_finder_returns,
+        np.array(completed_diag_memories, dtype=np.float32),
+        np.array(completed_diag_targets, dtype=np.float32),
     )
 
 
@@ -1097,6 +1122,20 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     env_step_jit       = jax.jit(env_step)
     compute_obs_jit    = jax.jit(compute_obs)
     compute_reward_jit = jax.jit(compute_reward)
+    diag_decoder = None
+    if bool(cfg.network.get("memory_comm_enabled", False)) and bool(cfg.network.get("actor_memory", False)) and cfg.env.get("map_names"):
+        from core.config import MAP_DIR
+        from env.maps import MapDefinition
+        diag_map = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
+        if diag_map.maze_cell_cols and diag_map.maze_cell_rows:
+            diag_decoder = {
+                "cols": int(diag_map.maze_cell_cols),
+                "rows": int(diag_map.maze_cell_rows),
+                "w": float(diag_map.width) / int(diag_map.maze_cell_cols),
+                "h": float(diag_map.height) / int(diag_map.maze_cell_rows),
+                "W": np.zeros((int(cfg.network.hidden_dim), int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows)), dtype=np.float32),
+                "b": np.zeros((int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows),), dtype=np.float32),
+            }
 
     # ── Model ─────────────────────────────────────────────────────────────
     master_key = jax.random.PRNGKey(int(cfg.training.seed))
@@ -1264,6 +1303,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         "success": np.zeros(E, dtype=np.float32),
         "found":   np.zeros(E, dtype=np.float32),
         "gap":     np.zeros(E, dtype=np.float32),
+        "finder_return": np.zeros(E, dtype=np.float32),
     }
 
     # Sliding window for stable logging metrics
@@ -1273,6 +1313,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_fnd  = deque(maxlen=E)
     window_gap  = deque(maxlen=E)
     window_prog_pct = deque(maxlen=E)
+    window_finder_return = deque(maxlen=E)
 
     # Sliding window for evaluation heatmaps
     window_target_pos = deque(maxlen=E)
@@ -1325,7 +1366,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
-             raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found) = _collect_rollout_mappo(
+             raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found,
+             raw_finder_return, raw_diag_memories, raw_diag_targets) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
@@ -1334,6 +1376,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
             n_eps = len(raw_ret)
+            diag_acc = None
+            diag_samples = 0
 
             if n_eps > 0:
                 completed_eps_count += n_eps
@@ -1343,6 +1387,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_fnd.extend(raw_found)
                 window_gap.extend(raw_gap)
                 window_prog_pct.extend(raw_prog_pct)
+                window_finder_return.extend(raw_finder_return)
 
                 window_target_pos.extend(raw_target_pos)
                 window_target_success.extend(raw_target_success)
@@ -1356,6 +1401,24 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_r_found.extend(raw_r_found)
                 window_r_succ.extend(raw_r_succ)
                 window_cov.extend(raw_cov)
+
+                if diag_decoder is not None and len(raw_diag_memories) > 0:
+                    X = np.asarray(raw_diag_memories, dtype=np.float32)
+                    pos = np.asarray(raw_diag_targets, dtype=np.float32)
+                    cx = np.clip(np.floor(pos[:, 0] / diag_decoder["w"]).astype(np.int32), 0, diag_decoder["cols"] - 1)
+                    cy = np.clip(np.floor(pos[:, 1] / diag_decoder["h"]).astype(np.int32), 0, diag_decoder["rows"] - 1)
+                    y = cx * diag_decoder["rows"] + cy
+                    logits = X @ diag_decoder["W"] + diag_decoder["b"]
+                    pred = np.argmax(logits, axis=-1)
+                    diag_acc = float(np.mean(pred == y))
+                    diag_samples = int(len(y))
+                    logits = logits - logits.max(axis=-1, keepdims=True)
+                    probs = np.exp(logits)
+                    probs /= np.maximum(probs.sum(axis=-1, keepdims=True), 1e-8)
+                    probs[np.arange(len(y)), y] -= 1.0
+                    lr_diag = 1e-3
+                    diag_decoder["W"] -= lr_diag * (X.T @ probs) / max(1, len(y))
+                    diag_decoder["b"] -= lr_diag * probs.mean(axis=0)
 
             # -- Success-rate curriculum transition check -------------------
             if (
@@ -1480,6 +1543,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "train/target_found_rate":  float(np.mean(window_fnd)),
                         "train/chain_gap_dist":     float(np.mean(window_gap)),
                         "train/chain_progress_pct": float(np.mean(window_prog_pct)),
+                        "train/finder_return_to_target_after_delivery_rate": float(np.mean(window_finder_return)),
                         "train/ep_length_reduction": (1.0 - (float(np.mean(window_len)) / max_steps)) * 100.0,
                         "train/map_coverage_pct":   float(np.mean(window_cov)) * 100.0,
                         "train/episodes_completed": completed_eps_count,
@@ -1491,6 +1555,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "rewards/target_found":     float(np.mean(window_r_found)),
                         "rewards/success_bonus":    float(np.mean(window_r_succ)),
                     })
+                    if diag_acc is not None:
+                        logs.update({
+                            "diagnostics/memory_target_cell_accuracy": diag_acc,
+                            "diagnostics/memory_target_cell_samples": diag_samples,
+                        })
                 logs.update(comm_summary)
                 wandb.log(logs, step=steps_done)
 
@@ -1914,4 +1983,3 @@ def _run_eval_with_render(
         success_rate=eval_success,
         found_rate=eval_found,
     )
-

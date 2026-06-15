@@ -28,6 +28,8 @@ reward:
   only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
   back_to_target_after_delivery: true
+  chain_reward_system: discrete_finders_path
+  only_reward_chain_from_target: true
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25

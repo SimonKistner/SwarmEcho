@@ -7,6 +7,13 @@ name: M02_small_grid_maze
 width: 90.0
 height: 90.0
 
+# Coarse logical cells used to construct this maze. Finder-path tracking,
+# discrete chain rewards, path visualization, and preview grid lines all use
+# this grid, not the 1 m physics/coverage grid.
+maze_cell_grid:
+  cols: 9
+  rows: 9
+
 spawn_zones:
   base:   [45.0,   45.0,   45.0,   45.0]
   drone:  [45.0,   45.0,   45.0,   45.0]

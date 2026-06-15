@@ -101,6 +101,7 @@ def make_env_fns(cfg: DictConfig):
     target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
     precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
     log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False)) or bool(cfg.network.get("memory_comm_enabled", False))
+    use_finders_path        = str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
 
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
@@ -174,6 +175,18 @@ def make_env_fns(cfg: DictConfig):
     R_cells = int(PAD_RADIUS / cell_size) + 2
     if padded_grid is None:
         raise ValueError("Padded occupancy grid missing. Map loading or padding logic failed.")
+
+    maze_cols = int(map_def.maze_cell_cols or 1)
+    maze_rows = int(map_def.maze_cell_rows or 1)
+    maze_cell_w = float(W) / maze_cols
+    maze_cell_h = float(H) / maze_rows
+    max_finders_path_len = maze_cols * maze_rows if use_finders_path else 1
+    base_maze_cell = jnp.array([
+        int(max(0, min(maze_cols - 1, math.floor((float(W) / 2.0) / maze_cell_w)))),
+        int(max(0, min(maze_rows - 1, math.floor((float(H) / 2.0) / maze_cell_h)))),
+    ], dtype=jnp.int16)
+    _maze_offsets = jnp.array([[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]], dtype=jnp.int16)
+    spawn_room_cells = jnp.clip(base_maze_cell[None, :] + _maze_offsets, jnp.array([0, 0], dtype=jnp.int16), jnp.array([maze_cols - 1, maze_rows - 1], dtype=jnp.int16))
 
     # 1. Pre-compute Ray Stencil for Visibility (Stencil + Cummax approach)
     # Circle sampling for visual radius
@@ -277,7 +290,7 @@ def make_env_fns(cfg: DictConfig):
     # _update_target_known  (internal utility)
     # ------------------------------------------------------------------
 
-    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """
         Compute the updated target knowledge and connectivity status.
 
@@ -368,7 +381,113 @@ def make_env_fns(cfg: DictConfig):
         new_target_known = knows_after[:N]
         new_base_target_known = knows_after[N]
 
-        return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix
+        return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix, directly_sees
+
+    def _maze_cell_from_pos(pos):
+        cx = jnp.clip(jnp.floor(pos[0] / maze_cell_w).astype(jnp.int16), 0, maze_cols - 1)
+        cy = jnp.clip(jnp.floor(pos[1] / maze_cell_h).astype(jnp.int16), 0, maze_rows - 1)
+        return jnp.stack([cx, cy]).astype(jnp.int16)
+
+    def _cell_center(cell):
+        return jnp.array([
+            (cell[0].astype(jnp.float32) + 0.5) * maze_cell_w,
+            (cell[1].astype(jnp.float32) + 0.5) * maze_cell_h,
+        ], dtype=jnp.float32)
+
+    def _is_spawn_room_cell(cell):
+        return jnp.any(jnp.all(spawn_room_cells == cell[None, :], axis=-1))
+
+    def _append_loop_erased(path, length, cell):
+        valid = jnp.arange(max_finders_path_len) < length.astype(jnp.int32)
+        matches = valid & jnp.all(path == cell[None, :], axis=-1)
+        already = jnp.any(matches)
+        match_idx = jnp.argmax(matches.astype(jnp.int32)).astype(jnp.int16)
+        last_idx = jnp.maximum(length.astype(jnp.int32) - 1, 0)
+        last_cell = path[last_idx]
+        same_last = (length > 0) & jnp.all(last_cell == cell)
+        can_append = (length.astype(jnp.int32) < max_finders_path_len) & ~already & ~same_last
+        next_len = jnp.where(already, match_idx + jnp.int16(1), jnp.where(can_append, length + jnp.int16(1), length))
+        path = jnp.where(can_append, path.at[length.astype(jnp.int32)].set(cell), path)
+        return path, next_len
+
+    def _update_finders_path_state(state: EnvState, mid_state: EnvState, directly_sees: jax.Array) -> dict:
+        if not use_finders_path:
+            return {}
+
+        cells = jax.vmap(_maze_cell_from_pos)(mid_state.pos)
+        in_spawn = jax.vmap(_is_spawn_room_cell)(cells)
+
+        def _update_one(i, carry):
+            paths, lens, active = carry
+            path = paths[i]
+            length = lens[i]
+            was_active = active[i]
+            now_active = was_active | (~in_spawn[i] & mid_state.active[i])
+            reset_path = in_spawn[i] & was_active
+
+            # Seed with base, previous spawn-room/exit cell, and first non-spawn cell.
+            prev_cell = _maze_cell_from_pos(state.pos[i])
+            seed = path.at[0].set(base_maze_cell).at[1].set(prev_cell).at[2].set(cells[i])
+            seed_len = jnp.int16(3)
+            path = jnp.where((~was_active) & now_active, seed, path)
+            length = jnp.where((~was_active) & now_active, seed_len, length)
+
+            path, length = jax.lax.cond(
+                was_active & now_active & ~reset_path & mid_state.active[i],
+                lambda op: _append_loop_erased(op[0], op[1], cells[i]),
+                lambda op: op,
+                (path, length),
+            )
+            path = jnp.where(reset_path, jnp.zeros_like(path), path)
+            length = jnp.where(reset_path, jnp.int16(0), length)
+            now_active = jnp.where(reset_path, jnp.bool_(False), now_active)
+            paths = paths.at[i].set(path)
+            lens = lens.at[i].set(length)
+            active = active.at[i].set(now_active)
+            return paths, lens, active
+
+        paths, lens, active = jax.lax.fori_loop(
+            0, N, _update_one,
+            (state.finder_path_cells, state.finder_path_lens, state.finder_path_active)
+        )
+
+        first_find_now = (~state.finders_path_valid) & (~jnp.any(state.target_known)) & jnp.any(directly_sees)
+        finder_idx = jnp.argmax(directly_sees.astype(jnp.int32))
+        selected_path = paths[finder_idx]
+        selected_len = lens[finder_idx]
+
+        def _build_index_grid(path_len_path):
+            path_len, path = path_len_path
+            grid = jnp.full((maze_cols, maze_rows), jnp.int16(-1), dtype=jnp.int16)
+
+            def _set_idx(k, g):
+                cell = path[k]
+                return jax.lax.cond(
+                    k < path_len.astype(jnp.int32),
+                    lambda gg: gg.at[cell[0].astype(jnp.int32), cell[1].astype(jnp.int32)].set(k.astype(jnp.int16)),
+                    lambda gg: gg,
+                    g,
+                )
+
+            return jax.lax.fori_loop(0, max_finders_path_len, _set_idx, grid)
+
+        new_finders_path = jnp.where(first_find_now, selected_path, state.finders_path)
+        new_finders_len = jnp.where(first_find_now, selected_len, state.finders_path_len)
+        new_index_grid = jnp.where(
+            first_find_now,
+            _build_index_grid((selected_len, selected_path)),
+            state.finders_path_index_grid,
+        )
+        keep_tracking = ~(state.finders_path_valid | first_find_now)
+        return {
+            "finder_path_cells": jnp.where(keep_tracking, paths, state.finder_path_cells),
+            "finder_path_lens": jnp.where(keep_tracking, lens, state.finder_path_lens),
+            "finder_path_active": jnp.where(keep_tracking, active, state.finder_path_active),
+            "finders_path": new_finders_path,
+            "finders_path_len": new_finders_len,
+            "finders_path_valid": state.finders_path_valid | first_find_now,
+            "finders_path_index_grid": new_index_grid,
+        }
 
     def _target_revisit_candidates(state: EnvState, target_known: jax.Array) -> jax.Array:
         """Agents that know and visually observe the target after base delivery."""
@@ -533,9 +652,17 @@ def make_env_fns(cfg: DictConfig):
             box_height    = jnp.float32(H),
             base_target_known = jnp.bool_(False),
             target_revisit_reward_claimed = jnp.bool_(False),
+            finder_returned_to_target = jnp.bool_(False),
             chain_held_steps = jnp.int32(0),
             is_conn_base      = jnp.zeros(N, dtype=jnp.bool_),
             is_conn_target    = jnp.zeros(N, dtype=jnp.bool_),
+            finder_path_cells = jnp.zeros((N, max_finders_path_len, 2), dtype=jnp.int16),
+            finder_path_lens = jnp.zeros(N, dtype=jnp.int16),
+            finder_path_active = jnp.zeros(N, dtype=jnp.bool_),
+            finders_path = jnp.zeros((max_finders_path_len, 2), dtype=jnp.int16),
+            finders_path_len = jnp.int16(0),
+            finders_path_valid = jnp.bool_(False),
+            finders_path_index_grid = jnp.full((maze_cols, maze_rows), jnp.int16(-1), dtype=jnp.int16),
             adj_matrix        = jnp.zeros((N + 1, N + 1), dtype=jnp.bool_) if log_adj else jnp.zeros((0, 0), dtype=jnp.bool_),
         )
 
@@ -666,23 +793,28 @@ def make_env_fns(cfg: DictConfig):
         )
 
         # 7. Update persistent target knowledge using new positions
-        new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix = _update_target_known(mid_state)
+        new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix, directly_sees = _update_target_known(mid_state)
         # MEM_T8-only diagnostic state update; no-op for normal levels.
         new_anti_target_known = _update_anti_target_known(mid_state)
         target_revisit_candidates = _target_revisit_candidates(mid_state, new_target_known)
         new_target_revisit_reward_claimed = (
             state.target_revisit_reward_claimed | jnp.any(target_revisit_candidates)
         )
+        path_updates = _update_finders_path_state(state, mid_state, directly_sees)
 
         return dataclasses.replace(
             mid_state,
             target_known=new_target_known,
             base_target_known=new_base_target_known,
             target_revisit_reward_claimed=new_target_revisit_reward_claimed,
+            finder_returned_to_target=state.finder_returned_to_target | (
+                state.base_target_known & ~state.target_revisit_reward_claimed & jnp.any(target_revisit_candidates)
+            ),
             anti_target_known=new_anti_target_known,
             is_conn_base=is_conn_base,
             is_conn_target=is_conn_target,
             adj_matrix=new_adj_matrix,
+            **path_updates,
         )
 
     return env_step, reset, update_coverage, (W, H, occ_grid, comm_occ_grid)
