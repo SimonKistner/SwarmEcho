@@ -47,11 +47,17 @@ network:
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
-  memory_comm_gradient_mode: "dial" #RIAL = blocked |DIAL = Gradients flow
   memory_comm_every_k_steps: 5
   memory_comm_num_heads: 4
-  memory_comm_merge: "residual"
-  memory_comm_attention_mode: "attend_global_learned_query"
+  #all info:
+  memory_comm_gradient_mode: "dial"
+  memory_comm_merge: "concat"
+  memory_comm_attention_mode: "attend_cur_obs_and_mem_query"
+
+  #low compute:
+  #memory_comm_gradient_mode: "rial"
+  #memory_comm_merge: "residual"
+  #memory_comm_attention_mode: "attend_global_learned_query"
 
   num_layers:  3    # critic depth
   actor_num_layers:  3    # actor depth (lighter, separate)
@@ -59,7 +65,7 @@ network:
 logging:
   eval_freq: 10
   eval_video_freq: 100000
-  eval_video: false
+  eval_video: true
   obs_log: false
   eval_failed_chain_heatmap: false
   eval_not_delivered_heatmap: false

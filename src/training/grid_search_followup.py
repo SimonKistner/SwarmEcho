@@ -8,6 +8,20 @@ the results to compare exploration performance (map coverage, target found).
 
 Minibatch size is calculated dynamically at runtime for each run to keep 
 the transitions per minibatch strictly under the VRAM safety limit (30,000).
+
+MEM_SHARE_COMM_MERGES = ["residual", "concat"]
+MEM_SHARE_COMM_ATTENTION_MODES = [
+    "attend_global_learned_query",
+    "attend_cur_obs_query",
+    "attend_mem_query",
+    "attend_cur_obs_and_mem_query",
+]
+MEM_SHARE_COMM_GRADIENT_MODES = ["rial", "dial"]
+
+expected
+expected 40M -> concat global rial
+expected 20M -> concat obs+mem dial
+
 """
 
 import sys

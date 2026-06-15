@@ -764,22 +764,20 @@ def _evaluate(
     )
 
 
-def _evaluate_parallel(
+@functools.partial(
+    nnx.jit,
+    static_argnames=("reset", "env_step", "obs_fn", "reward_fn", "cfg", "num_envs")
+)
+def _run_parallel_eval_jit(
     model:        MAPPOModel,
+    key:          jax.Array,
     reset,
     env_step,
     obs_fn,
     reward_fn,
     cfg:          DictConfig,
-    key:          jax.Array,
     num_envs:     int = 4000,
 ) -> tuple:
-    """
-    Run deterministic evaluation episodes in parallel using jax.vmap and jax.lax.scan.
-
-    Returns:
-      rets, lengths, gaps, progs, succs, fnds, final_state, final_succs, final_delivered, final_visual
-    """
     max_steps = int(cfg.env.max_steps)
     hold_chain_for = int(cfg.env.get("hold_chain_for", 0))
     actor_memory = bool(cfg.network.get("actor_memory", False))
@@ -887,11 +885,26 @@ def _evaluate_parallel(
 
         return ret, length, gap_dists[-1], progress_pcts[-1], succ, fnd, state_f, succ, delivered, visual
 
-    @nnx.jit
-    def run_parallel_eval_jit(model, keys):
-        return jax.vmap(run_single_env_rollout)(keys)
+    return jax.vmap(run_single_env_rollout)(env_keys)
 
-    return run_parallel_eval_jit(model, env_keys)
+
+def _evaluate_parallel(
+    model:        MAPPOModel,
+    reset,
+    env_step,
+    obs_fn,
+    reward_fn,
+    cfg:          DictConfig,
+    key:          jax.Array,
+    num_envs:     int = 4000,
+) -> tuple:
+    """
+    Run deterministic evaluation episodes in parallel using jax.vmap and jax.lax.scan.
+
+    Returns:
+      rets, lengths, gaps, progs, succs, fnds, final_state, final_succs, final_delivered, final_visual
+    """
+    return _run_parallel_eval_jit(model, key, reset, env_step, obs_fn, reward_fn, cfg, num_envs)
 
 
 # ---------------------------------------------------------------------------
@@ -1081,6 +1094,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
     reset_v          = jax.jit(jax.vmap(reset))
     reset_s          = jax.jit(reset)
+    env_step_jit       = jax.jit(env_step)
+    compute_obs_jit    = jax.jit(compute_obs)
+    compute_reward_jit = jax.jit(compute_reward)
 
     # ── Model ─────────────────────────────────────────────────────────────
     master_key = jax.random.PRNGKey(int(cfg.training.seed))
@@ -1278,11 +1294,25 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         cfg.logging.get("eval_not_visually_found_heatmap", False)
     )
 
+    start_update = 0
+    if cfg.training.checkpoint_path:
+        try:
+            import re
+            path_name = Path(str(cfg.training.checkpoint_path).replace("\\", "/")).name
+            match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
+            if match:
+                start_update = int(match.group(1))
+                print(f"  [resumption] Resuming from update {start_update} (step {start_update * E * T:,})")
+        except Exception as e:
+            print(f"  [resumption] Failed to parse starting update from checkpoint path: {e}")
+
     t_start = time.perf_counter()
     step_offset = _get_checkpoint_step_offset(cfg, E, T)
+    if start_update > 0 and step_offset == start_update * E * T:
+        step_offset = 0
 
     try:
-        for update in range(1, n_updates + 1):
+        for update in range(start_update + 1, n_updates + 1):
             master_key, collect_key = jax.random.split(master_key)
             steps_done = update * E * T + step_offset
 
@@ -1355,8 +1385,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 if eval_video:
                     master_key, eval_key = jax.random.split(master_key)
                     _run_eval_with_render(
-                        model=model, reset_s=reset_s, env_step=env_step,
-                        compute_obs=compute_obs, compute_reward=compute_reward,
+                        model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                        compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
                         cfg=cfg, eval_key=eval_key,
                         out_dir=eval_video_dir,
                         ckpt_name=f"early_{update:06d}",
@@ -1382,10 +1412,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             ppo_stats = trainer.update(mbs)
 
             elapsed = time.perf_counter() - t_start
-            sps     = steps_done / elapsed
+            sps     = (steps_done - start_update * E * T) / max(1e-6, elapsed)
 
             # ── Stdout ───────────────────────────────────────────────────────
-            if update % log_every == 0 or update == 1:
+            if update % log_every == 0 or update == start_update + 1:
                 window_full = len(window_ret) == window_ret.maxlen
                 _cov = f"{np.mean(window_cov):>5.1%}" if window_full else " ----"
                 _l = f"{np.mean(window_len):>6.0f}" if window_full else "  ----"
@@ -1398,7 +1428,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 now_str = datetime.now().strftime("%H:%M:%S")
 
                 # Calculate ETA
-                time_per_update = elapsed / update
+                time_per_update = elapsed / max(1, update - start_update)
                 eta_sec = int(time_per_update * (n_updates - update))
                 eta_m, eta_s = divmod(eta_sec, 60)
                 eta_h, eta_m = divmod(eta_m, 60)
@@ -1548,8 +1578,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             if eval_video:
                                 master_key, eval_key = jax.random.split(master_key)
                                 _run_eval_with_render(
-                                    model=model, reset_s=reset_s, env_step=env_step,
-                                    compute_obs=compute_obs, compute_reward=compute_reward,
+                                    model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                                    compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
                                     cfg=cfg, eval_key=eval_key,
                                     out_dir=eval_video_dir,
                                     ckpt_name=f"early_{update:06d}",
@@ -1571,7 +1601,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         (ep_states_list, ep_rewards_list, all_metrics_list,
                          _, _, _, _, _, _) = _evaluate(
                             model, reset_s,
-                            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+                            env_step_jit, compute_obs_jit, compute_reward_jit,
                             cfg, video_key, num_episodes=1,
                         )
                         stem = f"{eval_timestamp}_eval_update_{update:06d}"
@@ -1590,7 +1620,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         (ep_states_list, ep_rewards_list, all_metrics_list,
                          eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
                             model, reset_s,
-                            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+                            env_step_jit, compute_obs_jit, compute_reward_jit,
                             cfg, eval_key, num_episodes=1,
                         )
 
@@ -1749,8 +1779,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             if update == n_updates and eval_video:
                 master_key, eval_key = jax.random.split(master_key)
                 _run_eval_with_render(
-                    model=model, reset_s=reset_s, env_step=env_step,
-                    compute_obs=compute_obs, compute_reward=compute_reward,
+                    model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                    compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
                     cfg=cfg, eval_key=eval_key,
                     out_dir=eval_video_dir,
                     ckpt_name=f"update_{update:06d}",
@@ -1808,7 +1838,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 # ---------------------------------------------------------------------------
 
 def _run_eval_with_render(
-    model, reset_s, env_step, compute_obs, compute_reward,
+    model, reset_s, env_step_jit, compute_obs_jit, compute_reward_jit,
     cfg, eval_key,
     out_dir: Path,
     ckpt_name: str,
@@ -1839,7 +1869,7 @@ def _run_eval_with_render(
          eval_ret, eval_len, eval_gap, eval_prog_pct,
          eval_success, eval_found) = _evaluate(
             model, reset_s,
-            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+            env_step_jit, compute_obs_jit, compute_reward_jit,
             cfg, eval_key,
             num_episodes=eval_max_compute,
             episode_callback=callback,
@@ -1852,7 +1882,7 @@ def _run_eval_with_render(
          eval_ret, eval_len, eval_gap, eval_prog_pct,
          eval_success, eval_found) = _evaluate(
             model, reset_s,
-            jax.jit(env_step), jax.jit(compute_obs), jax.jit(compute_reward),
+            env_step_jit, compute_obs_jit, compute_reward_jit,
             cfg, eval_key,
             num_episodes=eval_render_videos,
         )
