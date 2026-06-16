@@ -13,6 +13,7 @@ env:
   target_spawn_method: "map_defined"
   precover_base_comm: false
   mem_test_mask_nonlocal_obs: true
+  experimental_setup: true
   observe_target_vector: false
   observe_base_vector: false
 
