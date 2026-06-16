@@ -649,6 +649,20 @@ def _evaluate(
     all_states, all_rewards, all_metrics = [], [], []
     total_ret = total_len = total_gap = total_prog_pct = total_success = total_found = 0.0
 
+    # Pre-build vmapped action functions to avoid recreation and compilation triggers inside the loop
+    if model.actor_memory:
+        if model.memory_comm_enabled:
+            act_team_fn = model.actor.__call_team__
+        else:
+            def _act_eval(o, h, r):
+                h, mu, _ = model.actor(o, h, r)
+                return h, mu
+            vmapped_act = jax.vmap(_act_eval)
+    else:
+        def _act_eval_ff(o):
+            return model.actor(o)[0]
+        vmapped_act = jax.vmap(_act_eval_ff)
+
     for ep_idx in range(num_episodes):
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
@@ -684,7 +698,7 @@ def _evaluate(
                         & base_memory_valid
                         & jnp.asarray(step_share)
                     )
-                    actor_h, actions, _ = model.actor.__call_team__(
+                    actor_h, actions, _ = act_team_fn(
                         obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
                     )
                     connected_to_base = state.adj_matrix[:N_eval, N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval,), dtype=bool)
@@ -698,13 +712,9 @@ def _evaluate(
                     base_memory = jnp.where(should_store, reported_memory, base_memory)
                     base_memory_valid = base_memory_valid | should_store
                 else:
-                    def _act_eval(o, h, r):
-                        h, mu, _ = model.actor(o, h, r)
-                        return h, mu
-
-                    actor_h, actions = jax.vmap(_act_eval)(obs, actor_h, resets)
+                    actor_h, actions = vmapped_act(obs, actor_h, resets)
             else:
-                actions = jax.vmap(lambda o: model.actor(o)[0])(obs)  # (N, A) mu in pre-squash space
+                actions = vmapped_act(obs)  # (N, A) mu in pre-squash space
             actions = jnp.tanh(actions) * max_force                # squash + scale to physics
 
             old_state = state
@@ -1123,7 +1133,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     compute_obs_jit    = jax.jit(compute_obs)
     compute_reward_jit = jax.jit(compute_reward)
     diag_decoder = None
-    if bool(cfg.network.get("memory_comm_enabled", False)) and bool(cfg.network.get("actor_memory", False)) and cfg.env.get("map_names"):
+    if (
+        bool(cfg.logging.get("memory_diagnostic_probe", True))
+        and bool(cfg.network.get("memory_comm_enabled", False))
+        and bool(cfg.network.get("actor_memory", False))
+        and cfg.env.get("map_names")
+    ):
         from core.config import MAP_DIR
         from env.maps import MapDefinition
         diag_map = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
@@ -1328,6 +1343,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_r_found = deque(maxlen=E)
     window_r_succ  = deque(maxlen=E)
     window_cov     = deque(maxlen=E)
+    window_diag_acc = deque(maxlen=E)
 
     completed_eps_count = 0
 
@@ -1412,6 +1428,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     pred = np.argmax(logits, axis=-1)
                     diag_acc = float(np.mean(pred == y))
                     diag_samples = int(len(y))
+                    window_diag_acc.extend(pred == y)
                     logits = logits - logits.max(axis=-1, keepdims=True)
                     probs = np.exp(logits)
                     probs /= np.maximum(probs.sum(axis=-1, keepdims=True), 1e-8)
@@ -1489,6 +1506,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 _red  = f"{(1.0 - (np.mean(window_len) / max_steps)) * 100.0:>5.1f}%" if window_full else "  ---%"
                 _s = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
                 _f = f"{np.mean(window_fnd):>5.1%}"  if window_full else " ----"
+                _diag = f"{np.mean(window_diag_acc):>5.1%}" if (diag_decoder is not None and len(window_diag_acc) > 0) else " ----"
 
                 now_str = datetime.now().strftime("%H:%M:%S")
 
@@ -1509,6 +1527,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"found={_f}  "
                     f"chain={_prog}  "
                     f"succ={_s}  "
+                    f"mem_probe={_diag}  "
                     f"eta={eta_str}"
                 )
 

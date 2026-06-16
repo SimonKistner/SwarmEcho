@@ -63,6 +63,7 @@ network:
 logging:
   eval_freq: 100
   obs_log: false
+  memory_diagnostic_probe: true
 
   eval_video_freq: 100 # Only render a single-episode tracking video every 200 updates
   eval_video: true

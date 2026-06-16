@@ -72,9 +72,9 @@ SHOW_SPAWN_ZONES = False    # Set to False to disable target/base spawn zones ov
 MERGE_TARGET_FOUND_HEATMAPS = True
 
 # 2. Heatmap overlay parameters
-FAILED_CHAIN_HEATMAP_ALPHA = 0.7   # Transparency of overlay dots in the failed chain heatmap (0.0 to 1.0)
+FAILED_CHAIN_HEATMAP_ALPHA = 0.9   # Transparency of overlay dots in the failed chain heatmap (0.0 to 1.0)
 FAILED_CHAIN_HEATMAP_DOT_RADIUS = 2 # Radius in pixels of failed chain heatmap dots
-HEATMAP_ALPHA = 0.7         # Transparency of overlay dots in the not-found heatmaps (0.0 to 1.0)
+HEATMAP_ALPHA = 1.0         # Transparency of overlay dots in the not-found heatmaps (0.0 to 1.0)
 HEATMAP_DOT_RADIUS = 2      # Radius in pixels of not-found heatmap dots
 
 # 3. Clustering parameters
@@ -103,7 +103,7 @@ CLUSTER_COLORS = [
 ]
 
 # 4. Representative rollout parameters
-RENDER_NUM_CLUSTERS = 5    # Number of cluster representatives to render. None = all.
+RENDER_NUM_CLUSTERS = 3    # Number of cluster representatives to render. None = all.
 
 
 # ==============================================================================

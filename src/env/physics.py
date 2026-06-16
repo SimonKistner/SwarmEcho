@@ -456,6 +456,37 @@ def make_env_fns(cfg: DictConfig):
         selected_path = paths[finder_idx]
         selected_len = lens[finder_idx]
 
+        # Resolve target cell for the finder drone
+        per_agent_targets = (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+        tgt_cell = _maze_cell_from_pos(target_pos_agents[finder_idx])
+
+        # Check if the final entry in the path is already the target cell
+        last_cell_idx = jnp.maximum(selected_len - 1, 0)
+        last_cell = selected_path[last_cell_idx]
+        is_same = jnp.all(last_cell == tgt_cell)
+
+        # Check if the final entry is at least a neighbor of the target cell
+        dx = jnp.abs(last_cell[0] - tgt_cell[0])
+        dy = jnp.abs(last_cell[1] - tgt_cell[1])
+        is_neighbor = (dx <= 1) & (dy <= 1)
+
+        # If neighbor but not same, append target cell as the final path entry
+        should_append = (~is_same) & is_neighbor & (selected_len < max_finders_path_len)
+        selected_path = jnp.where(should_append, selected_path.at[selected_len.astype(jnp.int32)].set(tgt_cell), selected_path)
+        selected_len = jnp.where(should_append, selected_len + jnp.int16(1), selected_len)
+
+        # Sanity check: warning if not same and not neighbor
+        def _warn_fn(lc, tc):
+            jax.debug.print("WARNING: Target discovered but final finder-path cell {c1} is not a neighbor of target cell {c2}!", c1=lc, c2=tc)
+            return None
+
+        jax.lax.cond(
+            first_find_now & (~is_same) & (~is_neighbor),
+            lambda: _warn_fn(last_cell, tgt_cell),
+            lambda: None
+        )
+
         def _build_index_grid(path_len_path):
             path_len, path = path_len_path
             grid = jnp.full((maze_cols, maze_rows), jnp.int16(-1), dtype=jnp.int16)

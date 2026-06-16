@@ -209,7 +209,21 @@ def make_reward_fn(cfg: DictConfig):
         next_idx = jnp.minimum(base_best + 1, valid_len - 1)
         next_cell = new_state.finders_path[next_idx]
         next_center = _path_cell_center(next_cell)
-        base_tie_dist = jnp.linalg.norm(new_state.pos - next_center[None, :], axis=-1)
+
+        # Resolve target positions per-agent (needed for diagnostic target tasks)
+        per_agent_targets = (new_state.target_pos.ndim == 2)
+        target_pos_agents = (
+            new_state.target_pos
+            if per_agent_targets
+            else jnp.tile(new_state.target_pos[None, :], (N, 1))
+        )
+        # If we reached the final path cell (target), tiebreak toward the actual target position
+        base_target_center = jnp.where(
+            base_best == valid_len - 1,
+            target_pos_agents,
+            next_center[None, :]
+        )
+        base_tie_dist = jnp.linalg.norm(new_state.pos - base_target_center, axis=-1)
         idx_b = jnp.argmin(jnp.where(base_tied, base_tie_dist, 1e9))
 
         tgt_rank = jnp.where(is_tgt_chain, path_idx, valid_len + 1)
@@ -218,7 +232,13 @@ def make_reward_fn(cfg: DictConfig):
         prev_idx = jnp.maximum(tgt_best - 1, 0)
         prev_cell = new_state.finders_path[prev_idx]
         prev_center = _path_cell_center(prev_cell)
-        tgt_tie_dist = jnp.linalg.norm(new_state.pos - prev_center[None, :], axis=-1)
+        # If we reached the start cell (base), tiebreak toward the actual base position
+        tgt_target_center = jnp.where(
+            tgt_best == 0,
+            new_state.base_pos[None, :],
+            prev_center[None, :]
+        )
+        tgt_tie_dist = jnp.linalg.norm(new_state.pos - tgt_target_center, axis=-1)
         idx_t = jnp.argmin(jnp.where(tgt_tied, tgt_tie_dist, 1e9))
 
         base_cells = jnp.where(any_base_chain, base_best + 1, 0)

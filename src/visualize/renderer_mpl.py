@@ -657,6 +657,22 @@ def _draw_frame(
     if not has_any:
         known_str += "\n  (none)"
 
+    # --- Finder Path Debug Print ---
+    render_fp_debug = bool(cfg.visualize.get("render_finders_path_debug", False))
+    if render_fp_debug:
+        known_str += "\n\nFinder Path:"
+        if frame.finders_path is not None and frame.finders_path_len > 0:
+            path_cells = [tuple(c) for c in frame.finders_path[:frame.finders_path_len]]
+            path_str = ", ".join(f"({c[0]},{c[1]})" for c in path_cells)
+            
+            # Wrap lines for text box
+            max_chars = 22
+            wrapped_lines = [path_str[i:i+max_chars] for i in range(0, len(path_str), max_chars)]
+            for line in wrapped_lines:
+                known_str += f"\n  {line}"
+        else:
+            known_str += "\n  (not valid)"
+
     leg_ax.text(
         0.0, 0.40, known_str,
         fontsize=RendererConfig.MPL_FONT_SIZE_LEGEND,

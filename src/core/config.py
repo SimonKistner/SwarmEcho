@@ -170,6 +170,7 @@ class LoggingConfig:
     # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
     obs_log: bool = False
+    memory_diagnostic_probe: bool = True  # Train a linear probe on base memory to predict target cell
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
@@ -208,6 +209,7 @@ class VisualizeConfig:
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
     render_conn_matrix: bool = False       # if True, render the connections matrix in the legend
+    render_finders_path_debug: bool = False  # if True, render the finders path list in the legend when valid
 
 
 @dataclass
@@ -476,6 +478,11 @@ def load_config(
             if not explicit_false:
                 OmegaConf.set_readonly(cfg, False)
                 cfg.env.log_adjacency_matrix = True
+
+    # Auto-false diagnostic probe if memory or memory communication is false/off
+    if not (bool(cfg.network.actor_memory) and bool(cfg.network.memory_comm_enabled)):
+        OmegaConf.set_readonly(cfg, False)
+        cfg.logging.memory_diagnostic_probe = False
 
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)

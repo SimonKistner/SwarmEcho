@@ -382,11 +382,12 @@ def _draw_frame_cv2(
         and frame.finders_path_len > 1
         and frame.maze_cell_grid is not None
     ):
+        scale = RendererConfig.RENDER_DPI / 100.0
         cols, rows = frame.maze_cell_grid
         cell_w = W / cols
         cell_h = H / rows
         pts = [
-            _w2p(float(c[0] + 0.5) * cell_w, float(c[1] + 0.5) * cell_h, lay)
+            lay.w2p(float(c[0] + 0.5) * cell_w, float(c[1] + 0.5) * cell_h)
             for c in frame.finders_path[:frame.finders_path_len]
         ]
         overlay = img.copy()
@@ -741,6 +742,26 @@ def _draw_frame_cv2(
     if not has_any:
         _draw_text(img, "  (none)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
         ly += int(20 * scale)
+
+    # ── Finder Path Debug Print ───────────────────────────────────────────
+    render_fp_debug = bool(cfg.visualize.get("render_finders_path_debug", False))
+    if render_fp_debug:
+        ly += int(10 * scale)
+        _draw_text(img, "Finder Path:", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 1.1, _C["text"])
+        ly += int(20 * scale)
+        if frame.finders_path is not None and frame.finders_path_len > 0:
+            path_cells = [tuple(c) for c in frame.finders_path[:frame.finders_path_len]]
+            path_str = ", ".join(f"({c[0]},{c[1]})" for c in path_cells)
+            
+            # Wrap lines for text box
+            max_chars = 22
+            wrapped_lines = [path_str[i:i+max_chars] for i in range(0, len(path_str), max_chars)]
+            for line in wrapped_lines:
+                _draw_text(img, line, (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 0.85, _C["text_grey"])
+                ly += int(18 * scale)
+        else:
+            _draw_text(img, "  (not valid)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
+            ly += int(20 * scale)
 
     # ── Connections matrix ───────────────────────────────────────────────
     render_conn = bool(cfg.visualize.get("render_conn_matrix", True))
