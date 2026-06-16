@@ -40,6 +40,11 @@ required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_6
 [tool.uv.pip]
 system = false  # always use the project's venv
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
 # ---------------------------------------------------------------------------
 # Development / linting extras (optional, not required for training)
 # ---------------------------------------------------------------------------

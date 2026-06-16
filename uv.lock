@@ -2349,6 +2349,11 @@ dev = [
     { name = "streamlit" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "chex", specifier = ">=0.1.86" },
@@ -2370,6 +2375,9 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.18.0" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "tenacity"
