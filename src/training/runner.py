@@ -47,6 +47,7 @@ Run organisation
 from __future__ import annotations
 
 import functools
+import gc
 import os
 import time
 from collections import deque
@@ -645,6 +646,7 @@ def _evaluate(
     """
     max_force = float(cfg.env.max_force)
     max_steps = int(cfg.env.max_steps)
+    collect_obs_logs = bool(cfg.logging.get("obs_log", cfg.logging.get("log_obs", True)))
 
     all_states, all_rewards, all_metrics = [], [], []
     total_ret = total_len = total_gap = total_prog_pct = total_success = total_found = 0.0
@@ -672,7 +674,9 @@ def _evaluate(
         ep_ret  = ep_gap = ep_prog_pct = 0.0
         ep_success = ep_found = False
         ep_states, ep_rewards = [], []
-        ep_metrics = {"r_explor": [], "r_gap": [], "r_coll": [], "chain_pct": [], "chain_gap": [], "r_total": [], "obs": []}
+        ep_metrics = {"r_explor": [], "r_gap": [], "r_coll": [], "chain_pct": [], "chain_gap": [], "r_total": []}
+        if collect_obs_logs:
+            ep_metrics["obs"] = []
 
         for t in range(max_steps):
             ep_states.append(jax.device_get(state))
@@ -756,7 +760,8 @@ def _evaluate(
             ep_metrics["chain_pct"].append(float(info["chain_progress_pct"]))
             ep_metrics["chain_gap"].append(float(info["chain_gap_dist"]))
             ep_metrics["r_total"].append(float(rew.sum()))
-            ep_metrics["obs"].append(np.array(obs))
+            if collect_obs_logs:
+                ep_metrics["obs"].append(np.array(obs))
 
             if bool(success_achieved):
                 ep_states.append(jax.device_get(state))  # include the connected frame as freeze frame
@@ -767,7 +772,8 @@ def _evaluate(
                 ep_metrics["chain_pct"].append(ep_metrics["chain_pct"][-1])
                 ep_metrics["chain_gap"].append(ep_metrics["chain_gap"][-1])
                 ep_metrics["r_total"].append(float(rew.sum()))
-                ep_metrics["obs"].append(ep_metrics["obs"][-1])
+                if collect_obs_logs:
+                    ep_metrics["obs"].append(ep_metrics["obs"][-1])
                 break
 
         final_metrics = {k: np.array(v) for k, v in ep_metrics.items()}
@@ -942,6 +948,20 @@ def _evaluate_parallel(
     return _run_parallel_eval_jit(model, key, reset, env_step, obs_fn, reward_fn, cfg, num_envs)
 
 
+def _release_video_eval_trajectory() -> None:
+    """
+    Encourage prompt cleanup after synchronous video rendering.
+
+    The video path materializes complete episode trajectories on the host so
+    the renderer can operate without JAX/chex dependencies.  Drop cyclic Python
+    garbage immediately before training resumes, and force a tiny JAX
+    synchronization point so pending dispatches do not overlap the next PPO
+    update's large allocations.
+    """
+    gc.collect()
+    jax.block_until_ready(jnp.asarray(0, dtype=jnp.int32))
+
+
 # ---------------------------------------------------------------------------
 # Selective eval render callback factory
 # ---------------------------------------------------------------------------
@@ -1016,6 +1036,7 @@ def _make_selective_eval_callback(
                 filename_stem = stem,
                 renderer   = renderer,
             )
+            _release_video_eval_trajectory()
         else:
             reason = "Bucket Full" if (success and n_success > 0) or (not success and n_fail > 0) else "Render Target is 0"
             render_status = f"Render: {rendered_success[0]}/{n_success} Success, {rendered_fail[0]}/{n_fail} Fail"
@@ -1706,6 +1727,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             filename_stem = stem,
                             renderer   = effective_train_renderer,
                         )
+                        del ep_states_list, ep_rewards_list, all_metrics_list
+                        _release_video_eval_trajectory()
                         time.sleep(1.0)
                 else:
                     if is_eval_step or is_video_step:
@@ -1728,6 +1751,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 filename_stem = stem,
                                 renderer   = effective_train_renderer,
                             )
+                            del ep_states_list, ep_rewards_list, all_metrics_list
+                            _release_video_eval_trajectory()
                             time.sleep(1.0)
 
                         if is_eval_step:
@@ -1992,6 +2017,12 @@ def _run_eval_with_render(
                 filename_stem = stem,
                 renderer   = renderer,
             )
+            ep_states_list[idx] = None
+            ep_rewards_list[idx] = None
+            all_metrics_list[idx] = None
+            _release_video_eval_trajectory()
+        del ep_states_list, ep_rewards_list, all_metrics_list
+        _release_video_eval_trajectory()
 
     _print_eval_stats(
         label=label,
