@@ -108,7 +108,8 @@ def make_reward_fn(cfg: DictConfig):
     target_found_requires_delivery = bool(cfg.reward.get("target_found_requires_delivery", True))
     back_to_target_after_delivery = bool(cfg.reward.get("back_to_target_after_delivery", False))
     chain_reward_system = str(cfg.reward.get("chain_reward_system", "euclidean"))
-    use_finders_path_reward = chain_reward_system == "discrete_finders_path"
+    experimental_setup = bool(cfg.env.get("experimental_setup", False))
+    use_finders_path_reward = (chain_reward_system == "discrete_finders_path") and not experimental_setup
     only_reward_chain_from_target = bool(cfg.reward.get("only_reward_chain_from_target", False))
     every_reward_global = bool(cfg.reward.get("every_reward_global", False))
     only_explor_individual = bool(cfg.reward.get("only_explor_individual", False)) and not every_reward_global
@@ -154,7 +155,8 @@ def make_reward_fn(cfg: DictConfig):
         H = H.at[:N, N].set(jnp.where(adj_db, 1, H[:N, N]))
         H = H.at[N, :N].set(jnp.where(adj_db, 1, H[N, :N]))
 
-        target_pos_agents = state.target_pos if state.target_pos.ndim == 2 else jnp.tile(state.target_pos[None, :], (N, 1))
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
         target_dists = jnp.linalg.norm(state.pos - target_pos_agents, axis=-1)
         adj_dt = (target_dists <= vis_r) & state.active
         H = H.at[:N, N+1].set(jnp.where(adj_dt, 1, H[:N, N+1]))
@@ -211,7 +213,7 @@ def make_reward_fn(cfg: DictConfig):
         next_center = _path_cell_center(next_cell)
 
         # Resolve target positions per-agent (needed for diagnostic target tasks)
-        per_agent_targets = (new_state.target_pos.ndim == 2)
+        per_agent_targets = experimental_setup and (new_state.target_pos.ndim == 2)
         target_pos_agents = (
             new_state.target_pos
             if per_agent_targets
@@ -271,7 +273,7 @@ def make_reward_fn(cfg: DictConfig):
         is_done:   jax.Array = jnp.bool_(False),
     ) -> tuple[jax.Array, dict]:
 
-        per_agent_targets = (new_state.target_pos.ndim == 2)
+        per_agent_targets = experimental_setup and (new_state.target_pos.ndim == 2)
         target_pos_agents = (
             new_state.target_pos
             if per_agent_targets

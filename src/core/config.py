@@ -73,6 +73,7 @@ class EnvConfig:
     observe_target_vector: bool = True            # if False, remove target odometry vector from actor observations
     observe_base_vector: bool = True              # if False, remove base odometry vector from actor observations
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
+    experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
 
 
 
