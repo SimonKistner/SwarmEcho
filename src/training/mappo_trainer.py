@@ -362,7 +362,15 @@ class MAPPOTrainer:
         preserve time order and additionally include reset masks plus rollout
         initial actor/critic hidden states.
         """
-        all_stats: list[MAPPOStats] = []
+        stats_sums = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+            "total_loss": 0.0,
+            "approx_kl": 0.0,
+            "clip_fraction": 0.0,
+        }
+        num_stat_steps = 0
 
         for _epoch in range(self.num_epochs):
             for mb in minibatches:
@@ -385,13 +393,29 @@ class MAPPOTrainer:
                         mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )
-                all_stats.append(stats)
+                # Materialise the scalar diagnostics immediately instead of
+                # keeping one device-resident stats tuple per PPO minibatch.
+                # On large recurrent runs the queued update work can otherwise
+                # accumulate until the final jnp.array([...]) conversion below,
+                # making the stats readback the first place that trips a large
+                # XLA allocation/OOM even though the diagnostics themselves are
+                # tiny.
+                stats_host = jax.device_get(stats)
+                stats_sums["policy_loss"] += float(stats_host.policy_loss)
+                stats_sums["value_loss"] += float(stats_host.value_loss)
+                stats_sums["entropy"] += float(stats_host.entropy)
+                stats_sums["total_loss"] += float(stats_host.total_loss)
+                stats_sums["approx_kl"] += float(stats_host.approx_kl)
+                stats_sums["clip_fraction"] += float(stats_host.clip_fraction)
+                num_stat_steps += 1
+                del _loss, stats, stats_host
 
+        denom = max(1, num_stat_steps)
         return {
-            "policy_loss":   float(jnp.mean(jnp.array([s.policy_loss   for s in all_stats]))),
-            "value_loss":    float(jnp.mean(jnp.array([s.value_loss    for s in all_stats]))),
-            "entropy":       float(jnp.mean(jnp.array([s.entropy       for s in all_stats]))),
-            "total_loss":    float(jnp.mean(jnp.array([s.total_loss    for s in all_stats]))),
-            "approx_kl":     float(jnp.mean(jnp.array([s.approx_kl    for s in all_stats]))),
-            "clip_fraction": float(jnp.mean(jnp.array([s.clip_fraction for s in all_stats]))),
+            "policy_loss":   stats_sums["policy_loss"] / denom,
+            "value_loss":    stats_sums["value_loss"] / denom,
+            "entropy":       stats_sums["entropy"] / denom,
+            "total_loss":    stats_sums["total_loss"] / denom,
+            "approx_kl":     stats_sums["approx_kl"] / denom,
+            "clip_fraction": stats_sums["clip_fraction"] / denom,
         }
