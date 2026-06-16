@@ -101,7 +101,11 @@ def make_env_fns(cfg: DictConfig):
     target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
     precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
     log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False)) or bool(cfg.network.get("memory_comm_enabled", False))
-    use_finders_path        = str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+    experimental_setup      = bool(cfg.env.get("experimental_setup", False))
+    use_finders_path        = (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and not experimental_setup
+    )
 
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
@@ -333,9 +337,10 @@ def make_env_fns(cfg: DictConfig):
 
         adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)).astype(jnp.float32)
 
-        # MEM_T8-only diagnostic path: target_pos may be (N, 2) to run eight
-        # independent cue/choice tasks inside one env. Normal levels use (2,).
-        per_agent_targets = (state.target_pos.ndim == 2)
+        # Experimental memory diagnostics may use one target per agent. Normal
+        # levels always use one shared target and should not execute diagnostic
+        # target-shape behavior.
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
         target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
 
         # 2. Drone-to-target LoS
@@ -421,11 +426,16 @@ def make_env_fns(cfg: DictConfig):
             paths, lens, active = carry
             path = paths[i]
             length = lens[i]
-            was_active = active[i]
+            # Path buffers are fixed-size JAX arrays; this flag is only a
+            # feature-state marker, not a memory-saving mechanism.  A path starts
+            # once an active agent leaves the start area. If an agent returns to
+            # the start area before discovering the target itself, erase that
+            # candidate route so it can start over from the next exit.
+            was_active = length > 0
             now_active = was_active | (~in_spawn[i] & mid_state.active[i])
-            reset_path = in_spawn[i] & was_active
+            reset_path = in_spawn[i] & was_active & (~state.target_known[i]) & (~directly_sees[i])
 
-            # Seed with base, previous spawn-room/exit cell, and first non-spawn cell.
+            # Seed with base, previous start-area/exit cell, and first non-start cell.
             prev_cell = _maze_cell_from_pos(state.pos[i])
             seed = path.at[0].set(base_maze_cell).at[1].set(prev_cell).at[2].set(cells[i])
             seed_len = jnp.int16(3)
@@ -440,7 +450,7 @@ def make_env_fns(cfg: DictConfig):
             )
             path = jnp.where(reset_path, jnp.zeros_like(path), path)
             length = jnp.where(reset_path, jnp.int16(0), length)
-            now_active = jnp.where(reset_path, jnp.bool_(False), now_active)
+            now_active = length > 0
             paths = paths.at[i].set(path)
             lens = lens.at[i].set(length)
             active = active.at[i].set(now_active)
@@ -451,13 +461,19 @@ def make_env_fns(cfg: DictConfig):
             (state.finder_path_cells, state.finder_path_lens, state.finder_path_active)
         )
 
-        first_find_now = (~state.finders_path_valid) & (~jnp.any(state.target_known)) & jnp.any(directly_sees)
-        finder_idx = jnp.argmax(directly_sees.astype(jnp.int32))
+        # Freeze the global finder path only from agents with initialized
+        # per-agent paths.  This is an invariant guard: a zero-length path means
+        # the fixed-size backing array still contains placeholder cells and must
+        # not be published as the route used by the chain reward.
+        path_ready = lens > 0
+        finder_candidates = directly_sees & path_ready
+        first_find_now = (~state.finders_path_valid) & jnp.any(finder_candidates)
+        finder_idx = jnp.argmax(finder_candidates.astype(jnp.int32))
         selected_path = paths[finder_idx]
         selected_len = lens[finder_idx]
 
         # Resolve target cell for the finder drone
-        per_agent_targets = (state.target_pos.ndim == 2)
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
         target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
         tgt_cell = _maze_cell_from_pos(target_pos_agents[finder_idx])
 
@@ -522,7 +538,7 @@ def make_env_fns(cfg: DictConfig):
 
     def _target_revisit_candidates(state: EnvState, target_known: jax.Array) -> jax.Array:
         """Agents that know and visually observe the target after base delivery."""
-        per_agent_targets = (state.target_pos.ndim == 2)
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
         target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
 
         def _sees_target(i):
