@@ -96,7 +96,7 @@ def _ensure_b_level_exists(level_id: str, global_cfg) -> None:
 # ---------------------------------------------------------------------------
 
 def run_curriculum():
-    # Parse levels from sys.argv if present (e.g. levels=B02,B03,B04,B05,B05b)
+    # Parse levels from sys.argv if present (e.g. levels=B02,B03)
     levels = ["B05a","B05b"]
     filtered_args = []
     for arg in sys.argv[1:]:

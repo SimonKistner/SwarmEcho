@@ -46,5 +46,3 @@ Thumbs.db
 # Secrets
 .env
 *.key
-
-res/

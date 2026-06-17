@@ -7,7 +7,7 @@ env:
   num_agents: 8
   num_targets: 1
   num_bases: 1
-  max_steps: 1000
+  max_steps: 850
   visual_radius: 5.0
   max_speed: 4.17   # 10.0 * 5/12
   max_force: 20.83  # 50.0 * 5/12
@@ -27,15 +27,19 @@ reward:
   only_explor_individual: false
   only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
-  back_to_target_after_delivery: true
+  back_to_target_after_delivery: false
   chain_reward_system: discrete_finders_path
-  only_reward_chain_from_target: true
+  only_reward_chain_from_target: false
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
+  finder_bonus:  100.0
+  max_gap_penalty: 5.0      # absolute penalty when gap is at its maximum
+  target_found_bonus: 0.0
+  success_bonus: 500.0
 
 training:
-  total_timesteps: 500_000_000
+  total_timesteps: 1_000_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -71,6 +75,12 @@ logging:
   eval_video: true
   eval_video_freq: 50
   eval_video_offset: 1
+
+curriculum:
+  success_threshold: 1.00
+  metric: success
+  mode: eval
+
 
 
 

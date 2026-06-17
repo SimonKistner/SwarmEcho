@@ -386,6 +386,16 @@ def main():
             active=state.active.at[0].set(jnp.bool_(True)),
         )
 
+    # JIT-compile key steps to prevent eager JAX overhead (critical for speed)
+    env_step_jit = jax.jit(env_step)
+    policy_step_jit = None
+    if model is not None:
+        @jax.jit
+        def policy_step_jit(state, actor_h, base_memory, base_memory_valid, step):
+            return _policy_actions(
+                model, obs_fn, state, actor_h, base_memory, base_memory_valid, step, float(cfg.env.max_force)
+            )
+
     if args.diagnostics == "all":
         print_diagnostics("initial", state, cfg, occ_grid, map_def, helpers)
     else:
@@ -394,8 +404,8 @@ def main():
 
     for step in range(args.steps):
         if args.action == "policy":
-            actions, actor_h, base_memory, base_memory_valid = _policy_actions(
-                model, obs_fn, state, actor_h, base_memory, base_memory_valid, step, float(cfg.env.max_force)
+            actions, actor_h, base_memory, base_memory_valid = policy_step_jit(
+                state, actor_h, base_memory, base_memory_valid, step
             )
         elif args.action == "random":
             key, subkey = jax.random.split(key)
@@ -403,7 +413,7 @@ def main():
         else:
             actions = jnp.zeros((cfg.env.num_agents, 2), dtype=jnp.float32)
         before = state
-        state = env_step(state, actions)
+        state = env_step_jit(state, actions)
         if args.diagnostics == "all":
             transition = print_transition_diagnostics(f"mirrored internal finder update for env_step {step + 1}", before, state, cfg, occ_grid, map_def, helpers)
             print_diagnostics(f"after env_step {step + 1}", state, cfg, occ_grid, map_def, helpers)

@@ -493,15 +493,21 @@ def make_env_fns(cfg: DictConfig):
         selected_len = jnp.where(should_append, selected_len + jnp.int16(1), selected_len)
 
         # Sanity check: warning if not same and not neighbor
-        def _warn_fn(lc, tc):
-            jax.debug.print("WARNING: Target discovered but final finder-path cell {c1} is not a neighbor of target cell {c2}!", c1=lc, c2=tc)
-            return None
-
-        jax.lax.cond(
-            first_find_now & (~is_same) & (~is_neighbor),
-            lambda: _warn_fn(last_cell, tgt_cell),
-            lambda: None
-        )
+        # def _warn_fn(idx, slen, lc, tc, drone_pos, tgt_pos, direct, ready, cond):
+        #     jax.debug.print(
+        #         "WARNING: Target discovered but final finder-path cell {c1} is not a neighbor of target cell {c2}!\n"
+        #         "  finder_idx={idx} path_len={slen} drone_pos={dp} target_pos={tp} directly_sees={d} path_ready={r}",
+        #         c1=lc, c2=tc, idx=idx, slen=slen, dp=drone_pos, tp=tgt_pos, d=direct, r=ready,
+        #         when=cond
+        #     )
+        #     return None
+        # 
+        # _warn_fn(
+        #     finder_idx, selected_len, last_cell, tgt_cell,
+        #     state.pos[finder_idx], target_pos_agents[finder_idx],
+        #     directly_sees[finder_idx], path_ready[finder_idx],
+        #     first_find_now & (~is_same) & (~is_neighbor)
+        # )
 
         def _build_index_grid(path_len_path):
             path_len, path = path_len_path

@@ -73,6 +73,7 @@ class EnvConfig:
     observe_target_vector: bool = True            # if False, remove target odometry vector from actor observations
     observe_base_vector: bool = True              # if False, remove base odometry vector from actor observations
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
+    terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
     experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
 
 
@@ -159,13 +160,14 @@ class LoggingConfig:
     # --- Frequencies ---
     log_freq: int = 10
     eval_freq: int = 50           # Run evaluation and heatmap generation every N updates
-    eval_offset: int = 25          # Offset for eval_freq modulo scheduling
+    eval_offset: int = 1          # Offset for eval_freq modulo scheduling
     eval_video_freq: Optional[int] = 50 # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
-    eval_video_offset: int = 0     # Offset for eval_video_freq modulo scheduling
+    eval_video_offset: int = 1     # Offset for eval_video_freq modulo scheduling
 
     # --- Model Checkpointing ---
     save_model: bool = True
-    num_checkpoints: int = 10     # Guaranteed number of checkpoints per run
+    checkpoint_freq: int = 50     # Save model checkpoint every N updates
+    checkpoint_offset: int = 0    # Offset for checkpoint_freq modulo scheduling
     checkpoint_dir: str = "outputs/checkpoints"
 
     # --- Diagnostics & Details ---
@@ -216,6 +218,9 @@ class VisualizeConfig:
 @dataclass
 class CurriculumConfig:
     success_threshold: Optional[float] = None
+    metric: str = "success"             # "success" or "target_found"
+    mode: str = "train"                 # "train" or "eval"
+
 
 
 @dataclass
@@ -548,6 +553,16 @@ def validate_config(cfg: DictConfig) -> None:
         assert int(cfg.visualize.eval_render_failures) >= 0, \
             "visualize.eval_render_failures must be >= 0"
         # Both buckets=0 is valid: compute episodes, print stats, render nothing.
+    if hasattr(cfg, "curriculum") and cfg.curriculum is not None:
+        if cfg.curriculum.get("metric", None) is not None:
+            valid_metrics = ("success", "target_found")
+            if str(cfg.curriculum.metric) not in valid_metrics:
+                raise ValueError(f"curriculum.metric must be one of {valid_metrics}")
+        if cfg.curriculum.get("mode", None) is not None:
+            valid_modes = ("train", "eval")
+            if str(cfg.curriculum.mode) not in valid_modes:
+                raise ValueError(f"curriculum.mode must be one of {valid_modes}")
+
     if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):

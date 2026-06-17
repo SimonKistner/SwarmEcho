@@ -102,6 +102,22 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
     if wandb_group:
         wandb_kwargs["group"] = str(wandb_group)
 
+    # Auto-resume WandB run if resuming training and a previous run directory exists
+    if cfg.training.checkpoint_path:
+        wandb_dir = run_dir / "wandb"
+        if wandb_dir.exists():
+            run_dirs = [d for d in wandb_dir.iterdir() if d.is_dir() and d.name.startswith("run-")]
+            if run_dirs:
+                # Sort by modification time to find the most recent run folder
+                run_dirs.sort(key=lambda d: d.stat().st_mtime)
+                latest_run_dir = run_dirs[-1]
+                parts = latest_run_dir.name.split("-")
+                if len(parts) >= 3:
+                    run_id = parts[-1]
+                    wandb_kwargs["id"] = run_id
+                    wandb_kwargs["resume"] = "allow"
+                    print(f"  [W&B] Auto-detected previous run ID '{run_id}' from '{latest_run_dir.name}'. Resuming run.")
+
     import wandb
     run = wandb.init(**wandb_kwargs)
     return run
@@ -167,13 +183,14 @@ def _get_checkpoint_step_offset(cfg: DictConfig, E: int, T: int) -> int:
 # Auto-reset step factory
 # ---------------------------------------------------------------------------
 
-def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_chain_for: int = 0):
+def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_chain_for: int = 0, terminate_on_target_found: bool = False):
     """
     Wrap env_step to auto-reset on episode termination.
 
     Done conditions (either triggers reset):
       * time_up        : new_state.step >= max_steps
       * fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
+      * target_found   : target is found/delivered (if terminate_on_target_found is True)
 
     Returns
     -------
@@ -182,6 +199,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
     """
     max_steps_jnp = jnp.int32(max_steps)
     hold_chain_for_jnp = jnp.int32(hold_chain_for)
+    terminate_on_target_found_jnp = jnp.bool_(terminate_on_target_found)
 
     def step(state, actions):
         new_state = env_step_fn(state, actions)
@@ -202,7 +220,9 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
         new_state = dataclasses.replace(new_state, chain_held_steps=new_chain_held_steps)
 
         success_achieved = new_chain_held_steps >= (hold_chain_for_jnp + jnp.int32(1))
-        done = time_up | success_achieved
+        
+        target_found = info["global_target_found"] > jnp.float32(0.5)
+        done = time_up | success_achieved | (terminate_on_target_found_jnp & target_found)
 
         _, info_terminal = reward_fn(state, new_state, jnp.bool_(True))
         reward_terminal  = info_terminal["r_success"] / reward.shape[0]  # Get per-agent bonus
@@ -391,6 +411,7 @@ def _collect_rollout_mappo(
     completed_target_visually_found = []
     completed_diag_memories = []
     completed_diag_targets = []
+    completed_diag_valids = []
 
     completed_r_coverage = []
     completed_r_gap      = []
@@ -522,12 +543,14 @@ def _collect_rollout_mappo(
                 completed_target_success.append(bool(ep_success_accum[e] > 0.5))
                 completed_target_delivered.append(bool(info["terminal_delivered"][e]))
                 completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
-            if (
+            is_diag_valid = (
                 model.actor_memory and model.memory_comm_enabled
-                and base_memory is not None and base_memory_valid is not None
-                and bool(np.array(base_memory_valid)[e])
+                and base_memory is not None
                 and bool(np.array(info["terminal_delivered"])[e])
-            ):
+                and np.any(np.array(base_memory)[e] != 0.0)
+            )
+            completed_diag_valids.append(is_diag_valid)
+            if is_diag_valid:
                 t_pos_diag = np.array(info["terminal_target_pos"][e])
                 if t_pos_diag.ndim == 2:
                     t_pos_diag = t_pos_diag[0]
@@ -616,6 +639,7 @@ def _collect_rollout_mappo(
         completed_finder_returns,
         np.array(completed_diag_memories, dtype=np.float32),
         np.array(completed_diag_targets, dtype=np.float32),
+        completed_diag_valids,
     )
 
 
@@ -763,7 +787,11 @@ def _evaluate(
             if collect_obs_logs:
                 ep_metrics["obs"].append(np.array(obs))
 
-            if bool(success_achieved):
+            target_found = bool(info["global_target_found"] > 0.5)
+            terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
+            episode_ended = success_achieved or (terminate_on_target_found and target_found)
+
+            if bool(episode_ended):
                 ep_states.append(jax.device_get(state))  # include the connected frame as freeze frame
                 # duplicate last metric to match states length
                 ep_metrics["r_explor"].append(ep_metrics["r_explor"][-1])
@@ -914,8 +942,13 @@ def _run_parallel_eval_jit(
             found_metric = info.get("target_found_fraction", info["global_target_found"])
             new_max_found = jnp.maximum(max_found, found_metric)
 
-            new_returns = returns + rew.sum()
-            new_lengths = jnp.where(new_has_succeeded, lengths, lengths + 1)
+            # Check for early episode termination (target found when terminate_on_target_found is True)
+            terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
+            target_found = info["global_target_found"] > 0.5
+            episode_ended_prev = has_succeeded | (jnp.bool_(terminate_on_target_found) & has_found_delivered)
+
+            new_returns = jnp.where(episode_ended_prev, returns, returns + rew.sum())
+            new_lengths = jnp.where(episode_ended_prev, lengths, lengths + 1)
 
             new_carry = (state, actor_h, base_memory, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths)
             return new_carry, (info["chain_gap_dist"], info["chain_progress_pct"])
@@ -1090,6 +1123,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         None (default) = always train for the full total_timesteps.
     """
     # ── Logging config ────────────────────────────────────────────────────
+    if success_threshold is not None:
+        OmegaConf.set_readonly(cfg, False)
+        cfg.curriculum.success_threshold = success_threshold
+        OmegaConf.set_readonly(cfg, True)
+
     if cfg.logging.get("suppress_xla_warnings", True):
         os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
         os.environ["NVIDIA_TF32_OVERRIDE"]  = "0"
@@ -1145,7 +1183,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     compute_reward     = make_reward_fn(cfg)
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
-    autoreset_step   = _make_autoreset_step(env_step, reset, compute_reward, max_steps, hold_chain_for)
+    terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
+    autoreset_step   = _make_autoreset_step(env_step, reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
     reset_v          = jax.jit(jax.vmap(reset))
@@ -1328,8 +1367,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     eval_video_freq = cfg.logging.get("eval_video_freq", None)
     eval_video_every = int(eval_video_freq) if eval_video_freq is not None else eval_every
     eval_video_offset = int(cfg.logging.get("eval_video_offset", 0) or 0)
-    num_ckpt    = int(cfg.logging.get("num_checkpoints", 20))
-    ckpt_every  = max(1, n_updates // num_ckpt)
+
+    checkpoint_freq = int(cfg.logging.get("checkpoint_freq", 50))
+    checkpoint_offset = int(cfg.logging.get("checkpoint_offset", 0) or 0)
+    ckpt_every = checkpoint_freq
+    ckpt_offset = checkpoint_offset
+    if save_model:
+        print(f"  [ckpt] Saving checkpoints every {ckpt_every} updates (offset: {ckpt_offset})")
+
     log_every   = max(1, n_updates // 200)
 
     # ── Persistent Accumulators & Windows ────────────────────────────────
@@ -1365,6 +1410,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_r_succ  = deque(maxlen=E)
     window_cov     = deque(maxlen=E)
     window_diag_acc = deque(maxlen=E)
+    window_diag_samples = deque(maxlen=E)
 
     completed_eps_count = 0
 
@@ -1404,7 +1450,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
              raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found,
-             raw_finder_return, raw_diag_memories, raw_diag_targets) = _collect_rollout_mappo(
+             raw_finder_return, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
@@ -1439,73 +1485,82 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_r_succ.extend(raw_r_succ)
                 window_cov.extend(raw_cov)
 
-                if diag_decoder is not None and len(raw_diag_memories) > 0:
-                    X = np.asarray(raw_diag_memories, dtype=np.float32)
-                    pos = np.asarray(raw_diag_targets, dtype=np.float32)
-                    cx = np.clip(np.floor(pos[:, 0] / diag_decoder["w"]).astype(np.int32), 0, diag_decoder["cols"] - 1)
-                    cy = np.clip(np.floor(pos[:, 1] / diag_decoder["h"]).astype(np.int32), 0, diag_decoder["rows"] - 1)
-                    y = cx * diag_decoder["rows"] + cy
-                    logits = X @ diag_decoder["W"] + diag_decoder["b"]
-                    pred = np.argmax(logits, axis=-1)
-                    diag_acc = float(np.mean(pred == y))
-                    diag_samples = int(len(y))
-                    window_diag_acc.extend(pred == y)
-                    logits = logits - logits.max(axis=-1, keepdims=True)
-                    probs = np.exp(logits)
-                    probs /= np.maximum(probs.sum(axis=-1, keepdims=True), 1e-8)
-                    probs[np.arange(len(y)), y] -= 1.0
-                    lr_diag = 1e-3
-                    diag_decoder["W"] -= lr_diag * (X.T @ probs) / max(1, len(y))
-                    diag_decoder["b"] -= lr_diag * probs.mean(axis=0)
+                if diag_decoder is not None:
+                    window_diag_samples.extend(raw_diag_valids)
+                    if len(raw_diag_memories) > 0:
+                        X = np.asarray(raw_diag_memories, dtype=np.float32)
+                        pos = np.asarray(raw_diag_targets, dtype=np.float32)
+                        cx = np.clip(np.floor(pos[:, 0] / diag_decoder["w"]).astype(np.int32), 0, diag_decoder["cols"] - 1)
+                        cy = np.clip(np.floor(pos[:, 1] / diag_decoder["h"]).astype(np.int32), 0, diag_decoder["rows"] - 1)
+                        y = cx * diag_decoder["rows"] + cy
+                        logits = X @ diag_decoder["W"] + diag_decoder["b"]
+                        pred = np.argmax(logits, axis=-1)
+                        diag_acc = float(np.mean(pred == y))
+                        diag_samples = int(len(y))
+                        window_diag_acc.extend(pred == y)
+                        logits = logits - logits.max(axis=-1, keepdims=True)
+                        probs = np.exp(logits)
+                        probs /= np.maximum(probs.sum(axis=-1, keepdims=True), 1e-8)
+                        probs[np.arange(len(y)), y] -= 1.0
+                        lr_diag = 1e-3
+                        diag_decoder["W"] -= lr_diag * (X.T @ probs) / max(1, len(y))
+                        diag_decoder["b"] -= lr_diag * probs.mean(axis=0)
 
-            # -- Success-rate curriculum transition check -------------------
-            if (
-                success_threshold is not None
-                and len(window_succ) == window_succ.maxlen
-                and float(np.mean(window_succ)) >= success_threshold
-            ):
-                print(
-                    f"  [curriculum] Success rate {float(np.mean(window_succ)):.1%} >= "
-                    f"threshold {success_threshold:.1%} -- advancing to next level."
-                )
-                # Save an intermediate checkpoint before breaking
-                early_ckpt_str = ""
-                if save_model:
-                    import orbax.checkpoint as ocp
-                    import shutil
-                    early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                    if early_ckpt.exists():
-                        shutil.rmtree(early_ckpt)
-                    _, state_dict = nnx.split(model)
-                    checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                    checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                    print(f"  [ckpt-early] saved -> {early_ckpt}")
-                    early_ckpt_str = str(early_ckpt)
+            # -- Curriculum transition check (Training stats) -----------------
+            curr_thresh = cfg.curriculum.get("success_threshold", None)
+            curr_mode = cfg.curriculum.get("mode", "train")
+            if curr_thresh is not None and curr_mode == "train":
+                curr_metric = cfg.curriculum.get("metric", "success")
+                if curr_metric == "target_found":
+                    window_metric = window_fnd
+                    metric_label = "Target found rate"
                 else:
-                    print("  [ckpt-early] skipped (save_model=false)")
+                    window_metric = window_succ
+                    metric_label = "Success rate"
 
-                # ── Early-exit eval + video (same logic as final eval) ────────
-                if eval_video:
-                    master_key, eval_key = jax.random.split(master_key)
-                    _run_eval_with_render(
-                        model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                        compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                        cfg=cfg, eval_key=eval_key,
-                        out_dir=eval_video_dir,
-                        ckpt_name=f"early_{update:06d}",
-                        renderer=effective_final_renderer,
-                        selective=selective_eval_render,
-                        eval_render_videos=eval_render_videos,
-                        eval_max_compute=eval_max_compute_episodes,
-                        n_success=eval_render_successes,
-                        n_fail=eval_render_failures,
-                        wandb_run=wandb_run,
-                        steps_done=steps_done,
-                        max_steps=max_steps,
-                        label="eval-early",
+                if len(window_metric) == window_metric.maxlen and float(np.mean(window_metric)) >= float(curr_thresh):
+                    print(
+                        f"  [curriculum] Training {metric_label} {float(np.mean(window_metric)):.1%} >= "
+                        f"threshold {curr_thresh:.1%} -- advancing to next level."
                     )
+                    # Save an intermediate checkpoint before breaking
+                    early_ckpt_str = ""
+                    if save_model:
+                        import orbax.checkpoint as ocp
+                        import shutil
+                        early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                        if early_ckpt.exists():
+                            shutil.rmtree(early_ckpt)
+                        _, state_dict = nnx.split(model)
+                        checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                        checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                        print(f"  [ckpt-early] saved -> {early_ckpt}")
+                        early_ckpt_str = str(early_ckpt)
+                    else:
+                        print("  [ckpt-early] skipped (save_model=false)")
 
-                return early_ckpt_str
+                    # ── Early-exit eval + video (same logic as final eval) ────────
+                    if eval_video:
+                        master_key, eval_key = jax.random.split(master_key)
+                        _run_eval_with_render(
+                            model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                            compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
+                            cfg=cfg, eval_key=eval_key,
+                            out_dir=eval_video_dir,
+                            ckpt_name=f"early_{update:06d}",
+                            renderer=effective_final_renderer,
+                            selective=selective_eval_render,
+                            eval_render_videos=eval_render_videos,
+                            eval_max_compute=eval_max_compute_episodes,
+                            n_success=eval_render_successes,
+                            n_fail=eval_render_failures,
+                            wandb_run=wandb_run,
+                            steps_done=steps_done,
+                            max_steps=max_steps,
+                            label="eval-early",
+                        )
+
+                    return early_ckpt_str
 
             # ── GAE + minibatches ─────────────────────────────────────────────
             advs, rets = buf.compute_gae(last_values, last_dones)
@@ -1595,16 +1650,20 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "rewards/target_found":     float(np.mean(window_r_found)),
                         "rewards/success_bonus":    float(np.mean(window_r_succ)),
                     })
-                    if diag_acc is not None:
+                    if len(window_diag_acc) > 0:
+                        diag_samples_pct = float(np.mean(window_diag_samples))
                         logs.update({
-                            "diagnostics/memory_target_cell_accuracy": diag_acc,
-                            "diagnostics/memory_target_cell_samples": diag_samples,
+                            "diagnostics/memory_target_cell_samples": diag_samples_pct,
                         })
+                        if diag_samples_pct >= 0.7:
+                            logs.update({
+                                "diagnostics/memory_target_cell_accuracy": float(np.mean(window_diag_acc)),
+                            })
                 logs.update(comm_summary)
                 wandb.log(logs, step=steps_done)
 
-            is_eval_step = ((update - eval_offset) % eval_every == 0)
-            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0))
+            is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset
+            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0) and update > eval_video_offset)
 
             # ── Mid-training eval + single video ─────────────────────────────
             if (is_eval_step or is_video_step) and update != n_updates:
@@ -1664,6 +1723,17 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 "eval/target_found_rate":   eval_found,
                                 "eval/map_coverage_pct":    eval_cov * 100.0,
                             }, step=steps_done)
+
+                        # ── Free GPU memory from parallel eval ──────────────
+                        # The vmapped eval returns full EnvState for all envs
+                        # plus the JIT-cached XLA executable.  Both consume
+                        # significant GPU memory that the PPO backward pass
+                        # needs.  Delete result arrays immediately and clear
+                        # the XLA cache to prevent late OOM.
+                        del rets, lengths, gaps, progs, succs, fnds, final_state
+                        gc.collect()
+                        jax.clear_caches()
+                        jax.block_until_ready(jnp.asarray(0, dtype=jnp.int32))
                         time.sleep(1.0)
 
                         # Check for parallel evaluation early exit
@@ -1708,6 +1778,53 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 )
                                 time.sleep(1.0)
                             return early_ckpt_str
+
+                        # Check for curriculum transition (Eval stats, parallel eval)
+                        curr_thresh = cfg.curriculum.get("success_threshold", None)
+                        curr_mode = cfg.curriculum.get("mode", "train")
+                        if curr_thresh is not None and curr_mode == "eval":
+                            curr_metric = cfg.curriculum.get("metric", "success")
+                            eval_val = eval_found if curr_metric == "target_found" else eval_success
+                            metric_label = "target_found" if curr_metric == "target_found" else "success"
+                            if eval_val >= float(curr_thresh):
+                                print(
+                                    f"\n  [curriculum-eval-exit] Evaluation metric '{metric_label}' {eval_val:.1%} >= "
+                                    f"threshold {curr_thresh:.1%} -- advancing to next level."
+                                )
+                                early_ckpt_str = ""
+                                if save_model:
+                                    import orbax.checkpoint as ocp
+                                    import shutil
+                                    early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                                    if early_ckpt.exists():
+                                        shutil.rmtree(early_ckpt)
+                                    _, state_dict = nnx.split(model)
+                                    checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                                    checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                    print(f"  [ckpt-early] saved -> {early_ckpt}")
+                                    early_ckpt_str = str(early_ckpt)
+
+                                if eval_video:
+                                    master_key, eval_key = jax.random.split(master_key)
+                                    _run_eval_with_render(
+                                        model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                                        compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
+                                        cfg=cfg, eval_key=eval_key,
+                                        out_dir=eval_video_dir,
+                                        ckpt_name=f"early_{update:06d}",
+                                        renderer=effective_final_renderer,
+                                        selective=selective_eval_render,
+                                        eval_render_videos=eval_render_videos,
+                                        eval_max_compute=eval_max_compute_episodes,
+                                        n_success=eval_render_successes,
+                                        n_fail=eval_render_failures,
+                                        wandb_run=wandb_run,
+                                        steps_done=steps_done,
+                                        max_steps=max_steps,
+                                        label="eval-early",
+                                    )
+                                    time.sleep(1.0)
+                                return early_ckpt_str
 
                     if is_video_step:
                         master_key, video_key = jax.random.split(master_key)
@@ -1764,6 +1881,53 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 f"success={eval_success:.1%}"
                             )
                             time.sleep(1.0)
+
+                            # Check for curriculum transition (Eval stats, non-parallel eval)
+                            curr_thresh = cfg.curriculum.get("success_threshold", None)
+                            curr_mode = cfg.curriculum.get("mode", "train")
+                            if curr_thresh is not None and curr_mode == "eval":
+                                curr_metric = cfg.curriculum.get("metric", "success")
+                                eval_val = eval_found if curr_metric == "target_found" else eval_success
+                                metric_label = "target_found" if curr_metric == "target_found" else "success"
+                                if eval_val >= float(curr_thresh):
+                                    print(
+                                        f"\n  [curriculum-eval-exit] Evaluation metric '{metric_label}' {eval_val:.1%} >= "
+                                        f"threshold {curr_thresh:.1%} -- advancing to next level."
+                                    )
+                                    early_ckpt_str = ""
+                                    if save_model:
+                                        import orbax.checkpoint as ocp
+                                        import shutil
+                                        early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                                        if early_ckpt.exists():
+                                            shutil.rmtree(early_ckpt)
+                                        _, state_dict = nnx.split(model)
+                                        checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                                        checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                        print(f"  [ckpt-early] saved -> {early_ckpt}")
+                                        early_ckpt_str = str(early_ckpt)
+
+                                    if eval_video:
+                                        master_key, eval_key = jax.random.split(master_key)
+                                        _run_eval_with_render(
+                                            model=model, reset_s=reset_s, env_step_jit=env_step_jit,
+                                            compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
+                                            cfg=cfg, eval_key=eval_key,
+                                            out_dir=eval_video_dir,
+                                            ckpt_name=f"early_{update:06d}",
+                                            renderer=effective_final_renderer,
+                                            selective=selective_eval_render,
+                                            eval_render_videos=eval_render_videos,
+                                            eval_max_compute=eval_max_compute_episodes,
+                                            n_success=eval_render_successes,
+                                            n_fail=eval_render_failures,
+                                            wandb_run=wandb_run,
+                                            steps_done=steps_done,
+                                            max_steps=max_steps,
+                                            label="eval-early",
+                                        )
+                                        time.sleep(1.0)
+                                    return early_ckpt_str
 
                 # Generate mid-run evaluation heatmaps if toggled in LoggingConfig
                 generate_any_heatmap = bool(
@@ -1918,7 +2082,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 time.sleep(1.0)
 
             # ── Checkpoint ────────────────────────────────────────────────────
-            if save_model and not is_benchmark and (update % ckpt_every == 0 or update == n_updates):
+            is_ckpt_step = ((update - ckpt_offset) % ckpt_every == 0)
+            if save_model and not is_benchmark and is_ckpt_step:
                 import orbax.checkpoint as ocp
                 import shutil
                 ckpt_path = (ckpt_dir / f"ckpt_{update:06d}").absolute()
