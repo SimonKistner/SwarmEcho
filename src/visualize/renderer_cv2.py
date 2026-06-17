@@ -319,7 +319,7 @@ def _draw_frame_cv2(
     rew_cfg = cfg.reward
     use_shortest_path_visuals = (
         bool(rew_cfg.get("only_shortest_path_chain_reward", False))
-        and str(rew_cfg.get("chain_reward_system", "euclidean")) == "euclidean"
+        and str(rew_cfg.get("chain_reward_system", "euclidean")) in ("euclidean", "discrete_finders_path")
         and not bool(rew_cfg.get("only_explor_individual", False))
         and not bool(rew_cfg.get("every_reward_global", False))
     )
@@ -394,6 +394,41 @@ def _draw_frame_cv2(
         for p1, p2 in zip(pts[:-1], pts[1:]):
             cv2.line(overlay, p1, p2, _hex_to_bgr("#22c55e"), max(2, int(2 * scale)), cv2.LINE_AA)
         cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
+
+    def _finder_path_tips() -> tuple[int, int]:
+        if frame.finders_path is None or frame.finders_path_len <= 0 or frame.maze_cell_grid is None:
+            return -1, -1
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        cells = np.floor(frame.pos / np.array([cell_w, cell_h], dtype=np.float32)).astype(np.int32)
+        cells[:, 0] = np.clip(cells[:, 0], 0, cols - 1)
+        cells[:, 1] = np.clip(cells[:, 1], 0, rows - 1)
+        path_idx = {tuple(c): k for k, c in enumerate(frame.finders_path[:frame.finders_path_len])}
+        ranks = np.array([path_idx.get(tuple(c), -1) for c in cells], dtype=np.int32)
+        valid_b = [i for i in range(N) if (i + drone_start) in base_comp and ranks[i] >= 0]
+        valid_t = [i for i in range(N) if (i + drone_start) in target_comp and ranks[i] >= 0]
+
+        def center(k: int) -> np.ndarray:
+            c = frame.finders_path[k]
+            return np.array([(c[0] + 0.5) * cell_w, (c[1] + 0.5) * cell_h], dtype=np.float32)
+
+        base_tip = -1
+        if valid_b:
+            best_rank = max(ranks[i] for i in valid_b)
+            tied = [i for i in valid_b if ranks[i] == best_rank]
+            ref = np.asarray(frame.target_pos if best_rank >= frame.finders_path_len - 2 else center(best_rank + 1), dtype=np.float32)
+            if ref.ndim > 1:
+                ref = ref[0]
+            base_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+
+        target_tip = -1
+        if valid_t:
+            best_rank = min(ranks[i] for i in valid_t)
+            tied = [i for i in valid_t if ranks[i] == best_rank]
+            ref = np.asarray(frame.base_pos if best_rank <= 1 else center(best_rank - 1), dtype=np.float32)
+            target_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+        return base_tip, target_tip
 
     # ── Connectivity ──────────────────────────────────────────────────────
     num_bases = int(cfg.env.num_bases or 0)
@@ -509,15 +544,18 @@ def _draw_frame_cv2(
     idx_base_tip = -1
     idx_target_tip = -1
     if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
-        d_to_t = dists[drone_start:, target_idx]
-        valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
-        if valid_b:
-            idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
+        if str(rew_cfg.get("chain_reward_system", "euclidean")) == "discrete_finders_path":
+            idx_base_tip, idx_target_tip = _finder_path_tips()
+        else:
+            d_to_t = dists[drone_start:, target_idx]
+            valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
+            if valid_b:
+                idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
 
-        d_to_b = dists[drone_start:, base_idx]
-        valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
-        if valid_t:
-            idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
+            d_to_b = dists[drone_start:, base_idx]
+            valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
+            if valid_t:
+                idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
     dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
     dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
