@@ -1688,7 +1688,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "train/ep_length":          float(np.mean(window_len)),
                         "train/success_rate":       float(np.mean(window_succ)),
                         "train/target_found_rate":  float(np.mean(window_fnd)),
-                        "train/chain_gap_dist":     float(np.mean(window_gap)),
                         "train/chain_progress_pct": float(np.mean(window_prog_pct)),
                         "train/finder_return_to_target_after_delivery_rate": float(np.mean(window_finder_return)),
                         "train/ep_length_reduction": (1.0 - (float(np.mean(window_len)) / max_steps)) * 100.0,
@@ -1768,7 +1767,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             wandb.log({
                                 "eval/ep_return":           eval_ret,
                                 "eval/ep_length":           eval_len,
-                                "eval/chain_gap_dist":      eval_gap,
                                 "eval/chain_progress_pct":  eval_prog_pct,
                                 "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
                                 "eval/success_rate":        eval_success,

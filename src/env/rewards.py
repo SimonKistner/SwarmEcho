@@ -253,7 +253,7 @@ def make_reward_fn(cfg: DictConfig):
         progress_cells = jnp.where(fully_connected, valid_len, progress_cells)
         progress_frac = jnp.where(new_state.finders_path_valid, progress_cells.astype(jnp.float32) / valid_len.astype(jnp.float32), 0.0)
         chain_progress_pct = 100.0 * progress_frac
-        chain_gap_dist = (1.0 - progress_frac) * jnp.sqrt(new_state.box_width**2 + new_state.box_height**2)
+        chain_gap_dist = jnp.float32(0.0)
         base_gap_penalty = -p_gap_max * (1.0 - progress_frac)
 
         if only_reward_chain_from_target:
@@ -435,8 +435,10 @@ def make_reward_fn(cfg: DictConfig):
             r_chain_gap = jnp.full((N,), base_gap_penalty / N, dtype=jnp.float32)
         else:
             if only_shortest_path_chain_reward:
-                if use_finders_path_reward:
-                    is_contributing = path_contributing
+                if use_finders_path_reward and only_reward_chain_from_target:
+                    is_contributing = _compute_shortest_paths(new_state, idx_t, idx_t, False, any_tgt_chain) & is_conn_target
+                elif use_finders_path_reward:
+                    is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
                 elif only_reward_chain_from_target:
                     is_contributing = _compute_shortest_paths(new_state, idx_t, idx_t, False, any_tgt_chain) & is_conn_target
                 else:

@@ -86,6 +86,15 @@ class EnvState:
     finder_path_active: jax.Array = dataclasses.field(
         default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
     )
+    target_known_path_cells: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 0, 2), dtype=jnp.int16)
+    )
+    target_known_path_lens: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.int16)
+    )
+    target_known_path_valid: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
+    )
     finders_path: jax.Array = dataclasses.field(
         default_factory=lambda: jnp.zeros((0, 2), dtype=jnp.int16)
     )
@@ -126,6 +135,7 @@ jax.tree_util.register_dataclass(
         "box_width", "box_height", "base_target_known", "chain_held_steps",
         "is_conn_base", "is_conn_target", "finder_returned_to_target",
         "finder_path_cells", "finder_path_lens", "finder_path_active",
+        "target_known_path_cells", "target_known_path_lens", "target_known_path_valid",
         "finders_path", "finders_path_len", "finders_path_valid",
         "finders_path_index_grid", "adj_matrix",
         "anti_target_known", "target_revisit_reward_claimed",

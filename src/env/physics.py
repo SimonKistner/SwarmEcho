@@ -378,7 +378,7 @@ def make_env_fns(cfg: DictConfig):
         knows_after = jnp.any((R > 0.5) & knows_before[None, :], axis=-1)
 
         # Direct connection adjacency matrix of size (N+1, N+1) (excluding self-loops)
-        if log_adj:
+        if log_adj or use_finders_path:
             adj_matrix = jnp.concatenate([A_top, A_bot], axis=0) > 0.5
         else:
             adj_matrix = jnp.zeros((0, 0), dtype=jnp.bool_)
@@ -415,7 +415,14 @@ def make_env_fns(cfg: DictConfig):
         path = jnp.where(can_append, path.at[length.astype(jnp.int32)].set(cell), path)
         return path, next_len
 
-    def _update_finders_path_state(state: EnvState, mid_state: EnvState, directly_sees: jax.Array) -> dict:
+    def _update_finders_path_state(
+        state: EnvState,
+        mid_state: EnvState,
+        directly_sees: jax.Array,
+        new_target_known: jax.Array,
+        new_base_target_known: jax.Array,
+        is_conn_base: jax.Array,
+    ) -> dict:
         if not use_finders_path:
             return {}
 
@@ -461,36 +468,61 @@ def make_env_fns(cfg: DictConfig):
             (state.finder_path_cells, state.finder_path_lens, state.finder_path_active)
         )
 
-        # Freeze the global finder path only from agents with initialized
-        # per-agent paths.  This is an invariant guard: a zero-length path means
-        # the fixed-size backing array still contains placeholder cells and must
-        # not be published as the route used by the chain reward.
+        # Per-agent target-knowledge paths: direct observers lock their own path;
+        # agents that learn through communication copy the lowest-index known path
+        # in their connected component. The global finder path is frozen from this
+        # per-agent memory, not directly from the first target observation when
+        # delivery is required.
         path_ready = lens > 0
-        finder_candidates = directly_sees & path_ready
-        first_find_now = (~state.finders_path_valid) & jnp.any(finder_candidates)
-        finder_idx = jnp.argmax(finder_candidates.astype(jnp.int32))
-        selected_path = paths[finder_idx]
-        selected_len = lens[finder_idx]
-
-        # Resolve target cell for the finder drone
         per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
         target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
-        tgt_cell = _maze_cell_from_pos(target_pos_agents[finder_idx])
 
-        # Check if the final entry in the path is already the target cell
-        last_cell_idx = jnp.maximum(selected_len - 1, 0)
-        last_cell = selected_path[last_cell_idx]
-        is_same = jnp.all(last_cell == tgt_cell)
+        def _append_target(path_len_tgt):
+            path, length, tgt_pos = path_len_tgt
+            tgt_cell = _maze_cell_from_pos(tgt_pos)
+            last_cell_idx = jnp.maximum(length - 1, 0)
+            last_cell = path[last_cell_idx]
+            is_same = jnp.all(last_cell == tgt_cell)
+            dx = jnp.abs(last_cell[0] - tgt_cell[0])
+            dy = jnp.abs(last_cell[1] - tgt_cell[1])
+            is_neighbor = (dx <= 1) & (dy <= 1)
+            should_append = (~is_same) & is_neighbor & (length < max_finders_path_len)
+            path = jnp.where(should_append, path.at[length.astype(jnp.int32)].set(tgt_cell), path)
+            length = jnp.where(should_append, length + jnp.int16(1), length)
+            return path, length
 
-        # Check if the final entry is at least a neighbor of the target cell
-        dx = jnp.abs(last_cell[0] - tgt_cell[0])
-        dy = jnp.abs(last_cell[1] - tgt_cell[1])
-        is_neighbor = (dx <= 1) & (dy <= 1)
+        direct_paths, direct_lens = jax.vmap(_append_target)((paths, lens, target_pos_agents))
+        direct_valid = directly_sees & path_ready & (~state.target_known_path_valid)
 
-        # If neighbor but not same, append target cell as the final path entry
-        should_append = (~is_same) & is_neighbor & (selected_len < max_finders_path_len)
-        selected_path = jnp.where(should_append, selected_path.at[selected_len.astype(jnp.int32)].set(tgt_cell), selected_path)
-        selected_len = jnp.where(should_append, selected_len + jnp.int16(1), selected_len)
+        source_paths = jnp.where(direct_valid[:, None, None], direct_paths, state.target_known_path_cells)
+        source_lens = jnp.where(direct_valid, direct_lens, state.target_known_path_lens)
+        source_valid = state.target_known_path_valid | direct_valid
+
+        # Recompute reachability over the direct communication graph stored by
+        # _update_target_known so path memory follows the same target-known spread.
+        A = mid_state.adj_matrix[:N, :N] | jnp.eye(N, dtype=jnp.bool_)
+        def _square_bool(R, _):
+            return (R.astype(jnp.float32) @ R.astype(jnp.float32) > 0.5), None
+        R_agents, _ = jax.lax.scan(_square_bool, A, None, length=n_reach)
+        source_matrix = R_agents & source_valid[None, :]
+        source_idx = jnp.argmax(source_matrix.astype(jnp.int32), axis=1)
+        has_source = jnp.any(source_matrix, axis=1)
+        should_set_known_path = new_target_known & (~state.target_known_path_valid) & has_source
+        known_paths = jnp.where(should_set_known_path[:, None, None], source_paths[source_idx], state.target_known_path_cells)
+        known_lens = jnp.where(should_set_known_path, source_lens[source_idx], state.target_known_path_lens)
+        known_valid = state.target_known_path_valid | should_set_known_path
+
+        delivery_freeze = bool(cfg.reward.get("target_found_requires_delivery", True))
+        delivered_now = (~state.base_target_known) & new_base_target_known
+        freeze_candidates = jnp.where(
+            delivery_freeze,
+            known_valid & is_conn_base & new_target_known & delivered_now,
+            direct_valid,
+        )
+        first_find_now = (~state.finders_path_valid) & jnp.any(freeze_candidates)
+        finder_idx = jnp.argmax(freeze_candidates.astype(jnp.int32))
+        selected_path = jnp.where(delivery_freeze, known_paths[finder_idx], direct_paths[finder_idx])
+        selected_len = jnp.where(delivery_freeze, known_lens[finder_idx], direct_lens[finder_idx])
 
         # Sanity check: warning if not same and not neighbor
         # def _warn_fn(idx, slen, lc, tc, drone_pos, tgt_pos, direct, ready, cond):
@@ -531,11 +563,15 @@ def make_env_fns(cfg: DictConfig):
             _build_index_grid((selected_len, selected_path)),
             state.finders_path_index_grid,
         )
-        keep_tracking = ~(state.finders_path_valid | first_find_now)
+        keep_tracking_global = ~(state.finders_path_valid | first_find_now)
+        keep_tracking_agents = keep_tracking_global & (~known_valid)
         return {
-            "finder_path_cells": jnp.where(keep_tracking, paths, state.finder_path_cells),
-            "finder_path_lens": jnp.where(keep_tracking, lens, state.finder_path_lens),
-            "finder_path_active": jnp.where(keep_tracking, active, state.finder_path_active),
+            "finder_path_cells": jnp.where(keep_tracking_agents[:, None, None], paths, state.finder_path_cells),
+            "finder_path_lens": jnp.where(keep_tracking_agents, lens, state.finder_path_lens),
+            "finder_path_active": jnp.where(keep_tracking_agents, active, state.finder_path_active),
+            "target_known_path_cells": known_paths,
+            "target_known_path_lens": known_lens,
+            "target_known_path_valid": known_valid,
             "finders_path": new_finders_path,
             "finders_path_len": new_finders_len,
             "finders_path_valid": state.finders_path_valid | first_find_now,
@@ -712,6 +748,9 @@ def make_env_fns(cfg: DictConfig):
             finder_path_cells = jnp.zeros((N, max_finders_path_len, 2), dtype=jnp.int16),
             finder_path_lens = jnp.zeros(N, dtype=jnp.int16),
             finder_path_active = jnp.zeros(N, dtype=jnp.bool_),
+            target_known_path_cells = jnp.zeros((N, max_finders_path_len, 2), dtype=jnp.int16),
+            target_known_path_lens = jnp.zeros(N, dtype=jnp.int16),
+            target_known_path_valid = jnp.zeros(N, dtype=jnp.bool_),
             finders_path = jnp.zeros((max_finders_path_len, 2), dtype=jnp.int16),
             finders_path_len = jnp.int16(0),
             finders_path_valid = jnp.bool_(False),
@@ -853,7 +892,10 @@ def make_env_fns(cfg: DictConfig):
         new_target_revisit_reward_claimed = (
             state.target_revisit_reward_claimed | jnp.any(target_revisit_candidates)
         )
-        path_updates = _update_finders_path_state(state, mid_state, directly_sees)
+        path_mid_state = dataclasses.replace(mid_state, adj_matrix=new_adj_matrix)
+        path_updates = _update_finders_path_state(
+            state, path_mid_state, directly_sees, new_target_known, new_base_target_known, is_conn_base
+        )
 
         return dataclasses.replace(
             mid_state,
