@@ -130,10 +130,13 @@ def recurrent_mappo_loss(
     returns:         jax.Array,   # (T, B) or (T, B, N)
     rnn_resets:      jax.Array,   # (T, B, N)
     initial_actor_h: jax.Array,   # (B, N, H)
+    initial_actor_signature: jax.Array | None,
+    initial_actor_value: jax.Array | None,
     initial_critic_h:jax.Array,   # (B, N, H)
     comm_masks:      jax.Array | None = None,
     active_masks:    jax.Array | None = None,
-    base_memories:   jax.Array | None = None,
+    base_signatures: jax.Array | None = None,
+    base_values:     jax.Array | None = None,
     base_memory_masks: jax.Array | None = None,
     clip_eps:        float = 0.2,
     vf_coef:         float = 0.5,
@@ -150,25 +153,31 @@ def recurrent_mappo_loss(
 
     if model.actor_memory:
         if model.memory_comm_enabled:
-            def _eval_env(obs_env, act_env, reset_env, init_h_env, comm_env, active_env, base_mem_env, base_mask_env):
+            def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env):
                 return model.actor.evaluate_actions_sequence(
                     obs_env,
                     act_env,
                     init_h_env,
                     reset_env,
+                    init_sig_env,
+                    init_val_env,
                     comm_env,
                     active_env,
-                    base_mem_env,
+                    base_sig_env,
+                    base_val_env,
                     base_mask_env,
                 )
-            _, log_probs_flat, entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 1, 1, 1, 1))(
+            _, log_probs_flat, entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
                 obs,
                 actions,
                 rnn_resets,
                 initial_actor_h,
+                initial_actor_signature,
+                initial_actor_value,
                 comm_masks,
                 active_masks,
-                base_memories,
+                base_signatures,
+                base_values,
                 base_memory_masks,
             )
             new_log_probs = jnp.swapaxes(log_probs_flat, 0, 1)
@@ -276,10 +285,13 @@ def _recurrent_mappo_step(
     returns:         jax.Array,
     rnn_resets:      jax.Array,
     initial_actor_h: jax.Array,
+    initial_actor_signature: jax.Array | None,
+    initial_actor_value: jax.Array | None,
     initial_critic_h:jax.Array,
     comm_masks:      jax.Array | None = None,
     active_masks:    jax.Array | None = None,
-    base_memories:   jax.Array | None = None,
+    base_signatures: jax.Array | None = None,
+    base_values:     jax.Array | None = None,
     base_memory_masks: jax.Array | None = None,
     *,
     clip_eps:  float,
@@ -291,8 +303,8 @@ def _recurrent_mappo_step(
         return recurrent_mappo_loss(
             m, obs, actions, old_log_probs, old_values,
             advantages, returns, rnn_resets,
-            initial_actor_h, initial_critic_h,
-            comm_masks, active_masks, base_memories, base_memory_masks,
+            initial_actor_h, initial_actor_signature, initial_actor_value, initial_critic_h,
+            comm_masks, active_masks, base_signatures, base_values, base_memory_masks,
             clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -386,10 +398,13 @@ class MAPPOTrainer:
                     *((
                         mb["rnn_resets"],
                         mb["initial_actor_h"],
+                        mb["initial_actor_signature"],
+                        mb["initial_actor_value"],
                         mb["initial_critic_h"],
                         mb["comm_masks"],
                         mb["active_masks"],
-                        mb["base_memories"],
+                        mb["base_signatures"],
+                        mb["base_values"],
                         mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )

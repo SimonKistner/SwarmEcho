@@ -272,11 +272,10 @@ def setup_model_and_env(cfg, checkpoint_path):
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
-        memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
-        memory_comm_merge = str(cfg.network.get("memory_comm_merge", "residual")),
-        memory_comm_attention_mode = str(cfg.network.get("memory_comm_attention_mode", "attend_global_learned_query")),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
     )
 
     # 3. Load Checkpoint

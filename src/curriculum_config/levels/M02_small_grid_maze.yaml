@@ -53,11 +53,9 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_every_k_steps: 5
-  memory_comm_num_heads: 4
-  #all info:
-  memory_comm_gradient_mode: "dial"
-  memory_comm_merge: "concat"
-  memory_comm_attention_mode: "attend_cur_obs_and_mem_query"
+  tarmac_sig_dim: 64
+  tarmac_val_dim: 128
+  tarmac_include_self: true
 
 logging:
   memory_diagnostic_probe: true

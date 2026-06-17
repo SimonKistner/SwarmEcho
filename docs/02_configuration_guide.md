@@ -20,6 +20,13 @@ The recurrent MAPPO extension is controlled from `network`:
 |---|---:|---|
 | `actor_memory` | `false` | Replaces the feed-forward actor with a per-agent GRU actor. |
 | `critic_memory` | `false` | Replaces the agent-centric critic with a per-agent GRU critic before cross-agent attention. Requires `critic_type: agent_centric`. |
+| `memory_comm_enabled` | `false` | Enables TarMAC communication for the recurrent actor. Requires `actor_memory: true`. |
+| `memory_comm_every_k_steps` | `5` | Applies wall-aware actor communication every k environment steps. Non-communication steps mask agent-agent and base replay messages. |
+| `tarmac_sig_dim` | `64` | Query/signature dimension used for TarMAC sender addressing. |
+| `tarmac_val_dim` | `128` | Value/message dimension used for TarMAC communicated payloads. |
+| `tarmac_include_self` | `true` | Keeps each agent's own previous signature/value in its attention sender set, allowing it to ignore incoming messages when useful. |
+
+When recurrent actor communication is enabled, SwarmEcho uses a single-round TarMAC-style mechanism rather than the older configurable hidden-state attention path. Agents carry GRU hidden state plus previous `(signature, value)` communication state; the base relay stores the first target-knowing reporter's emitted TarMAC signature/value and replays that token to eligible non-knowing agents in base range.
 
 ### 1.1 Heatmap and Video Evaluation Toggles
 Under the `logging` domain, the following parameters control mid-training and evaluation-time artifacts (stored under `outputs/.../videos/train/` and `outputs/.../videos/eval/`):
