@@ -41,12 +41,12 @@ def main():
     cfg.network.critic_memory = True
     cfg.network.memory_comm_enabled = True
     
-    gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial"))
     print(f"  num_agents N              : {N}")
     print(f"  obs_dim                   : {obs_dim}")
     print(f"  act_dim                   : {act_dim}")
     print(f"  hidden_dim H              : {H}")
-    print(f"  memory_comm_gradient_mode : {gradient_mode}")
+    print(f"  tarmac_sig_dim            : {int(cfg.network.get('tarmac_sig_dim', 64))}")
+    print(f"  tarmac_val_dim            : {int(cfg.network.get('tarmac_val_dim', 128))}")
 
     T = int(cfg.training.num_steps) # 50
     E = int(cfg.training.num_envs)  # 4000
@@ -71,9 +71,10 @@ def main():
         critic_memory=True,
         rngs=rngs,
         memory_comm_enabled=True,
-        memory_comm_gradient_mode=gradient_mode,
         memory_comm_every_k_steps=int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        memory_comm_num_heads=int(cfg.network.get("memory_comm_num_heads", 4)),
+        tarmac_sig_dim=int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim=int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self=bool(cfg.network.get("tarmac_include_self", True)),
     )
     
     trainer = MAPPOTrainer(
@@ -100,10 +101,13 @@ def main():
         "returns": jnp.zeros((T, B, N), dtype=jnp.float32),
         "rnn_resets": jnp.zeros((T, B, N), dtype=jnp.bool_),
         "initial_actor_h": jnp.zeros((B, N, H), dtype=jnp.float32),
+        "initial_actor_signature": jnp.zeros((B, N, int(cfg.network.get("tarmac_sig_dim", 64))), dtype=jnp.float32),
+        "initial_actor_value": jnp.zeros((B, N, int(cfg.network.get("tarmac_val_dim", 128))), dtype=jnp.float32),
         "initial_critic_h": jnp.zeros((B, N, H), dtype=jnp.float32),
         "comm_masks": jnp.ones((T, B, N, N), dtype=jnp.bool_),
         "active_masks": jnp.ones((T, B, N), dtype=jnp.bool_),
-        "base_memories": jnp.zeros((T, B, H), dtype=jnp.float32),
+        "base_signatures": jnp.zeros((T, B, int(cfg.network.get("tarmac_sig_dim", 64))), dtype=jnp.float32),
+        "base_values": jnp.zeros((T, B, int(cfg.network.get("tarmac_val_dim", 128))), dtype=jnp.float32),
         "base_memory_masks": jnp.zeros((T, B, N), dtype=jnp.bool_),
     }
 
@@ -112,13 +116,13 @@ def main():
     # 1. Actor Forward Pass
     @nnx.jit
     def run_actor_forward(m, mb):
-        def _eval_env(obs_env, act_env, reset_env, init_h_env, comm_env, active_env, base_mem_env, base_mask_env):
+        def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env):
             return m.actor.evaluate_actions_sequence(
-                obs_env, act_env, init_h_env, reset_env, comm_env, active_env, base_mem_env, base_mask_env
+                obs_env, act_env, init_h_env, reset_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env
             )
-        return jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 1, 1, 1, 1))(
-            mb["obs"], mb["actions"], mb["rnn_resets"], mb["initial_actor_h"],
-            mb["comm_masks"], mb["active_masks"], mb["base_memories"], mb["base_memory_masks"]
+        return jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
+            mb["obs"], mb["actions"], mb["rnn_resets"], mb["initial_actor_h"], mb["initial_actor_signature"], mb["initial_actor_value"],
+            mb["comm_masks"], mb["active_masks"], mb["base_signatures"], mb["base_values"], mb["base_memory_masks"]
         )
 
     # 2. Critic Forward Pass
@@ -128,13 +132,13 @@ def main():
 
     # 3. Actor Backward Pass
     def actor_loss_only(actor_m, mb):
-        def _eval_env(obs_env, act_env, reset_env, init_h_env, comm_env, active_env, base_mem_env, base_mask_env):
+        def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env):
             return actor_m.evaluate_actions_sequence(
-                obs_env, act_env, init_h_env, reset_env, comm_env, active_env, base_mem_env, base_mask_env
+                obs_env, act_env, init_h_env, reset_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env
             )
-        _, log_probs, _ = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 1, 1, 1, 1))(
-            mb["obs"], mb["actions"], mb["rnn_resets"], mb["initial_actor_h"],
-            mb["comm_masks"], mb["active_masks"], mb["base_memories"], mb["base_memory_masks"]
+        _, log_probs, _ = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
+            mb["obs"], mb["actions"], mb["rnn_resets"], mb["initial_actor_h"], mb["initial_actor_signature"], mb["initial_actor_value"],
+            mb["comm_masks"], mb["active_masks"], mb["base_signatures"], mb["base_values"], mb["base_memory_masks"]
         )
         return jnp.mean(log_probs)
 

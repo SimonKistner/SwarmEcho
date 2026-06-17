@@ -262,13 +262,16 @@ def _batched_rollout_and_memory_step_impl(
     obs_batch,
     act_keys,
     actor_h_in,
+    actor_signature_in,
+    actor_value_in,
     critic_h_in,
     reset_agents_b,
     max_force,
     states_adj_matrix=None,
     states_active=None,
     states_target_known=None,
-    base_memory=None,
+    base_signature=None,
+    base_value=None,
     base_memory_valid=None,
     t=None,
     *,
@@ -284,7 +287,8 @@ def _batched_rollout_and_memory_step_impl(
             step_share = (int(model.memory_comm_every_k_steps) <= 1) | ((t % int(model.memory_comm_every_k_steps)) == jnp.int32(0))
             comm_mask_b = raw_adj_b & step_share
             active_mask_b = states_active
-            base_memory_b = base_memory if base_memory is not None else jnp.zeros((E_, model.hidden_dim), dtype=jnp.float32)
+            base_signature_b = base_signature if base_signature is not None else jnp.zeros((E_, model.tarmac_sig_dim), dtype=jnp.float32)
+            base_value_b = base_value if base_value is not None else jnp.zeros((E_, model.tarmac_val_dim), dtype=jnp.float32)
             
             base_receiver_mask_b = (
                 states_adj_matrix[:, :N, N]
@@ -298,18 +302,21 @@ def _batched_rollout_and_memory_step_impl(
                 & step_share
             )
 
-            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n, comm_mask_n, active_n, base_memory_n, base_memory_mask_n):
+            def _rollout_one_env(obs_n, keys_n, actor_h_n, actor_sig_n, actor_val_n, critic_h_n, resets_n, comm_mask_n, active_n, base_sig_n, base_val_n, base_memory_mask_n):
                 return model.rollout_step_recurrent(
                     obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    actor_signature=actor_sig_n,
+                    actor_value=actor_val_n,
                     comm_mask=comm_mask_n,
                     active=active_n,
-                    base_memory=base_memory_n,
+                    base_signature=base_sig_n,
+                    base_value=base_val_n,
                     base_memory_mask=base_memory_mask_n,
                 )
 
-            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
-                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b,
+            actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+                obs_batch, act_keys, actor_h_in, actor_signature_in, actor_value_in, critic_h_in, reset_agents_b,
+                comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
             )
             
             # Base memory update logic
@@ -317,33 +324,35 @@ def _batched_rollout_and_memory_step_impl(
             reporters_b = states_target_known[:, :N] & connected_to_base_b & states_active[:, :N]
             first_idx_b = jnp.argmax(reporters_b.astype(jnp.int32), axis=-1)
             has_reporter_b = jnp.any(reporters_b, axis=-1)
-            reported_memory_b = jnp.take_along_axis(actor_h, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
+            reported_signature_b = jnp.take_along_axis(actor_signature, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
+            reported_value_b = jnp.take_along_axis(actor_value, first_idx_b[:, None, None], axis=1).squeeze(axis=1)
             should_store_b = has_reporter_b & ~base_memory_valid
-            base_memory = jnp.where(should_store_b[:, None], reported_memory_b, base_memory)
+            base_signature = jnp.where(should_store_b[:, None], reported_signature_b, base_signature)
+            base_value = jnp.where(should_store_b[:, None], reported_value_b, base_value)
             base_memory_valid = base_memory_valid | should_store_b
             
             return (
-                actor_h, critic_h, actions_b, log_probs_b, values_b, base_memory, base_memory_valid,
-                comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b
+                actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b, base_signature, base_value, base_memory_valid,
+                comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b
             )
             
         else:
             def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
                 return model.rollout_step_recurrent(
-                    obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
+                    obs_n, keys_n, actor_h_n, critic_h_n, resets=resets_n, max_force=max_force,
                 )
 
-            actor_h, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+            actor_h, _, _, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
                 obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
             )
-            return actor_h, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None
+            return actor_h, None, None, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None
     else:
         def _rollout_one_env(obs_n, keys_n):
             actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
             return actions, log_probs, value
 
         actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
-        return None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None
+        return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +371,12 @@ def _collect_rollout_mappo(
     T:                int,
     ep_trackers:      dict,
     actor_h = None,
+    actor_signature = None,
+    actor_value = None,
     critic_h = None,
     last_dones = None,
-    base_memory = None,
+    base_signature = None,
+    base_value = None,
     base_memory_valid = None,
     track_heatmap_data: bool = False,
 ) -> tuple:
@@ -375,11 +387,17 @@ def _collect_rollout_mappo(
     recurrent = bool(model.actor_memory or model.critic_memory)
     if last_dones is None:
         last_dones = np.zeros(buf.E, dtype=bool)
-    buf.reset(actor_h, critic_h)
+    buf.reset(actor_h, critic_h, actor_signature, actor_value)
     E, N = buf.E, buf.N
     if model.actor_memory and model.memory_comm_enabled:
-        if base_memory is None:
-            base_memory = jnp.zeros((E, model.hidden_dim), dtype=jnp.float32)
+        if actor_signature is None:
+            actor_signature = model.initial_actor_signature((E,))
+        if actor_value is None:
+            actor_value = model.initial_actor_value((E,))
+        if base_signature is None:
+            base_signature = jnp.zeros((E, model.tarmac_sig_dim), dtype=jnp.float32)
+        if base_value is None:
+            base_value = jnp.zeros((E, model.tarmac_val_dim), dtype=jnp.float32)
         if base_memory_valid is None:
             base_memory_valid = jnp.zeros((E,), dtype=bool)
 
@@ -432,36 +450,47 @@ def _collect_rollout_mappo(
         if recurrent:
             if model.actor_memory and actor_h is None:
                 actor_h = model.initial_actor_hidden((E_,))
+            if model.actor_memory and model.memory_comm_enabled and actor_signature is None:
+                actor_signature = model.initial_actor_signature((E_,))
+            if model.actor_memory and model.memory_comm_enabled and actor_value is None:
+                actor_value = model.initial_actor_value((E_,))
             if model.critic_memory and critic_h is None:
                 critic_h = model.initial_critic_hidden((E_,))
 
             actor_h_in = actor_h if actor_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
+            actor_signature_in = actor_signature if actor_signature is not None else jnp.zeros((E_, N_, model.tarmac_sig_dim), dtype=jnp.float32)
+            actor_value_in = actor_value if actor_value is not None else jnp.zeros((E_, N_, model.tarmac_val_dim), dtype=jnp.float32)
             critic_h_in = critic_h if critic_h is not None else jnp.zeros((E_, N_, model.hidden_dim), dtype=jnp.float32)
 
             if model.actor_memory and model.memory_comm_enabled:
-                (actor_h, critic_h, actions_b, log_probs_b, values_b, base_memory, base_memory_valid,
-                 comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+                (actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b, base_signature, base_value, base_memory_valid,
+                 comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
                     act_keys,
                     actor_h_in,
+                    actor_signature_in,
+                    actor_value_in,
                     critic_h_in,
                     reset_agents_b,
                     max_force,
                     states.adj_matrix,
                     states.active,
                     states.target_known,
-                    base_memory,
+                    base_signature,
+                    base_value,
                     base_memory_valid,
                     jnp.int32(t),
                 )
             else:
-                (actor_h, critic_h, actions_b, log_probs_b, values_b, _, _,
-                 comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+                (actor_h, _, _, critic_h, actions_b, log_probs_b, values_b, _, _, _,
+                 comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
                     act_keys,
                     actor_h_in,
+                    actor_signature_in,
+                    actor_value_in,
                     critic_h_in,
                     reset_agents_b,
                     max_force,
@@ -472,11 +501,13 @@ def _collect_rollout_mappo(
             if not model.critic_memory:
                 critic_h = None
         else:
-            (_, _, actions_b, log_probs_b, values_b, _, _,
-             comm_mask_b, active_mask_b, base_memory_b, base_receiver_mask_b) = batched_rollout_step_jit(
+            (_, _, _, _, actions_b, log_probs_b, values_b, _, _, _,
+             comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                 model,
                 obs_batch,
                 act_keys,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -545,16 +576,18 @@ def _collect_rollout_mappo(
                 completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
             is_diag_valid = (
                 model.actor_memory and model.memory_comm_enabled
-                and base_memory is not None
+                and base_signature is not None
                 and bool(np.array(info["terminal_delivered"])[e])
-                and np.any(np.array(base_memory)[e] != 0.0)
+                and np.any(np.array(base_value)[e] != 0.0)
             )
             completed_diag_valids.append(is_diag_valid)
             if is_diag_valid:
                 t_pos_diag = np.array(info["terminal_target_pos"][e])
                 if t_pos_diag.ndim == 2:
                     t_pos_diag = t_pos_diag[0]
-                completed_diag_memories.append(np.array(base_memory)[e])
+                completed_diag_memories.append(
+                    np.concatenate([np.array(base_signature)[e], np.array(base_value)[e]], axis=0)
+                )
                 completed_diag_targets.append(t_pos_diag)
 
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
@@ -584,12 +617,14 @@ def _collect_rollout_mappo(
             rnn_resets = np.array(reset_agents_b) if recurrent else None,
             comm_masks = np.array(comm_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
             active_masks = np.array(active_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
-            base_memories = np.array(base_memory_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_signatures = np.array(base_signature_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_values = np.array(base_value_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
             base_memory_masks = np.array(base_receiver_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
         ))
         if recurrent and model.actor_memory and model.memory_comm_enabled:
             done_j = jnp.asarray(dones_np, dtype=bool)
-            base_memory = jnp.where(done_j[:, None], jnp.zeros_like(base_memory), base_memory)
+            base_signature = jnp.where(done_j[:, None], jnp.zeros_like(base_signature), base_signature)
+            base_value = jnp.where(done_j[:, None], jnp.zeros_like(base_value), base_value)
             base_memory_valid = jnp.where(done_j, False, base_memory_valid)
         last_dones = dones_np
 
@@ -628,7 +663,7 @@ def _collect_rollout_mappo(
 
 
     return (
-        states, key, last_values, bootstrap_dones, actor_h, critic_h, np.asarray(last_dones, dtype=bool), base_memory, base_memory_valid,
+        states, key, last_values, bootstrap_dones, actor_h, actor_signature, actor_value, critic_h, np.asarray(last_dones, dtype=bool), base_signature, base_value, base_memory_valid,
         comm_summary,
         completed_returns, completed_lengths, completed_success,
         completed_found, completed_gaps, completed_prog_pcts,
@@ -693,7 +728,10 @@ def _evaluate(
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
         actor_h = model.initial_actor_hidden(()) if model.actor_memory else None
-        base_memory = jnp.zeros((model.hidden_dim,), dtype=jnp.float32) if model.actor_memory else None
+        actor_signature = model.initial_actor_signature(()) if (model.actor_memory and model.memory_comm_enabled) else None
+        actor_value = model.initial_actor_value(()) if (model.actor_memory and model.memory_comm_enabled) else None
+        base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32) if (model.actor_memory and model.memory_comm_enabled) else None
+        base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32) if (model.actor_memory and model.memory_comm_enabled) else None
         base_memory_valid = jnp.bool_(False)
         ep_ret  = ep_gap = ep_prog_pct = 0.0
         ep_success = ep_found = False
@@ -726,8 +764,8 @@ def _evaluate(
                         & base_memory_valid
                         & jnp.asarray(step_share)
                     )
-                    actor_h, actions, _ = act_team_fn(
-                        obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
+                    actor_h, actor_signature, actor_value, actions, _ = act_team_fn(
+                        obs, actor_h, actor_signature, actor_value, resets, comm_mask, state.active, base_signature, base_value, base_mask
                     )
                     connected_to_base = state.adj_matrix[:N_eval, N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval,), dtype=bool)
                     reporters = state.target_known & connected_to_base & state.active
@@ -735,9 +773,11 @@ def _evaluate(
                     # After base_memory_valid becomes true, later reporters cannot overwrite the first stored memory.
                     first_idx = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
                     has_reporter = jnp.any(reporters)
-                    reported_memory = actor_h[first_idx]
+                    reported_signature = actor_signature[first_idx]
+                    reported_value = actor_value[first_idx]
                     should_store = has_reporter & ~base_memory_valid
-                    base_memory = jnp.where(should_store, reported_memory, base_memory)
+                    base_signature = jnp.where(should_store, reported_signature, base_signature)
+                    base_value = jnp.where(should_store, reported_value, base_value)
                     base_memory_valid = base_memory_valid | should_store
                 else:
                     actor_h, actions = vmapped_act(obs, actor_h, resets)
@@ -860,13 +900,19 @@ def _run_parallel_eval_jit(
         state = reset(env_key)
 
         actor_h = model.initial_actor_hidden(()) if actor_memory else None
-        base_memory = jnp.zeros((model.hidden_dim,), dtype=jnp.float32) if (actor_memory and memory_comm_enabled) else None
+        actor_signature = model.initial_actor_signature(()) if (actor_memory and memory_comm_enabled) else None
+        actor_value = model.initial_actor_value(()) if (actor_memory and memory_comm_enabled) else None
+        base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32) if (actor_memory and memory_comm_enabled) else None
+        base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32) if (actor_memory and memory_comm_enabled) else None
         base_memory_valid = jnp.bool_(False) if (actor_memory and memory_comm_enabled) else None
 
         init_carry = (
             state,
             actor_h,
-            base_memory,
+            actor_signature,
+            actor_value,
+            base_signature,
+            base_value,
             base_memory_valid,
             jnp.bool_(False),  # has_succeeded
             jnp.bool_(False),  # has_found_delivered
@@ -877,7 +923,7 @@ def _run_parallel_eval_jit(
         )
 
         def eval_step(carry, t):
-            state, actor_h, base_memory, base_memory_valid, has_succeeded, has_found_delivered, has_found_visual, max_found, returns, lengths = carry
+            state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, has_succeeded, has_found_delivered, has_found_visual, max_found, returns, lengths = carry
 
             obs = obs_fn(state)
 
@@ -897,16 +943,18 @@ def _run_parallel_eval_jit(
                         & base_memory_valid
                         & step_share
                     )
-                    actor_h, actions, _ = model.actor.__call_team__(
-                        obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
+                    actor_h, actor_signature, actor_value, actions, _ = model.actor.__call_team__(
+                        obs, actor_h, actor_signature, actor_value, resets, comm_mask, state.active, base_signature, base_value, base_mask
                     )
                     connected_to_base = state.adj_matrix[:N_eval, N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval,), dtype=bool)
                     reporters = state.target_known & connected_to_base & state.active
                     first_idx = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
                     has_reporter = jnp.any(reporters)
-                    reported_memory = actor_h[first_idx]
+                    reported_signature = actor_signature[first_idx]
+                    reported_value = actor_value[first_idx]
                     should_store = has_reporter & ~base_memory_valid
-                    base_memory = jnp.where(should_store, reported_memory, base_memory)
+                    base_signature = jnp.where(should_store, reported_signature, base_signature)
+                    base_value = jnp.where(should_store, reported_value, base_value)
                     base_memory_valid = base_memory_valid | should_store
                 else:
                     def _act_eval(o, h, r):
@@ -950,11 +998,11 @@ def _run_parallel_eval_jit(
             new_returns = jnp.where(episode_ended_prev, returns, returns + rew.sum())
             new_lengths = jnp.where(episode_ended_prev, lengths, lengths + 1)
 
-            new_carry = (state, actor_h, base_memory, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths)
+            new_carry = (state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths)
             return new_carry, (info["chain_gap_dist"], info["chain_progress_pct"])
 
         final_carry, scan_outs = jax.lax.scan(eval_step, init_carry, jnp.arange(max_steps))
-        state_f, _, _, _, succ, delivered, visual, fnd, ret, length = final_carry
+        state_f, _, _, _, _, _, _, succ, delivered, visual, fnd, ret, length = final_carry
         gap_dists, progress_pcts = scan_outs
 
         return ret, length, gap_dists[-1], progress_pcts[-1], succ, fnd, state_f, succ, delivered, visual
@@ -1208,7 +1256,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 "rows": int(diag_map.maze_cell_rows),
                 "w": float(diag_map.width) / int(diag_map.maze_cell_cols),
                 "h": float(diag_map.height) / int(diag_map.maze_cell_rows),
-                "W": np.zeros((int(cfg.network.hidden_dim), int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows)), dtype=np.float32),
+                "W": np.zeros((int(cfg.network.tarmac_sig_dim) + int(cfg.network.tarmac_val_dim), int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows)), dtype=np.float32),
                 "b": np.zeros((int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows),), dtype=np.float32),
             }
 
@@ -1229,11 +1277,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         critic_memory    = critic_memory,
         rngs             = rngs,
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
-        memory_comm_gradient_mode = str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        memory_comm_num_heads = int(cfg.network.get("memory_comm_num_heads", 4)),
-        memory_comm_merge = str(cfg.network.get("memory_comm_merge", "residual")),
-        memory_comm_attention_mode = str(cfg.network.get("memory_comm_attention_mode", "attend_global_learned_query")),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
     )
     trainer = MAPPOTrainer(
         model         = model,
@@ -1258,6 +1305,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         per_agent  = per_agent,
         recurrent  = actor_memory or critic_memory,
         hidden_dim = int(cfg.network.hidden_dim),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
         actor_memory  = actor_memory,
         critic_memory = critic_memory,
     )
@@ -1288,10 +1337,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     states   = reset_v(env_keys)
     print("  Environments initialised ✓")
 
-    actor_h = model.initial_actor_hidden((E,)) if actor_memory else None
-    critic_h = model.initial_critic_hidden((E,)) if critic_memory else None
     use_memory_comm = actor_memory and bool(cfg.network.get("memory_comm_enabled", False))
-    base_memory = jnp.zeros((E, int(cfg.network.hidden_dim)), dtype=jnp.float32) if use_memory_comm else None
+    actor_h = model.initial_actor_hidden((E,)) if actor_memory else None
+    actor_signature = model.initial_actor_signature((E,)) if use_memory_comm else None
+    actor_value = model.initial_actor_value((E,)) if use_memory_comm else None
+    critic_h = model.initial_critic_hidden((E,)) if critic_memory else None
+    base_signature = jnp.zeros((E, int(cfg.network.get("tarmac_sig_dim", 64))), dtype=jnp.float32) if use_memory_comm else None
+    base_value = jnp.zeros((E, int(cfg.network.get("tarmac_val_dim", 128))), dtype=jnp.float32) if use_memory_comm else None
     base_memory_valid = jnp.zeros((E,), dtype=bool) if use_memory_comm else None
     rollout_last_dones = np.zeros(E, dtype=bool)
 
@@ -1444,7 +1496,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── Rollout ───────────────────────────────────────────────────────
             (states, collect_key,
-             last_values, last_dones, actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
+             last_values, last_dones, actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
              comm_summary,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
@@ -1453,7 +1505,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_finder_return, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
-                actor_h, critic_h, rollout_last_dones, base_memory, base_memory_valid,
+                actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
                 track_heatmap_data=track_heatmap_data,
             )
 

@@ -76,11 +76,10 @@ def _load_policy(checkpoint_path: Path, cfg, obs_dim: int, act_dim: int):
         critic_memory=bool(cfg.network.get("critic_memory", False)),
         rngs=nnx.Rngs(0),
         memory_comm_enabled=bool(cfg.network.get("memory_comm_enabled", False)),
-        memory_comm_gradient_mode=str(cfg.network.get("memory_comm_gradient_mode", "rial")),
         memory_comm_every_k_steps=int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        memory_comm_num_heads=int(cfg.network.get("memory_comm_num_heads", 4)),
-        memory_comm_merge=str(cfg.network.get("memory_comm_merge", "residual")),
-        memory_comm_attention_mode=str(cfg.network.get("memory_comm_attention_mode", "attend_global_learned_query")),
+        tarmac_sig_dim=int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim=int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self=bool(cfg.network.get("tarmac_include_self", True)),
     )
     _, empty_state = nnx.split(model)
     restored_state = ocp.Checkpointer(ocp.StandardCheckpointHandler()).restore(
@@ -91,7 +90,7 @@ def _load_policy(checkpoint_path: Path, cfg, obs_dim: int, act_dim: int):
     return model
 
 
-def _policy_actions(model, obs_fn, state, actor_h, base_memory, base_memory_valid, t: int, max_force: float):
+def _policy_actions(model, obs_fn, state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, t: int, max_force: float):
     obs = obs_fn(state)
     if model.actor_memory:
         resets = jnp.logical_not(state.active)
@@ -113,8 +112,8 @@ def _policy_actions(model, obs_fn, state, actor_h, base_memory, base_memory_vali
                 & base_memory_valid
                 & jnp.asarray(step_share)
             )
-            actor_h, raw_actions, _ = model.actor.__call_team__(
-                obs, actor_h, resets, comm_mask, state.active, base_memory, base_mask
+            actor_h, actor_signature, actor_value, raw_actions, _ = model.actor.__call_team__(
+                obs, actor_h, actor_signature, actor_value, resets, comm_mask, state.active, base_signature, base_value, base_mask
             )
             connected_to_base = (
                 state.adj_matrix[:n_eval, n_eval]
@@ -124,15 +123,17 @@ def _policy_actions(model, obs_fn, state, actor_h, base_memory, base_memory_vali
             reporters = state.target_known & connected_to_base & state.active
             first_idx = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
             has_reporter = jnp.any(reporters)
-            reported_memory = actor_h[first_idx]
+            reported_signature = actor_signature[first_idx]
+            reported_value = actor_value[first_idx]
             should_store = has_reporter & ~base_memory_valid
-            base_memory = jnp.where(should_store, reported_memory, base_memory)
+            base_signature = jnp.where(should_store, reported_signature, base_signature)
+            base_value = jnp.where(should_store, reported_value, base_value)
             base_memory_valid = base_memory_valid | should_store
         else:
             actor_h, raw_actions, _ = jax.vmap(lambda o, h, r: model.actor(o, h, r))(obs, actor_h, resets)
     else:
         raw_actions = jax.vmap(lambda o: model.actor(o)[0])(obs)
-    return jnp.tanh(raw_actions) * max_force, actor_h, base_memory, base_memory_valid
+    return jnp.tanh(raw_actions) * max_force, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid
 
 def _maze_helpers(map_def: MapDefinition):
     maze_cols = int(map_def.maze_cell_cols or 1)
@@ -363,7 +364,10 @@ def main():
     obs_fn = None
     model = None
     actor_h = None
-    base_memory = None
+    actor_signature = None
+    actor_value = None
+    base_signature = None
+    base_value = None
     base_memory_valid = jnp.bool_(False)
     if args.action == "policy":
         if checkpoint_path is None:
@@ -379,7 +383,11 @@ def main():
     state = reset(key)
     if model is not None and model.actor_memory:
         actor_h = model.initial_actor_hidden(())
-        base_memory = jnp.zeros((model.hidden_dim,), dtype=jnp.float32)
+        if model.memory_comm_enabled:
+            actor_signature = model.initial_actor_signature(())
+            actor_value = model.initial_actor_value(())
+            base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
+            base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)
     if args.place_agent_at_target:
         state = state.replace(
             pos=state.pos.at[0].set(state.target_pos),
@@ -391,9 +399,9 @@ def main():
     policy_step_jit = None
     if model is not None:
         @jax.jit
-        def policy_step_jit(state, actor_h, base_memory, base_memory_valid, step):
+        def policy_step_jit(state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, step):
             return _policy_actions(
-                model, obs_fn, state, actor_h, base_memory, base_memory_valid, step, float(cfg.env.max_force)
+                model, obs_fn, state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, step, float(cfg.env.max_force)
             )
 
     if args.diagnostics == "all":
@@ -404,8 +412,8 @@ def main():
 
     for step in range(args.steps):
         if args.action == "policy":
-            actions, actor_h, base_memory, base_memory_valid = policy_step_jit(
-                state, actor_h, base_memory, base_memory_valid, step
+            actions, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid = policy_step_jit(
+                state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, step
             )
         elif args.action == "random":
             key, subkey = jax.random.split(key)

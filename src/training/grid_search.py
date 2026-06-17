@@ -402,9 +402,9 @@ def run_benchmarks():
             f"logging.run_name={run_name}",
             f"logging.wandb_group=grid_search_{level}",
             "logging.use_timestamp_postfix=False",
-            f"network.memory_comm_merge={comm_merge}",
-            f"network.memory_comm_attention_mode={attention_mode}",
-            f"network.memory_comm_gradient_mode={gradient_mode}",
+            "network.tarmac_sig_dim=64",
+            "network.tarmac_val_dim=128",
+            "network.tarmac_include_self=True",
         ]
         
         cmd.extend(extra_args)

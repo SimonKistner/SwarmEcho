@@ -136,11 +136,10 @@ class NetworkConfig:
     actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
     memory_comm_enabled: bool = False
-    memory_comm_gradient_mode: str = "rial"  # "rial" | "dial"
     memory_comm_every_k_steps: int = 5
-    memory_comm_num_heads: int = 4
-    memory_comm_merge: str = "residual"  # "residual" | "concat"
-    memory_comm_attention_mode: str = "attend_global_learned_query"
+    tarmac_sig_dim: int = 64
+    tarmac_val_dim: int = 128
+    tarmac_include_self: bool = True
 
 
 @dataclass
@@ -567,27 +566,12 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
-    if str(cfg.network.memory_comm_gradient_mode) not in ("rial", "dial"):
-        raise ValueError("network.memory_comm_gradient_mode must be 'rial' or 'dial'.")
     if int(cfg.network.memory_comm_every_k_steps) < 1:
         raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
-    if int(cfg.network.memory_comm_num_heads) < 1:
-        raise ValueError("network.memory_comm_num_heads must be >= 1.")
-    if int(cfg.network.hidden_dim) % int(cfg.network.memory_comm_num_heads) != 0:
-        raise ValueError("network.hidden_dim must be divisible by network.memory_comm_num_heads.")
-    if str(cfg.network.memory_comm_merge) not in ("residual", "concat"):
-        raise ValueError("network.memory_comm_merge must be 'residual' or 'concat'.")
-    valid_attention_modes = (
-        "attend_global_learned_query",
-        "attend_cur_obs_query",
-        "attend_mem_query",
-        "attend_cur_obs_and_mem_query",
-    )
-    if str(cfg.network.memory_comm_attention_mode) not in valid_attention_modes:
-        raise ValueError(
-            "network.memory_comm_attention_mode must be one of "
-            f"{', '.join(valid_attention_modes)}."
-        )
+    if int(cfg.network.tarmac_sig_dim) < 1:
+        raise ValueError("network.tarmac_sig_dim must be >= 1.")
+    if int(cfg.network.tarmac_val_dim) < 1:
+        raise ValueError("network.tarmac_val_dim must be >= 1.")
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
         num_envs = int(cfg.training.num_envs)
         mb = int(cfg.training.num_minibatches)
