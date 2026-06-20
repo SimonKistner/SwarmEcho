@@ -97,8 +97,10 @@ class RewardConfig:
     chain_reward_system: str = "euclidean"  # "euclidean" | "discrete_finders_path"
     only_reward_chain_from_target: bool = False
     only_shortest_path_chain_reward: bool = False
+    reward_single_shortest_path: bool = True
     only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
     every_reward_global: bool = False     # share every reward/penalty equally across agents
+
 
 
 @dataclass
@@ -118,6 +120,8 @@ class TrainingConfig:
     total_timesteps: int = 50_000_000
     checkpoint_path: Optional[str] = None  # if set, resumes training from this path
     checkpoint_step_offset: Optional[int] = None  # if set, starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
+    ckpt_loading_mode: str = "branch"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
+    resume_update: Optional[bool] = None  # Deprecated legacy parameter (use ckpt_loading_mode instead)
     warn_vram_limit: bool = False
     abort_on_vram_limit: bool = False
     vram_limit_gb: float = 20.0
@@ -172,13 +176,13 @@ class LoggingConfig:
     # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
     obs_log: bool = False
-    memory_diagnostic_probe: bool = True  # Train a linear probe on base memory to predict target cell
+    memory_diagnostic_probe: bool = False  # Train a linear probe on base memory to predict target cell
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
     eval_failed_chain_heatmap: bool = False  # Generate heatmap of target positions for failed chain deliveries from sliding window
-    eval_not_delivered_heatmap: bool = False  # Generate heatmap of target positions not delivered to base from sliding window
-    eval_not_visually_found_heatmap: bool = False  # Generate heatmap of target positions not visually found from sliding window
+    eval_not_delivered_or_visually_found_heatmap: bool = False  # Generate heatmap of target positions not delivered/visually found
+    eval_not_deliv_not_visual_splitt_in_two: bool = False      # If true, split the not-delivered/not-visual heatmap into two separate files
 
     # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
     video_freq: Optional[int] = None # legacy
@@ -210,7 +214,7 @@ class VisualizeConfig:
     vis_color: str = "#03fbff"
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
-    render_conn_matrix: bool = False       # if True, render the connections matrix in the legend
+    render_conn_matrix: bool = True       # if True, render the connections matrix in the legend
     render_finders_path_debug: bool = False  # if True, render the finders path list in the legend when valid
 
 

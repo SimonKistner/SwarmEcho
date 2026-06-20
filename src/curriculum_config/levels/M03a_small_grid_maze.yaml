@@ -7,7 +7,7 @@ env:
   num_agents: 8
   num_targets: 1
   num_bases: 1
-  max_steps: 500
+  max_steps: 800
   visual_radius: 5.0
   max_speed: 4.17   # 10.0 * 5/12
   max_force: 20.83  # 50.0 * 5/12
@@ -21,7 +21,7 @@ env:
   hold_chain_for: 50
   observe_target_vector: false
   observe_base_vector: false
-  terminate_on_target_found: true
+  terminate_on_target_found: false
 
 reward:
   every_reward_global: false
@@ -57,7 +57,7 @@ network:
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
-  memory_comm_every_k_steps: 5
+  memory_comm_every_k_steps: 1
   tarmac_sig_dim: 64
   tarmac_val_dim: 128
   tarmac_include_self: true

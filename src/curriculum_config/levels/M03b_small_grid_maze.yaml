@@ -7,7 +7,7 @@ env:
   num_agents: 8
   num_targets: 1
   num_bases: 1
-  max_steps: 850
+  max_steps: 1000
   visual_radius: 5.0
   max_speed: 4.17   # 10.0 * 5/12
   max_force: 20.83  # 50.0 * 5/12
@@ -33,9 +33,9 @@ reward:
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
-  finder_bonus:  100.0
+  finder_bonus:  50.0
   max_gap_penalty: 5.0      # absolute penalty when gap is at its maximum
-  target_found_bonus: 0.0
+  target_found_bonus: 100.0
   success_bonus: 500.0
 
 training:
@@ -44,6 +44,7 @@ training:
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
+  seed: 14141414
 
   eval_parallel: true
   eval_parallel_envs: 4000
@@ -62,16 +63,15 @@ network:
   tarmac_include_self: true
 
 logging:
-  memory_diagnostic_probe: true
-
   checkpoint_freq: 50
   checkpoint_offset: 0
 
   eval_freq: 50
   eval_offset: 1
+  eval_not_delivered_or_visually_found_heatmap: true
 
   eval_video: true
-  eval_video_freq: 50
+  eval_video_freq: 100
   eval_video_offset: 1
 
 curriculum:

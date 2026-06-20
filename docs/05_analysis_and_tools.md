@@ -25,7 +25,7 @@ The high-throughput evaluation pipeline runs parallel JAX simulation sweeps acro
 
 - **Failed Chain Targets Heatmap (`[timestamp]_failed_chain_targets_heatmap.png`):** Plots red dots for target positions where the shortest-chain relay to the base station could not be completed and held.
 - **Failed Chain Targets CSV (`[timestamp]_failed_target_positions.csv`):** CSV log file containing the coordinates of target spawn failures.
-- **Merged Targets Heatmap (`[timestamp]_merged_targets_heatmap.png`):** Combines two key target-spawner failure metrics onto a single blueprint (if `MERGE_TARGET_FOUND_HEATMAPS = True`):
+- **Merged Targets Heatmap (`[timestamp]_merged_targets_heatmap.png`):** Combines two key target-spawner failure metrics onto a single blueprint by default:
   - **Not Visually Found (Sky Blue BGR `(235, 99, 37)`):** Target coordinates that were never visually seen by any drone in the swarm.
   - **Visually Found, Not Delivered (Dark Blue BGR `(6, 119, 217)`):** Target coordinates that were successfully seen by a drone (and updated in `target_known`), but never successfully routed back to the base.
 - **Top Padded Legend Layout:** All heatmaps utilize a 60px top margin to print title stats and visual color legends, ensuring the blueprint remains un-cluttered.

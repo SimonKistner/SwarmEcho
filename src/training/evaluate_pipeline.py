@@ -56,8 +56,8 @@ CREATE_CSV = True                    # Save coordinates of failed episodes to CS
 CREATE_FAILED_CHAIN_HEATMAP = True   # Render failed targets chain heatmap overlay image
 CREATE_NOT_DELIVERED_HEATMAP = True  # Render heatmap showing target positions as dots when NOT delivered to base
 CREATE_NOT_VISUALLY_FOUND_HEATMAP = True # Render heatmap showing target positions as dots when NOT visually found by any drone
-CREATE_CLUSTER_MAP = True            # Run failure clustering and save colored overlay image
-CREATE_CLUSTER_VIDEOS = True         # Simulate and render rollout videos for cluster representatives
+CREATE_CLUSTER_MAP = False            # Run failure clustering and save colored overlay image
+CREATE_CLUSTER_VIDEOS = False         # Simulate and render rollout videos for cluster representatives
 
 # ==============================================================================
 # Pipeline Configuration Constants

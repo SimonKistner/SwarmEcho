@@ -180,6 +180,30 @@ def _get_shortest_path_distances(adj: np.ndarray, source: int) -> np.ndarray:
                 queue.append(v)
     return dists
 
+
+def _get_single_shortest_path_edges(adj: np.ndarray, source: int, target: int, dists_to_target: np.ndarray) -> set[tuple[int, int]]:
+    edges = set()
+    if source < 0 or target < 0 or dists_to_target[source] >= 999:
+        return edges
+    curr = source
+    M = adj.shape[0]
+    for _ in range(M):
+        if curr == target:
+            break
+        candidates = []
+        for v in np.where(adj[curr])[0]:
+            v = int(v)
+            if dists_to_target[v] == dists_to_target[curr] - 1:
+                candidates.append(v)
+        if not candidates:
+            break
+        nxt = candidates[0]
+        edges.add((curr, nxt))
+        edges.add((nxt, curr))
+        curr = nxt
+    return edges
+
+
 def _drone_col(idx_in_adj: int, base_comp: set, target_comp: set) -> tuple:
     ib = idx_in_adj in base_comp
     it = idx_in_adj in target_comp
@@ -505,9 +529,15 @@ def _draw_frame_cv2(
         full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
     sp_nodes = set()
     if use_shortest_path_visuals and full_chain:
-        for i in range(M):
-            if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
-                sp_nodes.add(i)
+        if bool(rew_cfg.get("reward_single_shortest_path", True)):
+            full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+            for u, v in full_chain_edges:
+                sp_nodes.add(u)
+                sp_nodes.add(v)
+        else:
+            for i in range(M):
+                if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
+                    sp_nodes.add(i)
 
     drone_cols = []
     for i in range(N):
@@ -560,6 +590,12 @@ def _draw_frame_cv2(
     dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
     dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
 
+    reward_single = use_shortest_path_visuals and bool(rew_cfg.get("reward_single_shortest_path", True))
+    if reward_single:
+        full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+        base_tip_edges = _get_single_shortest_path_edges(adj, base_idx, idx_base_tip, dist_from_base_tip)
+        target_tip_edges = _get_single_shortest_path_edges(adj, target_idx, idx_target_tip, dist_from_target_tip)
+
     for i in range(M):
         for j in range(i + 1, M):
             if not adj[i, j]: continue
@@ -571,8 +607,11 @@ def _draw_frame_cv2(
 
             if use_shortest_path_visuals and full_chain:
                 # On full shortest path
-                if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
-                    is_both = True
+                if reward_single:
+                    is_both = (i, j) in full_chain_edges
+                else:
+                    if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
+                        is_both = True
 
                 if is_both: ec, lw = _C["both_chain"], 2
                 else:
@@ -588,12 +627,18 @@ def _draw_frame_cv2(
                 else: ec, lw = _C["link_grey"], 1
 
                 if ib and jb and idx_base_tip >= 0:
-                    if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
-                        on_base_sp = True
+                    if reward_single:
+                        on_base_sp = (i, j) in base_tip_edges
+                    else:
+                        if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
+                            on_base_sp = True
 
                 if it and jt and idx_target_tip >= 0:
-                    if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
-                        on_tgt_sp = True
+                    if reward_single:
+                        on_tgt_sp = (i, j) in target_tip_edges
+                    else:
+                        if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
+                            on_tgt_sp = True
 
             # Draw the subtle "glow" for shortest paths
             if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):

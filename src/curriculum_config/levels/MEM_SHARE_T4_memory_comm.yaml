@@ -63,5 +63,4 @@ logging:
   eval_video: true
   obs_log: false
   eval_failed_chain_heatmap: false
-  eval_not_delivered_heatmap: false
-  eval_not_visually_found_heatmap: false
+  eval_not_delivered_or_visually_found_heatmap: false

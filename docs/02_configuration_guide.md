@@ -35,8 +35,8 @@ Under the `logging` domain, the following parameters control mid-training and ev
 |---|---:|---|
 | `eval_video` | `true` | Renders a rollout video for evaluation episodes. |
 | `eval_failed_chain_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where the shortest chain was not successfully completed/held. |
-| `eval_not_delivered_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not successfully delivered. |
-| `eval_not_visually_found_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not visually found by any drone. |
+| `eval_not_delivered_or_visually_found_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not successfully delivered or not visually found. |
+| `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one merged heatmap. |
 
 These heatmaps dynamically use the actual count of completed episodes in the sliding window as the denominator. Heatmap and video filenames are prefix-synchronized using a shared timestamp prefix (`YYYY_MM_DD_hh_mm`).
 
@@ -55,7 +55,7 @@ The `visualize` domain defines the parameters for both evaluation videos and map
 
 Under selective rendering (`selective_eval_render: true`), the pipeline runs up to `eval_max_compute_episodes` rollout environments but only exports videos for `eval_render_failures` failed runs and `eval_render_successes` successful runs. Both can be set to `0` to completely skip video rendering while still computing performance statistics.
 
-Additionally, inside `src/training/evaluate_pipeline.py`, the constant `MERGE_TARGET_FOUND_HEATMAPS = True` merges "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target coordinate groups into a single combined heatmap `_merged_targets_heatmap.png`, drawing title statistics and legends in a clean 60px top padding.
+Additionally, when `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline merges "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target coordinate groups into a single combined heatmap `_merged_targets_heatmap.png` by default (unless `eval_not_deliv_not_visual_splitt_in_two = True`), drawing title statistics and legends in a clean 60px top padding.
 
 ## 2. Curriculum Overrides & Level Structure
 The training system scales difficulty sequentially via the `levels/` directory.

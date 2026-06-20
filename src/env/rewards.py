@@ -118,6 +118,8 @@ def make_reward_fn(cfg: DictConfig):
         and not only_explor_individual
         and not every_reward_global
     )
+    reward_single_shortest_path = bool(cfg.reward.get("reward_single_shortest_path", True))
+
     chain_rewards_global = only_explor_individual or every_reward_global
     maze_cols = 1
     maze_rows = 1
@@ -169,15 +171,38 @@ def make_reward_fn(cfg: DictConfig):
         n_steps = math.ceil(math.log2(V))
         H_final, _ = jax.lax.scan(_min_plus_step, H, None, length=n_steps)
 
+        def _trace_single_path(start_node, dest_node):
+            def scan_fn(u, _):
+                is_valid = (H[u, :] == 1) & (H_final[:, dest_node] == H_final[u, dest_node] - 1)
+                any_valid = jnp.any(is_valid)
+                next_node = jnp.where(
+                    u == dest_node,
+                    dest_node,
+                    jnp.where(any_valid, jnp.argmax(is_valid), dest_node)
+                )
+                return next_node, u
+
+            _, path_nodes = jax.lax.scan(scan_fn, start_node, None, length=V)
+            agents = jnp.arange(N)
+            return jnp.any(path_nodes == agents[:, None], axis=-1)
+
         # Safe gating. Only check path equality if the chain actually exists.
         is_on_base_path = jnp.where(
             has_b_chain,
-            (H_final[N, :N] + H_final[:N, idx_b] == H_final[N, idx_b]),
+            jnp.where(
+                reward_single_shortest_path,
+                _trace_single_path(N, idx_b),
+                (H_final[N, :N] + H_final[:N, idx_b] == H_final[N, idx_b])
+            ),
             False
         )
         is_on_tgt_path = jnp.where(
             has_t_chain,
-            (H_final[N+1, :N] + H_final[:N, idx_t] == H_final[N+1, idx_t]),
+            jnp.where(
+                reward_single_shortest_path,
+                _trace_single_path(N+1, idx_t),
+                (H_final[N+1, :N] + H_final[:N, idx_t] == H_final[N+1, idx_t])
+            ),
             False
         )
 

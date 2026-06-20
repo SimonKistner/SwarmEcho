@@ -123,6 +123,24 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
     return run
 
 
+def _save_checkpoint_history(ckpt_path: Path, run_name: str, update: int, E: int, T: int, prior_history: list):
+    try:
+        import json
+        current_session_steps = update * E * T
+        updated_history = list(prior_history)
+        updated_history.append({"run_name": run_name, "steps": current_session_steps})
+        total_steps = sum(x["steps"] for x in updated_history)
+        
+        history_file = ckpt_path / "step_history.json"
+        with open(history_file, "w") as f:
+            json.dump({
+                "total_steps": total_steps,
+                "history": updated_history
+            }, f, indent=2)
+    except Exception as e:
+        print(f"  [checkpoint-history] Failed to save step_history.json to {ckpt_path}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Resolve step offset from checkpoint path
 # ---------------------------------------------------------------------------
@@ -378,7 +396,6 @@ def _collect_rollout_mappo(
     base_signature = None,
     base_value = None,
     base_memory_valid = None,
-    track_heatmap_data: bool = False,
 ) -> tuple:
     """
     Collect T steps across all envs, storing normalised actions in the buffer.
@@ -423,10 +440,6 @@ def _collect_rollout_mappo(
     completed_gaps     = []
     completed_prog_pcts = []
     completed_finder_returns = []
-    completed_target_pos = []
-    completed_target_success = []
-    completed_target_delivered = []
-    completed_target_visually_found = []
     completed_diag_memories = []
     completed_diag_targets = []
     completed_diag_valids = []
@@ -565,15 +578,6 @@ def _collect_rollout_mappo(
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
 
-            # Append terminal target data
-            if track_heatmap_data:
-                t_pos = np.array(info["terminal_target_pos"][e])
-                if t_pos.ndim == 2:
-                    t_pos = t_pos[0]
-                completed_target_pos.append(t_pos.tolist())
-                completed_target_success.append(bool(ep_success_accum[e] > 0.5))
-                completed_target_delivered.append(bool(info["terminal_delivered"][e]))
-                completed_target_visually_found.append(bool(info["terminal_visually_found"][e]))
             is_diag_valid = (
                 model.actor_memory and model.memory_comm_enabled
                 and base_signature is not None
@@ -670,7 +674,6 @@ def _collect_rollout_mappo(
         completed_r_coverage, completed_r_gap, completed_r_coll,
         completed_r_prox, completed_r_found, completed_r_succ,
         completed_coverage,
-        completed_target_pos, completed_target_success, completed_target_delivered, completed_target_visually_found,
         completed_finder_returns,
         np.array(completed_diag_memories, dtype=np.float32),
         np.array(completed_diag_targets, dtype=np.float32),
@@ -1377,6 +1380,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     OmegaConf.set_readonly(cfg, False)
     cfg.env.box_width  = float(resolved_W)
     cfg.env.box_height = float(resolved_H)
+
+    # Auto-disable evaluation target heatmaps if parallel evaluation is disabled
+    if not bool(cfg.training.get("eval_parallel", False)):
+        if bool(cfg.logging.get("eval_failed_chain_heatmap", False)) or bool(cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False)):
+            print("\n  ⚠️  [WARNING] training.eval_parallel is False. Heatmap generation requires parallel evaluation.")
+            print("               Automatically setting logging.eval_failed_chain_heatmap and logging.eval_not_delivered_or_visually_found_heatmap to False.\n")
+            cfg.logging.eval_failed_chain_heatmap = False
+            cfg.logging.eval_not_delivered_or_visually_found_heatmap = False
+
     OmegaConf.set_readonly(cfg, True)
 
     OmegaConf.save(cfg, run_dir / "config.yaml")
@@ -1448,12 +1460,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_prog_pct = deque(maxlen=E)
     window_finder_return = deque(maxlen=E)
 
-    # Sliding window for evaluation heatmaps
-    window_target_pos = deque(maxlen=E)
-    window_target_success = deque(maxlen=E)
-    window_target_delivered = deque(maxlen=E)
-    window_target_visually_found = deque(maxlen=E)
-
     window_r_cov   = deque(maxlen=E)
     window_r_gap   = deque(maxlen=E)
     window_r_coll  = deque(maxlen=E)
@@ -1466,28 +1472,88 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     completed_eps_count = 0
 
-    track_heatmap_data = bool(
-        cfg.logging.get("eval_failed_chain_heatmap", False) or
-        cfg.logging.get("eval_not_delivered_heatmap", False) or
-        cfg.logging.get("eval_not_visually_found_heatmap", False)
-    )
-
     start_update = 0
+    loading_mode = cfg.training.get("ckpt_loading_mode", "branch").lower()
+    # Backward compatibility fallback
+    if cfg.training.get("resume_update", None) is not None:
+        loading_mode = "resume" if bool(cfg.training.resume_update) else "branch"
+
+    loaded_history = []
+    total_checkpoint_steps = 0
+    prior_history = []
+    prior_offset = 0
+
     if cfg.training.checkpoint_path:
+        checkpoint_path = Path(str(cfg.training.checkpoint_path).replace("\\", "/")).absolute()
+        
+        # Determine start_update from checkpoint name if resuming
         try:
             import re
-            path_name = Path(str(cfg.training.checkpoint_path).replace("\\", "/")).name
+            path_name = checkpoint_path.name
             match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
             if match:
-                start_update = int(match.group(1))
-                print(f"  [resumption] Resuming from update {start_update} (step {start_update * E * T:,})")
+                if loading_mode == "resume":
+                    start_update = int(match.group(1))
+                    print(f"  [resumption] Resuming from update {start_update} (step {start_update * E * T:,})")
+                else:
+                    print(f"  [checkpoint-load] Loaded weights from {path_name}, but training will start at update 0 (loading_mode=branch)")
         except Exception as e:
             print(f"  [resumption] Failed to parse starting update from checkpoint path: {e}")
 
+        # Load history
+        history_file = checkpoint_path / "step_history.json"
+        if history_file.exists():
+            try:
+                import json
+                with open(history_file, "r") as f:
+                    hist_data = json.load(f)
+                loaded_history = hist_data.get("history", [])
+                total_checkpoint_steps = hist_data.get("total_steps", 0)
+                print(f"  [checkpoint-history] Loaded history from {history_file.name}. Total steps: {total_checkpoint_steps:,}")
+            except Exception as e:
+                print(f"  [checkpoint-history] Failed to load step_history.json: {e}")
+                
+        if not loaded_history or total_checkpoint_steps == 0:
+            # Fallback to name parsing if no history file exists
+            try:
+                import re
+                path_name = checkpoint_path.name
+                match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
+                if match:
+                    val = int(match.group(1))
+                    total_checkpoint_steps = val * E * T
+                elif path_name.isdigit():
+                    val = int(path_name)
+                    total_checkpoint_steps = val * E * T if val < 100000 else val
+                
+                if total_checkpoint_steps > 0:
+                    parent_run_name = checkpoint_path.parents[1].name
+                    loaded_history = [{"run_name": parent_run_name, "steps": total_checkpoint_steps}]
+                    print(f"  [checkpoint-history] Reconstructed history from checkpoint path '{path_name}'. Total steps: {total_checkpoint_steps:,}")
+            except Exception as e:
+                print(f"  [checkpoint-history] Failed to reconstruct history: {e}")
+
+        # Determine prior_history and prior_offset
+        if loading_mode == "resume" and start_update > 0:
+            if loaded_history and loaded_history[-1]["run_name"] == run_name:
+                prior_history = loaded_history[:-1]
+            else:
+                prior_history = loaded_history[:-1] if len(loaded_history) > 0 else []
+            prior_offset = max(0, total_checkpoint_steps - start_update * E * T)
+        else:
+            prior_history = loaded_history
+            prior_offset = total_checkpoint_steps
+
+    # Manual offset override
+    manual_offset = cfg.training.get("checkpoint_step_offset", None)
+    if manual_offset is not None:
+        step_offset = int(manual_offset)
+        print(f"  [ckpt] Using manual checkpoint_step_offset override: {step_offset:,}")
+    else:
+        step_offset = prior_offset
+        print(f"  [ckpt] Auto-detected cumulative step offset: {step_offset:,}")
+
     t_start = time.perf_counter()
-    step_offset = _get_checkpoint_step_offset(cfg, E, T)
-    if start_update > 0 and step_offset == start_update * E * T:
-        step_offset = 0
 
     try:
         for update in range(start_update + 1, n_updates + 1):
@@ -1501,12 +1567,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
-             raw_target_pos, raw_target_success, raw_target_delivered, raw_target_visually_found,
              raw_finder_return, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
-                track_heatmap_data=track_heatmap_data,
             )
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
@@ -1523,11 +1587,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_gap.extend(raw_gap)
                 window_prog_pct.extend(raw_prog_pct)
                 window_finder_return.extend(raw_finder_return)
-
-                window_target_pos.extend(raw_target_pos)
-                window_target_success.extend(raw_target_success)
-                window_target_delivered.extend(raw_target_delivered)
-                window_target_visually_found.extend(raw_target_visually_found)
 
                 window_r_cov.extend(raw_r_cov)
                 window_r_gap.extend(raw_r_gap)
@@ -1586,6 +1645,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         _, state_dict = nnx.split(model)
                         checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                         checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                        _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
                         print(f"  [ckpt-early] saved -> {early_ckpt}")
                         early_ckpt_str = str(early_ckpt)
                     else:
@@ -1622,7 +1682,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             ppo_stats = trainer.update(mbs)
 
             elapsed = time.perf_counter() - t_start
-            sps     = (steps_done - start_update * E * T) / max(1e-6, elapsed)
+            sps     = ((update - start_update) * E * T) / max(1e-6, elapsed)
 
             # ── Stdout ───────────────────────────────────────────────────────
             if update % log_every == 0 or update == start_update + 1:
@@ -1719,12 +1779,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             # ── Mid-training eval + single video ─────────────────────────────
             if (is_eval_step or is_video_step) and update != n_updates:
                 eval_timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
+                heatmaps_generated = False
 
                 if bool(cfg.training.get("eval_parallel", False)):
                     if is_eval_step:
                         master_key, eval_key = jax.random.split(master_key)
                         (rets, lengths, gaps, progs, succs, fnds,
-                         final_state, _, _, _) = _evaluate_parallel(
+                         final_state, final_succs, final_delivered, final_visual) = _evaluate_parallel(
                             model, reset, env_step, compute_obs, compute_reward,
                             cfg, eval_key, num_envs=int(cfg.training.eval_parallel_envs),
                         )
@@ -1774,13 +1835,127 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 "eval/map_coverage_pct":    eval_cov * 100.0,
                             }, step=steps_done)
 
+                        # Generate mid-run evaluation heatmaps using parallel evaluation results
+                        generate_any_heatmap = bool(
+                            cfg.logging.get("eval_failed_chain_heatmap", False) or
+                            cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False)
+                        )
+                        if generate_any_heatmap:
+                            try:
+                                from training.evaluate_pipeline import (
+                                    load_map_data,
+                                    render_and_save_failed_chain_heatmap,
+                                    render_and_save_not_found_heatmap,
+                                    render_and_save_merged_heatmap,
+                                )
+                                _, map_data, map_def = load_map_data(cfg)
+                                
+                                target_pos_arr = np.asarray(final_state.target_pos)
+                                target_success_arr = np.asarray(final_succs)
+                                target_delivered_arr = np.asarray(final_delivered)
+                                target_visually_found_arr = np.asarray(final_visual)
+                                
+                                n_completed = len(target_success_arr)
+                                run_timestamp = f"{eval_timestamp}_update_{update:06d}"
+                                
+                                # Create subfolders for heatmaps if not exist
+                                chain_heatmaps_dir = train_video_dir / "chain_heatmaps"
+                                found_heatmaps_dir = train_video_dir / "found_heatmaps"
+                                chain_heatmaps_dir.mkdir(parents=True, exist_ok=True)
+                                found_heatmaps_dir.mkdir(parents=True, exist_ok=True)
+
+                                # 1. Failed Chain Heatmap
+                                if cfg.logging.get("eval_failed_chain_heatmap", False):
+                                    failed_positions = target_pos_arr[~target_success_arr]
+                                    success_rate = (np.sum(target_success_arr) / n_completed * 100.0)
+                                    num_fail = len(failed_positions)
+                                    _ = render_and_save_failed_chain_heatmap(
+                                        failed_positions=failed_positions,
+                                        map_data=map_data,
+                                        map_def=map_def,
+                                        success_rate=success_rate,
+                                        num_fail=num_fail,
+                                        run_dir=run_dir,
+                                        video_dir=chain_heatmaps_dir,
+                                        run_timestamp=run_timestamp,
+                                        save_csv=False,
+                                        save_png=True,
+                                        total_episodes=n_completed
+                                    )
+                                    
+                                # 2 & 3. Merged or Separate Target Found/Delivered Heatmaps
+                                if cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False):
+                                    split_in_two = bool(cfg.logging.get("eval_not_deliv_not_visual_splitt_in_two", False))
+                                    if not split_in_two:
+                                        not_delivered_positions = target_pos_arr[~target_delivered_arr]
+                                        delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
+                                        num_not_delivered = len(not_delivered_positions)
+
+                                        not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
+                                        visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
+                                        num_not_visually_found = len(not_visually_found_positions)
+
+                                        render_and_save_merged_heatmap(
+                                            not_delivered_positions=not_delivered_positions,
+                                            not_visually_found_positions=not_visually_found_positions,
+                                            map_data=map_data,
+                                            map_def=map_def,
+                                            delivered_rate=delivered_rate,
+                                            visually_found_rate=visually_found_rate,
+                                            num_not_delivered=num_not_delivered,
+                                            num_not_visually_found=num_not_visually_found,
+                                            run_dir=run_dir,
+                                            video_dir=found_heatmaps_dir,
+                                            run_timestamp=run_timestamp,
+                                            total_episodes=n_completed
+                                        )
+                                    else:
+                                        # 2. Delivered-to-base Heatmap
+                                        not_delivered_positions = target_pos_arr[~target_delivered_arr]
+                                        delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
+                                        num_not_delivered = len(not_delivered_positions)
+                                        render_and_save_not_found_heatmap(
+                                            not_found_positions=not_delivered_positions,
+                                            map_data=map_data,
+                                            map_def=map_def,
+                                            found_rate=delivered_rate,
+                                            num_not_found=num_not_delivered,
+                                            run_dir=run_dir,
+                                            video_dir=found_heatmaps_dir,
+                                            run_timestamp=run_timestamp,
+                                            filename_prefix="not_delivered_targets_heatmap",
+                                            label="Not Delivered",
+                                            total_episodes=n_completed
+                                        )
+                                        
+                                        # 3. Visually Found Heatmap
+                                        not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
+                                        visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
+                                        num_not_visually_found = len(not_visually_found_positions)
+                                        render_and_save_not_found_heatmap(
+                                            not_found_positions=not_visually_found_positions,
+                                            map_data=map_data,
+                                            map_def=map_def,
+                                            found_rate=visually_found_rate,
+                                            num_not_found=num_not_visually_found,
+                                            run_dir=run_dir,
+                                            video_dir=found_heatmaps_dir,
+                                            run_timestamp=run_timestamp,
+                                            filename_prefix="not_visually_found_targets_heatmap",
+                                            label="Not Visually Found",
+                                            total_episodes=n_completed
+                                        )
+                                heatmaps_generated = True
+                            except Exception as heatmap_err:
+                                print(f"  [heatmap-error] Failed to render evaluation heatmaps: {heatmap_err}")
+
                         # ── Free GPU memory from parallel eval ──────────────
                         # The vmapped eval returns full EnvState for all envs
                         # plus the JIT-cached XLA executable.  Both consume
                         # significant GPU memory that the PPO backward pass
                         # needs.  Delete result arrays immediately and clear
                         # the XLA cache to prevent late OOM.
-                        del rets, lengths, gaps, progs, succs, fnds, final_state
+                        del rets, lengths, gaps, progs, succs, fnds, final_state, final_succs, final_delivered, final_visual
                         gc.collect()
                         jax.clear_caches()
                         jax.block_until_ready(jnp.asarray(0, dtype=jnp.int32))
@@ -1804,6 +1979,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 _, state_dict = nnx.split(model)
                                 checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                                 checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
                                 print(f"  [ckpt-early] saved -> {early_ckpt}")
                                 early_ckpt_str = str(early_ckpt)
 
@@ -1851,6 +2027,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                     _, state_dict = nnx.split(model)
                                     checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                                     checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                    _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
                                     print(f"  [ckpt-early] saved -> {early_ckpt}")
                                     early_ckpt_str = str(early_ckpt)
 
@@ -1954,6 +2131,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         _, state_dict = nnx.split(model)
                                         checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                                         checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                                        _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
                                         print(f"  [ckpt-early] saved -> {early_ckpt}")
                                         early_ckpt_str = str(early_ckpt)
 
@@ -1979,117 +2157,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         time.sleep(1.0)
                                     return early_ckpt_str
 
-                # Generate mid-run evaluation heatmaps if toggled in LoggingConfig
-                generate_any_heatmap = bool(
-                    cfg.logging.get("eval_failed_chain_heatmap", False) or
-                    cfg.logging.get("eval_not_delivered_heatmap", False) or
-                    cfg.logging.get("eval_not_visually_found_heatmap", False)
-                )
 
-                if generate_any_heatmap and len(window_target_success) > 0:
-                    try:
-                        # Load map data once (locally imported to prevent circular dependencies)
-                        from training.evaluate_pipeline import (
-                            load_map_data,
-                            render_and_save_failed_chain_heatmap,
-                            render_and_save_not_found_heatmap,
-                            render_and_save_merged_heatmap,
-                            MERGE_TARGET_FOUND_HEATMAPS
-                        )
-                        _, map_data, map_def = load_map_data(cfg)
-                        
-                        target_pos_arr = np.array(window_target_pos)
-                        target_success_arr = np.array(window_target_success)
-                        target_delivered_arr = np.array(window_target_delivered)
-                        target_visually_found_arr = np.array(window_target_visually_found)
-                        
-                        n_completed = len(window_target_success)
-                        run_timestamp = f"{eval_timestamp}_update_{update:06d}"
-                        
-                        # 1. Failed Chain Heatmap
-                        if cfg.logging.get("eval_failed_chain_heatmap", False):
-                            failed_positions = target_pos_arr[~target_success_arr]
-                            success_rate = (np.sum(target_success_arr) / n_completed * 100.0)
-                            num_fail = len(failed_positions)
-                            _ = render_and_save_failed_chain_heatmap(
-                                failed_positions=failed_positions,
-                                map_data=map_data,
-                                map_def=map_def,
-                                success_rate=success_rate,
-                                num_fail=num_fail,
-                                run_dir=run_dir,
-                                video_dir=train_video_dir,
-                                run_timestamp=run_timestamp,
-                                save_csv=False,
-                                save_png=True,
-                                total_episodes=n_completed
-                            )
-                            
-                        # 2 & 3. Merged or Separate Target Found/Delivered Heatmaps
-                        if MERGE_TARGET_FOUND_HEATMAPS:
-                            if cfg.logging.get("eval_not_delivered_heatmap", False) or cfg.logging.get("eval_not_visually_found_heatmap", False):
-                                not_delivered_positions = target_pos_arr[~target_delivered_arr]
-                                delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
-                                num_not_delivered = len(not_delivered_positions)
-
-                                not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
-                                visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
-                                num_not_visually_found = len(not_visually_found_positions)
-
-                                render_and_save_merged_heatmap(
-                                    not_delivered_positions=not_delivered_positions,
-                                    not_visually_found_positions=not_visually_found_positions,
-                                    map_data=map_data,
-                                    map_def=map_def,
-                                    delivered_rate=delivered_rate,
-                                    visually_found_rate=visually_found_rate,
-                                    num_not_delivered=num_not_delivered,
-                                    num_not_visually_found=num_not_visually_found,
-                                    run_dir=run_dir,
-                                    video_dir=train_video_dir,
-                                    run_timestamp=run_timestamp,
-                                    total_episodes=n_completed
-                                )
-                        else:
-                            # 2. Delivered-to-base Heatmap
-                            if cfg.logging.get("eval_not_delivered_heatmap", False):
-                                not_delivered_positions = target_pos_arr[~target_delivered_arr]
-                                delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
-                                num_not_delivered = len(not_delivered_positions)
-                                render_and_save_not_found_heatmap(
-                                    not_found_positions=not_delivered_positions,
-                                    map_data=map_data,
-                                    map_def=map_def,
-                                    found_rate=delivered_rate,
-                                    num_not_found=num_not_delivered,
-                                    run_dir=run_dir,
-                                    video_dir=train_video_dir,
-                                    run_timestamp=run_timestamp,
-                                    filename_prefix="not_delivered_targets_heatmap",
-                                    label="Not Delivered",
-                                    total_episodes=n_completed
-                                )
-                                
-                            # 3. Visually Found Heatmap
-                            if cfg.logging.get("eval_not_visually_found_heatmap", False):
-                                not_visually_found_positions = target_pos_arr[~target_visually_found_arr]
-                                visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
-                                num_not_visually_found = len(not_visually_found_positions)
-                                render_and_save_not_found_heatmap(
-                                    not_found_positions=not_visually_found_positions,
-                                    map_data=map_data,
-                                    map_def=map_def,
-                                    found_rate=visually_found_rate,
-                                    num_not_found=num_not_visually_found,
-                                    run_dir=run_dir,
-                                    video_dir=train_video_dir,
-                                    run_timestamp=run_timestamp,
-                                    filename_prefix="not_visually_found_targets_heatmap",
-                                    label="Not Visually Found",
-                                    total_episodes=n_completed
-                                )
-                    except Exception as heatmap_err:
-                        print(f"  [heatmap-error] Failed to render evaluation heatmaps: {heatmap_err}")
 
                 # TODO: Mid-training eval W&B metrics are based on a single episode and carry
                 #       little statistical weight. Replace with a proper multi-episode test
@@ -2142,6 +2210,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 _, state_dict = nnx.split(model)
                 checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
                 checkpointer.save(str(ckpt_path), args=ocp.args.StandardSave(state_dict))
+                _save_checkpoint_history(ckpt_path, run_name, update, E, T, prior_history)
                 print(f"  [ckpt] saved -> {ckpt_path}")
 
         total_time = time.perf_counter() - t_start
@@ -2157,6 +2226,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             _, state_dict = nnx.split(model)
             checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
             checkpointer.save(str(final_ckpt), args=ocp.args.StandardSave(state_dict))
+            _save_checkpoint_history(final_ckpt, run_name, n_updates, E, T, prior_history)
             print(f"  [ckpt-final] saved -> {final_ckpt}")
             return str(final_ckpt)
 

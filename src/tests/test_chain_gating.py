@@ -161,5 +161,53 @@ def run_test():
     else:
         print("\n  [FAIL] Redundant drone still receiving chain rewards.")
 
+    # --------------------------------------------------------------------------
+    print_header("SCENARIO 4: Single Shortest Path Tiebreaker")
+    # --------------------------------------------------------------------------
+    # Base (0, 50). Target (200, 50).
+    # Path A: Base -> D0 (60, 40) -> D1 (190, 40) -> Target
+    # Path B: Base -> D2 (60, 60) -> D3 (190, 60) -> Target
+    cfg.env.visual_radius = 15.0
+    cfg.env.comm_radius = 131.0
+    cfg.env.comm_radius_base = 70.0
+
+    pos_ties = jnp.array([
+        [60.0, 40.0],  # D0
+        [190.0, 40.0], # D1
+        [60.0, 60.0],  # D2
+        [190.0, 60.0], # D3
+    ])
+
+    state_s4 = state.replace(
+        pos=pos_ties,
+        target_known=jnp.array([True, True, True, True])
+    )
+    state_s4_next = env_step(state_s4, jnp.zeros((4, 2)))
+
+    # Test with reward_single_shortest_path = False
+    cfg.reward.only_shortest_path_chain_reward = True
+    cfg.reward.reward_single_shortest_path = False
+    reward_fn_multi = make_reward_fn(cfg)
+    _, info_multi = reward_fn_multi(state_s4, state_s4_next, jnp.bool_(False))
+    is_contrib_multi = info_multi["is_contributing"]
+
+    # Test with reward_single_shortest_path = True
+    cfg.reward.reward_single_shortest_path = True
+    reward_fn_single = make_reward_fn(cfg)
+    _, info_single = reward_fn_single(state_s4, state_s4_next, jnp.bool_(False))
+    is_contrib_single = info_single["is_contributing"]
+
+    print(f"  Multi-path Contributing masks : {is_contrib_multi}")
+    print(f"  Single-path Contributing masks: {is_contrib_single}")
+
+    expected_multi = jnp.array([True, True, True, True])
+    expected_single = jnp.array([True, True, False, False])
+
+    if jnp.array_equal(is_contrib_multi, expected_multi) and jnp.array_equal(is_contrib_single, expected_single):
+        print("\n  [PASS] Single shortest path tie-breaker correctly chooses Path A and rejects Path B!")
+    else:
+        print("\n  [FAIL] Shortest path selection logic mismatch.")
+
+
 if __name__ == "__main__":
     run_test()
