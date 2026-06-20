@@ -38,10 +38,10 @@ update index.
 Run organisation
 -----------------
     outputs/{run_name}_{timestamp}/
-         checkpoints/ckpt_{update:06d}/
-         videos/
-             train/   ← mid-training eval videos and heatmaps (every eval_freq updates)
-             eval/    ← final-eval videos (end of training or early exit)
+         checkpoints/ckpt_{update:06d}/  ← Orbax-owned, left unchanged
+         artifacts/
+             train/   ← mid-training eval videos, heatmaps, point data, manifests
+             eval/    ← manual/checkpoint-scoped evaluation artifacts
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ from models.mappo import MAPPOModel
 from training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from training.mappo_trainer import MAPPOTrainer
 from training.video_worker import render_eval_video
+from training.artifacts import artifact_suffix, train_artifact_root
 from visualize.renderer import render_video
 
 
@@ -1369,12 +1370,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     log_root = Path(cfg.logging.get("log_dir", "outputs")).absolute()
     run_dir  = log_root / run_name
-    ckpt_dir       = run_dir / "checkpoints"
-    train_video_dir = run_dir / "videos" / "train"   # mid-training evals
-    eval_video_dir  = run_dir / "videos" / "eval"    # final / early-exit evals
+    ckpt_dir = run_dir / "checkpoints"
+    train_artifacts = train_artifact_root(run_dir)
+    train_video_dir = train_artifacts / "vids"
+    train_data_dir = train_artifacts / "data"
+    train_manifest_dir = train_artifacts / "manifests"
+    eval_video_dir = run_dir / "artifacts" / "eval" / "early" / "vids"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    train_video_dir.mkdir(parents=True, exist_ok=True)
-    eval_video_dir.mkdir(parents=True, exist_ok=True)
 
     # Update config with resolved world dimensions for the snapshot
     OmegaConf.set_readonly(cfg, False)
@@ -1775,9 +1777,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset
             is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0) and update > eval_video_offset)
+            if update == n_updates:
+                # Run the same train-eval artifact path one final time instead of
+                # using the legacy special final eval renderer/output folder.
+                is_eval_step = True
+                is_video_step = bool(eval_video)
 
-            # ── Mid-training eval + single video ─────────────────────────────
-            if (is_eval_step or is_video_step) and update != n_updates:
+            # ── Training eval + optional single video ─────────────────────────
+            if is_eval_step or is_video_step:
                 eval_timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
                 heatmaps_generated = False
 
@@ -1846,7 +1853,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                     load_map_data,
                                     render_and_save_failed_chain_heatmap,
                                     render_and_save_not_found_heatmap,
-                                    render_and_save_merged_heatmap,
+                                    render_and_save_found_and_delivered_heatmap,
                                 )
                                 _, map_data, map_def = load_map_data(cfg)
                                 
@@ -1856,13 +1863,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 target_visually_found_arr = np.asarray(final_visual)
                                 
                                 n_completed = len(target_success_arr)
-                                run_timestamp = f"{eval_timestamp}_update_{update:06d}"
+                                run_timestamp = artifact_suffix(update, steps_done)
                                 
                                 # Create subfolders for heatmaps if not exist
-                                chain_heatmaps_dir = train_video_dir / "chain_heatmaps"
-                                found_heatmaps_dir = train_video_dir / "found_heatmaps"
-                                chain_heatmaps_dir.mkdir(parents=True, exist_ok=True)
-                                found_heatmaps_dir.mkdir(parents=True, exist_ok=True)
+                                chain_heatmaps_dir = train_artifacts / "chain_heatmaps"
+                                found_heatmaps_dir = train_artifacts / "found_heatmaps"
 
                                 # 1. Failed Chain Heatmap
                                 if cfg.logging.get("eval_failed_chain_heatmap", False):
@@ -1878,12 +1883,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         run_dir=run_dir,
                                         video_dir=chain_heatmaps_dir,
                                         run_timestamp=run_timestamp,
-                                        save_csv=False,
+                                        save_csv=True,
                                         save_png=True,
-                                        total_episodes=n_completed
+                                        total_episodes=n_completed,
+                                        data_dir=train_data_dir,
+                                        manifest_dir=train_manifest_dir,
+                                        artifact_stem=f"failed_chain_{run_timestamp}"
                                     )
                                     
-                                # 2 & 3. Merged or Separate Target Found/Delivered Heatmaps
+                                # 2 & 3. Combined or Separate Target Found/Delivered Heatmaps
                                 if cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False):
                                     split_in_two = bool(cfg.logging.get("eval_not_deliv_not_visual_splitt_in_two", False))
                                     if not split_in_two:
@@ -1895,7 +1903,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         visually_found_rate = (np.sum(target_visually_found_arr) / n_completed * 100.0)
                                         num_not_visually_found = len(not_visually_found_positions)
 
-                                        render_and_save_merged_heatmap(
+                                        render_and_save_found_and_delivered_heatmap(
                                             not_delivered_positions=not_delivered_positions,
                                             not_visually_found_positions=not_visually_found_positions,
                                             map_data=map_data,
@@ -1907,7 +1915,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                             run_dir=run_dir,
                                             video_dir=found_heatmaps_dir,
                                             run_timestamp=run_timestamp,
-                                            total_episodes=n_completed
+                                            total_episodes=n_completed,
+                                            data_dir=train_data_dir,
+                                            manifest_dir=train_manifest_dir,
+                                            artifact_stem=f"found_and_delivered_{run_timestamp}"
                                         )
                                     else:
                                         # 2. Delivered-to-base Heatmap
@@ -1923,9 +1934,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                             run_dir=run_dir,
                                             video_dir=found_heatmaps_dir,
                                             run_timestamp=run_timestamp,
-                                            filename_prefix="not_delivered_targets_heatmap",
+                                            filename_prefix="delivered",
                                             label="Not Delivered",
-                                            total_episodes=n_completed
+                                            total_episodes=n_completed,
+                                            data_dir=train_data_dir,
+                                            manifest_dir=train_manifest_dir,
+                                            artifact_stem=f"delivered_{run_timestamp}"
                                         )
                                         
                                         # 3. Visually Found Heatmap
@@ -1941,9 +1955,12 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                             run_dir=run_dir,
                                             video_dir=found_heatmaps_dir,
                                             run_timestamp=run_timestamp,
-                                            filename_prefix="not_visually_found_targets_heatmap",
+                                            filename_prefix="found",
                                             label="Not Visually Found",
-                                            total_episodes=n_completed
+                                            total_episodes=n_completed,
+                                            data_dir=train_data_dir,
+                                            manifest_dir=train_manifest_dir,
+                                            artifact_stem=f"found_{run_timestamp}"
                                         )
                                 heatmaps_generated = True
                             except Exception as heatmap_err:
@@ -2061,7 +2078,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             env_step_jit, compute_obs_jit, compute_reward_jit,
                             cfg, video_key, num_episodes=1,
                         )
-                        stem = f"{eval_timestamp}_eval_update_{update:06d}"
+                        stem = f"eval_{artifact_suffix(update, steps_done)}"
                         render_eval_video(
                             ep_states  = ep_states_list[0],
                             ep_rewards = ep_rewards_list[0],
@@ -2085,7 +2102,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         )
 
                         if is_video_step:
-                            stem = f"{eval_timestamp}_eval_update_{update:06d}"
+                            stem = f"eval_{artifact_suffix(update, steps_done)}"
                             render_eval_video(
                                 ep_states  = ep_states_list[0],
                                 ep_rewards = ep_rewards_list[0],
@@ -2177,27 +2194,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 # Small sleep to allow XLA to settle after the eval/render spike
                 time.sleep(1.0)
 
-            # ── Final eval (last update) ──────────────────────────────────────
-            if update == n_updates and eval_video:
-                master_key, eval_key = jax.random.split(master_key)
-                _run_eval_with_render(
-                    model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                    compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                    cfg=cfg, eval_key=eval_key,
-                    out_dir=eval_video_dir,
-                    ckpt_name=f"update_{update:06d}",
-                    renderer=effective_final_renderer,
-                    selective=selective_eval_render,
-                    eval_render_videos=eval_render_videos,
-                    eval_max_compute=eval_max_compute_episodes,
-                    n_success=eval_render_successes,
-                    n_fail=eval_render_failures,
-                    wandb_run=wandb_run,
-                    steps_done=steps_done,
-                    max_steps=max_steps,
-                    label="eval-final",
-                )
-                time.sleep(1.0)
+            # Final training progress is now represented by the normal train eval
+            # artifacts. The legacy special final eval render path is intentionally
+            # removed so the last output uses the same artifact contract as every
+            # other scheduled training eval.
 
             # ── Checkpoint ────────────────────────────────────────────────────
             is_ckpt_step = ((update - ckpt_offset) % ckpt_every == 0)

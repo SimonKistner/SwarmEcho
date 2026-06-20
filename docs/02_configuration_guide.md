@@ -29,16 +29,16 @@ The recurrent MAPPO extension is controlled from `network`:
 When recurrent actor communication is enabled, SwarmEcho uses a single-round TarMAC-style mechanism rather than the older configurable hidden-state attention path. Agents carry GRU hidden state plus previous `(signature, value)` communication state; the base relay stores the first target-knowing reporter's emitted TarMAC signature/value and replays that token to eligible non-knowing agents in base range.
 
 ### 1.1 Heatmap and Video Evaluation Toggles
-Under the `logging` domain, the following parameters control mid-training and evaluation-time artifacts (stored under `outputs/.../videos/train/` and `outputs/.../videos/eval/`):
+Under the `logging` domain, the following parameters control mid-training and evaluation-time artifacts (stored under `outputs/.../artifacts/train/` and checkpoint-scoped `outputs/.../artifacts/eval/` folders for new runs, with legacy `videos/...` still readable by dashboards):
 
 | Key | Default | Description / Effect |
 |---|---:|---|
 | `eval_video` | `true` | Renders a rollout video for evaluation episodes. |
 | `eval_failed_chain_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where the shortest chain was not successfully completed/held. |
 | `eval_not_delivered_or_visually_found_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not successfully delivered or not visually found. |
-| `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one merged heatmap. |
+| `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one found-and-delivered heatmap. |
 
-These heatmaps dynamically use the actual count of completed episodes in the sliding window as the denominator. Heatmap and video filenames are prefix-synchronized using a shared timestamp prefix (`YYYY_MM_DD_hh_mm`).
+These heatmaps dynamically use the actual count of completed episodes in the sliding window as the denominator. Heatmap and video filenames use synchronized update/step suffixes such as `u000700_s00070M`.
 
 ### 1.2 Visualize Settings & Selective Rendering
 The `visualize` domain defines the parameters for both evaluation videos and map previews:
@@ -55,7 +55,7 @@ The `visualize` domain defines the parameters for both evaluation videos and map
 
 Under selective rendering (`selective_eval_render: true`), the pipeline runs up to `eval_max_compute_episodes` rollout environments but only exports videos for `eval_render_failures` failed runs and `eval_render_successes` successful runs. Both can be set to `0` to completely skip video rendering while still computing performance statistics.
 
-Additionally, when `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline merges "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target coordinate groups into a single combined heatmap `_merged_targets_heatmap.png` by default (unless `eval_not_deliv_not_visual_splitt_in_two = True`), drawing title statistics and legends in a clean 60px top padding.
+Additionally, when `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline combines "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target coordinate groups into a single combined heatmap `found_and_delivered_u000700_s00070M.png` by default (unless `eval_not_deliv_not_visual_splitt_in_two = True`), drawing title statistics and legends in a clean 60px top padding.
 
 ## 2. Curriculum Overrides & Level Structure
 The training system scales difficulty sequentially via the `levels/` directory.

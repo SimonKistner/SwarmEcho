@@ -31,7 +31,7 @@ Usage
 
 Output
 ------
-    outputs/<run>/videos/eval/
+    outputs/<run>/artifacts/eval/ckpt_u000700_s00070M/vids/
         SUCCESS_eval_<ckpt>_ep00.mp4
         FAIL_eval_<ckpt>_ep00.mp4
         ...  (or eval_<ckpt>_ep00.mp4 in legacy mode)
@@ -57,6 +57,7 @@ from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
 from training.runner import _evaluate, _make_selective_eval_callback, _release_video_eval_trajectory
 from training.video_worker import render_eval_video
+from training.artifacts import eval_checkpoint_artifact_root, checkpoint_artifact_suffix, parse_checkpoint_update, steps_for_update, write_manifest
 
 
 def main():
@@ -250,15 +251,33 @@ def main():
     compute_reward     = make_reward_fn(cfg)
 
     # ── Output directory ──────────────────────────────────────────────────
-    # run_dir was resolved earlier (before config load) so videos land in the
-    # correct run folder whether config.yaml was auto-loaded or not.
-    out_dir = run_dir / "videos" / "eval"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # New SwarmEcho-owned eval artifacts are scoped by checkpoint while legacy
+    # Orbax checkpoint directory names remain unchanged.
+    artifact_root = eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg)
+    out_dir = artifact_root / "vids"
+    manifest_dir = artifact_root / "manifests"
 
+    artifact_tag = checkpoint_artifact_suffix(checkpoint_path, cfg)
     ckpt_name = checkpoint_path.name  # e.g. "ckpt_000762"
+    update_for_manifest = parse_checkpoint_update(checkpoint_path) or 0
+    steps_for_manifest = steps_for_update(update_for_manifest, cfg)
 
     # ── Evaluate ──────────────────────────────────────────────────────────
     key = jax.random.PRNGKey(0)
+
+    def _record_video_manifest(video_path: str, stem: str, status: str | None = None) -> None:
+        write_manifest(
+            manifest_dir / f"{stem}.video.json",
+            {
+                "type": "video",
+                "checkpoint": str(checkpoint_path),
+                "checkpoint_name": ckpt_name,
+                "update": update_for_manifest,
+                "steps": steps_for_manifest,
+                "status": status,
+                "video_path": str(video_path),
+            },
+        )
 
     eval_reset = reset
     if target_pos_override is not None:
@@ -307,9 +326,9 @@ def main():
                     # Render failures on the fly up to n_fail
                     if rendered_fail[0] < n_fail and save_video:
                         rendered_fail[0] += 1
-                        stem = f"FAIL_eval_{ckpt_name}_ep{ep_idx:02d}"
+                        stem = f"FAIL_eval_{artifact_tag}_ep{ep_idx:02d}"
                         print(f"  [eval] Ep {ep_idx:>2}: success=False | RENDERED {stem}.mp4")
-                        render_eval_video(
+                        vid_path = render_eval_video(
                             ep_states  = ep_states,
                             ep_rewards = ep_rewards,
                             ep_metrics = ep_metrics,
@@ -318,6 +337,7 @@ def main():
                             filename_stem = stem,
                             renderer   = renderer,
                         )
+                        _record_video_manifest(vid_path, stem, status="FAIL")
                         _release_video_eval_trajectory()
                 
                 status_str = f"Ep {ep_idx:>2}: success={str(success):<5} steps={len(ep_states):>3} | Success Rate={(cumulative_successes[0]/(ep_idx+1))*100.0:>5.1f}% ({cumulative_successes[0]}/{ep_idx+1})"
@@ -344,9 +364,9 @@ def main():
             for i, (dist, ep_idx, ep_states, ep_rewards, ep_metrics) in enumerate(corner_slots):
                 if ep_idx is not None and save_video:
                     rendered_success_count += 1
-                    stem = f"SUCCESS_CORNER_{corner_names[i]}_eval_{ckpt_name}_ep{ep_idx:02d}"
+                    stem = f"SUCCESS_CORNER_{corner_names[i]}_eval_{artifact_tag}_ep{ep_idx:02d}"
                     print(f"  [corner-select] Rendering closest to Corner {i} ({corner_names[i]}): Ep {ep_idx} (dist: {dist:.2f}m) as {stem}.mp4")
-                    render_eval_video(
+                    vid_path = render_eval_video(
                         ep_states  = ep_states,
                         ep_rewards = ep_rewards,
                         ep_metrics = ep_metrics,
@@ -355,6 +375,7 @@ def main():
                         filename_stem = stem,
                         renderer   = renderer,
                     )
+                    _record_video_manifest(vid_path, stem, status="SUCCESS")
                     _release_video_eval_trajectory()
             print(f"  [corner-select] Rendered {rendered_success_count} corner success video(s).")
         else:
@@ -362,7 +383,7 @@ def main():
                 n_success = n_success,
                 n_fail    = n_fail,
                 out_dir   = out_dir if save_video else Path("/dev/null"),
-                ckpt_name = f"eval_{ckpt_name}",
+                ckpt_name = f"eval_{artifact_tag}",
                 renderer  = renderer,
                 cfg       = cfg,
             )
@@ -395,7 +416,13 @@ def main():
 
         if save_video:
             for ep_idx, (ep_states, ep_rewards, ep_metrics) in enumerate(zip(all_states, all_rewards, all_metrics)):
-                stem = f"eval_{ckpt_name}_ep{ep_idx:02d}"
+                if target_pos_override is not None:
+                    tx, ty = target_pos_override
+                    status = "SUCC" if float(ep_metrics.get("chain_pct", [0.0])[-1]) >= 99.5 else "FAIL"
+                    stem = f"target_x{tx:.2f}_y{ty:.2f}_{artifact_tag}_{status}"
+                else:
+                    status = None
+                    stem = f"eval_{artifact_tag}_ep{ep_idx:02d}"
                 vid_path = render_eval_video(
                     ep_states  = ep_states,
                     ep_rewards = ep_rewards,
@@ -405,6 +432,7 @@ def main():
                     filename_stem = stem,
                     renderer   = renderer,
                 )
+                _record_video_manifest(vid_path, stem, status=status)
                 print(f"  [ep {ep_idx}] video → {vid_path}")
 
     # ── Print results ─────────────────────────────────────────────────────
