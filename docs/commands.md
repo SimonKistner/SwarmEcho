@@ -79,7 +79,7 @@ uv run python src/training/curriculum.py levels=B02,B03,B04
 ## Spatial Failure Analysis Pipeline
 
 ### Run Evaluation Sweep & Generate Heatmaps
-Simulate parallel environments (4096 by default) to sweep for failure coordinates and generate heatmaps (failed chain targets, and merged or individual target-not-found heatmaps):
+Simulate parallel environments (4096 by default) to sweep for failure coordinates and generate heatmaps (failed chain targets, and found-and-delivered or split target-not-found heatmaps):
 ```bash
 uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000
 ```
