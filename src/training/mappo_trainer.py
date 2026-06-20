@@ -130,11 +130,18 @@ def recurrent_mappo_loss(
     returns:         jax.Array,   # (T, B) or (T, B, N)
     rnn_resets:      jax.Array,   # (T, B, N)
     initial_actor_h: jax.Array,   # (B, N, H)
+    initial_actor_signature: jax.Array | None,
+    initial_actor_value: jax.Array | None,
     initial_critic_h:jax.Array,   # (B, N, H)
-    clip_eps:        float,
-    vf_coef:         float,
-    ent_coef:        float,
-    per_agent:       bool,
+    comm_masks:      jax.Array | None = None,
+    active_masks:    jax.Array | None = None,
+    base_signatures: jax.Array | None = None,
+    base_values:     jax.Array | None = None,
+    base_memory_masks: jax.Array | None = None,
+    clip_eps:        float = 0.2,
+    vf_coef:         float = 0.5,
+    ent_coef:        float = 0.01,
+    per_agent:       bool = True,
 ) -> tuple[jax.Array, MAPPOStats]:
     """
     Recurrent MAPPO loss over full rollout sequences.
@@ -145,18 +152,49 @@ def recurrent_mappo_loss(
     T, B, N, D = obs.shape
 
     if model.actor_memory:
-        obs_actor = obs.reshape(T, B * N, D)
-        actions_actor = actions.reshape(T, B * N, actions.shape[-1])
-        resets_actor = rnn_resets.reshape(T, B * N)
-        init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
-        _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
-            obs_actor,
-            actions_actor,
-            init_actor,
-            resets_actor,
-        )
-        new_log_probs = log_probs_flat.reshape(T, B, N)
-        entropy = entropy_flat.reshape(T, B, N)
+        if model.memory_comm_enabled:
+            def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env):
+                return model.actor.evaluate_actions_sequence(
+                    obs_env,
+                    act_env,
+                    init_h_env,
+                    reset_env,
+                    init_sig_env,
+                    init_val_env,
+                    comm_env,
+                    active_env,
+                    base_sig_env,
+                    base_val_env,
+                    base_mask_env,
+                )
+            _, log_probs_flat, entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
+                obs,
+                actions,
+                rnn_resets,
+                initial_actor_h,
+                initial_actor_signature,
+                initial_actor_value,
+                comm_masks,
+                active_masks,
+                base_signatures,
+                base_values,
+                base_memory_masks,
+            )
+            new_log_probs = jnp.swapaxes(log_probs_flat, 0, 1)
+            entropy = jnp.swapaxes(entropy_flat, 0, 1)
+        else:
+            obs_actor = obs.reshape(T, B * N, D)
+            actions_actor = actions.reshape(T, B * N, actions.shape[-1])
+            resets_actor = rnn_resets.reshape(T, B * N)
+            init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
+            _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
+                obs_actor,
+                actions_actor,
+                init_actor,
+                resets_actor,
+            )
+            new_log_probs = log_probs_flat.reshape(T, B, N)
+            entropy = entropy_flat.reshape(T, B, N)
     else:
         obs_flat = obs.reshape(T * B * N, D)
         actions_flat = actions.reshape(T * B * N, -1)
@@ -247,7 +285,14 @@ def _recurrent_mappo_step(
     returns:         jax.Array,
     rnn_resets:      jax.Array,
     initial_actor_h: jax.Array,
+    initial_actor_signature: jax.Array | None,
+    initial_actor_value: jax.Array | None,
     initial_critic_h:jax.Array,
+    comm_masks:      jax.Array | None = None,
+    active_masks:    jax.Array | None = None,
+    base_signatures: jax.Array | None = None,
+    base_values:     jax.Array | None = None,
+    base_memory_masks: jax.Array | None = None,
     *,
     clip_eps:  float,
     vf_coef:   float,
@@ -258,7 +303,8 @@ def _recurrent_mappo_step(
         return recurrent_mappo_loss(
             m, obs, actions, old_log_probs, old_values,
             advantages, returns, rnn_resets,
-            initial_actor_h, initial_critic_h,
+            initial_actor_h, initial_actor_signature, initial_actor_value, initial_critic_h,
+            comm_masks, active_masks, base_signatures, base_values, base_memory_masks,
             clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -328,7 +374,15 @@ class MAPPOTrainer:
         preserve time order and additionally include reset masks plus rollout
         initial actor/critic hidden states.
         """
-        all_stats: list[MAPPOStats] = []
+        stats_sums = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+            "total_loss": 0.0,
+            "approx_kl": 0.0,
+            "clip_fraction": 0.0,
+        }
+        num_stat_steps = 0
 
         for _epoch in range(self.num_epochs):
             for mb in minibatches:
@@ -344,16 +398,39 @@ class MAPPOTrainer:
                     *((
                         mb["rnn_resets"],
                         mb["initial_actor_h"],
+                        mb["initial_actor_signature"],
+                        mb["initial_actor_value"],
                         mb["initial_critic_h"],
+                        mb["comm_masks"],
+                        mb["active_masks"],
+                        mb["base_signatures"],
+                        mb["base_values"],
+                        mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )
-                all_stats.append(stats)
+                # Materialise the scalar diagnostics immediately instead of
+                # keeping one device-resident stats tuple per PPO minibatch.
+                # On large recurrent runs the queued update work can otherwise
+                # accumulate until the final jnp.array([...]) conversion below,
+                # making the stats readback the first place that trips a large
+                # XLA allocation/OOM even though the diagnostics themselves are
+                # tiny.
+                stats_host = jax.device_get(stats)
+                stats_sums["policy_loss"] += float(stats_host.policy_loss)
+                stats_sums["value_loss"] += float(stats_host.value_loss)
+                stats_sums["entropy"] += float(stats_host.entropy)
+                stats_sums["total_loss"] += float(stats_host.total_loss)
+                stats_sums["approx_kl"] += float(stats_host.approx_kl)
+                stats_sums["clip_fraction"] += float(stats_host.clip_fraction)
+                num_stat_steps += 1
+                del _loss, stats, stats_host
 
+        denom = max(1, num_stat_steps)
         return {
-            "policy_loss":   float(jnp.mean(jnp.array([s.policy_loss   for s in all_stats]))),
-            "value_loss":    float(jnp.mean(jnp.array([s.value_loss    for s in all_stats]))),
-            "entropy":       float(jnp.mean(jnp.array([s.entropy       for s in all_stats]))),
-            "total_loss":    float(jnp.mean(jnp.array([s.total_loss    for s in all_stats]))),
-            "approx_kl":     float(jnp.mean(jnp.array([s.approx_kl    for s in all_stats]))),
-            "clip_fraction": float(jnp.mean(jnp.array([s.clip_fraction for s in all_stats]))),
+            "policy_loss":   stats_sums["policy_loss"] / denom,
+            "value_loss":    stats_sums["value_loss"] / denom,
+            "entropy":       stats_sums["entropy"] / denom,
+            "total_loss":    stats_sums["total_loss"] / denom,
+            "approx_kl":     stats_sums["approx_kl"] / denom,
+            "clip_fraction": stats_sums["clip_fraction"] / denom,
         }

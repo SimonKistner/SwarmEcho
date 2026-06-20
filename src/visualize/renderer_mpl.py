@@ -97,12 +97,17 @@ class _FrameData(NamedTuple):
     active:        np.ndarray | None
     collides:      np.ndarray | None
     occ_grid:      np.ndarray | None
+    comm_occ_grid: np.ndarray | None
+    mesh_walls:    np.ndarray | None
     box_width:     float
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
     base_target_known: bool | None
     adj_matrix:    np.ndarray | None
+    finders_path:  np.ndarray | None
+    finders_path_len: int
+    maze_cell_grid: tuple[int, int] | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -137,6 +142,30 @@ def _get_shortest_path_distances(adj: np.ndarray, source: int) -> np.ndarray:
     return dists
 
 
+def _get_single_shortest_path_edges(adj: np.ndarray, source: int, target: int, dists_to_target: np.ndarray) -> set[tuple[int, int]]:
+    edges = set()
+    if source < 0 or target < 0 or dists_to_target[source] >= 999:
+        return edges
+    curr = source
+    M = adj.shape[0]
+    for _ in range(M):
+        if curr == target:
+            break
+        candidates = []
+        for v in np.where(adj[curr])[0]:
+            v = int(v)
+            if dists_to_target[v] == dists_to_target[curr] - 1:
+                candidates.append(v)
+        if not candidates:
+            break
+        nxt = candidates[0]
+        edges.add((curr, nxt))
+        edges.add((nxt, curr))
+        curr = nxt
+    return edges
+
+
+
 from env.raycast import dda_raycast_np
 
 def _dda_raycast_np(p1, p2, occ_grid):
@@ -155,6 +184,11 @@ def _build_adjacency(pos, base_pos, target_pos, comm_radius, visual_radius, comm
     target_points = np.asarray(target_pos)
     if target_points.ndim == 1:
         target_points = target_points[None, :]
+    elif target_points.ndim == 2:
+        mask = ~np.all(target_points == 0.0, axis=1)
+        target_points = target_points[mask]
+        _, indices = np.unique(target_points, axis=0, return_index=True)
+        target_points = target_points[np.sort(indices)]
 
     base_idx = -1; target_idx = -1; target_indices = []
     if num_bases > 0: 
@@ -289,6 +323,7 @@ def _draw_frame(
     rew_cfg = cfg.reward
     use_shortest_path_visuals = (
         bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and str(rew_cfg.get("chain_reward_system", "euclidean")) in ("euclidean", "discrete_finders_path")
         and not bool(rew_cfg.get("only_explor_individual", False))
         and not bool(rew_cfg.get("every_reward_global", False))
     )
@@ -330,6 +365,10 @@ def _draw_frame(
         ax.imshow(occ.T, extent=(0, W, 0, H), origin="lower", 
                   cmap="Greys", alpha=0.5, interpolation="nearest", zorder=1)
 
+    if frame.mesh_walls is not None:
+        for x1, y1, x2, y2 in np.asarray(frame.mesh_walls):
+            ax.plot([x1, x2], [y1, y2], color="#0ea5e9", lw=2.0, solid_capstyle="butt", zorder=2)
+
     # ── Coverage ──────────────────────────────────────────────────────────
     if frame.coverage_grid.any():
         cell_size = 1.0
@@ -351,10 +390,58 @@ def _draw_frame(
         ax.imshow(cov, extent=[0, W, 0, H],
                   origin="lower", aspect="auto", zorder=1, interpolation="nearest")
 
+    if (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and frame.finders_path is not None
+        and frame.finders_path_len > 1
+        and frame.maze_cell_grid is not None
+    ):
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        pts = np.array([
+            [(c[0] + 0.5) * cell_w, (c[1] + 0.5) * cell_h]
+            for c in frame.finders_path[:frame.finders_path_len]
+        ], dtype=np.float32)
+        ax.plot(pts[:, 0], pts[:, 1], color="#22c55e", alpha=0.5, lw=3.0, zorder=2)
+
+    def _finder_path_tips() -> tuple[int, int]:
+        if frame.finders_path is None or frame.finders_path_len <= 0 or frame.maze_cell_grid is None:
+            return -1, -1
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        cells = np.floor(frame.pos / np.array([cell_w, cell_h], dtype=np.float32)).astype(np.int32)
+        cells[:, 0] = np.clip(cells[:, 0], 0, cols - 1)
+        cells[:, 1] = np.clip(cells[:, 1], 0, rows - 1)
+        path_idx = {tuple(c): k for k, c in enumerate(frame.finders_path[:frame.finders_path_len])}
+        ranks = np.array([path_idx.get(tuple(c), -1) for c in cells], dtype=np.int32)
+        valid_b = [i for i in range(N) if (i + drone_start) in base_comp and ranks[i] >= 0]
+        valid_t = [i for i in range(N) if (i + drone_start) in target_comp and ranks[i] >= 0]
+
+        def center(k: int) -> np.ndarray:
+            c = frame.finders_path[k]
+            return np.array([(c[0] + 0.5) * cell_w, (c[1] + 0.5) * cell_h], dtype=np.float32)
+
+        base_tip = -1
+        if valid_b:
+            best_rank = max(ranks[i] for i in valid_b)
+            tied = [i for i in valid_b if ranks[i] == best_rank]
+            ref = np.asarray(frame.target_pos if best_rank >= frame.finders_path_len - 2 else center(best_rank + 1), dtype=np.float32)
+            base_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+
+        target_tip = -1
+        if valid_t:
+            best_rank = min(ranks[i] for i in valid_t)
+            tied = [i for i in valid_t if ranks[i] == best_rank]
+            ref = np.asarray(frame.base_pos if best_rank <= 1 else center(best_rank - 1), dtype=np.float32)
+            target_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+        return base_tip, target_tip
+
     # ── Adjacency ─────────────────────────────────────────────────────────
     adj, base_idx, target_idx, target_indices, drone_start, ents, dists = _build_adjacency(
         frame.pos, frame.base_pos, frame.target_pos, 
-        comm_r, vis_r, comm_r_base, frame.occ_grid, (W, H), cfg
+        comm_r, vis_r, comm_r_base, frame.comm_occ_grid if frame.comm_occ_grid is not None else frame.occ_grid, (W, H), cfg
     )
     M = len(ents)
     
@@ -376,9 +463,15 @@ def _draw_frame(
         full_chain = bool(base_idx >= 0 and any(ti in base_comp for ti in target_indices))
     sp_nodes = set()
     if use_shortest_path_visuals and full_chain:
-        for i in range(M):
-            if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
-                sp_nodes.add(i)
+        if bool(rew_cfg.get("reward_single_shortest_path", True)):
+            full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+            for u, v in full_chain_edges:
+                sp_nodes.add(u)
+                sp_nodes.add(v)
+        else:
+            for i in range(M):
+                if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
+                    sp_nodes.add(i)
 
     drone_cols = []
     for i in range(N):
@@ -400,18 +493,27 @@ def _draw_frame(
     idx_base_tip = -1
     idx_target_tip = -1
     if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
-        d_to_t = dists[drone_start:, target_idx]
-        valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
-        if valid_b:
-            idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
-            
-        d_to_b = dists[drone_start:, base_idx]
-        valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
-        if valid_t:
-            idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
+        if str(rew_cfg.get("chain_reward_system", "euclidean")) == "discrete_finders_path":
+            idx_base_tip, idx_target_tip = _finder_path_tips()
+        else:
+            d_to_t = dists[drone_start:, target_idx]
+            valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
+            if valid_b:
+                idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
+
+            d_to_b = dists[drone_start:, base_idx]
+            valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
+            if valid_t:
+                idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
     dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
     dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+
+    reward_single = use_shortest_path_visuals and bool(rew_cfg.get("reward_single_shortest_path", True))
+    if reward_single:
+        full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+        base_tip_edges = _get_single_shortest_path_edges(adj, base_idx, idx_base_tip, dist_from_base_tip)
+        target_tip_edges = _get_single_shortest_path_edges(adj, target_idx, idx_target_tip, dist_from_target_tip)
 
     for i in range(M):
         for j in range(i + 1, M):
@@ -425,8 +527,11 @@ def _draw_frame(
                 on_tgt_sp = False
                 
                 if use_shortest_path_visuals and full_chain:
-                    if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
-                        is_both = True
+                    if reward_single:
+                        is_both = (i, j) in full_chain_edges
+                    else:
+                        if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
+                            is_both = True
                         
                     if is_both: ec, lw = "#a855f7", 1.5
                     else:
@@ -442,12 +547,18 @@ def _draw_frame(
                     else:                        ec, lw = "#94a3b8", 0.8
                     
                     if ib and jb and idx_base_tip >= 0:
-                        if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
-                            on_base_sp = True
+                        if reward_single:
+                            on_base_sp = (i, j) in base_tip_edges
+                        else:
+                            if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
+                                on_base_sp = True
                     
                     if it and jt and idx_target_tip >= 0:
-                        if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
-                            on_tgt_sp = True
+                        if reward_single:
+                            on_tgt_sp = (i, j) in target_tip_edges
+                        else:
+                            if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
+                                on_tgt_sp = True
 
                 if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):
                     glow_col = "#a855f7" if is_both else ("#3b82f6" if on_base_sp else "#ef4444")
@@ -509,6 +620,11 @@ def _draw_frame(
         target_points = np.asarray(frame.target_pos)
         if target_points.ndim == 1:
             target_points = target_points[None, :]
+        elif target_points.ndim == 2:
+            mask = ~np.all(target_points == 0.0, axis=1)
+            target_points = target_points[mask]
+            _, indices = np.unique(target_points, axis=0, return_index=True)
+            target_points = target_points[np.sort(indices)]
         for k, tp in enumerate(target_points):
             tx, ty = tp
             ax.scatter(tx, ty, s=RendererConfig.MPL_TARGET_S, marker="*", color="#dc2626",
@@ -523,6 +639,11 @@ def _draw_frame(
         anti_points = np.asarray(frame.anti_target_pos)
         if anti_points.ndim == 1:
             anti_points = anti_points[None, :]
+        elif anti_points.ndim == 2:
+            mask = ~np.all(anti_points == 0.0, axis=1)
+            anti_points = anti_points[mask]
+            _, indices = np.unique(anti_points, axis=0, return_index=True)
+            anti_points = anti_points[np.sort(indices)]
         for k, ap in enumerate(anti_points):
             anti_x, anti_y = ap
             ax.scatter(anti_x, anti_y, s=RendererConfig.MPL_TARGET_S * 0.75, marker="X",
@@ -616,6 +737,22 @@ def _draw_frame(
             has_any = True
     if not has_any:
         known_str += "\n  (none)"
+
+    # --- Finder Path Debug Print ---
+    render_fp_debug = bool(cfg.visualize.get("render_finders_path_debug", False))
+    if render_fp_debug:
+        known_str += "\n\nFinder Path:"
+        if frame.finders_path is not None and frame.finders_path_len > 0:
+            path_cells = [tuple(c) for c in frame.finders_path[:frame.finders_path_len]]
+            path_str = ", ".join(f"({c[0]},{c[1]})" for c in path_cells)
+            
+            # Wrap lines for text box
+            max_chars = 22
+            wrapped_lines = [path_str[i:i+max_chars] for i in range(0, len(path_str), max_chars)]
+            for line in wrapped_lines:
+                known_str += f"\n  {line}"
+        else:
+            known_str += "\n  (not valid)"
 
     leg_ax.text(
         0.0, 0.40, known_str,
@@ -829,13 +966,20 @@ def render_video(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    comm_occ_grid_static = None
+    mesh_walls_static = None
     anti_target_static = None
+    maze_cell_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = np.array(map_def.occupancy_grid)
+            comm_occ_grid_static = np.array(map_def.communication_occupancy_grid)
+            mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
+            if map_def.maze_cell_cols and map_def.maze_cell_rows:
+                maze_cell_grid_static = (int(map_def.maze_cell_cols), int(map_def.maze_cell_rows))
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -860,11 +1004,17 @@ def render_video(
                     active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
                     collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
                     occ_grid      = occ_grid_static,
+                    comm_occ_grid = comm_occ_grid_static,
+                    mesh_walls    = mesh_walls_static,
                     box_width     = float(traj_cpu.box_width[t]),
+                    box_height    = float(traj_cpu.box_height[t]),
                     extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
                     target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
                     base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
                     adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
+                    finders_path  = (np.array(traj_cpu.finders_path[t]) if hasattr(traj_cpu, "finders_path") else None),
+                    finders_path_len = (int(traj_cpu.finders_path_len[t]) if hasattr(traj_cpu, "finders_path_len") else 0),
+                    maze_cell_grid = maze_cell_grid_static,
                 )
                 rew_hist = rewards_cpu[:t+1] if rewards_cpu is not None else None
 
@@ -901,5 +1051,3 @@ def render_video(
     size_mb  = filename.stat().st_size / 1e6
     print(f"Saved {filename}  ({size_mb:.1f} MB, {n_out} frames @ {fps} fps)")
     return str(filename)
-
-

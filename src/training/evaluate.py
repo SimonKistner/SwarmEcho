@@ -55,7 +55,7 @@ from env.physics import make_env_fns
 from env.observations import make_obs_fns
 from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
-from training.runner import _evaluate, _make_selective_eval_callback
+from training.runner import _evaluate, _make_selective_eval_callback, _release_video_eval_trajectory
 from training.video_worker import render_eval_video
 
 
@@ -74,12 +74,13 @@ def main():
     render_failures_override      = None   # render_failures=Z
     eval_render_videos_override   = None   # eval_render_videos=N (legacy)
     target_pos_override           = None   # target_pos=x,y
+    render_success_closest_to_corners = False
 
     overrides = []
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         elif arg.startswith("--renderer="):
             renderer_override = arg.split("=", 1)[1]
         elif arg.lower() in ["video=false", "--no-video"]:
@@ -90,6 +91,10 @@ def main():
             selective_override = True
         elif arg.lower() in ["selective=false"]:
             selective_override = False
+        elif arg.lower() in ["render_success_closest_to_corners=true"]:
+            render_success_closest_to_corners = True
+        elif arg.lower() in ["render_success_closest_to_corners=false"]:
+            render_success_closest_to_corners = False
         elif arg.startswith("eval_max_compute_episodes="):
             eval_max_compute_override = int(arg.split("=", 1)[1])
         elif arg.startswith("render_successes="):
@@ -105,6 +110,12 @@ def main():
             overrides.append("logging.obs_log=true")
         elif arg.lower() in ["obs_log=false", "obs_saving=false", "--no-obs-log", "--no-obs-saving"]:
             overrides.append("logging.obs_log=false")
+        elif arg.lower() in ["connectivity=true", "conn_matrix=true", "--connectivity", "--conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=true")
+            overrides.append("env.log_adjacency_matrix=true")
+        elif arg.lower() in ["connectivity=false", "conn_matrix=false", "--no-connectivity", "--no-conn-matrix"]:
+            overrides.append("visualize.render_conn_matrix=false")
+            overrides.append("env.log_adjacency_matrix=false")
         else:
             overrides.append(arg)
 
@@ -149,6 +160,8 @@ def main():
         if selective_override is not None
         else bool(cfg.visualize.get("selective_eval_render", False))
     )
+    if render_success_closest_to_corners:
+        selective = True
     eval_render_videos = (
         eval_render_videos_override
         if eval_render_videos_override is not None
@@ -209,6 +222,11 @@ def main():
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
     )
 
     # ── Load checkpoint ───────────────────────────────────────────────────
@@ -227,8 +245,8 @@ def main():
     print(f"  Model params : {n_params:,}")
 
     # ── Environment ───────────────────────────────────────────────────────
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
-    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
+    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
     compute_reward     = make_reward_fn(cfg)
 
     # ── Output directory ──────────────────────────────────────────────────
@@ -254,26 +272,112 @@ def main():
 
     if selective:
         # Selective mode: stream episodes, fill SUCCESS_/FAIL_ buckets inline
-        callback = _make_selective_eval_callback(
-            n_success = n_success,
-            n_fail    = n_fail,
-            out_dir   = out_dir if save_video else Path("/dev/null"),
-            ckpt_name = f"eval_{ckpt_name}",
-            renderer  = renderer,
-            cfg       = cfg,
-        )
-        (all_states, all_rewards, all_metrics,
-         mean_ret, mean_len, mean_gap, mean_prog, success_rate, found_rate) = _evaluate(
-            model,
-            jax.jit(eval_reset),
-            jax.jit(env_step),
-            jax.jit(compute_obs),
-            jax.jit(compute_reward),
-            cfg, key,
-            num_episodes=eval_max_compute,
-            episode_callback=callback,
-        )
-        n_computed = len(all_states)
+        if render_success_closest_to_corners:
+            W = float(cfg.env.box_width)
+            H = float(cfg.env.box_height)
+            corners = [
+                np.array([0.0, 0.0]),      # bottom-left
+                np.array([W, 0.0]),        # bottom-right
+                np.array([0.0, H]),        # top-left
+                np.array([W, H])           # top-right
+            ]
+            # Slots: [ (best_dist, ep_idx, ep_states, ep_rewards, ep_metrics) ]
+            corner_slots = [[float("inf"), None, None, None, None] for _ in range(4)]
+            rendered_fail = [0]
+            cumulative_successes = [0]
+
+            def callback(ep_idx: int, success: bool, ep_states, ep_rewards, ep_metrics) -> bool:
+                nonlocal corner_slots, rendered_fail, cumulative_successes
+                
+                if success:
+                    cumulative_successes[0] += 1
+                    # Get target position from final step
+                    target_state = ep_states[-1]
+                    t_pos = np.array(target_state.target_pos)
+                    if t_pos.ndim == 2:
+                        t_pos = t_pos[0]  # fallback for MEM_T8
+                    
+                    # Check distance to each corner
+                    for i, corner in enumerate(corners):
+                        dist = float(np.linalg.norm(t_pos - corner))
+                        if dist < corner_slots[i][0]:
+                            corner_slots[i] = [dist, ep_idx, list(ep_states), list(ep_rewards), ep_metrics]
+                            print(f"  [corner-select] Success at Ep {ep_idx} is new closest to Corner {i} (dist: {dist:.2f}m)")
+                else:
+                    # Render failures on the fly up to n_fail
+                    if rendered_fail[0] < n_fail and save_video:
+                        rendered_fail[0] += 1
+                        stem = f"FAIL_eval_{ckpt_name}_ep{ep_idx:02d}"
+                        print(f"  [eval] Ep {ep_idx:>2}: success=False | RENDERED {stem}.mp4")
+                        render_eval_video(
+                            ep_states  = ep_states,
+                            ep_rewards = ep_rewards,
+                            ep_metrics = ep_metrics,
+                            cfg        = cfg,
+                            out_dir    = out_dir,
+                            filename_stem = stem,
+                            renderer   = renderer,
+                        )
+                        _release_video_eval_trajectory()
+                
+                status_str = f"Ep {ep_idx:>2}: success={str(success):<5} steps={len(ep_states):>3} | Success Rate={(cumulative_successes[0]/(ep_idx+1))*100.0:>5.1f}% ({cumulative_successes[0]}/{ep_idx+1})"
+                print(f"  [eval] {status_str}")
+                return False
+
+            (all_states, all_rewards, all_metrics,
+             mean_ret, mean_len, mean_gap, mean_prog, success_rate, found_rate) = _evaluate(
+                model,
+                jax.jit(eval_reset),
+                jax.jit(env_step),
+                jax.jit(compute_obs),
+                jax.jit(compute_reward),
+                cfg, key,
+                num_episodes=eval_max_compute,
+                episode_callback=callback,
+            )
+            n_computed = len(all_states)
+
+            # Render the corner successes
+            print("\n  [corner-select] Evaluation run complete. Rendering selected corner successes...")
+            corner_names = ["bottom_left", "bottom_right", "top_left", "top_right"]
+            rendered_success_count = 0
+            for i, (dist, ep_idx, ep_states, ep_rewards, ep_metrics) in enumerate(corner_slots):
+                if ep_idx is not None and save_video:
+                    rendered_success_count += 1
+                    stem = f"SUCCESS_CORNER_{corner_names[i]}_eval_{ckpt_name}_ep{ep_idx:02d}"
+                    print(f"  [corner-select] Rendering closest to Corner {i} ({corner_names[i]}): Ep {ep_idx} (dist: {dist:.2f}m) as {stem}.mp4")
+                    render_eval_video(
+                        ep_states  = ep_states,
+                        ep_rewards = ep_rewards,
+                        ep_metrics = ep_metrics,
+                        cfg        = cfg,
+                        out_dir    = out_dir,
+                        filename_stem = stem,
+                        renderer   = renderer,
+                    )
+                    _release_video_eval_trajectory()
+            print(f"  [corner-select] Rendered {rendered_success_count} corner success video(s).")
+        else:
+            callback = _make_selective_eval_callback(
+                n_success = n_success,
+                n_fail    = n_fail,
+                out_dir   = out_dir if save_video else Path("/dev/null"),
+                ckpt_name = f"eval_{ckpt_name}",
+                renderer  = renderer,
+                cfg       = cfg,
+            )
+            (all_states, all_rewards, all_metrics,
+             mean_ret, mean_len, mean_gap, mean_prog, success_rate, found_rate) = _evaluate(
+                model,
+                jax.jit(eval_reset),
+                jax.jit(env_step),
+                jax.jit(compute_obs),
+                jax.jit(compute_reward),
+                cfg, key,
+                num_episodes=eval_max_compute,
+                episode_callback=callback,
+            )
+            n_computed = len(all_states)
 
     else:
         # Legacy mode: compute and render eval_render_videos episodes sequentially

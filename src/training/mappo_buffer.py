@@ -34,6 +34,11 @@ class MAPPOTransition(NamedTuple):
     rewards:   np.ndarray   # (E,)
     dones:     np.ndarray   # (E,)
     rnn_resets: Optional[np.ndarray] = None  # (E, N), recurrent path only
+    comm_masks: Optional[np.ndarray] = None  # (E, N, N), TarMAC agent-agent mask
+    active_masks: Optional[np.ndarray] = None  # (E, N), TarMAC active-agent mask
+    base_signatures: Optional[np.ndarray] = None  # (E, S), saved base TarMAC signature
+    base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
+    base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
 
 
 class MAPPORolloutBuffer:
@@ -65,6 +70,8 @@ class MAPPORolloutBuffer:
         per_agent:  bool  = True,
         recurrent:  bool  = False,
         hidden_dim: int   = 0,
+        tarmac_sig_dim: int = 64,
+        tarmac_val_dim: int = 128,
         actor_memory:  bool = False,
         critic_memory: bool = False,
     ) -> None:
@@ -78,6 +85,8 @@ class MAPPORolloutBuffer:
         self.per_agent  = per_agent
         self.recurrent  = recurrent
         self.hidden_dim = hidden_dim
+        self.tarmac_sig_dim = tarmac_sig_dim
+        self.tarmac_val_dim = tarmac_val_dim
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
 
@@ -94,16 +103,27 @@ class MAPPORolloutBuffer:
             self._values = np.zeros((self.T, self.E),  dtype=np.float32)
 
         self._rnn_resets = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._comm_masks = np.zeros((self.T, self.E, self.N, self.N), dtype=bool)
+        self._active_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._base_signatures = np.zeros((self.T, self.E, self.tarmac_sig_dim), dtype=np.float32)
+        self._base_values = np.zeros((self.T, self.E, self.tarmac_val_dim), dtype=np.float32)
+        self._base_memory_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
         self._initial_actor_h = None
+        self._initial_actor_signature = None
+        self._initial_actor_value = None
         self._initial_critic_h = None
 
         self._ptr = 0
 
-    def reset(self, actor_h=None, critic_h=None) -> None:
+    def reset(self, actor_h=None, critic_h=None, actor_signature=None, actor_value=None) -> None:
         self._ptr = 0
         if self.recurrent:
             if self.actor_memory:
                 self._initial_actor_h = np.asarray(actor_h, dtype=np.float32)
+                if actor_signature is not None:
+                    self._initial_actor_signature = np.asarray(actor_signature, dtype=np.float32)
+                if actor_value is not None:
+                    self._initial_actor_value = np.asarray(actor_value, dtype=np.float32)
             if self.critic_memory:
                 self._initial_critic_h = np.asarray(critic_h, dtype=np.float32)
 
@@ -132,6 +152,16 @@ class MAPPORolloutBuffer:
         self._dones[self._ptr]     = np.asarray(tr.dones)
         if self.recurrent and tr.rnn_resets is not None:
             self._rnn_resets[self._ptr] = np.asarray(tr.rnn_resets).astype(bool)
+        if self.recurrent and tr.comm_masks is not None:
+            self._comm_masks[self._ptr] = np.asarray(tr.comm_masks).astype(bool)
+        if self.recurrent and tr.active_masks is not None:
+            self._active_masks[self._ptr] = np.asarray(tr.active_masks).astype(bool)
+        if self.recurrent and tr.base_signatures is not None:
+            self._base_signatures[self._ptr] = np.asarray(tr.base_signatures, dtype=np.float32)
+        if self.recurrent and tr.base_values is not None:
+            self._base_values[self._ptr] = np.asarray(tr.base_values, dtype=np.float32)
+        if self.recurrent and tr.base_memory_masks is not None:
+            self._base_memory_masks[self._ptr] = np.asarray(tr.base_memory_masks).astype(bool)
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -278,9 +308,15 @@ class MAPPORolloutBuffer:
         mb_envs = self.E // n_minibatches
 
         actor_h = self._initial_actor_h
+        actor_signature = self._initial_actor_signature
+        actor_value = self._initial_actor_value
         critic_h = self._initial_critic_h
         if actor_h is None:
             actor_h = np.zeros((self.E, self.N, self.hidden_dim), dtype=np.float32)
+        if actor_signature is None:
+            actor_signature = np.zeros((self.E, self.N, self.tarmac_sig_dim), dtype=np.float32)
+        if actor_value is None:
+            actor_value = np.zeros((self.E, self.N, self.tarmac_val_dim), dtype=np.float32)
         if critic_h is None:
             critic_h = np.zeros((self.E, self.N, self.hidden_dim), dtype=np.float32)
 
@@ -296,6 +332,13 @@ class MAPPORolloutBuffer:
                 "returns":         jnp.array(returns[:, idx]),
                 "rnn_resets":      jnp.array(self._rnn_resets[:, idx]),
                 "initial_actor_h":  jnp.array(actor_h[idx]),
+                "initial_actor_signature": jnp.array(actor_signature[idx]),
+                "initial_actor_value": jnp.array(actor_value[idx]),
                 "initial_critic_h": jnp.array(critic_h[idx]),
+                "comm_masks":       jnp.array(self._comm_masks[:, idx]),
+                "active_masks":     jnp.array(self._active_masks[:, idx]),
+                "base_signatures":  jnp.array(self._base_signatures[:, idx]),
+                "base_values":      jnp.array(self._base_values[:, idx]),
+                "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
             })
         return minibatches

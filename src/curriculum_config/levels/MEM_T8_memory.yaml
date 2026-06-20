@@ -13,6 +13,7 @@ env:
   target_spawn_method: "map_defined"
   precover_base_comm: false
   mem_test_mask_nonlocal_obs: true
+  experimental_setup: true
 
 training:
   total_timesteps: 20_000_000
@@ -40,6 +41,8 @@ network:
   critic_type: "agent_centric"
   actor_memory: true
   critic_memory: true
+  num_layers: 3    # critic depth
+  actor_num_layers: 3    # actor depth (lighter, separate)
 
 
 

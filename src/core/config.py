@@ -70,7 +70,11 @@ class EnvConfig:
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
+    observe_target_vector: bool = True            # if False, remove target odometry vector from actor observations
+    observe_base_vector: bool = True              # if False, remove base odometry vector from actor observations
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
+    terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
+    experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
 
 
 
@@ -89,9 +93,14 @@ class RewardConfig:
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
     target_found_requires_delivery: bool = True
+    back_to_target_after_delivery: bool = False
+    chain_reward_system: str = "euclidean"  # "euclidean" | "discrete_finders_path"
+    only_reward_chain_from_target: bool = False
     only_shortest_path_chain_reward: bool = False
+    reward_single_shortest_path: bool = True
     only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
     every_reward_global: bool = False     # share every reward/penalty equally across agents
+
 
 
 @dataclass
@@ -110,9 +119,15 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     total_timesteps: int = 50_000_000
     checkpoint_path: Optional[str] = None  # if set, resumes training from this path
-    warn_vram_limit: bool = True
-    abort_on_vram_limit: bool = True
+    checkpoint_step_offset: Optional[int] = None  # if set, starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
+    ckpt_loading_mode: str = "branch"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
+    resume_update: Optional[bool] = None  # Deprecated legacy parameter (use ckpt_loading_mode instead)
+    warn_vram_limit: bool = False
+    abort_on_vram_limit: bool = False
     vram_limit_gb: float = 20.0
+    eval_parallel: bool = False
+    eval_parallel_envs: int = 4000
+    eval_parallel_early_exit_threshold: Optional[float] = None
 
 
 
@@ -124,6 +139,11 @@ class NetworkConfig:
     critic_type:      str = "agent_centric"  # "agent_centric" | "global_mean"
     actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
+    memory_comm_enabled: bool = False
+    memory_comm_every_k_steps: int = 5
+    tarmac_sig_dim: int = 64
+    tarmac_val_dim: int = 128
+    tarmac_include_self: bool = True
 
 
 @dataclass
@@ -142,22 +162,27 @@ class LoggingConfig:
 
     # --- Frequencies ---
     log_freq: int = 10
-    eval_freq: int = 30           # Run evaluation and heatmap generation every N updates
+    eval_freq: int = 50           # Run evaluation and heatmap generation every N updates
+    eval_offset: int = 1          # Offset for eval_freq modulo scheduling
+    eval_video_freq: Optional[int] = 50 # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
+    eval_video_offset: int = 1     # Offset for eval_video_freq modulo scheduling
 
     # --- Model Checkpointing ---
     save_model: bool = True
-    num_checkpoints: int = 10     # Guaranteed number of checkpoints per run
+    checkpoint_freq: int = 50     # Save model checkpoint every N updates
+    checkpoint_offset: int = 0    # Offset for checkpoint_freq modulo scheduling
     checkpoint_dir: str = "outputs/checkpoints"
 
     # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
     obs_log: bool = False
+    memory_diagnostic_probe: bool = False  # Train a linear probe on base memory to predict target cell
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
     eval_failed_chain_heatmap: bool = False  # Generate heatmap of target positions for failed chain deliveries from sliding window
-    eval_not_delivered_heatmap: bool = False  # Generate heatmap of target positions not delivered to base from sliding window
-    eval_not_visually_found_heatmap: bool = False  # Generate heatmap of target positions not visually found from sliding window
+    eval_not_delivered_or_visually_found_heatmap: bool = False  # Generate heatmap of target positions not delivered/visually found
+    eval_not_deliv_not_visual_splitt_in_two: bool = False      # If true, split the not-delivered/not-visual heatmap into two separate files
 
     # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
     video_freq: Optional[int] = None # legacy
@@ -189,12 +214,16 @@ class VisualizeConfig:
     vis_color: str = "#03fbff"
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
-    render_conn_matrix: bool = False       # if True, render the connections matrix in the legend
+    render_conn_matrix: bool = True       # if True, render the connections matrix in the legend
+    render_finders_path_debug: bool = False  # if True, render the finders path list in the legend when valid
 
 
 @dataclass
 class CurriculumConfig:
     success_threshold: Optional[float] = None
+    metric: str = "success"             # "success" or "target_found"
+    mode: str = "train"                 # "train" or "eval"
+
 
 
 @dataclass
@@ -236,10 +265,17 @@ def compute_obs_dim(cfg: DictConfig) -> int:
         ├─ inv_dist_target_conn_drone             (1)   target-chain drones, norm by comm_r
         └─ inv_dist_base_conn_drone               (1)   base-chain drones, norm by comm_r
 
-    Total: 9 + 16 + B * 4
+    Total: 9 + 16 + B * 4 by default. The base and target odometry vectors
+    can be removed independently with env.observe_base_vector and
+    env.observe_target_vector; the target-known flag remains present.
     """
     B = cfg.env.radar_bins
-    return 9 + 16 + B * 4
+    self_dim = 9
+    if not bool(cfg.env.get("observe_base_vector", True)):
+        self_dim -= 2
+    if not bool(cfg.env.get("observe_target_vector", True)):
+        self_dim -= 2
+    return self_dim + 16 + B * 4
 
 
 def compute_action_dim(_cfg: DictConfig) -> int:
@@ -430,14 +466,32 @@ def load_config(
     elif cfg.reward.only_explor_individual:
         cfg.reward.only_shortest_path_chain_reward = False
 
+    if bool(cfg.network.memory_comm_enabled):
+        # Memory communication already requires the direct adjacency matrix to build
+        # sender/receiver masks, so expose it in EnvState/logging as well.
+        OmegaConf.set_readonly(cfg, False)
+        cfg.env.log_adjacency_matrix = True
+
     # Automatically enable adjacency matrix logging for render, evaluate, and test_physics scripts
-    # (since the matrix is only needed for rendering visuals, and we want to keep training performant)
+    # (since the matrix is needed for visuals/diagnostics in those entry points)
     import sys
     if sys.argv and len(sys.argv[0]) > 0:
         script_name = Path(sys.argv[0]).name
         if any(word in script_name for word in ["evaluate", "render", "preview", "test_physics"]):
-            OmegaConf.set_readonly(cfg, False)
-            cfg.env.log_adjacency_matrix = True
+            # Respect explicit disabled settings in overrides
+            explicit_false = False
+            if overrides is not None:
+                for o in overrides:
+                    if "env.log_adjacency_matrix=false" in o.lower():
+                        explicit_false = True
+            if not explicit_false:
+                OmegaConf.set_readonly(cfg, False)
+                cfg.env.log_adjacency_matrix = True
+
+    # Auto-false diagnostic probe if memory or memory communication is false/off
+    if not (bool(cfg.network.actor_memory) and bool(cfg.network.memory_comm_enabled)):
+        OmegaConf.set_readonly(cfg, False)
+        cfg.logging.memory_diagnostic_probe = False
 
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)
@@ -481,6 +535,8 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.env.spawn_delay >= 0, "spawn_delay must be >= 0."
     assert cfg.env.target_spawn_radius >= 0.0, "target_spawn_radius must be non-negative."
     assert 0.0 <= cfg.env.wall_restitution <= 1.0, "wall_restitution must be [0, 1]."
+    if str(cfg.reward.get("chain_reward_system", "euclidean")) not in ("euclidean", "discrete_finders_path"):
+        raise ValueError("reward.chain_reward_system must be 'euclidean' or 'discrete_finders_path'.")
     assert cfg.training.num_envs > 0
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0
@@ -500,8 +556,26 @@ def validate_config(cfg: DictConfig) -> None:
         assert int(cfg.visualize.eval_render_failures) >= 0, \
             "visualize.eval_render_failures must be >= 0"
         # Both buckets=0 is valid: compute episodes, print stats, render nothing.
+    if hasattr(cfg, "curriculum") and cfg.curriculum is not None:
+        if cfg.curriculum.get("metric", None) is not None:
+            valid_metrics = ("success", "target_found")
+            if str(cfg.curriculum.metric) not in valid_metrics:
+                raise ValueError(f"curriculum.metric must be one of {valid_metrics}")
+        if cfg.curriculum.get("mode", None) is not None:
+            valid_modes = ("train", "eval")
+            if str(cfg.curriculum.mode) not in valid_modes:
+                raise ValueError(f"curriculum.mode must be one of {valid_modes}")
+
     if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
+    if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
+        raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
+    if int(cfg.network.memory_comm_every_k_steps) < 1:
+        raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
+    if int(cfg.network.tarmac_sig_dim) < 1:
+        raise ValueError("network.tarmac_sig_dim must be >= 1.")
+    if int(cfg.network.tarmac_val_dim) < 1:
+        raise ValueError("network.tarmac_val_dim must be >= 1.")
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
         num_envs = int(cfg.training.num_envs)
         mb = int(cfg.training.num_minibatches)

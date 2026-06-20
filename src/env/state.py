@@ -50,6 +50,7 @@ class EnvState:
     box_width     : ()      float32 — dynamic world width
     box_height    : ()      float32 — dynamic world height
     base_target_known: ()   bool  — persistent: True once base is informed
+    target_revisit_reward_claimed: () bool — True after the post-delivery target revisit bonus is claimed
     chain_held_steps:  ()   int32 — consecutive timesteps chain has been held
     is_conn_base  : (N,)    bool  — True if agent is connected to base
     is_conn_target: (N,)    bool  — True if agent is connected to target
@@ -73,6 +74,39 @@ class EnvState:
     chain_held_steps:  jax.Array # ()    int32
     is_conn_base:      jax.Array # (N,)  bool
     is_conn_target:    jax.Array # (N,)  bool
+    finder_returned_to_target: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.bool_(False)
+    )
+    finder_path_cells: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 0, 2), dtype=jnp.int16)
+    )
+    finder_path_lens: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.int16)
+    )
+    finder_path_active: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
+    )
+    target_known_path_cells: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 0, 2), dtype=jnp.int16)
+    )
+    target_known_path_lens: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.int16)
+    )
+    target_known_path_valid: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
+    )
+    finders_path: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 2), dtype=jnp.int16)
+    )
+    finders_path_len: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.int16(0)
+    )
+    finders_path_valid: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.bool_(False)
+    )
+    finders_path_index_grid: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.zeros((0, 0), dtype=jnp.int16)
+    )
     # Direct communication adjacency matrix (excluding self-loops)
     adj_matrix:        jax.Array = dataclasses.field(
         default_factory=lambda: jnp.zeros((0, 0), dtype=jnp.bool_)
@@ -81,6 +115,9 @@ class EnvState:
     # Empty by default so older hand-built EnvState test fixtures stay valid.
     anti_target_known: jax.Array = dataclasses.field(
         default_factory=lambda: jnp.zeros((0,), dtype=jnp.bool_)
+    )
+    target_revisit_reward_claimed: jax.Array = dataclasses.field(
+        default_factory=lambda: jnp.bool_(False)
     )
     # (Removed static world data from PyTree to save VRAM)
 
@@ -96,8 +133,12 @@ jax.tree_util.register_dataclass(
         "coverage_grid", "step", "key",
         "active", "target_known", "collides", "last_cov_delta",
         "box_width", "box_height", "base_target_known", "chain_held_steps",
-        "is_conn_base", "is_conn_target", "adj_matrix",
-        "anti_target_known",
+        "is_conn_base", "is_conn_target", "finder_returned_to_target",
+        "finder_path_cells", "finder_path_lens", "finder_path_active",
+        "target_known_path_cells", "target_known_path_lens", "target_known_path_valid",
+        "finders_path", "finders_path_len", "finders_path_valid",
+        "finders_path_index_grid", "adj_matrix",
+        "anti_target_known", "target_revisit_reward_claimed",
     ],
     meta_fields=[],
 )
@@ -127,6 +168,8 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(state.collides,      (N,))
     chex.assert_shape(state.last_cov_delta, (N,))
     chex.assert_shape(state.base_target_known, ())
+    chex.assert_shape(state.target_revisit_reward_claimed, ())
+    chex.assert_shape(state.finder_returned_to_target, ())
     chex.assert_shape(state.chain_held_steps, ())
     chex.assert_shape(state.is_conn_base, (N,))
     chex.assert_shape(state.is_conn_target, (N,))
@@ -145,6 +188,8 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
         chex.assert_type(state.anti_target_known, jnp.bool_)
     chex.assert_type(state.collides,      jnp.bool_)
     chex.assert_type(state.base_target_known, jnp.bool_)
+    chex.assert_type(state.target_revisit_reward_claimed, jnp.bool_)
+    chex.assert_type(state.finder_returned_to_target, jnp.bool_)
     chex.assert_type(state.chain_held_steps, jnp.int32)
     chex.assert_type(state.is_conn_base, jnp.bool_)
     chex.assert_type(state.is_conn_target, jnp.bool_)

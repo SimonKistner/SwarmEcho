@@ -93,12 +93,17 @@ class _FrameData(NamedTuple):
     active:        np.ndarray | None  # (N,) bool
     collides:      np.ndarray | None  # (N,) bool
     occ_grid:      np.ndarray | None  # (W_px, H_px) bool
+    comm_occ_grid: np.ndarray | None  # communication blockers; mesh walls are transparent
+    mesh_walls:    np.ndarray | None  # (M, 4), drawn blue for communication-transparent blockers
     box_width:     float
     box_height:    float
     extra_metrics: dict[str, any]
     target_known:  np.ndarray | None
     base_target_known: bool | None
     adj_matrix:    np.ndarray | None
+    finders_path:  np.ndarray | None
+    finders_path_len: int
+    maze_cell_grid: tuple[int, int] | None
 
 
 def _bfs(adj: np.ndarray, source: int) -> set[int]:
@@ -174,6 +179,30 @@ def _get_shortest_path_distances(adj: np.ndarray, source: int) -> np.ndarray:
                 dists[v] = d_u + 1
                 queue.append(v)
     return dists
+
+
+def _get_single_shortest_path_edges(adj: np.ndarray, source: int, target: int, dists_to_target: np.ndarray) -> set[tuple[int, int]]:
+    edges = set()
+    if source < 0 or target < 0 or dists_to_target[source] >= 999:
+        return edges
+    curr = source
+    M = adj.shape[0]
+    for _ in range(M):
+        if curr == target:
+            break
+        candidates = []
+        for v in np.where(adj[curr])[0]:
+            v = int(v)
+            if dists_to_target[v] == dists_to_target[curr] - 1:
+                candidates.append(v)
+        if not candidates:
+            break
+        nxt = candidates[0]
+        edges.add((curr, nxt))
+        edges.add((nxt, curr))
+        curr = nxt
+    return edges
+
 
 def _drone_col(idx_in_adj: int, base_comp: set, target_comp: set) -> tuple:
     ib = idx_in_adj in base_comp
@@ -314,6 +343,7 @@ def _draw_frame_cv2(
     rew_cfg = cfg.reward
     use_shortest_path_visuals = (
         bool(rew_cfg.get("only_shortest_path_chain_reward", False))
+        and str(rew_cfg.get("chain_reward_system", "euclidean")) in ("euclidean", "discrete_finders_path")
         and not bool(rew_cfg.get("only_explor_individual", False))
         and not bool(rew_cfg.get("every_reward_global", False))
     )
@@ -330,6 +360,7 @@ def _draw_frame_cv2(
     # For now, we try to get it from the state if we were to add it, or
     # we'll have to load it from the map.
     occ_grid = getattr(frame, "occ_grid", None)
+    comm_occ_grid = getattr(frame, "comm_occ_grid", occ_grid)
     if occ_grid is not None:
         wall_img = np.zeros((occ_grid.shape[1], occ_grid.shape[0]), dtype=np.uint8)
         # grid is (W, H), opencv wants (H, W)
@@ -338,6 +369,12 @@ def _draw_frame_cv2(
         mask = wall_full > 0
         roi = img[lay.mt:lay.mt+lay.ph, lay.ml:lay.ml+lay.pw]
         roi[mask] = 50 # Solid walls
+
+    mesh_walls = getattr(frame, "mesh_walls", None)
+    if mesh_walls is not None:
+        mesh_width = max(2, int(round(lay.scale)))
+        for x1, y1, x2, y2 in np.asarray(mesh_walls):
+            cv2.line(img, lay.w2p(float(x1), float(y1)), lay.w2p(float(x2), float(y2)), (235, 165, 14), mesh_width, cv2.LINE_AA)
 
     # Axis labels removed per request
 
@@ -363,6 +400,60 @@ def _draw_frame_cv2(
         blend = (roi.astype(np.float32) * 0.75 + cov_full.astype(np.float32) * 0.25).astype(np.uint8)
         roi[mask] = blend[mask]
 
+    if (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and frame.finders_path is not None
+        and frame.finders_path_len > 1
+        and frame.maze_cell_grid is not None
+    ):
+        scale = RendererConfig.RENDER_DPI / 100.0
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        pts = [
+            lay.w2p(float(c[0] + 0.5) * cell_w, float(c[1] + 0.5) * cell_h)
+            for c in frame.finders_path[:frame.finders_path_len]
+        ]
+        overlay = img.copy()
+        for p1, p2 in zip(pts[:-1], pts[1:]):
+            cv2.line(overlay, p1, p2, _hex_to_bgr("#22c55e"), max(2, int(2 * scale)), cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
+
+    def _finder_path_tips() -> tuple[int, int]:
+        if frame.finders_path is None or frame.finders_path_len <= 0 or frame.maze_cell_grid is None:
+            return -1, -1
+        cols, rows = frame.maze_cell_grid
+        cell_w = W / cols
+        cell_h = H / rows
+        cells = np.floor(frame.pos / np.array([cell_w, cell_h], dtype=np.float32)).astype(np.int32)
+        cells[:, 0] = np.clip(cells[:, 0], 0, cols - 1)
+        cells[:, 1] = np.clip(cells[:, 1], 0, rows - 1)
+        path_idx = {tuple(c): k for k, c in enumerate(frame.finders_path[:frame.finders_path_len])}
+        ranks = np.array([path_idx.get(tuple(c), -1) for c in cells], dtype=np.int32)
+        valid_b = [i for i in range(N) if (i + drone_start) in base_comp and ranks[i] >= 0]
+        valid_t = [i for i in range(N) if (i + drone_start) in target_comp and ranks[i] >= 0]
+
+        def center(k: int) -> np.ndarray:
+            c = frame.finders_path[k]
+            return np.array([(c[0] + 0.5) * cell_w, (c[1] + 0.5) * cell_h], dtype=np.float32)
+
+        base_tip = -1
+        if valid_b:
+            best_rank = max(ranks[i] for i in valid_b)
+            tied = [i for i in valid_b if ranks[i] == best_rank]
+            ref = np.asarray(frame.target_pos if best_rank >= frame.finders_path_len - 2 else center(best_rank + 1), dtype=np.float32)
+            if ref.ndim > 1:
+                ref = ref[0]
+            base_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+
+        target_tip = -1
+        if valid_t:
+            best_rank = min(ranks[i] for i in valid_t)
+            tied = [i for i in valid_t if ranks[i] == best_rank]
+            ref = np.asarray(frame.base_pos if best_rank <= 1 else center(best_rank - 1), dtype=np.float32)
+            target_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
+        return base_tip, target_tip
+
     # ── Connectivity ──────────────────────────────────────────────────────
     num_bases = int(cfg.env.num_bases or 0)
     num_targets = int(cfg.env.num_targets or 0)
@@ -370,6 +461,11 @@ def _draw_frame_cv2(
     target_points = np.asarray(frame.target_pos)
     if target_points.ndim == 1:
         target_points = target_points[None, :]
+    elif target_points.ndim == 2:
+        mask = ~np.all(target_points == 0.0, axis=1)
+        target_points = target_points[mask]
+        _, indices = np.unique(target_points, axis=0, return_index=True)
+        target_points = target_points[np.sort(indices)]
 
     ents_comp = []
     base_idx = -1; target_idx = -1; target_indices = []
@@ -407,11 +503,11 @@ def _draw_frame_cv2(
                 threshold = comm_r
 
             if dists[i, j] <= threshold:
-                if occ_grid is not None:
-                    # Wall check
+                if comm_occ_grid is not None:
+                    # Communication raycast: mesh walls are transparent only for comm.
                     p1_grid = ents[i] / cell_size
                     p2_grid = ents[j] / cell_size
-                    if _dda_raycast_np(p1_grid, p2_grid, occ_grid):
+                    if _dda_raycast_np(p1_grid, p2_grid, comm_occ_grid):
                         adj[i, j] = adj[j, i] = True
                 else:
                     adj[i, j] = adj[j, i] = True
@@ -433,9 +529,15 @@ def _draw_frame_cv2(
         full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
     sp_nodes = set()
     if use_shortest_path_visuals and full_chain:
-        for i in range(M):
-            if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
-                sp_nodes.add(i)
+        if bool(rew_cfg.get("reward_single_shortest_path", True)):
+            full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+            for u, v in full_chain_edges:
+                sp_nodes.add(u)
+                sp_nodes.add(v)
+        else:
+            for i in range(M):
+                if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
+                    sp_nodes.add(i)
 
     drone_cols = []
     for i in range(N):
@@ -472,18 +574,27 @@ def _draw_frame_cv2(
     idx_base_tip = -1
     idx_target_tip = -1
     if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
-        d_to_t = dists[drone_start:, target_idx]
-        valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
-        if valid_b:
-            idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
+        if str(rew_cfg.get("chain_reward_system", "euclidean")) == "discrete_finders_path":
+            idx_base_tip, idx_target_tip = _finder_path_tips()
+        else:
+            d_to_t = dists[drone_start:, target_idx]
+            valid_b = [i for i in range(N) if (i + drone_start) in base_comp]
+            if valid_b:
+                idx_base_tip = valid_b[np.argmin(d_to_t[valid_b])] + drone_start
 
-        d_to_b = dists[drone_start:, base_idx]
-        valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
-        if valid_t:
-            idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
+            d_to_b = dists[drone_start:, base_idx]
+            valid_t = [i for i in range(N) if (i + drone_start) in target_comp]
+            if valid_t:
+                idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
     dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
     dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+
+    reward_single = use_shortest_path_visuals and bool(rew_cfg.get("reward_single_shortest_path", True))
+    if reward_single:
+        full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+        base_tip_edges = _get_single_shortest_path_edges(adj, base_idx, idx_base_tip, dist_from_base_tip)
+        target_tip_edges = _get_single_shortest_path_edges(adj, target_idx, idx_target_tip, dist_from_target_tip)
 
     for i in range(M):
         for j in range(i + 1, M):
@@ -496,8 +607,11 @@ def _draw_frame_cv2(
 
             if use_shortest_path_visuals and full_chain:
                 # On full shortest path
-                if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
-                    is_both = True
+                if reward_single:
+                    is_both = (i, j) in full_chain_edges
+                else:
+                    if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
+                        is_both = True
 
                 if is_both: ec, lw = _C["both_chain"], 2
                 else:
@@ -513,12 +627,18 @@ def _draw_frame_cv2(
                 else: ec, lw = _C["link_grey"], 1
 
                 if ib and jb and idx_base_tip >= 0:
-                    if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
-                        on_base_sp = True
+                    if reward_single:
+                        on_base_sp = (i, j) in base_tip_edges
+                    else:
+                        if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
+                            on_base_sp = True
 
                 if it and jt and idx_target_tip >= 0:
-                    if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
-                        on_tgt_sp = True
+                    if reward_single:
+                        on_tgt_sp = (i, j) in target_tip_edges
+                    else:
+                        if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
+                            on_tgt_sp = True
 
             # Draw the subtle "glow" for shortest paths
             if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):
@@ -583,6 +703,11 @@ def _draw_frame_cv2(
         anti_points = np.asarray(frame.anti_target_pos)
         if anti_points.ndim == 1:
             anti_points = anti_points[None, :]
+        elif anti_points.ndim == 2:
+            mask = ~np.all(anti_points == 0.0, axis=1)
+            anti_points = anti_points[mask]
+            _, indices = np.unique(anti_points, axis=0, return_index=True)
+            anti_points = anti_points[np.sort(indices)]
         for k, ap in enumerate(anti_points):
             apx, apy = lay.w2p(ap[0], ap[1])
             cv2.drawMarker(img, (apx, apy), _C["anti_mkr"], cv2.MARKER_TILTED_CROSS, am * 2, 2, cv2.LINE_AA)
@@ -700,6 +825,26 @@ def _draw_frame_cv2(
     if not has_any:
         _draw_text(img, "  (none)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
         ly += int(20 * scale)
+
+    # ── Finder Path Debug Print ───────────────────────────────────────────
+    render_fp_debug = bool(cfg.visualize.get("render_finders_path_debug", False))
+    if render_fp_debug:
+        ly += int(10 * scale)
+        _draw_text(img, "Finder Path:", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 1.1, _C["text"])
+        ly += int(20 * scale)
+        if frame.finders_path is not None and frame.finders_path_len > 0:
+            path_cells = [tuple(c) for c in frame.finders_path[:frame.finders_path_len]]
+            path_str = ", ".join(f"({c[0]},{c[1]})" for c in path_cells)
+            
+            # Wrap lines for text box
+            max_chars = 22
+            wrapped_lines = [path_str[i:i+max_chars] for i in range(0, len(path_str), max_chars)]
+            for line in wrapped_lines:
+                _draw_text(img, line, (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 0.85, _C["text_grey"])
+                ly += int(18 * scale)
+        else:
+            _draw_text(img, "  (not valid)", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND, _C["text_grey"])
+            ly += int(20 * scale)
 
     # ── Connections matrix ───────────────────────────────────────────────
     render_conn = bool(cfg.visualize.get("render_conn_matrix", True))
@@ -883,13 +1028,20 @@ def render_video_cv2(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
+    comm_occ_grid_static = None
+    mesh_walls_static = None
     anti_target_static = None
+    maze_cell_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
         map_path = MAP_DIR / f"{active_map_name}.yaml"
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = map_def.occupancy_grid
+            comm_occ_grid_static = map_def.communication_occupancy_grid
+            mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
+            if map_def.maze_cell_cols and map_def.maze_cell_rows:
+                maze_cell_grid_static = (int(map_def.maze_cell_cols), int(map_def.maze_cell_rows))
             # MEM_T8-only diagnostic marker overlay.
             if map_def.anti_target_spawn_points is not None:
                 anti_target_static = np.array(map_def.anti_target_spawn_points)
@@ -908,12 +1060,17 @@ def render_video_cv2(
             active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
             collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
             occ_grid      = occ_grid_static,
+            comm_occ_grid = comm_occ_grid_static,
+            mesh_walls    = mesh_walls_static,
             box_width     = float(traj_cpu.box_width[t]),
             box_height    = float(traj_cpu.box_height[t]),
             extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
             target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
             base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
             adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
+            finders_path  = (np.array(traj_cpu.finders_path[t]) if hasattr(traj_cpu, "finders_path") else None),
+            finders_path_len = (int(traj_cpu.finders_path_len[t]) if hasattr(traj_cpu, "finders_path_len") else 0),
+            maze_cell_grid = maze_cell_grid_static,
         ))
 
     # 2. Determine parallelism (daemonic processes cannot spawn children)

@@ -27,6 +27,16 @@ The model framework is built using Flax (`nnx` API).
   obs_i -> actor encoder -> GRU_i -> policy head -> mu/log_std
   ```
   The hidden state is reset at episode boundaries and while an agent is inactive.
+- **Actor communication** (`network.memory_comm_enabled: true`) replaces the plain GRU input with a single-round TarMAC update:
+  ```text
+  previous hidden_i -> query_i
+  previous signature_j/value_j (+ optional saved base token)
+      -> masked TarMAC attention over the wall-aware communication graph
+      -> concat(obs_embed_i, comm_context_i)
+      -> GRU_i
+      -> next signature_i/value_i and policy head
+  ```
+  The base station is passive: it stores the first target-knowing reporter's emitted TarMAC signature/value pair, then replays that saved token to non-knowing agents that are in base communication range. No previous action is fed back into the actor GRU or communication state.
 - **Critic memory** is available for the agent-centric critic:
   ```text
   obs_i -> critic encoder -> GRU_i -> masked cross-agent attention -> V_i

@@ -110,7 +110,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Build env functions
     # -----------------------------------------------------------------------
-    env_step, reset, _, (W, H, occ_grid) = make_env_fns(cfg)
+    env_step, reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
 
     # JIT-compile the functions we need
     reset_jit = jax.jit(reset)

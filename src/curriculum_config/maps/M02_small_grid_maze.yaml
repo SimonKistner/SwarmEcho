@@ -7,9 +7,16 @@ name: M02_small_grid_maze
 width: 90.0
 height: 90.0
 
+# Coarse logical cells used to construct this maze. Finder-path tracking,
+# discrete chain rewards, path visualization, and preview grid lines all use
+# this grid, not the 1 m physics/coverage grid.
+maze_cell_grid:
+  cols: 9
+  rows: 9
+
 spawn_zones:
-  base:   [40.0,   40.0,   50.0,   50.0]
-  drone:  [40.0,   40.0,   50.0,   50.0]
+  base:   [45.0,   45.0,   45.0,   45.0]
+  drone:  [45.0,   45.0,   45.0,   45.0]
   target: [0.833,   0.833,  89.167,  89.167]
 
 # Target must be at least 1.25 m away from every wall (including world border) (scaled from 3.0 m).
@@ -19,6 +26,11 @@ target_wall_clearance: 1.25
 # columns 4-5, rows 4-5, i.e. world coords 40-50, 40-50).
 target_exclude_zones:
   - [30.417, 30.417, 60.0, 60.0]   # centre room + 10 m margin all sides (scaled from 16m margin / 24m cell)
+# Excludes the 2nd grid cell in each of the 4 corridors to prevent direct 1-drone connections
+  - [ 40.0, 60.0, 50.0, 70.0 ]       # North corridor extension (cell [4, 6])
+  - [ 40.0, 20.0, 50.0, 30.417 ]     # South corridor extension (cell [4, 2])
+  - [ 60.0, 40.0, 70.0, 50.0 ]       # East corridor extension  (cell [6, 4])
+  - [ 20.0, 40.0, 30.417, 50.0 ]     # West corridor extension  (cell [2, 4])
 
 rooms: []
 hallways: []

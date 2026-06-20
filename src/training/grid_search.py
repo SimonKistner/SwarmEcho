@@ -1,13 +1,14 @@
 """
 training/grid_search.py
 =======================
-Sequentially launches SwarmEcho training runs for a grid of hyperparameters.
+Sequentially launches SwarmEcho training runs for a grid of memory
+communication hyperparameters.
 Terminates each run after a 20-minute wallclock timeout, logging and parsing 
 the results to compare exploration performance (map coverage, target found) 
 across configurations.
 
-Sorts runs to start with the highest memory footprint (VRAM usage) and slowly 
-decrease down to the lowest memory, longest wallclock time configuration.
+Only the memory-communication architecture knobs are swept here; training
+batching and PPO schedule values come from the selected level/config.
 """
 
 import sys
@@ -25,17 +26,28 @@ import os
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # --- Grid Parameters (Constants) ---
-NUM_ENVS_LIST = [2000, 4000, 7000]
-NUM_STEPS_LIST = [50, 100, 200]
-NUM_EPOCHS_LIST = [2, 5, 10]
-NUM_MINIBATCHES_LIST = [10, 50, 100]
+MEM_SHARE_COMM_MERGES = ["residual", "concat"]
+MEM_SHARE_COMM_ATTENTION_MODES = [
+    "attend_global_learned_query",
+    "attend_cur_obs_query",
+    "attend_mem_query",
+    "attend_cur_obs_and_mem_query",
+]
+MEM_SHARE_COMM_GRADIENT_MODES = ["rial", "dial"]
 
-TIMEOUT_SECONDS = 1000 
+TIMEOUT_SECONDS = None  # Disabled (no wallclock limit) 
 
-def shorten_num(val):
-    if val >= 1000:
-        return f"{val//1000}k" if val % 1000 == 0 else f"{val/1000:.1f}k"
-    return str(val)
+def shorten_comm_mode(value):
+    return {
+        "residual": "res",
+        "concat": "cat",
+        "attend_global_learned_query": "gq",
+        "attend_cur_obs_query": "obsq",
+        "attend_mem_query": "memq",
+        "attend_cur_obs_and_mem_query": "obsmemq",
+        "rial": "rial",
+        "dial": "dial",
+    }[value]
 
 def format_duration(seconds):
     h, r = divmod(int(seconds), 3600)
@@ -86,7 +98,7 @@ def run_command_realtime_logging(cmd, timeout_seconds):
                     break
                     
             elapsed = time.perf_counter() - start_time
-            if elapsed > timeout_seconds:
+            if timeout_seconds is not None and elapsed > timeout_seconds:
                 timed_out = True
                 print(f"\n⚠️ Run exceeded timeout limit of {format_duration(timeout_seconds)}. Terminating...")
                 process.terminate()
@@ -216,14 +228,13 @@ def write_summary_markdown(level, results):
         f.write(f"# Grid Search Results for Level: {level}\n\n")
         f.write(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write("Runs are sorted by **Map Coverage** (descending). OOMs at the bottom are sorted by allocation size (ascending).\n\n")
-        f.write("| Rank | Run Name | num_envs | num_steps | num_epochs | num_minibatches | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |\n")
-        f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        f.write("| Rank | Run Name | Comm Merge | Attention Mode | Gradient Mode | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |\n")
+        f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for rank, res in enumerate(sorted_results, 1):
             run_name = res["run_name"]
-            envs = res["envs"]
-            steps = res["steps"]
-            epochs = res["epochs"]
-            minibatches = res["minibatches"]
+            comm_merge = res.get("comm_merge", "-")
+            attention_mode = res.get("attention_mode", "-")
+            gradient_mode = res.get("gradient_mode", "-")
             status = res["status"]
             steps_done = f"{res['metrics']['steps']:,}"
             sps = f"{res['metrics']['sps']:,.0f}" if res['metrics']['sps'] > 0 else "----"
@@ -233,7 +244,7 @@ def write_summary_markdown(level, results):
             ret = res["metrics"]["ep_return"]
             details = res["details"]
             
-            f.write(f"| {rank} | `{run_name}` | {envs} | {steps} | {epochs} | {minibatches} | **{status}** | {steps_done} | {sps} | {cov} | {found} | {succ} | {ret} | {details} |\n")
+            f.write(f"| {rank} | `{run_name}` | {comm_merge} | {attention_mode} | {gradient_mode} | **{status}** | {steps_done} | {sps} | {cov} | {found} | {succ} | {ret} | {details} |\n")
 
 def load_existing_results(level):
     results = []
@@ -250,42 +261,43 @@ def load_existing_results(level):
             if not line.startswith("|") or "Rank" in line or set(line.replace(" ", "")).issubset({"|", "-", ":"}):
                 continue
             parts = [p.strip() for p in line.split("|")]
-            # Format: | Rank | Run Name | num_envs | num_steps | num_epochs | num_minibatches | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |
+            # Format: | Rank | Run Name | Comm Merge | Attention Mode | Gradient Mode | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |
             if len(parts) < 15:
                 continue
             
             run_name = parts[2].strip("`")
             if not run_name.startswith(f"grid_{level}_"):
                 continue
-            
-            try:
-                envs = int(parts[3])
-                steps = int(parts[4])
-                epochs = int(parts[5])
-                minibatches = int(parts[6])
-            except ValueError:
+
+            comm_merge = parts[3]
+            attention_mode = parts[4]
+            gradient_mode = parts[5]
+            if (
+                comm_merge not in MEM_SHARE_COMM_MERGES
+                or attention_mode not in MEM_SHARE_COMM_ATTENTION_MODES
+                or gradient_mode not in MEM_SHARE_COMM_GRADIENT_MODES
+            ):
                 continue
-                
-            status = parts[7].strip("*")
+            status_idx = 6
+            status = parts[status_idx].strip("*")
             
-            raw_steps = parts[8].replace(",", "")
+            raw_steps = parts[status_idx + 1].replace(",", "")
             steps_done = int(raw_steps) if raw_steps.isdigit() else 0
             
-            raw_sps = parts[9].replace(",", "")
+            raw_sps = parts[status_idx + 2].replace(",", "")
             sps = float(raw_sps) if raw_sps.replace(".", "", 1).isdigit() else 0.0
             
-            cov = parts[10]
-            found = parts[11]
-            succ = parts[12]
-            ret = parts[13]
-            details = parts[14]
+            cov = parts[status_idx + 3]
+            found = parts[status_idx + 4]
+            succ = parts[status_idx + 5]
+            ret = parts[status_idx + 6]
+            details = parts[status_idx + 7]
             
             results.append({
                 "run_name": run_name,
-                "envs": envs,
-                "steps": steps,
-                "epochs": epochs,
-                "minibatches": minibatches,
+                "comm_merge": comm_merge,
+                "attention_mode": attention_mode,
+                "gradient_mode": gradient_mode,
                 "status": status,
                 "details": details,
                 "metrics": {
@@ -325,7 +337,7 @@ def print_progress_bar(completed, total, elapsed_time, session_completed):
 
 def run_benchmarks():
     # Parse CLI Arguments
-    level = "M02"
+    level = "MEM_SHARE_T8_memory_comm"
     extra_args = []
     if len(sys.argv) > 1:
         if "=" not in sys.argv[1]:
@@ -334,21 +346,21 @@ def run_benchmarks():
         else:
             extra_args = sys.argv[1:]
 
-    # Generate all hyperparameter combinations
-    raw_combinations = list(itertools.product(
-        NUM_ENVS_LIST,
-        NUM_STEPS_LIST,
-        NUM_EPOCHS_LIST,
-        NUM_MINIBATCHES_LIST
+    # Generate all memory-communication combinations. The old batching/PPO
+    # hyperparameter grid intentionally is not searched here.
+    combinations = list(itertools.product(
+        MEM_SHARE_COMM_MERGES,
+        MEM_SHARE_COMM_ATTENTION_MODES,
+        MEM_SHARE_COMM_GRADIENT_MODES,
     ))
-    
-    # Filter valid configurations (num_envs % num_minibatches == 0)
-    combinations = [c for c in raw_combinations if c[0] % c[3] == 0]
     total_runs = len(combinations)
     
     # Load already-completed results to support resume functionality
     results = load_existing_results(level)
-    completed_combos = {(r["envs"], r["steps"], r["epochs"], r["minibatches"]) for r in results}
+    completed_combos = {
+        (r.get("comm_merge", "-"), r.get("attention_mode", "-"), r.get("gradient_mode", "-"))
+        for r in results
+    }
     
     # Filter remaining combinations
     remaining_combinations = [c for c in combinations if c not in completed_combos]
@@ -356,7 +368,7 @@ def run_benchmarks():
     # Randomly shuffle remaining runs as requested
     random.shuffle(remaining_combinations)
     
-    print(f"🚀 Starting/Resuming hyperparameter grid search for Level: {level}")
+    print(f"🚀 Starting/Resuming memory-communication grid search for Level: {level}")
     print(f"   Total valid combinations in grid : {total_runs}")
     print(f"   Completed in previous runs       : {len(completed_combos)}")
     print(f"   Remaining runs to evaluate       : {len(remaining_combinations)}")
@@ -369,31 +381,30 @@ def run_benchmarks():
     session_completed = 0
     start_session_time = time.perf_counter()
     
-    for envs, steps, epochs, minibatches in remaining_combinations:
-        envs_str = shorten_num(envs)
-        steps_str = shorten_num(steps)
-        epochs_str = shorten_num(epochs)
-        mb_str = shorten_num(minibatches)
-        
-        run_name = f"grid_{level}_env{envs_str}_step{steps_str}_epoch{epochs_str}_mb{mb_str}"
+    for comm_merge, attention_mode, gradient_mode in remaining_combinations:
+        run_name = (
+            f"grid_{level}"
+            f"_{shorten_comm_mode(comm_merge)}"
+            f"_{shorten_comm_mode(attention_mode)}"
+            f"_{shorten_comm_mode(gradient_mode)}"
+        )
         
         current_idx = len(results) + 1
         print(f"\n[{current_idx}/{total_runs}] Launching run: {run_name}")
-        print(f"          Environments : {envs:<5} | Steps : {steps:<4} | Epochs : {epochs:<2} | Minibatches : {minibatches}")
+        print(f"          Comm Merge   : {comm_merge} | Attention : {attention_mode} | Gradient : {gradient_mode}")
         print("-" * 80)
         
         # Build training CLI command with python -u to ensure unbuffered stdout
         cmd = [
             "uv", "run", "python", "-u", "src/training/train.py",
             f"level={level}",
-            f"training.num_envs={envs}",
-            f"training.num_steps={steps}",
-            f"training.num_epochs={epochs}",
-            f"training.num_minibatches={minibatches}",
-            "training.total_timesteps=500000000",  # prevent natural exit
+            "training.total_timesteps=50000000",  # prevent natural exit
             f"logging.run_name={run_name}",
             f"logging.wandb_group=grid_search_{level}",
-            "logging.use_timestamp_postfix=False"
+            "logging.use_timestamp_postfix=False",
+            "network.tarmac_sig_dim=64",
+            "network.tarmac_val_dim=128",
+            "network.tarmac_include_self=True",
         ]
         
         cmd.extend(extra_args)
@@ -420,7 +431,7 @@ def run_benchmarks():
                 print(f"✅ {run_name} timed out after the limit.")
             elif return_code == 0:
                 status = "SUCCESS"
-                details = "Completed budget (unlikely)"
+                details = "Completed budget or early exit"
                 print(f"✅ {run_name} completed successfully.")
             else:
                 oom_size = extract_oom_size(full_output)
@@ -447,10 +458,9 @@ def run_benchmarks():
             
         results.append({
             "run_name": run_name,
-            "envs": envs,
-            "steps": steps,
-            "epochs": epochs,
-            "minibatches": minibatches,
+            "comm_merge": comm_merge,
+            "attention_mode": attention_mode,
+            "gradient_mode": gradient_mode,
             "status": status,
             "details": details,
             "metrics": metrics

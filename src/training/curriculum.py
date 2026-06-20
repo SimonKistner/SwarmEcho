@@ -96,7 +96,7 @@ def _ensure_b_level_exists(level_id: str, global_cfg) -> None:
 # ---------------------------------------------------------------------------
 
 def run_curriculum():
-    # Parse levels from sys.argv if present (e.g. levels=B02,B03,B04,B05,B05b)
+    # Parse levels from sys.argv if present (e.g. levels=B02,B03)
     levels = ["B05a","B05b"]
     filtered_args = []
     for arg in sys.argv[1:]:
@@ -131,6 +131,22 @@ def run_curriculum():
     print("="*60)
 
     last_checkpoint = global_cfg.training.get("checkpoint_path", None)
+
+    # Track cumulative step offset across curriculum stages
+    cumulative_steps = 0
+    if last_checkpoint:
+        try:
+            import re
+            path_name = Path(last_checkpoint).name
+            match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
+            if match:
+                val = int(match.group(1))
+                E = int(global_cfg.training.num_envs)
+                T = int(global_cfg.training.num_steps)
+                cumulative_steps = val * E * T
+                print(f"  [curriculum] Parsed initial step offset from starting checkpoint: {cumulative_steps:,} steps")
+        except Exception as e:
+            print(f"  [curriculum] Failed to parse initial checkpoint steps: {e}")
 
     for idx, level_id in enumerate(levels):
         level_name = f"L{level_id}"
@@ -167,6 +183,11 @@ def run_curriculum():
 
         # 4. Set checkpoint from previous stage
         cfg.training.checkpoint_path = last_checkpoint
+        if last_checkpoint:
+            cfg.training.ckpt_loading_mode = "branch"
+            cfg.training.checkpoint_step_offset = cumulative_steps
+            print(f"  [curriculum] Loading weights from: {last_checkpoint}")
+            print(f"  [curriculum] Continuing with step offset: {cumulative_steps:,} steps")
 
         # 5. Wire logging into the curriculum directory
         cfg.logging.log_dir = str(curriculum_root)
@@ -185,7 +206,24 @@ def run_curriculum():
         # 7. Run training
         final_ckpt_path = train(cfg, success_threshold=success_threshold)
 
-        # 8. Pass checkpoint to the next stage
+        # 8. Update cumulative steps based on updates completed in this stage
+        if final_ckpt_path:
+            try:
+                import re
+                path_name = Path(final_ckpt_path).name
+                match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
+                if match:
+                    local_updates = int(match.group(1))
+                    E = int(cfg.training.num_envs)
+                    T = int(cfg.training.num_steps)
+                    steps_taken = local_updates * E * T
+                    cumulative_steps += steps_taken
+                    print(f"  [curriculum] Stage completed {local_updates} updates ({steps_taken:,} steps). "
+                          f"New cumulative step offset: {cumulative_steps:,}")
+            except Exception as e:
+                print(f"  [curriculum] Failed to parse completed stage steps from '{final_ckpt_path}': {e}")
+
+        # 9. Pass checkpoint to the next stage
         last_checkpoint = final_ckpt_path
         print(f"  Stage {level_name} complete.")
 

@@ -63,6 +63,11 @@ class MAPPOModel(nnx.Module):
         rngs:             nnx.Rngs,
         actor_memory:     bool = False,
         critic_memory:    bool = False,
+        memory_comm_enabled: bool = False,
+        memory_comm_every_k_steps: int = 5,
+        tarmac_sig_dim: int = 64,
+        tarmac_val_dim: int = 128,
+        tarmac_include_self: bool = True,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -71,6 +76,11 @@ class MAPPOModel(nnx.Module):
         self.critic_type = critic_type
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
+        self.memory_comm_enabled = memory_comm_enabled
+        self.memory_comm_every_k_steps = memory_comm_every_k_steps
+        self.tarmac_sig_dim = tarmac_sig_dim
+        self.tarmac_val_dim = tarmac_val_dim
+        self.tarmac_include_self = tarmac_include_self
 
         if actor_memory:
             self.actor = RecurrentDecentralizedActor(
@@ -79,6 +89,11 @@ class MAPPOModel(nnx.Module):
                 hidden_dim       = hidden_dim,
                 actor_num_layers = actor_num_layers,
                 rngs             = rngs,
+                memory_comm_enabled = memory_comm_enabled,
+                memory_comm_every_k_steps = memory_comm_every_k_steps,
+                tarmac_sig_dim = tarmac_sig_dim,
+                tarmac_val_dim = tarmac_val_dim,
+                tarmac_include_self = tarmac_include_self,
             )
         else:
             self.actor = DecentralizedActor(
@@ -144,6 +159,14 @@ class MAPPOModel(nnx.Module):
         """Return zero actor memory with shape batch_shape + (N, H)."""
         return jnp.zeros((*tuple(batch_shape), self.num_agents, self.hidden_dim), dtype=jnp.float32)
 
+    def initial_actor_signature(self, batch_shape=()) -> jax.Array:
+        """Return zero TarMAC actor signatures with shape batch_shape + (N, S)."""
+        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.tarmac_sig_dim), dtype=jnp.float32)
+
+    def initial_actor_value(self, batch_shape=()) -> jax.Array:
+        """Return zero TarMAC actor values with shape batch_shape + (N, V)."""
+        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.tarmac_val_dim), dtype=jnp.float32)
+
     def initial_critic_hidden(self, batch_shape=()) -> jax.Array:
         """Return zero critic memory with shape batch_shape + (N, H)."""
         return jnp.zeros((*tuple(batch_shape), self.num_agents, self.hidden_dim), dtype=jnp.float32)
@@ -200,7 +223,14 @@ class MAPPOModel(nnx.Module):
         critic_hidden:  jax.Array | None,
         resets:         jax.Array,   # (N,)
         max_force:      float = 50.0,
-    ) -> tuple[jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
+        actor_signature: jax.Array | None = None,
+        actor_value:    jax.Array | None = None,
+        comm_mask:      jax.Array | None = None,
+        active:         jax.Array | None = None,
+        base_signature: jax.Array | None = None,
+        base_value:     jax.Array | None = None,
+        base_memory_mask: jax.Array | None = None,
+    ) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
         """
         Rollout step that carries optional actor and critic recurrent states.
 
@@ -211,13 +241,33 @@ class MAPPOModel(nnx.Module):
             if actor_hidden is None:
                 actor_hidden = self.initial_actor_hidden(())
 
-            def _act_one(obs_i, key_i, h_i, reset_i):
-                h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
-                return h_i, a, lp
+            if self.memory_comm_enabled:
+                if actor_signature is None:
+                    actor_signature = self.initial_actor_signature(())
+                if actor_value is None:
+                    actor_value = self.initial_actor_value(())
+                actor_hidden, actor_signature, actor_value, actions, log_probs, _ = self.actor.act_team(
+                    all_obs,
+                    actor_hidden,
+                    actor_signature,
+                    actor_value,
+                    keys,
+                    reset=resets,
+                    comm_mask=comm_mask,
+                    active=active,
+                    base_signature=base_signature,
+                    base_value=base_value,
+                    base_memory_mask=base_memory_mask,
+                    deterministic=False,
+                )
+            else:
+                def _act_one(obs_i, key_i, h_i, reset_i):
+                    h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
+                    return h_i, a, lp
 
-            actor_hidden, actions, log_probs = jax.vmap(_act_one)(
-                all_obs, keys, actor_hidden, resets
-            )
+                actor_hidden, actions, log_probs = jax.vmap(_act_one)(
+                    all_obs, keys, actor_hidden, resets
+                )
         else:
             def _act_one(obs_i, key_i):
                 a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
@@ -231,7 +281,7 @@ class MAPPOModel(nnx.Module):
             resets,
             deterministic=False,
         )
-        return actor_hidden, critic_hidden, actions, log_probs, value
+        return actor_hidden, actor_signature, actor_value, critic_hidden, actions, log_probs, value
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +323,11 @@ if __name__ == "__main__":
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
     )
 
     _, params = nnx.split(model)

@@ -213,7 +213,7 @@ def main():
 
     for arg in args:
         if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1])
+            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
         else:
             overrides.append(arg)
 
@@ -256,6 +256,11 @@ def main():
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
+        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
+        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
+        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
+        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
+        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
     )
 
     # ── Load Checkpoint ───────────────────────────────────────────────────
@@ -446,8 +451,8 @@ def main():
     print(f"Simulating rollout videos for the first {num_to_render} cluster representative(s)...")
 
     # Environment fns
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
-    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
+    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
     compute_reward = make_reward_fn(cfg)
 
     renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))

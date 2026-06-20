@@ -1,0 +1,66 @@
+env:
+  map_names: ["memory_share_t_maze_4"]
+  num_agents: 4
+  num_targets: 2
+  num_bases: 0
+  max_steps: 50
+  visual_radius: 8.0
+  comm_radius: 45.0
+  comm_radius_base: 0.01
+  spawn_delay: 0
+  use_random_base_spawn: false
+  use_random_drone_spawn: true
+  target_spawn_method: "map_defined"
+  precover_base_comm: false
+  mem_test_mask_nonlocal_obs: true
+  experimental_setup: true
+  observe_target_vector: false
+  observe_base_vector: false
+
+training:
+  total_timesteps: 50_000_000
+  num_envs: 4000
+  num_steps: 50
+  num_epochs: 1
+  num_minibatches: 20
+  seed: 5555
+  eval_parallel: true
+  eval_parallel_envs: 4000
+  eval_parallel_early_exit_threshold: 1.0
+
+reward:
+  exploration_bonus: 0.01
+  target_found_requires_delivery: false
+  target_found_bonus: 0.0
+  finder_bonus: 50.0
+  max_gap_penalty: 0.0
+  success_bonus: 0.0
+  base_proximity_bonus: 0.0
+  target_proximity_bonus: 0.0
+  proximity_penalty: 0.0
+  collision_penalty: 0.1
+  every_reward_global: false
+  only_explor_individual: false
+  only_shortest_path_chain_reward: false
+
+network:
+  critic_type: "agent_centric"
+  actor_memory: true
+  critic_memory: true
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 5
+  tarmac_sig_dim: 64
+  tarmac_val_dim: 128
+  tarmac_include_self: true
+
+
+  num_layers:  3    # critic depth
+  actor_num_layers:  3    # actor depth (lighter, separate)
+
+logging:
+  eval_freq: 10
+  eval_video_freq: 100000
+  eval_video: true
+  obs_log: false
+  eval_failed_chain_heatmap: false
+  eval_not_delivered_or_visually_found_heatmap: false

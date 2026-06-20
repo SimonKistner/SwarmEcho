@@ -73,7 +73,8 @@ def make_env_fns(cfg: DictConfig):
     env_step        : (EnvState, actions (N,2)) -> EnvState
     reset           : (PRNGKey) -> EnvState
     update_coverage : (coverage_grid, pos, active) -> coverage_grid
-    world_meta      : tuple (W, H, occ_grid) - resolved box width, height, and occupancy grid
+    world_meta      : tuple (W, H, occ_grid, comm_occ_grid) - resolved box width, height,
+                      physical occupancy grid, and communication occupancy grid
     """
 
     # --- Extract config as Python scalars (XLA compile-time constants) -----
@@ -99,7 +100,12 @@ def make_env_fns(cfg: DictConfig):
     target_spawn_radius_min = float(cfg.env.get("target_spawn_radius_min", 0.0))
     target_invalid_spawn_base_radius = float(cfg.env.get("target_invalid_spawn_base_radius", 0.0))
     precover_base_comm      = bool(cfg.env.get("precover_base_comm", False))
-    log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False))
+    log_adj                 = bool(cfg.env.get("log_adjacency_matrix", False)) or bool(cfg.network.get("memory_comm_enabled", False))
+    experimental_setup      = bool(cfg.env.get("experimental_setup", False))
+    use_finders_path        = (
+        str(cfg.reward.get("chain_reward_system", "euclidean")) == "discrete_finders_path"
+        and not experimental_setup
+    )
 
 
     # How many matrix-squaring steps to guarantee full-graph reachability.
@@ -114,6 +120,7 @@ def make_env_fns(cfg: DictConfig):
     # Map loading
     map_def      = None
     occ_grid     = None
+    comm_occ_grid = None
     padded_grid  = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
@@ -128,6 +135,8 @@ def make_env_fns(cfg: DictConfig):
             W, H = map_def.width, map_def.height
             if map_def.occupancy_grid is not None:
                 occ_grid = jnp.array(map_def.occupancy_grid, dtype=jnp.bool_)
+            if map_def.communication_occupancy_grid is not None:
+                comm_occ_grid = jnp.array(map_def.communication_occupancy_grid, dtype=jnp.bool_)
             if map_def.padded_occupancy_grid is not None:
                 padded_grid = map_def.padded_occupancy_grid
 
@@ -142,8 +151,15 @@ def make_env_fns(cfg: DictConfig):
                 ty = (map_def.target_spawn_zone[1] + map_def.target_spawn_zone[3]) / 2.0
                 TARGET_POS_FIXED = jnp.array([tx, ty], dtype=jnp.float32)
             # MEM_T8-only diagnostic scaffolding: paired anti-target slots.
-            if map_def.anti_target_spawn_points is not None and len(map_def.anti_target_spawn_points) >= N:
-                ANTI_TARGET_POINTS = map_def.anti_target_spawn_points[:N]
+            if map_def.anti_target_spawn_points is not None:
+                if len(map_def.anti_target_spawn_points) >= N:
+                    ANTI_TARGET_POINTS = map_def.anti_target_spawn_points[:N]
+                else:
+                    scale = N // len(map_def.anti_target_spawn_points)
+                    anti_indices = jnp.arange(N) // scale
+                    mapped_points = map_def.anti_target_spawn_points[anti_indices]
+                    is_receiver = (jnp.arange(N) % 2 == 1)[:, None]
+                    ANTI_TARGET_POINTS = jnp.where(is_receiver, mapped_points, 0.0)
         else:
             raise FileNotFoundError(f"Map file not found: {map_path}")
 
@@ -156,11 +172,25 @@ def make_env_fns(cfg: DictConfig):
 
     if occ_grid is None:
         raise ValueError("Occupancy grid missing. A valid map MUST be loaded for physics.")
+    if comm_occ_grid is None:
+        comm_occ_grid = occ_grid
 
     # Padding size in cells
     R_cells = int(PAD_RADIUS / cell_size) + 2
     if padded_grid is None:
         raise ValueError("Padded occupancy grid missing. Map loading or padding logic failed.")
+
+    maze_cols = int(map_def.maze_cell_cols or 1)
+    maze_rows = int(map_def.maze_cell_rows or 1)
+    maze_cell_w = float(W) / maze_cols
+    maze_cell_h = float(H) / maze_rows
+    max_finders_path_len = maze_cols * maze_rows if use_finders_path else 1
+    base_maze_cell = jnp.array([
+        int(max(0, min(maze_cols - 1, math.floor((float(W) / 2.0) / maze_cell_w)))),
+        int(max(0, min(maze_rows - 1, math.floor((float(H) / 2.0) / maze_cell_h)))),
+    ], dtype=jnp.int16)
+    _maze_offsets = jnp.array([[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]], dtype=jnp.int16)
+    spawn_room_cells = jnp.clip(base_maze_cell[None, :] + _maze_offsets, jnp.array([0, 0], dtype=jnp.int16), jnp.array([maze_cols - 1, maze_rows - 1], dtype=jnp.int16))
 
     # 1. Pre-compute Ray Stencil for Visibility (Stencil + Cummax approach)
     # Circle sampling for visual radius
@@ -264,7 +294,7 @@ def make_env_fns(cfg: DictConfig):
     # _update_target_known  (internal utility)
     # ------------------------------------------------------------------
 
-    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    def _update_target_known(state: EnvState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """
         Compute the updated target knowledge and connectivity status.
 
@@ -289,8 +319,8 @@ def make_env_fns(cfg: DictConfig):
         def _check_comm(i, j):
             dist = jnp.linalg.norm(state.pos[i] - state.pos[j])
             in_range = (dist <= comm_r) & state.active[i] & state.active[j] & (i != j)
-            # DDA Raycast (structural)
-            can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, occ_grid)
+            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+            can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid)
             return in_range & can_see
 
         adj_dd = jax.vmap(jax.vmap(_check_comm, (None, 0)), (0, None))(
@@ -301,15 +331,16 @@ def make_env_fns(cfg: DictConfig):
         def _check_base_comm(i):
             dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
             in_range = (dist <= comm_r_base) & state.active[i]
-            # DDA Raycast (structural)
-            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid)
+            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid)
             return in_range & can_see
 
         adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)).astype(jnp.float32)
 
-        # MEM_T8-only diagnostic path: target_pos may be (N, 2) to run eight
-        # independent cue/choice tasks inside one env. Normal levels use (2,).
-        per_agent_targets = (state.target_pos.ndim == 2)
+        # Experimental memory diagnostics may use one target per agent. Normal
+        # levels always use one shared target and should not execute diagnostic
+        # target-shape behavior.
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
         target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
 
         # 2. Drone-to-target LoS
@@ -347,7 +378,7 @@ def make_env_fns(cfg: DictConfig):
         knows_after = jnp.any((R > 0.5) & knows_before[None, :], axis=-1)
 
         # Direct connection adjacency matrix of size (N+1, N+1) (excluding self-loops)
-        if log_adj:
+        if log_adj or use_finders_path:
             adj_matrix = jnp.concatenate([A_top, A_bot], axis=0) > 0.5
         else:
             adj_matrix = jnp.zeros((0, 0), dtype=jnp.bool_)
@@ -355,7 +386,212 @@ def make_env_fns(cfg: DictConfig):
         new_target_known = knows_after[:N]
         new_base_target_known = knows_after[N]
 
-        return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix
+        return new_target_known, new_base_target_known, is_conn_base, is_conn_target, adj_matrix, directly_sees
+
+    def _maze_cell_from_pos(pos):
+        cx = jnp.clip(jnp.floor(pos[0] / maze_cell_w).astype(jnp.int16), 0, maze_cols - 1)
+        cy = jnp.clip(jnp.floor(pos[1] / maze_cell_h).astype(jnp.int16), 0, maze_rows - 1)
+        return jnp.stack([cx, cy]).astype(jnp.int16)
+
+    def _cell_center(cell):
+        return jnp.array([
+            (cell[0].astype(jnp.float32) + 0.5) * maze_cell_w,
+            (cell[1].astype(jnp.float32) + 0.5) * maze_cell_h,
+        ], dtype=jnp.float32)
+
+    def _is_spawn_room_cell(cell):
+        return jnp.any(jnp.all(spawn_room_cells == cell[None, :], axis=-1))
+
+    def _append_loop_erased(path, length, cell):
+        valid = jnp.arange(max_finders_path_len) < length.astype(jnp.int32)
+        matches = valid & jnp.all(path == cell[None, :], axis=-1)
+        already = jnp.any(matches)
+        match_idx = jnp.argmax(matches.astype(jnp.int32)).astype(jnp.int16)
+        last_idx = jnp.maximum(length.astype(jnp.int32) - 1, 0)
+        last_cell = path[last_idx]
+        same_last = (length > 0) & jnp.all(last_cell == cell)
+        can_append = (length.astype(jnp.int32) < max_finders_path_len) & ~already & ~same_last
+        next_len = jnp.where(already, match_idx + jnp.int16(1), jnp.where(can_append, length + jnp.int16(1), length))
+        path = jnp.where(can_append, path.at[length.astype(jnp.int32)].set(cell), path)
+        return path, next_len
+
+    def _update_finders_path_state(
+        state: EnvState,
+        mid_state: EnvState,
+        directly_sees: jax.Array,
+        new_target_known: jax.Array,
+        new_base_target_known: jax.Array,
+        is_conn_base: jax.Array,
+    ) -> dict:
+        if not use_finders_path:
+            return {}
+
+        cells = jax.vmap(_maze_cell_from_pos)(mid_state.pos)
+        in_spawn = jax.vmap(_is_spawn_room_cell)(cells)
+
+        def _update_one(i, carry):
+            paths, lens, active = carry
+            path = paths[i]
+            length = lens[i]
+            # Path buffers are fixed-size JAX arrays; this flag is only a
+            # feature-state marker, not a memory-saving mechanism.  A path starts
+            # once an active agent leaves the start area. If an agent returns to
+            # the start area before discovering the target itself, erase that
+            # candidate route so it can start over from the next exit.
+            was_active = length > 0
+            now_active = was_active | (~in_spawn[i] & mid_state.active[i])
+            reset_path = in_spawn[i] & was_active & (~state.target_known[i]) & (~directly_sees[i])
+
+            # Seed with base, previous start-area/exit cell, and first non-start cell.
+            prev_cell = _maze_cell_from_pos(state.pos[i])
+            seed = path.at[0].set(base_maze_cell).at[1].set(prev_cell).at[2].set(cells[i])
+            seed_len = jnp.int16(3)
+            path = jnp.where((~was_active) & now_active, seed, path)
+            length = jnp.where((~was_active) & now_active, seed_len, length)
+
+            path, length = jax.lax.cond(
+                was_active & now_active & ~reset_path & mid_state.active[i],
+                lambda op: _append_loop_erased(op[0], op[1], cells[i]),
+                lambda op: op,
+                (path, length),
+            )
+            path = jnp.where(reset_path, jnp.zeros_like(path), path)
+            length = jnp.where(reset_path, jnp.int16(0), length)
+            now_active = length > 0
+            paths = paths.at[i].set(path)
+            lens = lens.at[i].set(length)
+            active = active.at[i].set(now_active)
+            return paths, lens, active
+
+        paths, lens, active = jax.lax.fori_loop(
+            0, N, _update_one,
+            (state.finder_path_cells, state.finder_path_lens, state.finder_path_active)
+        )
+
+        # Per-agent target-knowledge paths: direct observers lock their own path;
+        # agents that learn through communication copy the lowest-index known path
+        # in their connected component. The global finder path is frozen from this
+        # per-agent memory, not directly from the first target observation when
+        # delivery is required.
+        path_ready = lens > 0
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+
+        def _append_target(path_len_tgt):
+            path, length, tgt_pos = path_len_tgt
+            tgt_cell = _maze_cell_from_pos(tgt_pos)
+            last_cell_idx = jnp.maximum(length - 1, 0)
+            last_cell = path[last_cell_idx]
+            is_same = jnp.all(last_cell == tgt_cell)
+            dx = jnp.abs(last_cell[0] - tgt_cell[0])
+            dy = jnp.abs(last_cell[1] - tgt_cell[1])
+            is_neighbor = (dx <= 1) & (dy <= 1)
+            should_append = (~is_same) & is_neighbor & (length < max_finders_path_len)
+            path = jnp.where(should_append, path.at[length.astype(jnp.int32)].set(tgt_cell), path)
+            length = jnp.where(should_append, length + jnp.int16(1), length)
+            return path, length
+
+        direct_paths, direct_lens = jax.vmap(_append_target)((paths, lens, target_pos_agents))
+        direct_valid = directly_sees & path_ready & (~state.target_known_path_valid)
+
+        source_paths = jnp.where(direct_valid[:, None, None], direct_paths, state.target_known_path_cells)
+        source_lens = jnp.where(direct_valid, direct_lens, state.target_known_path_lens)
+        source_valid = state.target_known_path_valid | direct_valid
+
+        # Recompute reachability over the direct communication graph stored by
+        # _update_target_known so path memory follows the same target-known spread.
+        A = mid_state.adj_matrix[:N, :N] | jnp.eye(N, dtype=jnp.bool_)
+        def _square_bool(R, _):
+            return (R.astype(jnp.float32) @ R.astype(jnp.float32) > 0.5), None
+        R_agents, _ = jax.lax.scan(_square_bool, A, None, length=n_reach)
+        source_matrix = R_agents & source_valid[None, :]
+        source_idx = jnp.argmax(source_matrix.astype(jnp.int32), axis=1)
+        has_source = jnp.any(source_matrix, axis=1)
+        should_set_known_path = new_target_known & (~state.target_known_path_valid) & has_source
+        known_paths = jnp.where(should_set_known_path[:, None, None], source_paths[source_idx], state.target_known_path_cells)
+        known_lens = jnp.where(should_set_known_path, source_lens[source_idx], state.target_known_path_lens)
+        known_valid = state.target_known_path_valid | should_set_known_path
+
+        delivery_freeze = bool(cfg.reward.get("target_found_requires_delivery", True))
+        delivered_now = (~state.base_target_known) & new_base_target_known
+        freeze_candidates = jnp.where(
+            delivery_freeze,
+            known_valid & is_conn_base & new_target_known & delivered_now,
+            direct_valid,
+        )
+        first_find_now = (~state.finders_path_valid) & jnp.any(freeze_candidates)
+        finder_idx = jnp.argmax(freeze_candidates.astype(jnp.int32))
+        selected_path = jnp.where(delivery_freeze, known_paths[finder_idx], direct_paths[finder_idx])
+        selected_len = jnp.where(delivery_freeze, known_lens[finder_idx], direct_lens[finder_idx])
+
+        # Sanity check: warning if not same and not neighbor
+        # def _warn_fn(idx, slen, lc, tc, drone_pos, tgt_pos, direct, ready, cond):
+        #     jax.debug.print(
+        #         "WARNING: Target discovered but final finder-path cell {c1} is not a neighbor of target cell {c2}!\n"
+        #         "  finder_idx={idx} path_len={slen} drone_pos={dp} target_pos={tp} directly_sees={d} path_ready={r}",
+        #         c1=lc, c2=tc, idx=idx, slen=slen, dp=drone_pos, tp=tgt_pos, d=direct, r=ready,
+        #         when=cond
+        #     )
+        #     return None
+        # 
+        # _warn_fn(
+        #     finder_idx, selected_len, last_cell, tgt_cell,
+        #     state.pos[finder_idx], target_pos_agents[finder_idx],
+        #     directly_sees[finder_idx], path_ready[finder_idx],
+        #     first_find_now & (~is_same) & (~is_neighbor)
+        # )
+
+        def _build_index_grid(path_len_path):
+            path_len, path = path_len_path
+            grid = jnp.full((maze_cols, maze_rows), jnp.int16(-1), dtype=jnp.int16)
+
+            def _set_idx(k, g):
+                cell = path[k]
+                return jax.lax.cond(
+                    k < path_len.astype(jnp.int32),
+                    lambda gg: gg.at[cell[0].astype(jnp.int32), cell[1].astype(jnp.int32)].set(k.astype(jnp.int16)),
+                    lambda gg: gg,
+                    g,
+                )
+
+            return jax.lax.fori_loop(0, max_finders_path_len, _set_idx, grid)
+
+        new_finders_path = jnp.where(first_find_now, selected_path, state.finders_path)
+        new_finders_len = jnp.where(first_find_now, selected_len, state.finders_path_len)
+        new_index_grid = jnp.where(
+            first_find_now,
+            _build_index_grid((selected_len, selected_path)),
+            state.finders_path_index_grid,
+        )
+        keep_tracking_global = ~(state.finders_path_valid | first_find_now)
+        keep_tracking_agents = keep_tracking_global & (~known_valid)
+        return {
+            "finder_path_cells": jnp.where(keep_tracking_agents[:, None, None], paths, state.finder_path_cells),
+            "finder_path_lens": jnp.where(keep_tracking_agents, lens, state.finder_path_lens),
+            "finder_path_active": jnp.where(keep_tracking_agents, active, state.finder_path_active),
+            "target_known_path_cells": known_paths,
+            "target_known_path_lens": known_lens,
+            "target_known_path_valid": known_valid,
+            "finders_path": new_finders_path,
+            "finders_path_len": new_finders_len,
+            "finders_path_valid": state.finders_path_valid | first_find_now,
+            "finders_path_index_grid": new_index_grid,
+        }
+
+    def _target_revisit_candidates(state: EnvState, target_known: jax.Array) -> jax.Array:
+        """Agents that know and visually observe the target after base delivery."""
+        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
+        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+
+        def _sees_target(i):
+            target_i = target_pos_agents[i]
+            dist = jnp.linalg.norm(state.pos[i] - target_i)
+            in_range = (dist <= vis_r) & state.active[i]
+            can_see = dda_raycast(state.pos[i] / cell_size, target_i / cell_size, occ_grid)
+            return in_range & can_see
+
+        sees_target = jax.vmap(_sees_target)(jnp.arange(N))
+        return state.base_target_known & target_known & sees_target
 
     def _update_anti_target_known(state: EnvState) -> jax.Array:
         if ANTI_TARGET_POINTS is None or state.anti_target_known.size == 0:
@@ -431,7 +667,14 @@ def make_env_fns(cfg: DictConfig):
             elif use_task:  # fallback to "map_defined"
                 # MEM_T8-only diagnostic path: fixed per-agent target slots.
                 if map_def.target_spawn_points is not None and int(cfg.env.num_targets) > 1:
-                    target_pos = map_def.target_spawn_points[:N]
+                    if len(map_def.target_spawn_points) >= N:
+                        target_pos = map_def.target_spawn_points[:N]
+                    else:
+                        scale = N // len(map_def.target_spawn_points)
+                        target_indices = jnp.arange(N) // scale
+                        mapped_pos = map_def.target_spawn_points[target_indices]
+                        is_receiver = (jnp.arange(N) % 2 == 1)[:, None]
+                        target_pos = jnp.where(is_receiver, mapped_pos, 0.0)
                 else:
                     target_pos = map_def.sample_target(k2)
             else:
@@ -497,9 +740,21 @@ def make_env_fns(cfg: DictConfig):
             box_width     = jnp.float32(W),
             box_height    = jnp.float32(H),
             base_target_known = jnp.bool_(False),
+            target_revisit_reward_claimed = jnp.bool_(False),
+            finder_returned_to_target = jnp.bool_(False),
             chain_held_steps = jnp.int32(0),
             is_conn_base      = jnp.zeros(N, dtype=jnp.bool_),
             is_conn_target    = jnp.zeros(N, dtype=jnp.bool_),
+            finder_path_cells = jnp.zeros((N, max_finders_path_len, 2), dtype=jnp.int16),
+            finder_path_lens = jnp.zeros(N, dtype=jnp.int16),
+            finder_path_active = jnp.zeros(N, dtype=jnp.bool_),
+            target_known_path_cells = jnp.zeros((N, max_finders_path_len, 2), dtype=jnp.int16),
+            target_known_path_lens = jnp.zeros(N, dtype=jnp.int16),
+            target_known_path_valid = jnp.zeros(N, dtype=jnp.bool_),
+            finders_path = jnp.zeros((max_finders_path_len, 2), dtype=jnp.int16),
+            finders_path_len = jnp.int16(0),
+            finders_path_valid = jnp.bool_(False),
+            finders_path_index_grid = jnp.full((maze_cols, maze_rows), jnp.int16(-1), dtype=jnp.int16),
             adj_matrix        = jnp.zeros((N + 1, N + 1), dtype=jnp.bool_) if log_adj else jnp.zeros((0, 0), dtype=jnp.bool_),
         )
 
@@ -630,21 +885,34 @@ def make_env_fns(cfg: DictConfig):
         )
 
         # 7. Update persistent target knowledge using new positions
-        new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix = _update_target_known(mid_state)
+        new_target_known, new_base_target_known, is_conn_base, is_conn_target, new_adj_matrix, directly_sees = _update_target_known(mid_state)
         # MEM_T8-only diagnostic state update; no-op for normal levels.
         new_anti_target_known = _update_anti_target_known(mid_state)
+        target_revisit_candidates = _target_revisit_candidates(mid_state, new_target_known)
+        new_target_revisit_reward_claimed = (
+            state.target_revisit_reward_claimed | jnp.any(target_revisit_candidates)
+        )
+        path_mid_state = dataclasses.replace(mid_state, adj_matrix=new_adj_matrix)
+        path_updates = _update_finders_path_state(
+            state, path_mid_state, directly_sees, new_target_known, new_base_target_known, is_conn_base
+        )
 
         return dataclasses.replace(
             mid_state,
             target_known=new_target_known,
             base_target_known=new_base_target_known,
+            target_revisit_reward_claimed=new_target_revisit_reward_claimed,
+            finder_returned_to_target=state.finder_returned_to_target | (
+                state.base_target_known & ~state.target_revisit_reward_claimed & jnp.any(target_revisit_candidates)
+            ),
             anti_target_known=new_anti_target_known,
             is_conn_base=is_conn_base,
             is_conn_target=is_conn_target,
             adj_matrix=new_adj_matrix,
+            **path_updates,
         )
 
-    return env_step, reset, update_coverage, (W, H, occ_grid)
+    return env_step, reset, update_coverage, (W, H, occ_grid, comm_occ_grid)
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +929,7 @@ if __name__ == "__main__":
     cfg = load_config(cli_overrides=False)
     validate_config(cfg)
 
-    env_step, reset, update_coverage, (W, H, occ_grid) = make_env_fns(cfg)
+    env_step, reset, update_coverage, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
 
     reset_jit = jax.jit(reset)
     step_jit  = jax.jit(env_step)

@@ -47,7 +47,7 @@ from visualize.renderer import render_video
 
 
 def _resolve_map_path(name_or_path: str) -> Path:
-    path = Path(name_or_path)
+    path = Path(name_or_path.replace("\\", "/"))
     if path.suffix in {".yaml", ".yml"}:
         return path if path.is_absolute() else (Path.cwd() / path).resolve()
     return MAP_DIR / f"{name_or_path}.yaml"
@@ -118,11 +118,17 @@ def render_svg(
         '</defs>'
     ]
 
-    # Grid lines every 10m
-    for x in range(0, int(width) + 1, 10):
+    # Grid lines follow map-defined maze cells when provided. This must match
+    # the discrete finder-path reward/tracking grid rather than the 1 m physics grid.
+    maze_grid = data.get("maze_cell_grid") or {}
+    cols = int(maze_grid.get("cols", max(1, int(width // 10))))
+    rows = int(maze_grid.get("rows", max(1, int(height // 10))))
+    for i in range(cols + 1):
+        x = i * width / cols
         px = x * scale
         svg.append(f'<line x1="{px:.3f}" y1="0" x2="{px:.3f}" y2="{img_h:.3f}" stroke="#cbd5e1" stroke-opacity="0.45" stroke-width="1"/>')
-    for y in range(0, int(height) + 1, 10):
+    for i in range(rows + 1):
+        y = i * height / rows
         py = (height - y) * scale
         svg.append(f'<line x1="0" y1="{py:.3f}" x2="{img_w:.3f}" y2="{py:.3f}" stroke="#cbd5e1" stroke-opacity="0.45" stroke-width="1"/>')
 
@@ -154,6 +160,13 @@ def render_svg(
         px1, py1 = x1 * scale, (height - y1) * scale
         px2, py2 = x2 * scale, (height - y2) * scale
         svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#1f2937" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
+
+    # Mesh walls: movement/visual blockers, but communication-transparent.
+    for seg in data.get("mesh_walls", data.get("mesh", [])):
+        x1, y1, x2, y2 = seg
+        px1, py1 = x1 * scale, (height - y1) * scale
+        px2, py2 = x2 * scale, (height - y2) * scale
+        svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#0ea5e9" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
 
     # Zones
     if show_zones:
@@ -237,11 +250,17 @@ def render_png(
     # 1. Blank background (light slate background)
     img = np.full((img_h, img_w, 3), (252, 250, 248), dtype=np.uint8)
 
-    # 2. Grid lines
-    for x in range(0, int(width) + 1, 10):
+    # 2. Grid lines follow map-defined maze cells when provided. This must
+    # match the discrete finder-path reward/tracking grid.
+    maze_grid = data.get("maze_cell_grid") or {}
+    cols = int(maze_grid.get("cols", max(1, int(width // 10))))
+    rows = int(maze_grid.get("rows", max(1, int(height // 10))))
+    for i in range(cols + 1):
+        x = i * width / cols
         px = int(x * scale)
         cv2.line(img, (px, 0), (px, img_h), (225, 213, 203), 1, cv2.LINE_AA)
-    for y in range(0, int(height) + 1, 10):
+    for i in range(rows + 1):
+        y = i * height / rows
         py = int((height - y) * scale)
         cv2.line(img, (0, py), (img_w, py), (225, 213, 203), 1, cv2.LINE_AA)
 
@@ -280,6 +299,13 @@ def render_png(
         p1 = (int(x1 * scale), int((height - y1) * scale))
         p2 = (int(x2 * scale), int((height - y2) * scale))
         cv2.line(img, p1, p2, (55, 41, 31), wall_width, cv2.LINE_AA)
+
+    # Mesh walls: movement/visual blockers, but communication-transparent.
+    for seg in data.get("mesh_walls", data.get("mesh", [])):
+        x1, y1, x2, y2 = seg
+        p1 = (int(x1 * scale), int((height - y1) * scale))
+        p2 = (int(x2 * scale), int((height - y2) * scale))
+        cv2.line(img, p1, p2, (235, 165, 14), wall_width, cv2.LINE_AA)
 
     # 6. Spawn Zones
     if show_zones:
@@ -500,7 +526,7 @@ def main() -> None:
     env_step = None
     map_def = None
     try:
-        env_step, env_reset, _, (W, H, occ_grid) = make_env_fns(cfg)
+        env_step, env_reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
         state = env_reset(jax.random.PRNGKey(args.seed))
         map_def = MapDefinition.load(map_path, cell_size=1.0)
     except Exception as e:

@@ -8,6 +8,20 @@ the results to compare exploration performance (map coverage, target found).
 
 Minibatch size is calculated dynamically at runtime for each run to keep 
 the transitions per minibatch strictly under the VRAM safety limit (30,000).
+
+MEM_SHARE_COMM_MERGES = ["residual", "concat"]
+MEM_SHARE_COMM_ATTENTION_MODES = [
+    "attend_global_learned_query",
+    "attend_cur_obs_query",
+    "attend_mem_query",
+    "attend_cur_obs_and_mem_query",
+]
+MEM_SHARE_COMM_GRADIENT_MODES = ["rial", "dial"]
+
+expected
+expected 40M -> concat global rial
+expected 20M -> concat obs+mem dial
+
 """
 
 import sys
@@ -37,7 +51,7 @@ COMBINATIONS = [
     (4000, 200),
 ]
 
-TIMEOUT_SECONDS = 1800  # 30-minute training limit
+TIMEOUT_SECONDS = None  # Disabled (no wallclock limit)
 
 def calculate_optimal_minibatches(num_envs, num_steps, recurrent, max_transitions_per_mb=30000):
     total_batch_size = num_envs * num_steps
@@ -109,7 +123,7 @@ def run_command_realtime_logging(cmd, timeout_seconds):
                     break
                     
             elapsed = time.perf_counter() - start_time
-            if elapsed > timeout_seconds:
+            if timeout_seconds is not None and elapsed > timeout_seconds:
                 timed_out = True
                 print(f"\n⚠️ Run exceeded timeout limit of {format_duration(timeout_seconds)}. Terminating...")
                 process.terminate()
@@ -411,7 +425,7 @@ def run_benchmarks():
             f"training.num_envs={envs}",
             f"training.num_steps={steps}",
             f"training.num_minibatches={minibatches}",
-            "training.total_timesteps=500000000",  # prevent natural exit
+            "training.total_timesteps=50000000",  # prevent natural exit
             f"logging.run_name={run_name}",
             f"logging.wandb_group=grid_search_{level}_followup",
             "logging.use_timestamp_postfix=False"
@@ -441,7 +455,7 @@ def run_benchmarks():
                 print(f"✅ {run_name} timed out after the limit.")
             elif return_code == 0:
                 status = "SUCCESS"
-                details = "Completed budget (unlikely)"
+                details = "Completed budget or early exit"
                 print(f"✅ {run_name} completed successfully.")
             else:
                 oom_size = extract_oom_size(full_output)

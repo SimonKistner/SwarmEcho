@@ -227,6 +227,64 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
     return sorted_reg
 
 # ---------------------------------------------------------------------------
+# Resumption History Parser
+# ---------------------------------------------------------------------------
+
+def get_run_history_chain(run_data) -> str:
+    # 1. Try to read step_history.json from the latest checkpoint
+    outputs_path = Path(run_data["outputs_path"])
+    ckpt_dir = outputs_path / "checkpoints"
+    if ckpt_dir.exists():
+        ckpts = sorted(list(ckpt_dir.glob("ckpt_*")), key=lambda x: x.name)
+        if ckpts:
+            latest_ckpt = ckpts[-1]
+            history_file = latest_ckpt / "step_history.json"
+            if history_file.exists():
+                try:
+                    import json
+                    with open(history_file, "r") as f:
+                        data = json.load(f)
+                    history_list = data.get("history", [])
+                    if history_list:
+                        chain = []
+                        for entry in history_list:
+                            name = entry.get("run_name", "unknown")
+                            steps = entry.get("steps", 0)
+                            steps_str = f"{steps / 1_000_000:.1f}M" if steps >= 1_000_000 else f"{steps:,}"
+                            chain.append(f"<b>{name}</b> ({steps_str})")
+                        return " ➔ ".join(chain)
+                except:
+                    pass
+                
+    # 2. Fallback: Check config.yaml for checkpoint_path
+    cfg = run_data["config"]
+    t_cfg = cfg.get("training", {}) if isinstance(cfg, dict) else {}
+    checkpoint_path = t_cfg.get("checkpoint_path", None)
+    if checkpoint_path:
+        try:
+            parent_ckpt_name = Path(checkpoint_path).name
+            parent_run_name = Path(checkpoint_path).parents[1].name
+            # Also get steps from the checkpoint name
+            try:
+                updates = int(parent_ckpt_name.split("_")[1]) if "_" in parent_ckpt_name else 0
+                envs = int(t_cfg.get("num_envs", 1024))
+                rollout_steps = int(t_cfg.get("num_steps", 128))
+                parent_steps = updates * envs * rollout_steps
+                parent_steps_str = f"{parent_steps / 1_000_000:.1f}M" if parent_steps >= 1_000_000 else f"{parent_steps:,}"
+            except:
+                parent_steps_str = "unknown steps"
+            
+            current_steps_str = run_data["config"].get("telemetry", {}).get("actual_steps_trained", "Unknown")
+            return f"<b>{parent_run_name}</b> ({parent_steps_str}) [Resumed {parent_ckpt_name}] ➔ <b>{run_data['run_name']}</b> ({current_steps_str})"
+        except:
+            pass
+        
+    # 3. Scratch run (no history)
+    current_steps_str = run_data["config"].get("telemetry", {}).get("actual_steps_trained", "Unknown")
+    return f"<b>{run_data['run_name']}</b> ({current_steps_str}) [Started from Scratch]"
+
+
+# ---------------------------------------------------------------------------
 # State & Data Loading
 # ---------------------------------------------------------------------------
 
@@ -350,6 +408,14 @@ if len(selected_operations) == 1:
     st.markdown("---")
     st.markdown("<div class='header-style'>Core Intelligence Profile</div>", unsafe_allow_html=True)
     st.caption("Key operational parameters for the selected stage.")
+
+    st.markdown("<div class='section-title'>Resumption History</div>", unsafe_allow_html=True)
+    history_chain = get_run_history_chain(registry[r_disp])
+    info_html = "<div class='se-table-container'><table class='se-table'>"
+    info_html += "<thead><tr><th>Run Name</th><th>Heritage / Resumption History</th></tr></thead><tbody>"
+    info_html += f"<tr><td><b>{r_disp}</b></td><td>{history_chain}</td></tr>"
+    info_html += "</tbody></table></div>"
+    st.markdown(info_html, unsafe_allow_html=True)
     
     # Extract specific core keys
     r_disp = selected_operations[0]
@@ -406,11 +472,22 @@ else:
 
     st.markdown("---")
     st.markdown("<div class='header-style'>Configuration Deviations</div>", unsafe_allow_html=True)
+    st.caption("Parameters exhibiting variability across the selected operational domains.")
+
+    # Resumption History (Unconditional Info)
+    st.markdown("<div class='section-title'>Resumption History</div>", unsafe_allow_html=True)
+    info_html = "<div class='se-table-container'><table class='se-table'>"
+    info_html += "<thead><tr><th>Run Name</th><th>Heritage / Resumption History</th></tr></thead><tbody>"
+    for r_disp in selected_operations:
+        run_data = registry[r_disp]
+        history_chain = get_run_history_chain(run_data)
+        info_html += f"<tr><td><b>{r_disp}</b></td><td>{history_chain}</td></tr>"
+    info_html += "</tbody></table></div>"
+    st.markdown(info_html, unsafe_allow_html=True)
     
     domain_order = ["ENV", "REWARD", "TELEMETRY", "TRAINING", "LOGGING"]
 
     if not varying_df.empty:
-        st.caption("Parameters exhibiting variability across the selected operational domains.")
         v_domains = sorted(list(set([idx.split(" | ")[0] for idx in varying_df.index])), key=lambda x: domain_order.index(x) if x in domain_order else 999)
         for dom in v_domains:
             sub_df = varying_df[varying_df.index.str.startswith(dom + " | ")]
