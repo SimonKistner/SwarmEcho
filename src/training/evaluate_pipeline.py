@@ -406,6 +406,7 @@ def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, su
 
     # Save CSV
     if save_csv:
+        data_dir.mkdir(parents=True, exist_ok=True)
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["x", "y"])
