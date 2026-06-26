@@ -6,25 +6,26 @@ Ego-centric, permutation-invariant Radar + Graph observation model.
 All functions are pure JAX — JIT/vmap/scan compatible.
 Use `make_obs_fns(cfg)` so config scalars become XLA compile-time constants.
 
-Observation structure per agent i  (obs_dim = 9 + 16 + B*4)
+Observation structure per agent i  (obs_dim = 5 + 16 + B*4 [+2 if base_vec] [+2 if target_vec])
 ---------------------------------------------------------
 
-┌──────────────────────────── Self state (9) ───────────────────────────────┐
-│  vel_i / v_max                            (2)  ego velocity               │
-│  (base_pos - pos_i) / max_dim            (2)  odometry to base           │
-│  is_connected_to_base                    (1)  multi-hop graph flag        │
-│  is_connected_to_target                  (1)  multi-hop graph flag        │
-│  target_known_flag                       (1)  1.0 if drone knows target   │
-│  (target_pos - pos_i) / max_dim × mask   (2)  masked until target_known  │
+┌───────────────── Fixed core (always present, fixed indices) ───────────────┐
+│  vel_i / v_max                           (2)  indices 0-1                 │
+│  is_connected_to_base                    (1)  index  2                    │
+│  is_connected_to_target                  (1)  index  3                    │
+│  target_known_flag              ← HERE   (1)  index  4  ← ALWAYS index 4 │
 ├────────────────────── Local Coverage Probes (16) ─────────────────────────┤
 │  16 radial probes (evenly spaced circle) at sampling_radius:               │
-│  returns 1.0 if covered, 0.0 otherwise                                    │
+│  returns 1.0 if covered, 0.0 otherwise            indices 5-20            │
 ├─────────────────────── 360° Radar  (B bins × 4) ──────────────────────────┤
-│  For each of B angular bins:                                               │
+│  For each of B angular bins:                      indices 21-(20+B*4)     │
 │    inv_dist_wall                         (1)  1 - d/vis_r  (ray-cast)    │
 │    inv_dist_drone                        (1)  1 - d/comm_r (any drone)   │
 │    inv_dist_target_conn_drone            (1)  1 - d/comm_r (tgt-chain)   │
 │    inv_dist_base_conn_drone              (1)  1 - d/comm_r (base-chain)  │
+├─────────────────── Optional tail (appended last) ─────────────────────────┤
+│  (base_pos - pos_i) / max_dim            (2)  if observe_base_vector      │
+│  (target_pos - pos_i) / max_dim × mask   (2)  if observe_target_vector    │
 └────────────────────────────────────────────────────────────────────────────┘
 
 Design principles
@@ -455,7 +456,27 @@ def make_obs_fns(
             ], axis=-1)                                                      # (B, 4)
             radar_block = radar.reshape(-1)                                  # (B*4,)
 
-            return jnp.concatenate([self_block_final, local_cov, radar_block])                # (obs_dim,)
+            # ── Assemble obs: fixed core + optional tail ──────────────────────
+            # Fixed core (indices are stable regardless of optional flags):
+            #   vel(2) | conn_base(1) | conn_target(1) | target_known(1) | coverage(16) | radar(B*4)
+            core_parts = [
+                vel_i / v_max,                                               # (2,) indices 0-1
+                jnp.array([
+                    is_conn_base_f,
+                    is_conn_target_f,
+                    target_mask_f,
+                ], dtype=jnp.float32),                                        # (3,) indices 2-4
+                local_cov,                                                   # (16,) indices 5-20
+                radar_block,                                                  # (B*4,) indices 21+
+            ]
+            # Optional tail (appended after radar; indices shift with B)
+            tail_parts = []
+            if observe_base_vector:
+                tail_parts.append(rel_base_f)                                # (2,)
+            if observe_target_vector:
+                tail_parts.append(rel_target_f)                              # (2,)
+
+            return jnp.concatenate([*core_parts, *tail_parts])               # (obs_dim,)
 
         return jax.vmap(single_obs)(jnp.arange(N, dtype=jnp.int32))         # (N, obs_dim)
 
@@ -513,19 +534,20 @@ if __name__ == "__main__":
     assert not jnp.any(jnp.isinf(obs)), "Inf in observations!"
 
     # Radar channels (all of B*4 part) must be in [0, 1]
-    radar_part = obs[:, 25:]
+    radar_part = obs[:, 21:21 + B * 4]  # indices 21 to (20+B*4)
     assert jnp.all((radar_part >= 0.0) & (radar_part <= 1.0 + 1e-5)), \
         f"Radar values out of [0,1]: min={radar_part.min():.4f} max={radar_part.max():.4f}"
 
-    # Graph flags must be binary
-    graph_flags = obs[:, 4:7]   # now 3 flags: conn_base, conn_target, target_known
+    # Graph flags must be binary (conn_base=2, conn_target=3, target_known=4)
+    graph_flags = obs[:, 2:5]
     assert jnp.all((graph_flags == 0.0) | (graph_flags == 1.0)), \
         "Graph connectivity / target_known flags are not binary!"
 
     # Target odometry must be zero for drones that don't know target position
+    # target_vec is at the end of the obs (last 2 dims when observe_target_vector=True)
     target_known = jnp.array(state.target_known)
     for i in range(N):
-        tgt_odo = obs[i, 7:9]   # shifted by 1 due to new flag
+        tgt_odo = obs[i, -2:]   # last 2 dims = target odometry (when observe_target_vector=True)
         if not target_known[i]:
             assert jnp.allclose(tgt_odo, 0.0), \
                 f"Agent {i}: target odometry should be masked but got {tgt_odo}"
@@ -545,12 +567,12 @@ if __name__ == "__main__":
     # 3. Compute observations
     obs = jax.jit(compute_obs)(state)
 
-    # Local coverage block starts at index 9 (8 self-state + 1 target_known_flag)
+    # Local coverage block starts at index 5 (vel(2) + flags(3))
     # The offsets are circular (16 directions, 0 is North, 8 is South)
     # Drone at (10, 25) sampling North (0) looks at (10, 35).
     # Drone at (10, 25) sampling South (8) looks at (10, 15).
 
-    local_cov_bits = obs[0, 9:25]
+    local_cov_bits = obs[0, 5:21]
     print(f"    Drone at X={stripe_x} sees local coverage bits: {local_cov_bits}")
 
     assert local_cov_bits[0] == 1.0, "Calibration Failed: Drone should see coverage at its current X-stripe (North)"

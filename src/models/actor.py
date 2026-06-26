@@ -118,6 +118,82 @@ class MLP(nnx.Module):
         return self.out_linear(x)
 
 
+class SplitPolicyTrunk(nnx.Module):
+    """
+    Split policy trunk for dual heads: exploration vs chain-formation.
+    """
+    def __init__(
+        self,
+        in_features:          int,
+        hidden_dim:           int,
+        actor_num_layers:     int,
+        separation_layers:    int,
+        target_known_obs_idx: int,
+        act_dim:              int,
+        rngs:                 nnx.Rngs,
+    ) -> None:
+        self.target_known_obs_idx = target_known_obs_idx
+        
+        shared_count = actor_num_layers - separation_layers
+        
+        s_layers, s_norms = [], []
+        prev = in_features
+        for _ in range(shared_count):
+            s_layers.append(nnx.Linear(prev, hidden_dim, rngs=rngs))
+            s_norms.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+            prev = hidden_dim
+        self.shared_layers = nnx.List(s_layers)
+        self.shared_norms  = nnx.List(s_norms)
+        
+        a_layers, a_norms = [], []
+        prev_A = prev
+        for _ in range(separation_layers):
+            a_layers.append(nnx.Linear(prev_A, hidden_dim, rngs=rngs))
+            a_norms.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+            prev_A = hidden_dim
+        self.branch_A_layers = nnx.List(a_layers)
+        self.branch_A_norms  = nnx.List(a_norms)
+        
+        b_layers, b_norms = [], []
+        prev_B = prev
+        for _ in range(separation_layers):
+            b_layers.append(nnx.Linear(prev_B, hidden_dim, rngs=rngs))
+            b_norms.append(nnx.LayerNorm(hidden_dim, rngs=rngs))
+            prev_B = hidden_dim
+        self.branch_B_layers = nnx.List(b_layers)
+        self.branch_B_norms  = nnx.List(b_norms)
+        
+        self.mu_head_A      = nnx.Linear(prev_A, act_dim, rngs=rngs)
+        self.log_std_head_A = nnx.Linear(prev_A, act_dim, rngs=rngs)
+        self.mu_head_B      = nnx.Linear(prev_B, act_dim, rngs=rngs)
+        self.log_std_head_B = nnx.Linear(prev_B, act_dim, rngs=rngs)
+
+    def __call__(self, feat: jax.Array, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
+        use_B = obs[..., self.target_known_obs_idx] > 0.5
+
+        x = feat
+        for lin, norm in zip(self.shared_layers, self.shared_norms):
+            x = jnp.tanh(norm(lin(x)))
+
+        x_A = x
+        for lin, norm in zip(self.branch_A_layers, self.branch_A_norms):
+            x_A = jnp.tanh(norm(lin(x_A)))
+
+        x_B = x
+        for lin, norm in zip(self.branch_B_layers, self.branch_B_norms):
+            x_B = jnp.tanh(norm(lin(x_B)))
+
+        mu_A      = self.mu_head_A(x_A)
+        log_std_A = self.log_std_head_A(x_A)
+        mu_B      = self.mu_head_B(x_B)
+        log_std_B = self.log_std_head_B(x_B)
+
+        use_B_feat = use_B[..., None]
+        mu      = jnp.where(use_B_feat, mu_B, mu_A)
+        log_std = jnp.clip(jnp.where(use_B_feat, log_std_B, log_std_A), LOG_STD_MIN, LOG_STD_MAX)
+        return mu, log_std
+
+
 # ---------------------------------------------------------------------------
 # DecentralizedActor
 # ---------------------------------------------------------------------------
@@ -146,17 +222,31 @@ class DecentralizedActor(nnx.Module):
         hidden_dim:       int,
         actor_num_layers: int,
         rngs:             nnx.Rngs,
+        two_policy_heads: bool = False,
+        policy_separation_layers: int = 0,
+        target_known_obs_idx: int = 4,
     ) -> None:
         self.act_dim = act_dim
-        self.trunk        = MLP(obs_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
-        self.mu_head      = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
-        self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+        self.two_policy_heads = two_policy_heads
+        if two_policy_heads:
+            self.split_trunk = SplitPolicyTrunk(
+                in_features=obs_dim, hidden_dim=hidden_dim, actor_num_layers=actor_num_layers,
+                separation_layers=policy_separation_layers, target_known_obs_idx=target_known_obs_idx,
+                act_dim=act_dim, rngs=rngs
+            )
+        else:
+            self.trunk        = MLP(obs_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+            self.mu_head      = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+            self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
 
     def __call__(self, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
         """obs: (..., obs_dim) → mu (..., act_dim), log_std (..., act_dim)"""
-        feat    = self.trunk(obs)
-        mu      = self.mu_head(feat)
-        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        if self.two_policy_heads:
+            mu, log_std = self.split_trunk(obs, obs)
+        else:
+            feat    = self.trunk(obs)
+            mu      = self.mu_head(feat)
+            log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
         return mu, log_std
 
     def act(
@@ -272,6 +362,9 @@ class RecurrentDecentralizedActor(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
+        two_policy_heads: bool = False,
+        policy_separation_layers: int = 0,
+        target_known_obs_idx: int = 4,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
@@ -288,9 +381,18 @@ class RecurrentDecentralizedActor(nnx.Module):
             self.tarmac_query = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
             self.tarmac_signature = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
             self.tarmac_value = nnx.Linear(hidden_dim, tarmac_val_dim, rngs=rngs)
-        self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
-        self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
-        self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+            
+        self.two_policy_heads = two_policy_heads
+        if two_policy_heads:
+            self.split_trunk = SplitPolicyTrunk(
+                in_features=hidden_dim, hidden_dim=hidden_dim, actor_num_layers=actor_num_layers,
+                separation_layers=policy_separation_layers, target_known_obs_idx=target_known_obs_idx,
+                act_dim=act_dim, rngs=rngs
+            )
+        else:
+            self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
+            self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+            self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
 
 
     def initial_tarmac_signature(self, batch_shape=(), num_agents: int | None = None) -> jax.Array:
@@ -385,9 +487,13 @@ class RecurrentDecentralizedActor(nnx.Module):
         hidden = self.gru(prev_hidden, gru_input)
         signature = self.tarmac_signature(hidden) if self.memory_comm_enabled else signature
         value = self.tarmac_value(hidden) if self.memory_comm_enabled else value
-        feat = self.policy_trunk(hidden)
-        mu = self.mu_head(feat)
-        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        
+        if self.two_policy_heads:
+            mu, log_std = self.split_trunk(hidden, obs)
+        else:
+            feat = self.policy_trunk(hidden)
+            mu = self.mu_head(feat)
+            log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
         return hidden, signature, value, mu, log_std
 
     def act_team(
@@ -429,9 +535,12 @@ class RecurrentDecentralizedActor(nnx.Module):
 
         encoded = self.encoder(obs)
         hidden = self.gru(hidden, encoded)
-        feat = self.policy_trunk(hidden)
-        mu = self.mu_head(feat)
-        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        if self.two_policy_heads:
+            mu, log_std = self.split_trunk(hidden, obs)
+        else:
+            feat = self.policy_trunk(hidden)
+            mu = self.mu_head(feat)
+            log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
         return hidden, mu, log_std
 
     def act(

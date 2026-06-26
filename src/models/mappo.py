@@ -68,6 +68,9 @@ class MAPPOModel(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
+        two_policy_heads: bool = False,
+        policy_separation_layers: int = 0,
+        target_known_obs_idx: int = 4,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -94,6 +97,9 @@ class MAPPOModel(nnx.Module):
                 tarmac_sig_dim = tarmac_sig_dim,
                 tarmac_val_dim = tarmac_val_dim,
                 tarmac_include_self = tarmac_include_self,
+                two_policy_heads = two_policy_heads,
+                policy_separation_layers = policy_separation_layers,
+                target_known_obs_idx = target_known_obs_idx,
             )
         else:
             self.actor = DecentralizedActor(
@@ -102,6 +108,9 @@ class MAPPOModel(nnx.Module):
                 hidden_dim       = hidden_dim,
                 actor_num_layers = actor_num_layers,
                 rngs             = rngs,
+                two_policy_heads = two_policy_heads,
+                policy_separation_layers = policy_separation_layers,
+                target_known_obs_idx = target_known_obs_idx,
             )
 
         if critic_memory and critic_type != "agent_centric":
@@ -293,7 +302,7 @@ if __name__ == "__main__":
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-    from core.config import load_config, validate_config, compute_obs_dim, compute_action_dim
+    from core.config import load_config, validate_config, compute_obs_dim, compute_action_dim, compute_target_known_obs_idx
 
     print("── MAPPOModel Self-Test ─────────────────────────────────────")
     cfg     = load_config(cli_overrides=False)
@@ -328,6 +337,9 @@ if __name__ == "__main__":
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
         tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
         tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
+        two_policy_heads = bool(cfg.network.get("two_policy_heads", False)),
+        policy_separation_layers = int(cfg.network.get("policy_separation_layers", 0)),
+        target_known_obs_idx = compute_target_known_obs_idx(cfg),
     )
 
     _, params = nnx.split(model)

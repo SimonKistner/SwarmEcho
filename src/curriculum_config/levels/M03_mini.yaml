@@ -43,7 +43,7 @@ training:
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 14141414
+  seed: 6252026
 
   eval_parallel: true
   eval_parallel_envs: 4000
@@ -52,7 +52,7 @@ training:
 network:
   critic_type: "agent_centric"
   num_layers: 3    # critic depth
-  actor_num_layers: 4    # actor depth (lighter, separate)
+  actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
@@ -60,6 +60,7 @@ network:
   tarmac_sig_dim: 64
   tarmac_val_dim: 128
   tarmac_include_self: true
+  two_policy_heads: true
 
 logging:
   checkpoint_freq: 50

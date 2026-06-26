@@ -46,12 +46,19 @@ st.markdown("<div class='subheader-style'>Cross-Curriculum Telemetry Analysis</d
 # ---------------------------------------------------------------------------
 
 def extract_timestamp_robust(name: str):
-    """Finds YYYYMMDD_HHMMSS anywhere in the string."""
+    """Finds YYYYMMDD_HHMMSS or YYYY_MM_DD_HH_MM anywhere in the string."""
     match = re.search(r'(\d{8})_(\d{6})', name)
     if match:
         ts_str = f"{match.group(1)}_{match.group(2)}"
         try:
             return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+            
+    match2 = re.search(r'(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})', name)
+    if match2:
+        try:
+            return datetime(int(match2.group(1)), int(match2.group(2)), int(match2.group(3)), int(match2.group(4)), int(match2.group(5)))
         except ValueError:
             pass
     return None
@@ -89,27 +96,36 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
     local_candidates = {} # path -> metadata
     
     if outputs_root.exists():
-        exclude_dirs = {"videos", "checkpoints", "to_delete", "wandb", "files", "logs", "bin", ".git"}
+        exclude_dirs = {"videos", "artifacts", "checkpoints", "to_delete", "wandb", "files", "logs", "bin", ".git"}
         for root, dirs, files in os.walk(str(outputs_root)):
             # Prune directory search in-place so we don't descend into excluded directories
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
             
             p = Path(root)
             cfg_file = p / "config.yaml"
-            v_dir = p / "videos"
+            v_dir_old = p / "videos"
+            v_dir_new = p / "artifacts"
             
-            # Check if there are any mp4 files in videos/ (including subdirectories like train/eval)
             has_mp4 = False
-            if v_dir.exists():
-                for _ in v_dir.rglob("*.mp4"):
+            active_v_dir = None
+            
+            if v_dir_new.exists():
+                for _ in v_dir_new.rglob("*.mp4"):
                     has_mp4 = True
+                    active_v_dir = v_dir_new
                     break
             
-            if cfg_file.exists() or (v_dir.exists() and has_mp4):
+            if not has_mp4 and v_dir_old.exists():
+                for _ in v_dir_old.rglob("*.mp4"):
+                    has_mp4 = True
+                    active_v_dir = v_dir_old
+                    break
+            
+            if cfg_file.exists() or has_mp4:
                 # We found a potential run directory
                 ts = extract_timestamp_robust(p.name)
-                if not ts and v_dir.exists():
-                    ts = extract_timestamp_from_video(v_dir)
+                if not ts and active_v_dir:
+                    ts = extract_timestamp_from_video(active_v_dir)
                 if not ts:
                     # Windows creation time is usually reliable for linking
                     ts = datetime.fromtimestamp(p.stat().st_ctime)
@@ -122,7 +138,7 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
                     "path": p,
                     "group": group_name,
                     "name": p.name,
-                    "v_dir": v_dir,
+                    "v_dir": active_v_dir or v_dir_new,
                     "cfg_file": cfg_file if cfg_file.exists() else None
                 }
 
@@ -528,19 +544,28 @@ for idx, r_disp in enumerate(selected_operations):
                     status_icon = "🔴"
                     stem = stem[len("FAIL_"):]
                 
-                # Check for update / ckpt numbers and episode numbers
-                up_match = re.search(r'(?:update|ckpt)_(\d+)', stem)
+                # Check for update / ckpt numbers and episode numbers, plus new format features
+                up_match = re.search(r'(?:update|ckpt)_(\d+)|_u(\d+)', stem)
                 ep_match = re.search(r'ep(\d+)', stem)
+                step_match = re.search(r'_s([\d\.]+[A-Za-z]?)', stem)
                 
                 parts = []
                 if up_match:
-                    parts.append(f"Update {int(up_match.group(1))}")
+                    up_val = int(up_match.group(1) or up_match.group(2))
+                    parts.append(f"Update {up_val}")
+                if step_match:
+                    s_val = step_match.group(1)
+                    s_val = re.sub(r'^0+', '', s_val)
+                    if not s_val or not s_val[0].isdigit():
+                        s_val = "0" + s_val
+                    parts.append(f"Steps {s_val}")
                 if ep_match:
                     parts.append(f"Ep {int(ep_match.group(1))}")
                 
                 if not parts:
-                    # Tidy up raw name
-                    label = f"{status_icon}{cat_pref} {stem.replace('_', ' ').title()}"
+                    # Tidy up raw name, dropping the timestamp prefix if present
+                    clean_stem = re.sub(r'^\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_', '', stem)
+                    label = f"{status_icon}{cat_pref} {clean_stem.replace('_', ' ').title()}"
                 else:
                     label = f"{status_icon}{cat_pref} " + " | ".join(parts)
                 

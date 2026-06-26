@@ -62,7 +62,7 @@ import numpy as np
 from flax import nnx
 from omegaconf import DictConfig, OmegaConf
 
-from core.config import compute_obs_dim, compute_action_dim
+from core.config import compute_obs_dim, compute_action_dim, compute_target_known_obs_idx
 from env.physics import make_env_fns
 from env.observations import make_obs_fns
 from env.rewards import make_reward_fn
@@ -1285,6 +1285,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
         tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
         tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
+        two_policy_heads = bool(cfg.network.get("two_policy_heads", False)),
+        policy_separation_layers = int(cfg.network.get("policy_separation_layers", 0)),
+        target_known_obs_idx = compute_target_known_obs_idx(cfg),
     )
     trainer = MAPPOTrainer(
         model         = model,

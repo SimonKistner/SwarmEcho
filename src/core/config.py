@@ -144,6 +144,9 @@ class NetworkConfig:
     tarmac_sig_dim: int = 64
     tarmac_val_dim: int = 128
     tarmac_include_self: bool = True
+    # Dual policy heads: separate exploration vs chain-formation branches
+    two_policy_heads:         bool = False  # if True, actor uses two policy output branches
+    policy_separation_layers: int  = 0      # how many trailing trunk layers to split (0 = heads only)
 
 
 @dataclass
@@ -248,34 +251,39 @@ def compute_obs_dim(cfg: DictConfig) -> int:
 
     Observation layout per agent (see observations.py for full docs):
 
-        Self state (9)
-        ├─ vel_i / v_max                         (2)
-        ├─ (base_pos - pos_i) / max_dim          (2)
-        ├─ is_connected_to_base                  (1)   multi-hop graph
-        ├─ is_connected_to_target                (1)   multi-hop graph
-        ├─ target_known_flag                     (1)   explicit 0/1 flag
-        └─ (target_pos - pos_i) / max_dim × mask (2)   masked until target_known
+        Fixed core (always present, fixed indices regardless of optional flags):
+        ├─ vel_i / v_max                         (2)  indices 0-1
+        ├─ is_connected_to_base                  (1)  index  2
+        ├─ is_connected_to_target                (1)  index  3
+        ├─ target_known_flag                     (1)  index  4  ← ALWAYS index 4
+        ├─ Local Coverage (16 radial probes)    (16)  indices 5-20
+        └─ Radar (B bins × 4 channels)         (B*4)  indices 21-(20+B*4)
 
-        Local Coverage (16) — per circular direction (evenly spaced):
-        ├─ is_cell_covered                        (1)   0/1 flag at sampling distance
-        
-        Radar (B × 4)  — per angular bin:
-        ├─ inv_dist_wall                          (1)   ray-cast, norm by vis_r
-        ├─ inv_dist_drone                         (1)   any active drone, norm by comm_r
-        ├─ inv_dist_target_conn_drone             (1)   target-chain drones, norm by comm_r
-        └─ inv_dist_base_conn_drone               (1)   base-chain drones, norm by comm_r
+        Optional tail (appended at the end — indices depend on B):
+        ├─ (base_pos - pos_i) / max_dim          (2)  if observe_base_vector=True
+        └─ (target_pos - pos_i) / max_dim × mask (2)  if observe_target_vector=True
 
-    Total: 9 + 16 + B * 4 by default. The base and target odometry vectors
-    can be removed independently with env.observe_base_vector and
-    env.observe_target_vector; the target-known flag remains present.
+    Total: 5 + 16 + B*4 [+ 2 if base_vector] [+ 2 if target_vector].
+    The optional vectors default to True, giving 5 + 16 + B*4 + 4 = 9 + 16 + B*4.
     """
     B = cfg.env.radar_bins
-    self_dim = 9
-    if not bool(cfg.env.get("observe_base_vector", True)):
-        self_dim -= 2
-    if not bool(cfg.env.get("observe_target_vector", True)):
-        self_dim -= 2
-    return self_dim + 16 + B * 4
+    core_dim = 5 + 16 + B * 4  # fixed: vel(2) + flags(3) + coverage(16) + radar(B*4)
+    if bool(cfg.env.get("observe_base_vector", True)):
+        core_dim += 2
+    if bool(cfg.env.get("observe_target_vector", True)):
+        core_dim += 2
+    return core_dim
+
+
+def compute_target_known_obs_idx(_cfg: DictConfig) -> int:
+    """
+    Return the obs-vector index of the target_known_flag scalar.
+
+    With the current obs layout (optional odometry vectors moved to the tail),
+    this is always index 4, regardless of observe_base_vector or
+    observe_target_vector settings.
+    """
+    return 4
 
 
 def compute_action_dim(_cfg: DictConfig) -> int:
@@ -576,6 +584,16 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.tarmac_sig_dim must be >= 1.")
     if int(cfg.network.tarmac_val_dim) < 1:
         raise ValueError("network.tarmac_val_dim must be >= 1.")
+    if bool(cfg.network.get("two_policy_heads", False)):
+        sep    = int(cfg.network.get("policy_separation_layers", 0))
+        layers = int(cfg.network.actor_num_layers)
+        if sep < 0:
+            raise ValueError("network.policy_separation_layers must be >= 0.")
+        if sep > layers:
+            raise ValueError(
+                f"network.policy_separation_layers ({sep}) cannot exceed "
+                f"network.actor_num_layers ({layers})."
+            )
     if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
         num_envs = int(cfg.training.num_envs)
         mb = int(cfg.training.num_minibatches)

@@ -66,9 +66,9 @@ def test_coverage_radar():
     # Samples with x < 50 are covered (1.0).
     # Since boundary is at x = 50, samples with cos(angle) < 0 are covered.
     
-    # Self-block is 9 dims (vel(2), base(2), conn_b, conn_t, known, target(2))
-    # Local coverage starts at index 9.
-    cov_bits = obs[0, 9:25]
+    # Self-block is 5 dims (vel(2), conn_b, conn_t, known)
+    # Local coverage starts at index 5.
+    cov_bits = obs[0, 5:21]
     
     print(f"Drone at (50, 50), Left half covered.")
     print(f"Observed Coverage Bits: {cov_bits}")
