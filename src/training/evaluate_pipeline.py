@@ -8,8 +8,8 @@ This pipeline performs the following in a single cohesive execution:
   2. Saves failed target positions to a CSV and generates a failed chain targets heatmap overlay.
   3. Optionally generates a target-not-delivered heatmap.
   4. Optionally generates a target-not-visually-found heatmap.
-  5. Optionally merges "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target groups
-     into a single merged heatmap with a top-padded title/legend layout.
+  5. Optionally combines "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target groups
+     into a single found-and-delivered heatmap with a top-padded title/legend layout.
   6. Clusters failed positions using HDBSCAN (or BFS connected components) to detect spatial patterns.
   7. Plots clustered failures and highlights cluster representatives on a map blueprint.
   8. Optionally simulates and renders video rollouts of the cluster representatives.
@@ -46,6 +46,7 @@ from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
 from training.runner import _evaluate, _evaluate_parallel
 from training.video_worker import render_eval_video
+from training.artifacts import eval_checkpoint_artifact_root, checkpoint_artifact_suffix, write_manifest
 from env.maps import MapDefinition
 from visualize.render_preview import render_png, _resolve_map_path
 
@@ -68,8 +69,8 @@ SEED = 42                   # Random seed for env reset and model initialization
 SCALE = 8.0                 # Resolution scale (pixels per world-meter) for map image
 SHOW_SPAWN_ZONES = False    # Set to False to disable target/base spawn zones overlay
 
-# Merge "Not Visually Found" and "Not Delivered" heatmaps into a single heatmap
-MERGE_TARGET_FOUND_HEATMAPS = True
+# Combine "Not Visually Found" and "Not Delivered" heatmaps into a found-and-delivered heatmap
+COMBINE_FOUND_AND_DELIVERED_HEATMAPS = True
 
 # 2. Heatmap overlay parameters
 FAILED_CHAIN_HEATMAP_ALPHA = 0.9   # Transparency of overlay dots in the failed chain heatmap (0.0 to 1.0)
@@ -379,17 +380,33 @@ def load_map_data(cfg):
     return map_name, map_data, map_def
 
 
-def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, success_rate, num_fail, run_dir, video_dir, run_timestamp, save_csv=True, save_png=True, total_episodes=4096):
+def save_point_csv(path, positions, category, **extra_columns):
+    """Persist heatmap source points for dashboard overlays."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    extras = list(extra_columns.keys())
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["x", "y", "category", *extras])
+        for pos in positions:
+            writer.writerow([f"{pos[0]:.6f}", f"{pos[1]:.6f}", category, *[extra_columns[k] for k in extras]])
+    print(f"Saved heatmap point data to: {path.name}")
+
+
+def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, success_rate, num_fail, run_dir, video_dir, run_timestamp, save_csv=True, save_png=True, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
     """
     Generates the failed targets CSV and/or renders the failed chain heatmap image.
     The heatmap is generated with a 60px white border at the top displaying the 
     sliding window size/total episodes, failed chain counts, success rate, and legend.
     """
-    csv_path = video_dir / f"{run_timestamp}_failed_target_positions.csv"
-    heatmap_path = video_dir / f"{run_timestamp}_failed_chain_targets_heatmap.png"
+    artifact_stem = artifact_stem or f"{run_timestamp}_failed_chain"
+    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
+    csv_path = data_dir / f"{artifact_stem}.points.csv"
+    heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
 
     # Save CSV
     if save_csv:
+        data_dir.mkdir(parents=True, exist_ok=True)
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["x", "y"])
@@ -429,18 +446,33 @@ def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, su
         cv2.circle(padded_img, (15, 46), 4, (68, 68, 239), -1, cv2.LINE_AA)
         cv2.putText(padded_img, "Failed Chain Target", (25, 50), cv2.FONT_HERSHEY_DUPLEX, 0.38, (55, 41, 31), 1, cv2.LINE_AA)
 
+        Path(video_dir).mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(heatmap_path), padded_img)
         print(f"Saved failed chain targets heatmap to: {heatmap_path.name}")
+    if manifest_dir is not None:
+        write_manifest(Path(manifest_dir) / f"{artifact_stem}.heatmap.json", {
+            "type": "heatmap",
+            "kind": "failed_chain",
+            "image_path": str(heatmap_path),
+            "points_path": str(csv_path) if save_csv else None,
+            "total_episodes": int(total_episodes),
+            "num_points": int(num_fail),
+            "success_rate": None if success_rate is None else float(success_rate),
+        })
 
     return csv_path
 
 
-def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096):
+def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
     """
     Generates a secondary heatmap plotting target coordinates that were not found/delivered.
     Uses blue dots on the map, with a 60px top padding containing title stats and a color legend.
     """
-    heatmap_path = video_dir / f"{run_timestamp}_{filename_prefix}.png"
+    artifact_stem = artifact_stem or f"{run_timestamp}_{filename_prefix}"
+    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
+    points_path = data_dir / f"{artifact_stem}.points.csv"
+    heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
+    save_point_csv(points_path, not_found_positions, filename_prefix, total_episodes=int(total_episodes), rate=float(found_rate))
 
     # Generate heatmap background
     background_img = render_png(
@@ -473,18 +505,33 @@ def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, fo
     cv2.circle(padded_img, (15, 46), 4, (235, 99, 37), -1, cv2.LINE_AA)
     cv2.putText(padded_img, label, (25, 50), cv2.FONT_HERSHEY_DUPLEX, 0.38, (55, 41, 31), 1, cv2.LINE_AA)
 
+    Path(video_dir).mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(heatmap_path), padded_img)
     print(f"Saved {label.lower()} heatmap to: {heatmap_path.name}")
+    if manifest_dir is not None:
+        write_manifest(Path(manifest_dir) / f"{artifact_stem}.heatmap.json", {
+            "type": "heatmap",
+            "kind": filename_prefix,
+            "label": label,
+            "image_path": str(heatmap_path),
+            "points_path": str(points_path),
+            "total_episodes": int(total_episodes),
+            "num_points": int(num_not_found),
+            "rate": float(found_rate),
+        })
 
 
-def render_and_save_merged_heatmap(not_delivered_positions, not_visually_found_positions, map_data, map_def, delivered_rate, visually_found_rate, num_not_delivered, num_not_visually_found, run_dir, video_dir, run_timestamp, total_episodes=4096):
+def render_and_save_found_and_delivered_heatmap(not_delivered_positions, not_visually_found_positions, map_data, map_def, delivered_rate, visually_found_rate, num_not_delivered, num_not_visually_found, run_dir, video_dir, run_timestamp, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
     """
-    Generates a merged heatmap combining 'Not Visually Found' (sky blue) and 
+    Generates a found-and-delivered heatmap combining 'Not Visually Found' (sky blue) and
     'Visually Found, Not Delivered' (dark blue) target coordinate groups.
     Includes a validation check warning if 'Not Visually Found' count exceeds 
     'Not Delivered', and formats title stats and a dual-color legend in a 60px top white border.
     """
-    heatmap_path = video_dir / f"{run_timestamp}_merged_targets_heatmap.png"
+    artifact_stem = artifact_stem or f"{run_timestamp}_found_and_delivered"
+    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
+    points_path = data_dir / f"{artifact_stem}.points.csv"
+    heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
 
     # Math safety check
     if num_not_visually_found > num_not_delivered:
@@ -506,6 +553,14 @@ def render_and_save_merged_heatmap(not_delivered_positions, not_visually_found_p
 
     # Convert not_visually_found positions to set of tuples for fast matching
     not_visually_found_set = {tuple(pos) for pos in not_visually_found_positions}
+    points_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(points_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["x", "y", "category", "total_episodes", "delivered_rate", "visually_found_rate"])
+        for pos in not_delivered_positions:
+            category = "not_visually_found" if tuple(pos) in not_visually_found_set else "visually_found_not_delivered"
+            writer.writerow([f"{pos[0]:.6f}", f"{pos[1]:.6f}", category, int(total_episodes), float(delivered_rate), float(visually_found_rate)])
+    print(f"Saved heatmap point data to: {points_path.name}")
 
     for pos in not_delivered_positions:
         px = int(pos[0] * SCALE)
@@ -539,8 +594,21 @@ def render_and_save_merged_heatmap(not_delivered_positions, not_visually_found_p
     cv2.circle(padded_img, (260, 46), 4, (235, 99, 37), -1, cv2.LINE_AA)
     cv2.putText(padded_img, "Not Visually Found", (270, 50), cv2.FONT_HERSHEY_DUPLEX, 0.38, (55, 41, 31), 1, cv2.LINE_AA)
 
+    Path(video_dir).mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(heatmap_path), padded_img)
-    print(f"Saved merged targets heatmap to: {heatmap_path.name}")
+    print(f"Saved found-and-delivered heatmap to: {heatmap_path.name}")
+    if manifest_dir is not None:
+        write_manifest(Path(manifest_dir) / f"{artifact_stem}.heatmap.json", {
+            "type": "heatmap",
+            "kind": "found_and_delivered",
+            "image_path": str(heatmap_path),
+            "points_path": str(points_path),
+            "total_episodes": int(total_episodes),
+            "num_not_delivered": int(num_not_delivered),
+            "num_not_visually_found": int(num_not_visually_found),
+            "delivered_rate": float(delivered_rate),
+            "visually_found_rate": float(visually_found_rate),
+        })
 
 
 def load_failures_from_csv(csv_path):
@@ -564,7 +632,7 @@ def load_failures_from_csv(csv_path):
     return failed_positions
 
 
-def run_failure_clustering(failed_positions, map_data, map_def, video_dir, run_timestamp, render_png_flag=True):
+def run_failure_clustering(failed_positions, map_data, map_def, clusters_dir, run_timestamp, render_png_flag=True):
     """Clusters failed positions, draws visualization if toggled, and returns representative coordinates."""
     n_failures = len(failed_positions)
     if n_failures == 0:
@@ -660,7 +728,8 @@ def run_failure_clustering(failed_positions, map_data, map_def, video_dir, run_t
 
     # Save image if toggled
     if render_png_flag:
-        clustered_path = video_dir / f"{run_timestamp}_failed_targets_clustered.png"
+        Path(clusters_dir).mkdir(parents=True, exist_ok=True)
+        clustered_path = Path(clusters_dir) / f"{run_timestamp}_failed_targets_clustered.png"
         cv2.imwrite(str(clustered_path), img)
         print(f"Saved clustered failed targets map to: {clustered_path.name}")
 
@@ -708,9 +777,9 @@ def render_cluster_videos(model, cfg, env_step, reset, compute_obs, compute_rewa
         print(f"    ✓ Video saved: {Path(vid_path).name}")
 
 
-def run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, video_dir, limit, run_timestamp):
+def run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, data_dir, video_dir, limit, run_timestamp):
     """Legacy feature: Simulates and renders failed videos directly from a previously saved CSV file."""
-    csv_candidates = list(video_dir.glob("*failed_target_positions*.csv"))
+    csv_candidates = list(Path(data_dir).glob("*.points.csv")) + list(Path(video_dir).glob("*failed_target_positions*.csv"))
     if not csv_candidates:
         print(f"ERROR: No failed target positions CSV found in: {video_dir}")
         sys.exit(1)
@@ -736,7 +805,7 @@ def run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_r
     to_render = []
     for pos in failed_positions:
         tx, ty = pos
-        if (round(tx, 2), round(ry, 2)) not in rendered_positions:
+        if (round(tx, 2), round(ty, 2)) not in rendered_positions:
             to_render.append(pos)
             if len(to_render) >= limit:
                 break
@@ -854,9 +923,16 @@ def main():
     )
     validate_config(cfg)
 
-    # Resolve Video / Output Directory
-    video_dir = run_dir / "videos" / "eval"
-    video_dir.mkdir(parents=True, exist_ok=True)
+    # Resolve artifact directories. New outputs are checkpoint-scoped under
+    # artifacts/eval while legacy videos/eval remains readable by the dashboard.
+    artifact_root = eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg)
+    artifact_tag = checkpoint_artifact_suffix(checkpoint_path, cfg)
+    video_dir = artifact_root / "vids"
+    chain_heatmaps_dir = artifact_root / "chain_heatmaps"
+    found_heatmaps_dir = artifact_root / "found_heatmaps"
+    clusters_dir = artifact_root / "clusters"
+    data_dir = artifact_root / "data"
+    manifest_dir = artifact_root / "manifests"
 
     # Map blueprint files
     map_name, map_data, map_def = load_map_data(cfg)
@@ -868,13 +944,13 @@ def main():
     if render_failed_csv is not None:
         # Mode A: Legacy mode to render failed target videos from CSV
         print(f"\n--- Running Legacy CSV Target Replays (limit: {render_failed_csv}) ---")
-        run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, video_dir, render_failed_csv, run_timestamp)
+        run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, data_dir, video_dir, render_failed_csv, run_timestamp)
         print("\nEvaluation pipeline complete.")
         return
 
     # ── Dependency Resolution & Execution Plan ────────────────────────────
     # Resolve CSV candidates early
-    csv_candidates = list(video_dir.glob("*failed_target_positions*.csv"))
+    csv_candidates = list(data_dir.glob("*failed_chain*.points.csv")) + list((run_dir / "videos" / "eval").glob("*failed_target_positions*.csv"))
 
     # We need to run parallel JAX simulation sweep if:
     #   CREATE_CSV is requested (to get fresh coordinate logs) OR we want to render either of the target-not-found heatmaps
@@ -911,11 +987,11 @@ def main():
         
         print("\n--- Phase 2: Processing Swept Coordinates ---")
 
-        # Check if we should merge visually not found and not delivered heatmaps
-        if MERGE_TARGET_FOUND_HEATMAPS:
+        # Check if we should combine visually not found and not delivered heatmaps
+        if COMBINE_FOUND_AND_DELIVERED_HEATMAPS:
             if CREATE_NOT_DELIVERED_HEATMAP or CREATE_NOT_VISUALLY_FOUND_HEATMAP:
-                print("\n--- Phase 2a/b: Generating Merged Targets Heatmap overlay ---")
-                render_and_save_merged_heatmap(
+                print("\n--- Phase 2a/b: Generating Found-and-Delivered Heatmap overlay ---")
+                render_and_save_found_and_delivered_heatmap(
                     not_delivered_positions=not_delivered_positions,
                     not_visually_found_positions=not_visually_found_positions,
                     map_data=map_data,
@@ -925,9 +1001,12 @@ def main():
                     num_not_delivered=num_not_delivered,
                     num_not_visually_found=num_not_visually_found,
                     run_dir=run_dir,
-                    video_dir=video_dir,
+                    video_dir=found_heatmaps_dir,
                     run_timestamp=run_timestamp,
-                    total_episodes=NUM_ENVS
+                    total_episodes=NUM_ENVS,
+                    data_dir=data_dir,
+                    manifest_dir=manifest_dir,
+                    artifact_stem=f"found_and_delivered_{artifact_tag}"
                 )
         else:
             # 1. Visually Found Heatmap (Phase 2a)
@@ -935,8 +1014,8 @@ def main():
                 print("\n--- Phase 2a: Generating Visually-Found Heatmap overlay ---")
                 render_and_save_not_found_heatmap(
                     not_visually_found_positions, map_data, map_def, visually_found_rate, num_not_visually_found, 
-                    run_dir, video_dir, run_timestamp, "not_visually_found_targets_heatmap", "Not Visually Found",
-                    total_episodes=NUM_ENVS
+                    run_dir, found_heatmaps_dir, run_timestamp, "found", "Not Visually Found",
+                    total_episodes=NUM_ENVS, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"found_{artifact_tag}"
                 )
 
             # 2. Delivered Heatmap (Phase 2b)
@@ -944,16 +1023,17 @@ def main():
                 print("\n--- Phase 2b: Generating Delivered-To-Base Heatmap overlay ---")
                 render_and_save_not_found_heatmap(
                     not_delivered_positions, map_data, map_def, delivered_rate, num_not_delivered, 
-                    run_dir, video_dir, run_timestamp, "not_delivered_targets_heatmap", "Not Delivered",
-                    total_episodes=NUM_ENVS
+                    run_dir, found_heatmaps_dir, run_timestamp, "delivered", "Not Delivered",
+                    total_episodes=NUM_ENVS, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"delivered_{artifact_tag}"
                 )
 
         # 3. CSV and Failed Chain Heatmap (Phase 2c)
         if CREATE_CSV or CREATE_FAILED_CHAIN_HEATMAP:
             print("\n--- Phase 2c: Saving Coordinate Log & Failed Chain Heatmap overlay ---")
             _ = render_and_save_failed_chain_heatmap(
-                failed_positions, map_data, map_def, success_rate, num_fail, run_dir, video_dir, run_timestamp,
-                save_csv=CREATE_CSV, save_png=CREATE_FAILED_CHAIN_HEATMAP, total_episodes=NUM_ENVS
+                failed_positions, map_data, map_def, success_rate, num_fail, run_dir, chain_heatmaps_dir, run_timestamp,
+                save_csv=CREATE_CSV, save_png=CREATE_FAILED_CHAIN_HEATMAP, total_episodes=NUM_ENVS,
+                data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
             )
     else:
         # Load from the latest CSV
@@ -966,8 +1046,9 @@ def main():
             print("\n--- Phase 2: Generating failed chain heatmap overlay from loaded CSV ---")
             _ = render_and_save_failed_chain_heatmap(
                 failed_positions, map_data, map_def, success_rate=None, num_fail=num_fail, 
-                run_dir=run_dir, video_dir=video_dir, run_timestamp=run_timestamp,
-                save_csv=False, save_png=True, total_episodes=NUM_ENVS
+                run_dir=run_dir, video_dir=chain_heatmaps_dir, run_timestamp=run_timestamp,
+                save_csv=False, save_png=True, total_episodes=NUM_ENVS,
+                data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
             )
 
         if CREATE_NOT_DELIVERED_HEATMAP:
@@ -982,14 +1063,14 @@ def main():
         if len(failed_positions) > 0:
             print("\n--- Phase 3: Spatial Clustering Analysis ---")
             rep_coords = run_failure_clustering(
-                failed_positions, map_data, map_def, video_dir, run_timestamp, 
+                failed_positions, map_data, map_def, clusters_dir, run_timestamp,
                 render_png_flag=CREATE_CLUSTER_MAP
             )
 
             if CREATE_CLUSTER_VIDEOS:
                 if len(rep_coords) > 0:
                     print("\n--- Phase 4: Simulating & Rendering Representative Rollout Videos ---")
-                    render_cluster_videos(model, cfg, env_step, reset, compute_obs, compute_reward, rep_coords, video_dir, run_timestamp)
+                    render_cluster_videos(model, cfg, env_step, reset, compute_obs, compute_reward, rep_coords, clusters_dir, f"cluster_{artifact_tag}")
         else:
             print("\nPerfect success rate! No failures to cluster.")
 

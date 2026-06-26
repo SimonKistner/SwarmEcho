@@ -1,0 +1,88 @@
+# M03 Small Grid Maze – 7×7 cell grid, 10 m per cell (= visual_radius × 2), 70×70 m total.
+# Center room: cell (3,3), center at (35, 35).
+# Cell size matches visual_radius * 2 so agents can see exactly to the next corridor wall.
+
+name: M03_small_grid_maze
+width: 70.0
+height: 70.0
+
+maze_cell_grid:
+  cols: 7
+  rows: 7
+
+spawn_zones:
+  base:   [35.0,   35.0,   35.0,   35.0]
+  drone:  [35.0,   35.0,   35.0,   35.0]
+  target: [0.833,   0.833,  69.167,  69.167]
+
+# Target must be at least 1.25 m away from every wall (including world border)
+target_wall_clearance: 1.25
+
+# Target must NOT spawn inside the centre spawn room (the 10x10 m cell at
+# columns 3, rows 3, i.e. world coords 30-40, 30-40).
+target_exclude_zones:
+  - [20.417, 20.417, 50.0, 50.0]   # centre room (cols 2-4, rows 2-4)
+  - [30.0, 50.0, 40.0, 60.0]       # North corridor extension (cell [3, 5])
+  - [30.0, 10.0, 40.0, 20.417]     # South corridor extension (cell [3, 1])
+  - [50.0, 30.0, 60.0, 40.0]       # East corridor extension  (cell [5, 3])
+  - [10.0, 30.0, 20.417, 40.0]     # West corridor extension  (cell [1, 3])
+
+rooms: []
+hallways: []
+walls:
+  # ── World border (fully closed, no exits) ──────────────────────────────────
+  - [0.0,   0.0,  70.0,   0.0]    # south border
+  - [70.0,  0.0,  70.0,  70.0]    # east border
+  - [70.0, 70.0,   0.0,  70.0]    # north border
+  - [0.0,  70.0,   0.0,   0.0]    # west border
+
+  # ── Horizontal walls ──────────────────────────────────────────────────────
+  # y = 60
+  - [10.0,  60.0,  20.0,  60.0]  # c=1
+  - [30.0,  60.0,  40.0,  60.0]  # c=3
+  - [50.0,  60.0,  70.0,  60.0]  # c=5,6 merged
+
+  # y = 50
+  - [0.0,   50.0,  10.0,  50.0]  # c=0
+  - [20.0,  50.0,  30.0,  50.0]  # c=2
+  - [40.0,  50.0,  50.0,  50.0]  # c=4
+
+  # y = 40  →  no interior horizontal walls
+
+  # y = 30
+  - [0.0,   30.0,  20.0,  30.0]  # c=0,1 merged
+  - [60.0,  30.0,  70.0,  30.0]  # c=6
+
+  # y = 20
+  - [20.0,  20.0,  30.0,  20.0]  # c=2
+  - [40.0,  20.0,  50.0,  20.0]  # c=4
+
+  # y = 10
+  - [10.0,  10.0,  40.0,  10.0]  # c=1,2,3 merged
+  - [50.0,  10.0,  60.0,  10.0]  # c=5
+
+  # ── Vertical walls ────────────────────────────────────────────────────────
+  # x = 10
+  - [10.0,  50.0,  10.0,  60.0]  # r=1
+  - [10.0,  30.0,  10.0,  40.0]  # r=3
+  - [10.0,  10.0,  10.0,  20.0]  # r=5
+
+  # x = 20
+  - [20.0,  40.0,  20.0,  50.0]  # r=2
+  - [20.0,  20.0,  20.0,  30.0]  # r=4
+  - [20.0,   0.0,  20.0,  10.0]  # r=6
+
+  # x = 30
+  - [30.0,  50.0,  30.0,  70.0]  # r=0,1 merged
+
+  # x = 40
+  - [40.0,  10.0,  40.0,  20.0]  # r=5
+
+  # x = 50
+  - [50.0,  40.0,  50.0,  60.0]  # r=1,2 merged
+  - [50.0,  20.0,  50.0,  30.0]  # r=4
+  - [50.0,   0.0,  50.0,  10.0]  # r=6
+
+  # x = 60
+  - [60.0,  30.0,  60.0,  50.0]  # r=2,3 merged
+  - [60.0,  10.0,  60.0,  20.0]  # r=5

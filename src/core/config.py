@@ -70,8 +70,8 @@ class EnvConfig:
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
-    observe_target_vector: bool = True            # if False, remove target odometry vector from actor observations
-    observe_base_vector: bool = True              # if False, remove base odometry vector from actor observations
+    observe_target_vector: bool = False            # if False, remove target odometry vector from actor observations
+    observe_base_vector: bool = False              # if False, remove base odometry vector from actor observations
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
     terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
     experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
@@ -171,7 +171,7 @@ class LoggingConfig:
     save_model: bool = True
     checkpoint_freq: int = 50     # Save model checkpoint every N updates
     checkpoint_offset: int = 0    # Offset for checkpoint_freq modulo scheduling
-    checkpoint_dir: str = "outputs/checkpoints"
+    checkpoint_dir: Optional[str] = None
 
     # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
@@ -180,8 +180,8 @@ class LoggingConfig:
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
-    eval_failed_chain_heatmap: bool = False  # Generate heatmap of target positions for failed chain deliveries from sliding window
-    eval_not_delivered_or_visually_found_heatmap: bool = False  # Generate heatmap of target positions not delivered/visually found
+    eval_failed_chain_heatmap: bool = True  # Generate heatmap of target positions for failed chain deliveries from sliding window
+    eval_not_delivered_or_visually_found_heatmap: bool = True  # Generate heatmap of target positions not delivered/visually found
     eval_not_deliv_not_visual_splitt_in_two: bool = False      # If true, split the not-delivered/not-visual heatmap into two separate files
 
     # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
