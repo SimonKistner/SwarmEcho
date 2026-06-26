@@ -54,7 +54,7 @@ training:
 network:
   critic_type: "agent_centric"
   num_layers: 3    # critic depth
-  actor_num_layers: 4    # actor depth (lighter, separate)
+  actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
