@@ -71,6 +71,7 @@ from training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from training.mappo_trainer import MAPPOTrainer
 from training.video_worker import render_eval_video
 from training.artifacts import artifact_suffix, train_artifact_root
+from training.adaptive_spawn import AdaptiveTargetSpawnController, diagnostics_to_wandb
 from visualize.renderer import render_video
 
 
@@ -444,6 +445,7 @@ def _collect_rollout_mappo(
     completed_diag_memories = []
     completed_diag_targets = []
     completed_diag_valids = []
+    completed_target_positions = []
 
     completed_r_coverage = []
     completed_r_gap      = []
@@ -570,6 +572,10 @@ def _collect_rollout_mappo(
             completed_gaps.append(float(ep_gap_accum[e]))
             completed_prog_pcts.append(float(ep_prog_pct_accum[e]))
             completed_finder_returns.append(float(ep_finder_return_accum[e]))
+            t_pos_completed = np.array(info["terminal_target_pos"])[e]
+            if t_pos_completed.ndim == 2:
+                t_pos_completed = t_pos_completed[0]
+            completed_target_positions.append(t_pos_completed.astype(np.float32))
 
             completed_r_coverage.append(float(r_coverage_accum[e]))
             completed_r_gap.append(float(r_gap_accum[e]))
@@ -676,6 +682,7 @@ def _collect_rollout_mappo(
         completed_r_prox, completed_r_found, completed_r_succ,
         completed_coverage,
         completed_finder_returns,
+        np.array(completed_target_positions, dtype=np.float32),
         np.array(completed_diag_memories, dtype=np.float32),
         np.array(completed_diag_targets, dtype=np.float32),
         completed_diag_valids,
@@ -1236,10 +1243,29 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
-    autoreset_step   = _make_autoreset_step(env_step, reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+    adaptive_spawn = None
+    train_reset = reset
+    if bool(cfg.env.get("adaptive_target_spawn", False)):
+        from core.config import MAP_DIR
+        from env.maps import MapDefinition
+        if not cfg.env.get("map_names"):
+            raise ValueError("env.adaptive_target_spawn requires env.map_names[0] to load maze-cell metadata")
+        adaptive_map = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
+        adaptive_spawn = AdaptiveTargetSpawnController(
+            adaptive_map,
+            target_spawn_method=str(cfg.env.get("target_spawn_method", "map_defined")),
+            static_maze_optimal_path=bool(cfg.env.get("static_maze_optimal_path", True)),
+            target_spawn_radius=float(cfg.env.get("target_spawn_radius", 0.0)),
+            target_spawn_radius_min=float(cfg.env.get("target_spawn_radius_min", 0.0)),
+            target_invalid_spawn_base_radius=float(cfg.env.get("target_invalid_spawn_base_radius", 0.0)),
+        )
+        train_reset = adaptive_spawn.make_reset(reset)
+        print(f"  [adaptive-spawn] enabled with {len(adaptive_spawn.categories)} path-length categories")
+
+    autoreset_step   = _make_autoreset_step(env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
-    reset_v          = jax.jit(jax.vmap(reset))
+    reset_v          = jax.jit(jax.vmap(train_reset))
     reset_s          = jax.jit(reset)
     env_step_jit       = jax.jit(env_step)
     compute_obs_jit    = jax.jit(compute_obs)
@@ -1569,7 +1595,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
              raw_cov,
-             raw_finder_return, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
+             raw_finder_return, raw_target_positions, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
@@ -1579,6 +1605,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             n_eps = len(raw_ret)
             diag_acc = None
             diag_samples = 0
+            adaptive_spawn_diag = None
 
             if n_eps > 0:
                 completed_eps_count += n_eps
@@ -1597,6 +1624,9 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_r_found.extend(raw_r_found)
                 window_r_succ.extend(raw_r_succ)
                 window_cov.extend(raw_cov)
+
+                if adaptive_spawn is not None:
+                    adaptive_spawn.record_completed(raw_target_positions, raw_success)
 
                 if diag_decoder is not None:
                     window_diag_samples.extend(raw_diag_valids)
@@ -1683,6 +1713,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             # ── PPO update ────────────────────────────────────────────────────
             ppo_stats = trainer.update(mbs)
 
+            if adaptive_spawn is not None:
+                adaptive_spawn_diag = adaptive_spawn.update_probabilities()
+                train_reset = adaptive_spawn.make_reset(reset)
+                autoreset_step = _make_autoreset_step(env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+                autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
+                reset_v = jax.jit(jax.vmap(train_reset))
+
             elapsed = time.perf_counter() - t_start
             sps     = ((update - start_update) * E * T) / max(1e-6, elapsed)
 
@@ -1763,6 +1800,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "rewards/target_found":     float(np.mean(window_r_found)),
                         "rewards/success_bonus":    float(np.mean(window_r_succ)),
                     })
+                    if bool(cfg.logging.get("adaptive_spawn_diagnostics", False)) and adaptive_spawn_diag is not None:
+                        logs.update(diagnostics_to_wandb(adaptive_spawn_diag))
                     if len(window_diag_acc) > 0:
                         diag_samples_pct = float(np.mean(window_diag_samples))
                         logs.update({
