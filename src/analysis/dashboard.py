@@ -22,17 +22,17 @@ st.markdown("""
     .header-style { font-size: 26px; font-weight: 600; color: #FFFFFF; margin-bottom: 2px; }
     .subheader-style { font-size: 13px; font-weight: 500; color: #00ADB5; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 20px;}
     .section-title { font-size: 18px; font-weight: 600; color: #EEEEEE; margin-top: 30px; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; }
-    
+
     /* Table Styling for Screenshot Readiness */
     .se-table-container { width: 100%; overflow-x: auto; margin-bottom: 25px; border-radius: 6px; border: 1px solid #333; background-color: #121418; }
     .se-table { width: 100%; border-collapse: collapse; font-family: 'Inter', 'Segoe UI', monospace; font-size: 13.5px; }
     .se-table th { background-color: #1A1D24; color: #00ADB5; text-align: left; padding: 12px 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #222831; }
     .se-table td { padding: 10px 15px; border-bottom: 1px solid #222831; color: #D3D6DA; }
     .se-table tr:hover { background-color: #1A1D24; }
-    
+
     /* Deviation Highlighting */
     .row-diff td { background-color: rgba(255, 60, 60, 0.15) !important; color: #FF8A8A !important; font-weight: 600; }
-    
+
     /* Checkbox Group Styling in Sidebar */
     .sidebar-cgroup { font-size: 14px; font-weight: 600; color: #EEEEEE; margin-top: 20px; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px; }
 </style>
@@ -41,12 +41,13 @@ st.markdown("""
 st.markdown("<div class='header-style'>SwarmEcho Operations Matrix</div>", unsafe_allow_html=True)
 st.markdown("<div class='subheader-style'>Cross-Curriculum Telemetry Analysis</div>", unsafe_allow_html=True)
 
+
 # ---------------------------------------------------------------------------
 # Logic - Discovery Engine  & Naming Cleaners
 # ---------------------------------------------------------------------------
 
 def extract_timestamp_robust(name: str):
-    """Finds YYYYMMDD_HHMMSS anywhere in the string."""
+    """Finds YYYYMMDD_HHMMSS or YYYY_MM_DD_HH_MM anywhere in the string."""
     match = re.search(r'(\d{8})_(\d{6})', name)
     if match:
         ts_str = f"{match.group(1)}_{match.group(2)}"
@@ -54,7 +55,16 @@ def extract_timestamp_robust(name: str):
             return datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
         except ValueError:
             pass
+
+    match2 = re.search(r'(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})', name)
+    if match2:
+        try:
+            return datetime(int(match2.group(1)), int(match2.group(2)), int(match2.group(3)), int(match2.group(4)),
+                            int(match2.group(5)))
+        except ValueError:
+            pass
     return None
+
 
 def clean_semantic_name(raw_name: str) -> str:
     """Strips timestamps and fixes capitalization for clean UI display.
@@ -67,6 +77,7 @@ def clean_semantic_name(raw_name: str) -> str:
     if clean.lower() == "Standalone": return "Direct Operations"
     return clean
 
+
 def flatten_wandb_config(cfg_dict):
     flat = {}
     for key, val in cfg_dict.items():
@@ -76,6 +87,7 @@ def flatten_wandb_config(cfg_dict):
             flat[key] = val
     return flat
 
+
 def extract_timestamp_from_video(v_dir: Path):
     for v_file in v_dir.rglob("*.mp4"):
         ts = extract_timestamp_robust(v_file.name)
@@ -83,46 +95,56 @@ def extract_timestamp_from_video(v_dir: Path):
             return ts
     return None
 
+
 @st.cache_data(ttl=60)
 def find_all_runs(outputs_root: Path, wandb_root: Path):
     """Heuristic discovery of operation footprints, prioritizing local folders."""
-    local_candidates = {} # path -> metadata
-    
+    local_candidates = {}  # path -> metadata
+
     if outputs_root.exists():
-        exclude_dirs = {"videos", "checkpoints", "to_delete", "wandb", "files", "logs", "bin", ".git"}
+        exclude_dirs = {"videos", "artifacts", "checkpoints", "to_delete", "wandb", "files", "logs", "bin", ".git"}
         for root, dirs, files in os.walk(str(outputs_root)):
             # Prune directory search in-place so we don't descend into excluded directories
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            
+
             p = Path(root)
             cfg_file = p / "config.yaml"
-            v_dir = p / "videos"
-            
-            # Check if there are any mp4 files in videos/ (including subdirectories like train/eval)
+            v_dir_old = p / "videos"
+            v_dir_new = p / "artifacts"
+
             has_mp4 = False
-            if v_dir.exists():
-                for _ in v_dir.rglob("*.mp4"):
+            active_v_dir = None
+
+            if v_dir_new.exists():
+                for _ in v_dir_new.rglob("*.mp4"):
                     has_mp4 = True
+                    active_v_dir = v_dir_new
                     break
-            
-            if cfg_file.exists() or (v_dir.exists() and has_mp4):
+
+            if not has_mp4 and v_dir_old.exists():
+                for _ in v_dir_old.rglob("*.mp4"):
+                    has_mp4 = True
+                    active_v_dir = v_dir_old
+                    break
+
+            if cfg_file.exists() or has_mp4:
                 # We found a potential run directory
                 ts = extract_timestamp_robust(p.name)
-                if not ts and v_dir.exists():
-                    ts = extract_timestamp_from_video(v_dir)
+                if not ts and active_v_dir:
+                    ts = extract_timestamp_from_video(active_v_dir)
                 if not ts:
                     # Windows creation time is usually reliable for linking
                     ts = datetime.fromtimestamp(p.stat().st_ctime)
-                
+
                 group_name = p.parent.name if p.parent != outputs_root else "Standalone"
-                if group_name == "curriculum": group_name = "Direct Ops" # Flatten one level if needed
-                
+                if group_name == "curriculum": group_name = "Direct Ops"  # Flatten one level if needed
+
                 local_candidates[str(p)] = {
                     "ts": ts,
                     "path": p,
                     "group": group_name,
                     "name": p.name,
-                    "v_dir": v_dir,
+                    "v_dir": active_v_dir or v_dir_new,
                     "cfg_file": cfg_file if cfg_file.exists() else None
                 }
 
@@ -136,17 +158,18 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
                 wandb_runs.append({"ts": w_ts, "path": w_path})
 
     run_registry = {}
-    
+
     for _, local in local_candidates.items():
         # Source of Truth: The local config.yaml snapshot created at run-start
         raw_cfg = None
         if local["cfg_file"]:
             try:
                 raw_cfg = OmegaConf.to_container(OmegaConf.load(local["cfg_file"]), resolve=True)
-            except: pass
-            
-        if raw_cfg is None: continue # Skip folders that aren't valid runs
-        
+            except:
+                pass
+
+        if raw_cfg is None: continue  # Skip folders that aren't valid runs
+
         # Best-Effort WandB Linking (for URL/Metrics only)
         match_w_path = None
         internal_wandb = local["path"] / "wandb"
@@ -154,19 +177,19 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
             runs = list(internal_wandb.glob("run-*"))
             if runs:
                 match_w_path = sorted(runs, key=os.path.getmtime)[-1]
-        
+
         if not match_w_path:
             for w in wandb_runs:
                 if abs((w["ts"] - local["ts"]).total_seconds()) <= 300:
                     match_w_path = w["path"]
                     break
-        
+
         verified = (match_w_path is not None)
         if "_wandb" in raw_cfg: raw_cfg = flatten_wandb_config(raw_cfg)
-        
+
         # Calculate Steps Trained (Priority: WandB Summary > Checkpoints)
         actual_steps = "Unknown"
-        
+
         # 1. Try WandB Summary
         if match_w_path:
             summary_path = match_w_path / "files" / "wandb-summary.json"
@@ -183,7 +206,8 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
                                 actual_steps = f"{total_steps / 1_000_000:.1f}M"
                             else:
                                 actual_steps = f"{total_steps:,}"
-                except: pass
+                except:
+                    pass
 
         # 2. Fallback to Checkpoints
         if actual_steps == "Unknown":
@@ -202,11 +226,12 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
                             actual_steps = f"{total_steps / 1_000_000:.1f}M"
                         else:
                             actual_steps = f"{total_steps:,}"
-                    except: pass
-        
+                    except:
+                        pass
+
         if "telemetry" not in raw_cfg: raw_cfg["telemetry"] = {}
         raw_cfg["telemetry"]["actual_steps_trained"] = actual_steps
-        
+
         display_name = f"{local['group']} | {local['name']}"
         run_registry[display_name] = {
             "id": display_name,
@@ -221,10 +246,11 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
             "folder_name": local["path"].name,
             "verified": verified
         }
-                
+
     # Sort by creation time (newest first)
     sorted_reg = dict(sorted(run_registry.items(), key=lambda x: x[1]["created"], reverse=True))
     return sorted_reg
+
 
 # ---------------------------------------------------------------------------
 # Resumption History Parser
@@ -255,7 +281,7 @@ def get_run_history_chain(run_data) -> str:
                         return " ➔ ".join(chain)
                 except:
                     pass
-                
+
     # 2. Fallback: Check config.yaml for checkpoint_path
     cfg = run_data["config"]
     t_cfg = cfg.get("training", {}) if isinstance(cfg, dict) else {}
@@ -273,12 +299,12 @@ def get_run_history_chain(run_data) -> str:
                 parent_steps_str = f"{parent_steps / 1_000_000:.1f}M" if parent_steps >= 1_000_000 else f"{parent_steps:,}"
             except:
                 parent_steps_str = "unknown steps"
-            
+
             current_steps_str = run_data["config"].get("telemetry", {}).get("actual_steps_trained", "Unknown")
             return f"<b>{parent_run_name}</b> ({parent_steps_str}) [Resumed {parent_ckpt_name}] ➔ <b>{run_data['run_name']}</b> ({current_steps_str})"
         except:
             pass
-        
+
     # 3. Scratch run (no history)
     current_steps_str = run_data["config"].get("telemetry", {}).get("actual_steps_trained", "Unknown")
     return f"<b>{run_data['run_name']}</b> ({current_steps_str}) [Started from Scratch]"
@@ -306,22 +332,22 @@ if not registry:
 with st.sidebar:
     st.markdown("<div class='header-style' style='font-size: 20px;'>Matrix Selection</div>", unsafe_allow_html=True)
     st.caption("Select stages across domains for variance testing.")
-    
+
     grouped_runs = {}
     for r_disp, r_data in registry.items():
         g_name = r_data["group_name"]
         if g_name not in grouped_runs: grouped_runs[g_name] = []
         grouped_runs[g_name].append((r_disp, r_data["run_name"]))
-        
+
     selected_operations = []
-    
+
     for g_name, runs in grouped_runs.items():
         st.markdown(f"<div class='sidebar-cgroup'>{g_name}</div>", unsafe_allow_html=True)
         for r_disp, r_name in runs:
             r_data = registry[r_disp]
             verified_icon = "🟢" if r_data.get("verified") else "⚪"
             label = f"{verified_icon} {r_name}"
-            
+
             # Default to selecting the most recent standalone just to show something on load
             is_def = (selected_operations == []) and (g_name == "Standalone")
             if st.checkbox(label, value=is_def, key=r_disp):
@@ -377,19 +403,20 @@ diff_df["_sort_diff"] = is_different
 diff_df.sort_values(by=["_sort_diff"], ascending=[False], inplace=True)
 diff_df.drop(columns=["_sort_diff"], inplace=True)
 
+
 def render_html_table(df, title, show_domain=True):
     if df.empty: return
-    
+
     html = f"<div class='section-title'>{title}</div>"
     html += "<div class='se-table-container'><table class='se-table'>"
-    
+
     # Headers
     html += "<thead><tr>"
     if show_domain: html += "<th>Domain</th>"
     html += "<th>Parameter</th>"
     for col in df.columns: html += f"<th>{col}</th>"
     html += "</tr></thead><tbody>"
-    
+
     for row_idx, row in df.iterrows():
         domain, key = row_idx.split(" | ", 1)
         html += "<tr>"
@@ -398,7 +425,7 @@ def render_html_table(df, title, show_domain=True):
         for val in row:
             html += f"<td>{val}</td>"
         html += "</tr>"
-        
+
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
 
@@ -416,14 +443,15 @@ if len(selected_operations) == 1:
     info_html += f"<tr><td><b>{r_disp}</b></td><td>{history_chain}</td></tr>"
     info_html += "</tbody></table></div>"
     st.markdown(info_html, unsafe_allow_html=True)
-    
+
     # Extract specific core keys
     r_disp = selected_operations[0]
     cfg = registry[r_disp]["config"]
     env_cfg = cfg.get("env", {})
     rew_cfg = cfg.get("reward", {})
     tel_cfg = cfg.get("telemetry", {})
-    
+
+
     def render_vertical_card(title, items):
         html = f"<div style='font-size: 13px; font-weight: 600; color: #00ADB5; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; margin-top: 20px;'>{title}</div>"
         html += "<div style='border: 1px solid #333; border-radius: 6px; background-color: #121418; width: 380px;'>"
@@ -435,7 +463,8 @@ if len(selected_operations) == 1:
             html += "</div>"
         html += "</div>"
         st.markdown(html, unsafe_allow_html=True)
-        
+
+
     env_items = [
         ("map_names", str(env_cfg.get("map_names", "N/A"))),
         ("max_steps", str(env_cfg.get("max_steps", "N/A"))),
@@ -444,22 +473,22 @@ if len(selected_operations) == 1:
         ("num_targets", str(env_cfg.get("num_targets", "0"))),
         ("actual_steps_trained", str(tel_cfg.get("actual_steps_trained", "Unknown")))
     ]
-    
+
     rew_items = [
         ("collision_penalty", str(rew_cfg.get("collision_penalty", "N/A"))),
         ("exploration_bonus", str(rew_cfg.get("exploration_bonus", "N/A"))),
         ("max_gap_penalty", str(rew_cfg.get("max_gap_penalty", "N/A"))),
         ("success_bonus", str(rew_cfg.get("success_bonus", "0")))
     ]
-    
+
     render_vertical_card("Env", env_items)
     render_vertical_card("Reward", rew_items)
 
-        
     st.markdown("<br><div class='header-style'>Complete Operation Profile</div>", unsafe_allow_html=True)
     # Group beautifully by domain with strict ordering
     domain_order = ["ENV", "REWARD", "TELEMETRY", "TRAINING", "LOGGING"]
-    domains = sorted(list(set([idx.split(" | ")[0] for idx in diff_df.index])), key=lambda x: domain_order.index(x) if x in domain_order else 999)
+    domains = sorted(list(set([idx.split(" | ")[0] for idx in diff_df.index])),
+                     key=lambda x: domain_order.index(x) if x in domain_order else 999)
     for dom in domains:
         sub_df = diff_df[diff_df.index.str.startswith(dom + " | ")]
         render_html_table(sub_df, dom, show_domain=False)
@@ -484,11 +513,12 @@ else:
         info_html += f"<tr><td><b>{r_disp}</b></td><td>{history_chain}</td></tr>"
     info_html += "</tbody></table></div>"
     st.markdown(info_html, unsafe_allow_html=True)
-    
+
     domain_order = ["ENV", "REWARD", "TELEMETRY", "TRAINING", "LOGGING"]
 
     if not varying_df.empty:
-        v_domains = sorted(list(set([idx.split(" | ")[0] for idx in varying_df.index])), key=lambda x: domain_order.index(x) if x in domain_order else 999)
+        v_domains = sorted(list(set([idx.split(" | ")[0] for idx in varying_df.index])),
+                           key=lambda x: domain_order.index(x) if x in domain_order else 999)
         for dom in v_domains:
             sub_df = varying_df[varying_df.index.str.startswith(dom + " | ")]
             render_html_table(sub_df, dom, show_domain=False)
@@ -519,7 +549,7 @@ for idx, r_disp in enumerate(selected_operations):
                     cat_pref = " [Eval]"
                 elif "train" in vf.parts or vf.parent.name == "train" or stem.startswith("train_") or "_train_" in stem:
                     cat_pref = " [Train]"
-                
+
                 status_icon = "⚪"
                 if stem.startswith("SUCCESS_"):
                     status_icon = "🟢"
@@ -527,33 +557,42 @@ for idx, r_disp in enumerate(selected_operations):
                 elif stem.startswith("FAIL_"):
                     status_icon = "🔴"
                     stem = stem[len("FAIL_"):]
-                
-                # Check for update / ckpt numbers and episode numbers
-                up_match = re.search(r'(?:update|ckpt)_(\d+)', stem)
+
+                # Check for update / ckpt numbers and episode numbers, plus new format features
+                up_match = re.search(r'(?:update|ckpt)_(\d+)|_u(\d+)', stem)
                 ep_match = re.search(r'ep(\d+)', stem)
-                
+                step_match = re.search(r'_s([\d\.]+[A-Za-z]?)', stem)
+
                 parts = []
                 if up_match:
-                    parts.append(f"Update {int(up_match.group(1))}")
+                    up_val = int(up_match.group(1) or up_match.group(2))
+                    parts.append(f"Update {up_val}")
+                if step_match:
+                    s_val = step_match.group(1)
+                    s_val = re.sub(r'^0+', '', s_val)
+                    if not s_val or not s_val[0].isdigit():
+                        s_val = "0" + s_val
+                    parts.append(f"Steps {s_val}")
                 if ep_match:
                     parts.append(f"Ep {int(ep_match.group(1))}")
-                
+
                 if not parts:
-                    # Tidy up raw name
-                    label = f"{status_icon}{cat_pref} {stem.replace('_', ' ').title()}"
+                    # Tidy up raw name, dropping the timestamp prefix if present
+                    clean_stem = re.sub(r'^\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_', '', stem)
+                    label = f"{status_icon}{cat_pref} {clean_stem.replace('_', ' ').title()}"
                 else:
                     label = f"{status_icon}{cat_pref} " + " | ".join(parts)
-                
+
                 # Unique label check
                 dup_idx = 1
                 orig_label = label
                 while label in option_map:
                     label = f"{orig_label} ({dup_idx})"
                     dup_idx += 1
-                
+
                 options.append(label)
                 option_map[label] = vf
-            
+
             selected_label = st.selectbox(
                 "Select Rollout Video",
                 options,
@@ -564,7 +603,8 @@ for idx, r_disp in enumerate(selected_operations):
             st.video(str(selected_vf))
             int_meta = registry[r_disp]["folder_name"]
             st.markdown(f"<span style='color:#666; font-size:10px;'>Run: {int_meta}</span>", unsafe_allow_html=True)
-            st.markdown(f"<span style='color:#666; font-size:10px;'>Path: {selected_vf.relative_to(BASE_DIR)}</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color:#666; font-size:10px;'>Path: {selected_vf.relative_to(BASE_DIR)}</span>",
+                        unsafe_allow_html=True)
         else:
             st.warning("Video Link Broken / No Videos Found")
 
@@ -575,7 +615,8 @@ if len(selected_operations) > 1:
     st.markdown("<br><div class='header-style'>Static Configuration Baseline</div>", unsafe_allow_html=True)
     st.caption("Parameters maintaining constant values across all viewed operations.")
     with st.expander("Explore Static Baseline Configurations", expanded=False):
-        domains = sorted(list(set([idx.split(" | ")[0] for idx in static_df.index])), key=lambda x: domain_order.index(x) if x in domain_order else 999)
+        domains = sorted(list(set([idx.split(" | ")[0] for idx in static_df.index])),
+                         key=lambda x: domain_order.index(x) if x in domain_order else 999)
         for dom in domains:
             sub_df = static_df[static_df.index.str.startswith(dom + " | ")]
             render_html_table(sub_df, dom, show_domain=False)
