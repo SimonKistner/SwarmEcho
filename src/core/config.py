@@ -67,6 +67,8 @@ class EnvConfig:
     target_spawn_radius: float = 0.0      # if > 0, target spawns in a circle of this max radius around base (for "ring")
     target_spawn_radius_min: float = 0.0  # if > 0, target spawns in a ring (min to max radius) (for "ring")
     target_invalid_spawn_base_radius: float = 0.0 # if > 0, target cannot spawn within this radius of the base (for "outside_base")
+    adaptive_target_spawn: bool = False            # if True, training target spawn cells adapt to per-category success
+    static_maze_optimal_path: bool = True          # if True, compute maze-cell path categories once at training init
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
@@ -177,6 +179,7 @@ class LoggingConfig:
     suppress_xla_warnings: bool = True
     obs_log: bool = False
     memory_diagnostic_probe: bool = False  # Train a linear probe on base memory to predict target cell
+    adaptive_spawn_diagnostics: bool = False  # Log adaptive target-spawn bucket diagnostics to WandB
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
