@@ -123,7 +123,7 @@ def run_scripted_test():
     # Load level configuration for M03b
     sys.argv = [sys.argv[0]]
     cfg = load_config(
-        config_path=Path("src/curriculum_config/levels/M03b_small_grid_maze.yaml"),
+        config_path=Path("src/curriculum_config/levels/M02_small_grid_maze.yaml"),
         cli_overrides=True
     )
     
