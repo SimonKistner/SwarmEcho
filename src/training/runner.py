@@ -304,11 +304,9 @@ def _batched_rollout_and_memory_step_impl(
     if recurrent:
         if memory_comm_enabled:
             raw_adj_b = states_adj_matrix[:, :N, :N] if states_adj_matrix.shape[-1] > 0 else jnp.zeros((E_, N, N), dtype=bool)
-            if model.tarmac_include_self:
-                raw_adj_b = raw_adj_b | jnp.broadcast_to(jnp.eye(N, dtype=bool), raw_adj_b.shape)
             step_share = (int(model.memory_comm_every_k_steps) <= 1) | ((t % int(model.memory_comm_every_k_steps)) == jnp.int32(0))
             ic3_enabled = model.ic3_comm_enabled
-            comm_mask_b = jnp.where(ic3_enabled, raw_adj_b, raw_adj_b & step_share)
+            comm_mask_b = raw_adj_b & step_share
             active_mask_b = states_active
             base_signature_b = base_signature if base_signature is not None else jnp.zeros((E_, model.tarmac_sig_dim), dtype=jnp.float32)
             base_value_b = base_value if base_value is not None else jnp.zeros((E_, model.tarmac_val_dim), dtype=jnp.float32)
@@ -344,10 +342,11 @@ def _batched_rollout_and_memory_step_impl(
                 obs_batch, act_keys, actor_h_in, actor_signature_in, actor_value_in, critic_h_in, reset_agents_b,
                 comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
             )
-            comm_gate_actions_b = jnp.where(ic3_enabled, comm_gate_actions_b, jnp.ones_like(comm_gate_actions_b))
-            comm_gate_log_probs_b = jnp.where(ic3_enabled, comm_gate_log_probs_b, jnp.zeros_like(comm_gate_log_probs_b))
-            comm_gate_entropy_b = jnp.where(ic3_enabled, comm_gate_entropy_b, jnp.zeros_like(comm_gate_entropy_b))
-            comm_gate_prob_b = jnp.where(ic3_enabled, comm_gate_prob_b, jnp.ones_like(comm_gate_prob_b))
+            gate_decision_active_b = jnp.full(comm_gate_actions_b.shape, ic3_enabled & step_share, dtype=bool) & active_mask_b
+            comm_gate_actions_b = jnp.where(gate_decision_active_b, comm_gate_actions_b, jnp.ones_like(comm_gate_actions_b))
+            comm_gate_log_probs_b = jnp.where(gate_decision_active_b, comm_gate_log_probs_b, jnp.zeros_like(comm_gate_log_probs_b))
+            comm_gate_entropy_b = jnp.where(gate_decision_active_b, comm_gate_entropy_b, jnp.zeros_like(comm_gate_entropy_b))
+            comm_gate_prob_b = jnp.where(gate_decision_active_b, comm_gate_prob_b, jnp.ones_like(comm_gate_prob_b))
             
             # Base memory update logic
             connected_to_base_b = states_adj_matrix[:, :N, N] if states_adj_matrix.shape[-1] > N else jnp.zeros((E_, N), dtype=bool)
@@ -364,7 +363,7 @@ def _batched_rollout_and_memory_step_impl(
             return (
                 actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b, base_signature, base_value, base_memory_valid,
                 comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
-                comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b
+                comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b, gate_decision_active_b
             )
             
         else:
@@ -376,14 +375,14 @@ def _batched_rollout_and_memory_step_impl(
             actor_h, _, _, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
                 obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
             )
-            return actor_h, None, None, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None
+            return actor_h, None, None, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None, None
     else:
         def _rollout_one_env(obs_n, keys_n):
             actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
             return actions, log_probs, value
 
         actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
-        return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -471,13 +470,12 @@ def _collect_rollout_mappo(
     completed_ic3_gate_entropy_means = []
 
     ic3_comm_count_accum = ep_trackers.get("ic3_comm_count", np.zeros(E))
+    ic3_comm_opportunity_accum = ep_trackers.get("ic3_comm_opportunity", np.zeros(E))
     ic3_target_known_comm_count_accum = ep_trackers.get("ic3_target_known_comm_count", np.zeros(E))
-    ic3_target_known_steps_accum = ep_trackers.get("ic3_target_known_steps", np.zeros(E))
+    ic3_target_known_opportunity_accum = ep_trackers.get("ic3_target_known_opportunity", np.zeros(E))
     ic3_gate_prob_sum_accum = ep_trackers.get("ic3_gate_prob_sum", np.zeros(E))
     ic3_gate_entropy_sum_accum = ep_trackers.get("ic3_gate_entropy_sum", np.zeros(E))
     ic3_step_count_accum = ep_trackers.get("ic3_step_count", np.zeros(E))
-    ic3_by_step_sum = np.zeros(T, dtype=np.float32)
-    ic3_by_step_count = np.zeros(T, dtype=np.float32)
 
     for t in range(T):
         key, act_key = jax.random.split(key)
@@ -505,7 +503,7 @@ def _collect_rollout_mappo(
             if model.actor_memory and model.memory_comm_enabled:
                 (actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b, base_signature, base_value, base_memory_valid,
                  comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
-                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b) = batched_rollout_step_jit(
+                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b, comm_gate_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
                     act_keys,
@@ -526,7 +524,7 @@ def _collect_rollout_mappo(
             else:
                 (actor_h, _, _, critic_h, actions_b, log_probs_b, values_b, _, _, _,
                  comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
-                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b) = batched_rollout_step_jit(
+                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b, comm_gate_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
                     act_keys,
@@ -545,7 +543,7 @@ def _collect_rollout_mappo(
         else:
             (_, _, _, _, actions_b, log_probs_b, values_b, _, _, _,
              comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
-                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b) = batched_rollout_step_jit(
+                 comm_gate_actions_b, comm_gate_log_probs_b, comm_gate_entropy_b, comm_gate_prob_b, comm_gate_mask_b) = batched_rollout_step_jit(
                 model,
                 obs_batch,
                 act_keys,
@@ -569,19 +567,22 @@ def _collect_rollout_mappo(
         dones_np   = np.array(dones_b).astype(bool)
 
         if model.actor_memory and model.memory_comm_enabled and model.ic3_comm_enabled:
-            gate_np = np.array(comm_gate_actions_b).astype(np.float32) * np.array(states.active).astype(np.float32)
-            gate_prob_np = np.array(comm_gate_prob_b).astype(np.float32)
-            gate_entropy_np = np.array(comm_gate_entropy_b).astype(np.float32)
+            active_np = np.array(states.active).astype(np.float32)
+            gate_mask_np = np.array(comm_gate_mask_b).astype(np.float32) * active_np
+            gate_np = np.array(comm_gate_actions_b).astype(np.float32) * gate_mask_np
+            gate_prob_np = np.array(comm_gate_prob_b).astype(np.float32) * gate_mask_np
+            gate_entropy_np = np.array(comm_gate_entropy_b).astype(np.float32) * gate_mask_np
             target_known_step_np = np.any(np.array(states.target_known[:, :N_]), axis=1).astype(np.float32)
             gate_sum_np = gate_np.sum(axis=1)
+            opportunity_np = gate_mask_np.sum(axis=1)
             ic3_comm_count_accum += gate_sum_np
+            ic3_comm_opportunity_accum += opportunity_np
             ic3_target_known_comm_count_accum += gate_sum_np * target_known_step_np
-            ic3_target_known_steps_accum += target_known_step_np
-            ic3_gate_prob_sum_accum += gate_prob_np.mean(axis=1)
-            ic3_gate_entropy_sum_accum += gate_entropy_np.mean(axis=1)
-            ic3_step_count_accum += 1.0
-            ic3_by_step_sum[t] = float(gate_np.sum())
-            ic3_by_step_count[t] = float(gate_np.size)
+            ic3_target_known_opportunity_accum += opportunity_np * target_known_step_np
+            prob_denom_np = np.maximum(opportunity_np, 1.0)
+            ic3_gate_prob_sum_accum += gate_prob_np.sum(axis=1) / prob_denom_np
+            ic3_gate_entropy_sum_accum += gate_entropy_np.sum(axis=1) / prob_denom_np
+            ic3_step_count_accum += (opportunity_np > 0.0).astype(np.float32)
 
         ep_ret_accum     += rewards_np
         ep_len_accum     += 1
@@ -627,9 +628,9 @@ def _collect_rollout_mappo(
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
             if model.actor_memory and model.memory_comm_enabled and model.ic3_comm_enabled:
-                denom = max(1.0, float(ep_len_accum[e]) * float(N))
+                denom = max(1.0, float(ic3_comm_opportunity_accum[e]))
                 completed_ic3_rates.append(float(ic3_comm_count_accum[e]) / denom)
-                known_denom = max(1.0, float(ic3_target_known_steps_accum[e]) * float(N))
+                known_denom = max(1.0, float(ic3_target_known_opportunity_accum[e]))
                 completed_ic3_target_known_rates.append(float(ic3_target_known_comm_count_accum[e]) / known_denom)
                 step_denom = max(1.0, float(ic3_step_count_accum[e]))
                 completed_ic3_gate_prob_means.append(float(ic3_gate_prob_sum_accum[e]) / step_denom)
@@ -667,8 +668,9 @@ def _collect_rollout_mappo(
         r_succ_accum     = np.where(dones_np, 0.0, r_succ_accum)
         cov_accum        = np.where(dones_np, 0.0, cov_accum)
         ic3_comm_count_accum = np.where(dones_np, 0.0, ic3_comm_count_accum)
+        ic3_comm_opportunity_accum = np.where(dones_np, 0.0, ic3_comm_opportunity_accum)
         ic3_target_known_comm_count_accum = np.where(dones_np, 0.0, ic3_target_known_comm_count_accum)
-        ic3_target_known_steps_accum = np.where(dones_np, 0.0, ic3_target_known_steps_accum)
+        ic3_target_known_opportunity_accum = np.where(dones_np, 0.0, ic3_target_known_opportunity_accum)
         ic3_gate_prob_sum_accum = np.where(dones_np, 0.0, ic3_gate_prob_sum_accum)
         ic3_gate_entropy_sum_accum = np.where(dones_np, 0.0, ic3_gate_entropy_sum_accum)
         ic3_step_count_accum = np.where(dones_np, 0.0, ic3_step_count_accum)
@@ -689,6 +691,7 @@ def _collect_rollout_mappo(
             base_memory_masks = np.array(base_receiver_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
             comm_gate_actions = np.array(comm_gate_actions_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
             comm_gate_log_probs = np.array(comm_gate_log_probs_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            comm_gate_masks = np.array(comm_gate_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
         ))
         if recurrent and model.actor_memory and model.memory_comm_enabled:
             done_j = jnp.asarray(dones_np, dtype=bool)
@@ -728,16 +731,14 @@ def _collect_rollout_mappo(
     ep_trackers["r_succ"]     = r_succ_accum
     ep_trackers["coverage"]   = cov_accum
     ep_trackers["ic3_comm_count"] = ic3_comm_count_accum
+    ep_trackers["ic3_comm_opportunity"] = ic3_comm_opportunity_accum
     ep_trackers["ic3_target_known_comm_count"] = ic3_target_known_comm_count_accum
-    ep_trackers["ic3_target_known_steps"] = ic3_target_known_steps_accum
+    ep_trackers["ic3_target_known_opportunity"] = ic3_target_known_opportunity_accum
     ep_trackers["ic3_gate_prob_sum"] = ic3_gate_prob_sum_accum
     ep_trackers["ic3_gate_entropy_sum"] = ic3_gate_entropy_sum_accum
     ep_trackers["ic3_step_count"] = ic3_step_count_accum
 
     comm_summary = {}
-    if model.actor_memory and model.memory_comm_enabled and model.ic3_comm_enabled:
-        rates = np.divide(ic3_by_step_sum, np.maximum(ic3_by_step_count, 1.0))
-        comm_summary.update({f"comm/ic3_rate_by_step/step_{i:03d}": float(v) for i, v in enumerate(rates)})
 
 
     return (
@@ -834,13 +835,12 @@ def _evaluate(
                     N_eval = obs.shape[0]
                     step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
                     raw_comm_mask = state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)
-                    if model.tarmac_include_self:
-                        raw_comm_mask = raw_comm_mask | jnp.eye(N_eval, dtype=bool)
-                    comm_mask = raw_comm_mask if model.ic3_comm_enabled else (raw_comm_mask & jnp.asarray(step_share))
+                    comm_mask = raw_comm_mask & jnp.asarray(step_share)
                     comm_gate = None
                     if model.ic3_comm_enabled:
                         comm_gate, _, _, _ = model.actor.sample_comm_gate(actor_h, deterministic=True)
-                        gate_count_step = jnp.sum(comm_gate.astype(jnp.float32) * state.active.astype(jnp.float32))
+                        gate_count_step = jnp.where(step_share, jnp.sum(comm_gate.astype(jnp.float32) * state.active.astype(jnp.float32)), jnp.float32(0.0))
+                        gate_opportunity_step = jnp.where(step_share, jnp.sum(state.active.astype(jnp.float32)), jnp.float32(0.0))
                     # Base-memory relay is only offered to drones that do not already know the target.
                     # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
                     base_mask = (
@@ -1010,27 +1010,28 @@ def _run_parallel_eval_jit(
             jnp.float32(0.0),  # returns
             jnp.int32(0),      # lengths
             jnp.float32(0.0),  # ic3_gate_count
+            jnp.float32(0.0),  # ic3_gate_opportunity
         )
 
         def eval_step(carry, t):
-            state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, has_succeeded, has_found_delivered, has_found_visual, max_found, returns, lengths, ic3_gate_count = carry
+            state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, has_succeeded, has_found_delivered, has_found_visual, max_found, returns, lengths, ic3_gate_count, ic3_gate_opportunity = carry
 
             obs = obs_fn(state)
 
             gate_count_step = jnp.float32(0.0)
+            gate_opportunity_step = jnp.float32(0.0)
             if actor_memory:
                 resets = jnp.logical_not(state.active)
                 if memory_comm_enabled:
                     N_eval = obs.shape[0]
                     step_share = (memory_comm_every_k_steps <= 1) | ((t % memory_comm_every_k_steps) == 0)
                     raw_comm_mask = state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)
-                    if model.tarmac_include_self:
-                        raw_comm_mask = raw_comm_mask | jnp.eye(N_eval, dtype=bool)
-                    comm_mask = raw_comm_mask if model.ic3_comm_enabled else (raw_comm_mask & step_share)
+                    comm_mask = raw_comm_mask & step_share
                     comm_gate = None
                     if model.ic3_comm_enabled:
                         comm_gate, _, _, _ = model.actor.sample_comm_gate(actor_h, deterministic=True)
-                        gate_count_step = jnp.sum(comm_gate.astype(jnp.float32) * state.active.astype(jnp.float32))
+                        gate_count_step = jnp.where(step_share, jnp.sum(comm_gate.astype(jnp.float32) * state.active.astype(jnp.float32)), jnp.float32(0.0))
+                        gate_opportunity_step = jnp.where(step_share, jnp.sum(state.active.astype(jnp.float32)), jnp.float32(0.0))
                     base_mask = (
                         (
                             state.adj_matrix[:N_eval, N_eval]
@@ -1096,15 +1097,16 @@ def _run_parallel_eval_jit(
             new_returns = jnp.where(episode_ended_prev, returns, returns + rew.sum())
             new_lengths = jnp.where(episode_ended_prev, lengths, lengths + 1)
             new_ic3_gate_count = jnp.where(episode_ended_prev, ic3_gate_count, ic3_gate_count + gate_count_step)
+            new_ic3_gate_opportunity = jnp.where(episode_ended_prev, ic3_gate_opportunity, ic3_gate_opportunity + gate_opportunity_step)
 
-            new_carry = (state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths, new_ic3_gate_count)
+            new_carry = (state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths, new_ic3_gate_count, new_ic3_gate_opportunity)
             return new_carry, (info["chain_gap_dist"], info["chain_progress_pct"])
 
         final_carry, scan_outs = jax.lax.scan(eval_step, init_carry, jnp.arange(max_steps))
-        state_f, _, _, _, _, _, _, succ, delivered, visual, fnd, ret, length, ic3_gate_count = final_carry
+        state_f, _, _, _, _, _, _, succ, delivered, visual, fnd, ret, length, ic3_gate_count, ic3_gate_opportunity = final_carry
         gap_dists, progress_pcts = scan_outs
 
-        denom = jnp.maximum(jnp.float32(1.0), length.astype(jnp.float32) * jnp.float32(model.num_agents))
+        denom = jnp.maximum(jnp.float32(1.0), ic3_gate_opportunity)
         ic3_rate = ic3_gate_count / denom
         return ret, length, gap_dists[-1], progress_pcts[-1], succ, fnd, state_f, succ, delivered, visual, ic3_rate
 
@@ -1404,7 +1406,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_frequency_control = str(cfg.network.get("memory_comm_frequency_control", "static")),
-        ic3_comm_gate_mode = str(cfg.network.get("ic3_comm_gate_mode", "sample")),
         ic3_comm_gate_entropy_coef = float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)),
         ic3_comm_gate_cost = float(cfg.network.get("ic3_comm_gate_cost", 0.0)),
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),

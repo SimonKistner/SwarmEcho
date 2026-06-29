@@ -270,7 +270,6 @@ class RecurrentDecentralizedActor(nnx.Module):
         memory_comm_enabled: bool = False,
         memory_comm_every_k_steps: int = 5,
         memory_comm_frequency_control: str = "static",
-        ic3_comm_gate_mode: str = "sample",
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
@@ -280,7 +279,6 @@ class RecurrentDecentralizedActor(nnx.Module):
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
         self.memory_comm_frequency_control = memory_comm_frequency_control
-        self.ic3_comm_gate_mode = ic3_comm_gate_mode
         self.ic3_comm_enabled = memory_comm_enabled and memory_comm_frequency_control == "ic3"
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
@@ -340,11 +338,17 @@ class RecurrentDecentralizedActor(nnx.Module):
             active = jnp.ones((N,), dtype=bool)
 
         active_pair = active[:, None] & active[None, :]
-        share_mask = comm_mask & active_pair
-        if not self.tarmac_include_self:
-            share_mask = share_mask & ~jnp.eye(N, dtype=bool)
+        eye = jnp.eye(N, dtype=bool)
+        external_mask = comm_mask & active_pair & ~eye
         if comm_gate is not None:
-            share_mask = share_mask & comm_gate[None, :]
+            external_mask = external_mask & comm_gate[None, :]
+
+        has_external_sender = jnp.any(external_mask, axis=-1)
+        if self.tarmac_include_self:
+            self_mask = eye & active[:, None] & has_external_sender[:, None]
+            share_mask = external_mask | self_mask
+        else:
+            share_mask = external_mask
 
         sender_signature = prev_signature
         sender_value = prev_value

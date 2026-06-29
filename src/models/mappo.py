@@ -66,7 +66,6 @@ class MAPPOModel(nnx.Module):
         memory_comm_enabled: bool = False,
         memory_comm_every_k_steps: int = 5,
         memory_comm_frequency_control: str = "static",
-        ic3_comm_gate_mode: str = "sample",
         ic3_comm_gate_entropy_coef: float = 0.001,
         ic3_comm_gate_cost: float = 0.0,
         tarmac_sig_dim: int = 64,
@@ -84,7 +83,6 @@ class MAPPOModel(nnx.Module):
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
         self.memory_comm_frequency_control = memory_comm_frequency_control
         self.ic3_comm_enabled = memory_comm_enabled and memory_comm_frequency_control == "ic3"
-        self.ic3_comm_gate_mode = ic3_comm_gate_mode
         self.ic3_comm_gate_entropy_coef = ic3_comm_gate_entropy_coef
         self.ic3_comm_gate_cost = ic3_comm_gate_cost
         self.tarmac_sig_dim = tarmac_sig_dim
@@ -101,7 +99,6 @@ class MAPPOModel(nnx.Module):
                 memory_comm_enabled = memory_comm_enabled,
                 memory_comm_every_k_steps = memory_comm_every_k_steps,
                 memory_comm_frequency_control = memory_comm_frequency_control,
-                ic3_comm_gate_mode = ic3_comm_gate_mode,
                 tarmac_sig_dim = tarmac_sig_dim,
                 tarmac_val_dim = tarmac_val_dim,
                 tarmac_include_self = tarmac_include_self,
@@ -339,7 +336,6 @@ if __name__ == "__main__":
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
         memory_comm_frequency_control = str(cfg.network.get("memory_comm_frequency_control", "static")),
-        ic3_comm_gate_mode = str(cfg.network.get("ic3_comm_gate_mode", "sample")),
         ic3_comm_gate_entropy_coef = float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)),
         ic3_comm_gate_cost = float(cfg.network.get("ic3_comm_gate_cost", 0.0)),
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),

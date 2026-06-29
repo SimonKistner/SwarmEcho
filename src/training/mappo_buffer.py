@@ -41,6 +41,7 @@ class MAPPOTransition(NamedTuple):
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
     comm_gate_actions: Optional[np.ndarray] = None  # (E, N), IC3 sender gate actions
     comm_gate_log_probs: Optional[np.ndarray] = None  # (E, N), rollout IC3 gate log-probs
+    comm_gate_masks: Optional[np.ndarray] = None  # (E, N), True where IC3 gate is an active policy decision
 
 
 class MAPPORolloutBuffer:
@@ -112,6 +113,7 @@ class MAPPORolloutBuffer:
         self._base_memory_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
         self._comm_gate_actions = np.ones((self.T, self.E, self.N), dtype=np.int32)
         self._comm_gate_log_probs = np.zeros((self.T, self.E, self.N), dtype=np.float32)
+        self._comm_gate_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
         self._initial_actor_h = None
         self._initial_actor_signature = None
         self._initial_actor_value = None
@@ -170,6 +172,8 @@ class MAPPORolloutBuffer:
             self._comm_gate_actions[self._ptr] = np.asarray(tr.comm_gate_actions, dtype=np.int32)
         if self.recurrent and tr.comm_gate_log_probs is not None:
             self._comm_gate_log_probs[self._ptr] = np.asarray(tr.comm_gate_log_probs, dtype=np.float32)
+        if self.recurrent and tr.comm_gate_masks is not None:
+            self._comm_gate_masks[self._ptr] = np.asarray(tr.comm_gate_masks).astype(bool)
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -350,5 +354,6 @@ class MAPPORolloutBuffer:
                 "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
                 "comm_gate_actions": jnp.array(self._comm_gate_actions[:, idx]),
                 "comm_gate_log_probs": jnp.array(self._comm_gate_log_probs[:, idx]),
+                "comm_gate_masks": jnp.array(self._comm_gate_masks[:, idx]),
             })
         return minibatches

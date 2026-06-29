@@ -21,15 +21,14 @@ The recurrent MAPPO extension is controlled from `network`:
 | `actor_memory` | `false` | Replaces the feed-forward actor with a per-agent GRU actor. |
 | `critic_memory` | `false` | Replaces the agent-centric critic with a per-agent GRU critic before cross-agent attention. Requires `critic_type: agent_centric`. |
 | `memory_comm_enabled` | `false` | Enables TarMAC communication for the recurrent actor. Requires `actor_memory: true`. |
-| `memory_comm_frequency_control` | `static` | Selects TarMAC send frequency control: `static` uses `memory_comm_every_k_steps`; `ic3` samples learned sender gates every step for agent-agent TarMAC. |
-| `memory_comm_every_k_steps` | `5` | Applies wall-aware actor communication every k environment steps in static mode. Base replay continues to use this cadence in IC3 mode. |
-| `ic3_comm_gate_mode` | `sample` | IC3 sender gate mode. Training samples Bernoulli/categorical gates; eval uses deterministic argmax. |
+| `memory_comm_frequency_control` | `static` | Selects TarMAC sender control: `static` lets all reachable agents send on each `memory_comm_every_k_steps` slot; `ic3` samples learned sender gates within those same slots. |
+| `memory_comm_every_k_steps` | `5` | Defines the communication slots used by both static agent-agent communication and IC3 gated agent-agent communication; base replay also uses this cadence. |
 | `ic3_comm_gate_entropy_coef` | `0.001` | Extra entropy weight applied to IC3 gate entropy inside the recurrent PPO entropy term. |
 | `ic3_comm_gate_cost` | `0.0` | Optional sparsity cost on sampled IC3 communicate actions. |
 | `ic3_comm_always_threshold` | `0.95` | Episode-rate threshold for always-true / always-false IC3 diagnostics. |
 | `tarmac_sig_dim` | `64` | Query/signature dimension used for TarMAC sender addressing. |
 | `tarmac_val_dim` | `128` | Value/message dimension used for TarMAC communicated payloads. |
-| `tarmac_include_self` | `true` | Keeps each agent's own previous signature/value in its attention sender set, allowing it to ignore incoming messages when useful. |
+| `tarmac_include_self` | `true` | Adds the receiver's own previous signature/value as an attention candidate only when it is already receiving at least one external agent message. |
 
 When recurrent actor communication is enabled, SwarmEcho uses a single-round TarMAC-style mechanism rather than the older configurable hidden-state attention path. Agents carry GRU hidden state plus previous `(signature, value)` communication state; the base relay stores the first target-knowing reporter's emitted TarMAC signature/value and replays that token to eligible non-knowing agents in base range.
 

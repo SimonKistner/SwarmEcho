@@ -144,7 +144,6 @@ class NetworkConfig:
     memory_comm_enabled: bool = False
     memory_comm_frequency_control: str = "static"  # "static" | "ic3"
     memory_comm_every_k_steps: int = 5
-    ic3_comm_gate_mode: str = "sample"
     ic3_comm_gate_entropy_coef: float = 0.001
     ic3_comm_gate_cost: float = 0.0
     ic3_comm_always_threshold: float = 0.95
@@ -580,8 +579,6 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
     if str(cfg.network.get("memory_comm_frequency_control", "static")) not in ("static", "ic3"):
         raise ValueError("network.memory_comm_frequency_control must be 'static' or 'ic3'.")
-    if str(cfg.network.get("ic3_comm_gate_mode", "sample")) != "sample":
-        raise ValueError("network.ic3_comm_gate_mode currently supports only 'sample'.")
     if str(cfg.network.get("memory_comm_frequency_control", "static")) == "ic3" and not bool(cfg.network.memory_comm_enabled):
         raise ValueError("network.memory_comm_frequency_control='ic3' requires network.memory_comm_enabled=true.")
     if float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)) < 0.0:
