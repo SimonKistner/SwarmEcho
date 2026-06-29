@@ -16,6 +16,8 @@ env:
   use_random_base_spawn: false
   use_random_drone_spawn: false
   target_spawn_method: map_defined   # spawn from wall-buffered valid_target_coords (see M03_small_grid_maze.yaml)
+  adaptive_target_spawn: true
+  static_maze_optimal_path: true
   precover_base_comm: true
   hold_chain_for: 50
   observe_target_vector: false
@@ -38,7 +40,7 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 400_000_000
+  total_timesteps: 500_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -49,10 +51,13 @@ training:
   eval_parallel_envs: 4000
   eval_parallel_early_exit_threshold: 1.0
 
+  #checkpoint_path:  "outputs/mini_maze_adpTargetSpawn_v2/checkpoints/ckpt_001000"  # if set, resumes training from this path
+  #ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
+
 network:
   critic_type: "agent_centric"
   num_layers: 3    # critic depth
-  actor_num_layers: 4    # actor depth (lighter, separate)
+  actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
@@ -62,6 +67,7 @@ network:
   tarmac_include_self: true
 
 logging:
+  adaptive_spawn_diagnostics: true
   checkpoint_freq: 50
   checkpoint_offset: 0
 
