@@ -40,7 +40,7 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 800_000_000
+  total_timesteps: 500_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -51,8 +51,8 @@ training:
   eval_parallel_envs: 4000
   eval_parallel_early_exit_threshold: 1.0
 
-  checkpoint_path:  "outputs/mini_maze_adpTargetSpawn_v2/checkpoints/ckpt_001000"  # if set, resumes training from this path
-  ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
+  #checkpoint_path:  "outputs/mini_maze_adpTargetSpawn_v2/checkpoints/ckpt_001000"  # if set, resumes training from this path
+  #ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
 
 network:
   critic_type: "agent_centric"
