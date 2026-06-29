@@ -36,7 +36,7 @@ The model framework is built using Flax (`nnx` API).
       -> GRU_i
       -> next signature_i/value_i and policy head
   ```
-  The base station is passive: it stores the first target-knowing reporter's emitted TarMAC signature/value pair, then replays that saved token to non-knowing agents that are in base communication range. No previous action is fed back into the actor GRU or communication state.
+  With `network.memory_comm_frequency_control: static`, agent-agent communication uses `memory_comm_every_k_steps`. With `network.memory_comm_frequency_control: ic3`, a learned Bernoulli sender gate controls which agents broadcast their TarMAC token on each step; PPO optimizes the gate log-probability together with the physical action log-probability. The base station is passive: it stores the first target-knowing reporter's emitted TarMAC signature/value pair, then replays that saved token to non-knowing agents that are in base communication range. Base replay remains governed by `memory_comm_every_k_steps`, and no previous action is fed back into the actor GRU or communication state.
 - **Critic memory** is available for the agent-centric critic:
   ```text
   obs_i -> critic encoder -> GRU_i -> masked cross-agent attention -> V_i

@@ -235,16 +235,22 @@ class AdaptiveTargetSpawnController:
 
 def diagnostics_to_wandb(diag: AdaptiveSpawnDiagnostics) -> dict[str, float]:
     logs: dict[str, float] = {}
-    for cat, value in diag.success_rate.items():
+    categories = sorted(
+        set(diag.success_rate)
+        | set(diag.configured_rate)
+        | set(diag.actual_pct)
+        | set(diag.actual_count)
+    )
+    for cat in categories:
         label = f"category_{cat:03d}"
-        logs[f"diagnostics/spawn_success_rate/{label}"] = value
-    for cat, value in diag.configured_rate.items():
-        label = f"category_{cat:03d}"
-        logs[f"diagnostics/spawn_configured_rate/{label}"] = value
-    for cat, value in diag.actual_count.items():
-        label = f"category_{cat:03d}"
-        logs[f"diagnostics/spawn_actual_count/{label}"] = value
-    for cat, value in diag.actual_pct.items():
-        label = f"category_{cat:03d}"
-        logs[f"diagnostics/spawn_actual_pct/{label}"] = value
+        if cat in diag.success_rate:
+            logs[f"adaptive_spawn_control/spawn_success_rate/{label}"] = diag.success_rate[cat]
+        if cat in diag.configured_rate:
+            logs[f"adaptive_spawn_control/spawn_configured_rate/{label}"] = diag.configured_rate[cat]
+        if cat in diag.actual_pct:
+            logs[f"adaptive_spawn_control/spawn_actual_pct/{label}"] = diag.actual_pct[cat]
+    for cat in categories:
+        if cat in diag.actual_count:
+            label = f"category_{cat:03d}"
+            logs[f"actual count/spawn_actual_count/{label}"] = diag.actual_count[cat]
     return logs
