@@ -138,6 +138,9 @@ def recurrent_mappo_loss(
     base_signatures: jax.Array | None = None,
     base_values:     jax.Array | None = None,
     base_memory_masks: jax.Array | None = None,
+    comm_gate_actions: jax.Array | None = None,
+    old_comm_gate_log_probs: jax.Array | None = None,
+    comm_gate_masks: jax.Array | None = None,
     clip_eps:        float = 0.2,
     vf_coef:         float = 0.5,
     ent_coef:        float = 0.01,
@@ -153,7 +156,7 @@ def recurrent_mappo_loss(
 
     if model.actor_memory:
         if model.memory_comm_enabled:
-            def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env):
+            def _eval_env(obs_env, act_env, reset_env, init_h_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env, gate_env):
                 return model.actor.evaluate_actions_sequence(
                     obs_env,
                     act_env,
@@ -166,8 +169,9 @@ def recurrent_mappo_loss(
                     base_sig_env,
                     base_val_env,
                     base_mask_env,
+                    gate_env,
                 )
-            _, log_probs_flat, entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
+            _, log_probs_flat, entropy_flat, gate_log_probs_flat, gate_entropy_flat = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1))(
                 obs,
                 actions,
                 rnn_resets,
@@ -179,15 +183,22 @@ def recurrent_mappo_loss(
                 base_signatures,
                 base_values,
                 base_memory_masks,
+                comm_gate_actions,
             )
             new_log_probs = jnp.swapaxes(log_probs_flat, 0, 1)
             entropy = jnp.swapaxes(entropy_flat, 0, 1)
+            if model.ic3_comm_enabled:
+                gate_mask = comm_gate_masks.astype(jnp.float32) if comm_gate_masks is not None else jnp.ones_like(new_log_probs)
+                new_log_probs = new_log_probs + jnp.swapaxes(gate_log_probs_flat, 0, 1) * gate_mask
+                if old_comm_gate_log_probs is not None:
+                    old_log_probs = old_log_probs + old_comm_gate_log_probs * gate_mask
+                entropy = entropy + model.ic3_comm_gate_entropy_coef * jnp.swapaxes(gate_entropy_flat, 0, 1) * gate_mask
         else:
             obs_actor = obs.reshape(T, B * N, D)
             actions_actor = actions.reshape(T, B * N, actions.shape[-1])
             resets_actor = rnn_resets.reshape(T, B * N)
             init_actor = initial_actor_h.reshape(B * N, model.hidden_dim)
-            _, log_probs_flat, entropy_flat = model.actor.evaluate_actions_sequence(
+            _, log_probs_flat, entropy_flat, _, _ = model.actor.evaluate_actions_sequence(
                 obs_actor,
                 actions_actor,
                 init_actor,
@@ -230,7 +241,12 @@ def recurrent_mappo_loss(
     value_loss = 0.5 * jnp.mean(jnp.maximum(value_losses, value_losses_clipped))
 
     mean_entropy = jnp.mean(entropy)
-    total_loss = policy_loss + vf_coef * value_loss - ent_coef * mean_entropy
+    comm_cost = 0.0
+    if model.ic3_comm_enabled and comm_gate_actions is not None:
+        gate_mask = comm_gate_masks.astype(jnp.float32) if comm_gate_masks is not None else jnp.ones_like(comm_gate_actions, dtype=jnp.float32)
+        denom = jnp.maximum(jnp.sum(gate_mask), 1.0)
+        comm_cost = model.ic3_comm_gate_cost * jnp.sum(comm_gate_actions.astype(jnp.float32) * gate_mask) / denom
+    total_loss = policy_loss + vf_coef * value_loss - ent_coef * mean_entropy + comm_cost
     approx_kl = jnp.mean((ratio - 1.0) - log_ratio)
     clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32))
 
@@ -293,6 +309,9 @@ def _recurrent_mappo_step(
     base_signatures: jax.Array | None = None,
     base_values:     jax.Array | None = None,
     base_memory_masks: jax.Array | None = None,
+    comm_gate_actions: jax.Array | None = None,
+    comm_gate_log_probs: jax.Array | None = None,
+    comm_gate_masks: jax.Array | None = None,
     *,
     clip_eps:  float,
     vf_coef:   float,
@@ -305,6 +324,7 @@ def _recurrent_mappo_step(
             advantages, returns, rnn_resets,
             initial_actor_h, initial_actor_signature, initial_actor_value, initial_critic_h,
             comm_masks, active_masks, base_signatures, base_values, base_memory_masks,
+            comm_gate_actions, comm_gate_log_probs, comm_gate_masks,
             clip_eps, vf_coef, ent_coef, per_agent,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -406,6 +426,9 @@ class MAPPOTrainer:
                         mb["base_signatures"],
                         mb["base_values"],
                         mb["base_memory_masks"],
+                        mb.get("comm_gate_actions", None),
+                        mb.get("comm_gate_log_probs", None),
+                        mb.get("comm_gate_masks", None),
                     ) if self.recurrent else ()),
                 )
                 # Materialise the scalar diagnostics immediately instead of

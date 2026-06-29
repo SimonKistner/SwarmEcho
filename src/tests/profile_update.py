@@ -136,7 +136,7 @@ def main():
             return actor_m.evaluate_actions_sequence(
                 obs_env, act_env, init_h_env, reset_env, init_sig_env, init_val_env, comm_env, active_env, base_sig_env, base_val_env, base_mask_env
             )
-        _, log_probs, _ = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
+        _, log_probs, _, _, _ = jax.vmap(_eval_env, in_axes=(1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1))(
             mb["obs"], mb["actions"], mb["rnn_resets"], mb["initial_actor_h"], mb["initial_actor_signature"], mb["initial_actor_value"],
             mb["comm_masks"], mb["active_masks"], mb["base_signatures"], mb["base_values"], mb["base_memory_masks"]
         )

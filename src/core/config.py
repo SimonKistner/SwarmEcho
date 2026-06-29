@@ -142,7 +142,11 @@ class NetworkConfig:
     actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
     memory_comm_enabled: bool = False
+    memory_comm_frequency_control: str = "static"  # "static" | "ic3"
     memory_comm_every_k_steps: int = 5
+    ic3_comm_gate_entropy_coef: float = 0.001
+    ic3_comm_gate_cost: float = 0.0
+    ic3_comm_always_threshold: float = 0.95
     tarmac_sig_dim: int = 64
     tarmac_val_dim: int = 128
     tarmac_include_self: bool = True
@@ -573,6 +577,16 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
+    if str(cfg.network.get("memory_comm_frequency_control", "static")) not in ("static", "ic3"):
+        raise ValueError("network.memory_comm_frequency_control must be 'static' or 'ic3'.")
+    if str(cfg.network.get("memory_comm_frequency_control", "static")) == "ic3" and not bool(cfg.network.memory_comm_enabled):
+        raise ValueError("network.memory_comm_frequency_control='ic3' requires network.memory_comm_enabled=true.")
+    if float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)) < 0.0:
+        raise ValueError("network.ic3_comm_gate_entropy_coef must be >= 0.")
+    if float(cfg.network.get("ic3_comm_gate_cost", 0.0)) < 0.0:
+        raise ValueError("network.ic3_comm_gate_cost must be >= 0.")
+    if not (0.0 <= float(cfg.network.get("ic3_comm_always_threshold", 0.95)) <= 1.0):
+        raise ValueError("network.ic3_comm_always_threshold must be in [0, 1].")
     if int(cfg.network.memory_comm_every_k_steps) < 1:
         raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
     if int(cfg.network.tarmac_sig_dim) < 1:
