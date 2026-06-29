@@ -65,6 +65,10 @@ class MAPPOModel(nnx.Module):
         critic_memory:    bool = False,
         memory_comm_enabled: bool = False,
         memory_comm_every_k_steps: int = 5,
+        memory_comm_frequency_control: str = "static",
+        ic3_comm_gate_mode: str = "sample",
+        ic3_comm_gate_entropy_coef: float = 0.001,
+        ic3_comm_gate_cost: float = 0.0,
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
@@ -78,6 +82,11 @@ class MAPPOModel(nnx.Module):
         self.critic_memory = critic_memory
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
+        self.memory_comm_frequency_control = memory_comm_frequency_control
+        self.ic3_comm_enabled = memory_comm_enabled and memory_comm_frequency_control == "ic3"
+        self.ic3_comm_gate_mode = ic3_comm_gate_mode
+        self.ic3_comm_gate_entropy_coef = ic3_comm_gate_entropy_coef
+        self.ic3_comm_gate_cost = ic3_comm_gate_cost
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
         self.tarmac_include_self = tarmac_include_self
@@ -91,6 +100,8 @@ class MAPPOModel(nnx.Module):
                 rngs             = rngs,
                 memory_comm_enabled = memory_comm_enabled,
                 memory_comm_every_k_steps = memory_comm_every_k_steps,
+                memory_comm_frequency_control = memory_comm_frequency_control,
+                ic3_comm_gate_mode = ic3_comm_gate_mode,
                 tarmac_sig_dim = tarmac_sig_dim,
                 tarmac_val_dim = tarmac_val_dim,
                 tarmac_include_self = tarmac_include_self,
@@ -230,6 +241,7 @@ class MAPPOModel(nnx.Module):
         base_signature: jax.Array | None = None,
         base_value:     jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
+        comm_gate:      jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
         """
         Rollout step that carries optional actor and critic recurrent states.
@@ -259,6 +271,7 @@ class MAPPOModel(nnx.Module):
                     base_value=base_value,
                     base_memory_mask=base_memory_mask,
                     deterministic=False,
+                    comm_gate=comm_gate,
                 )
             else:
                 def _act_one(obs_i, key_i, h_i, reset_i):
@@ -325,6 +338,10 @@ if __name__ == "__main__":
         rngs             = rngs,
         memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
+        memory_comm_frequency_control = str(cfg.network.get("memory_comm_frequency_control", "static")),
+        ic3_comm_gate_mode = str(cfg.network.get("ic3_comm_gate_mode", "sample")),
+        ic3_comm_gate_entropy_coef = float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)),
+        ic3_comm_gate_cost = float(cfg.network.get("ic3_comm_gate_cost", 0.0)),
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
         tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
         tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),

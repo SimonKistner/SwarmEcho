@@ -269,6 +269,8 @@ class RecurrentDecentralizedActor(nnx.Module):
         rngs:             nnx.Rngs,
         memory_comm_enabled: bool = False,
         memory_comm_every_k_steps: int = 5,
+        memory_comm_frequency_control: str = "static",
+        ic3_comm_gate_mode: str = "sample",
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
@@ -277,6 +279,9 @@ class RecurrentDecentralizedActor(nnx.Module):
         self.hidden_dim = hidden_dim
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
+        self.memory_comm_frequency_control = memory_comm_frequency_control
+        self.ic3_comm_gate_mode = ic3_comm_gate_mode
+        self.ic3_comm_enabled = memory_comm_enabled and memory_comm_frequency_control == "ic3"
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
         self.tarmac_include_self = tarmac_include_self
@@ -288,6 +293,8 @@ class RecurrentDecentralizedActor(nnx.Module):
             self.tarmac_query = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
             self.tarmac_signature = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
             self.tarmac_value = nnx.Linear(hidden_dim, tarmac_val_dim, rngs=rngs)
+            if self.ic3_comm_enabled:
+                self.ic3_comm_gate_head = nnx.Linear(hidden_dim, 2, rngs=rngs)
         self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
         self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
         self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
@@ -313,6 +320,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         base_signature: jax.Array | None = None,
         base_value: jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
+        comm_gate: jax.Array | None = None,
     ) -> jax.Array:
         """Return TarMAC value-space context from previous sender tokens.
 
@@ -335,6 +343,8 @@ class RecurrentDecentralizedActor(nnx.Module):
         share_mask = comm_mask & active_pair
         if not self.tarmac_include_self:
             share_mask = share_mask & ~jnp.eye(N, dtype=bool)
+        if comm_gate is not None:
+            share_mask = share_mask & comm_gate[None, :]
 
         sender_signature = prev_signature
         sender_value = prev_value
@@ -360,6 +370,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         base_value: jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
         deterministic: bool = True,
+        comm_gate: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """Team actor pass with TarMAC pre-GRU communication.
 
@@ -377,7 +388,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         if self.memory_comm_enabled:
             comm_context = self._tarmac_context(
                 prev_hidden, signature, value, comm_mask, active,
-                base_signature, base_value, base_memory_mask,
+                base_signature, base_value, base_memory_mask, comm_gate,
             )
             gru_input = jnp.concatenate([encoded, comm_context], axis=-1)
         else:
@@ -404,10 +415,11 @@ class RecurrentDecentralizedActor(nnx.Module):
         base_value: jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
         deterministic: bool = False,
+        comm_gate: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         hidden, signature, value, mu, log_std = self.__call_team__(
             obs, hidden, signature, value, reset, comm_mask, active,
-            base_signature, base_value, base_memory_mask, deterministic,
+            base_signature, base_value, base_memory_mask, deterministic, comm_gate,
         )
         std = jnp.exp(log_std)
         u = jnp.where(deterministic, mu, mu + std * jax.vmap(lambda k: jax.random.normal(k, mu.shape[-1:]))(keys))
@@ -416,6 +428,33 @@ class RecurrentDecentralizedActor(nnx.Module):
         jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
         entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
         return hidden, signature, value, u, log_prob, entropy
+
+    def sample_comm_gate(
+        self,
+        hidden: jax.Array,
+        keys: jax.Array | None = None,
+        deterministic: bool = False,
+        gate_actions: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Sample or evaluate IC3 sender gates from previous hidden state."""
+        if not self.ic3_comm_enabled:
+            shape = hidden.shape[:-1]
+            gate = jnp.ones(shape, dtype=bool)
+            zeros = jnp.zeros(shape, dtype=hidden.dtype)
+            return gate, zeros, zeros, gate.astype(hidden.dtype)
+        logits = self.ic3_comm_gate_head(hidden)
+        probs = jax.nn.softmax(logits, axis=-1)
+        if gate_actions is None:
+            if deterministic:
+                gate_i = jnp.argmax(logits, axis=-1).astype(jnp.int32)
+            else:
+                gate_i = jax.vmap(lambda k, l: jax.random.categorical(k, l).astype(jnp.int32))(keys, logits)
+        else:
+            gate_i = gate_actions.astype(jnp.int32)
+        logp_all = jax.nn.log_softmax(logits, axis=-1)
+        log_prob = jnp.take_along_axis(logp_all, gate_i[..., None], axis=-1).squeeze(axis=-1)
+        entropy = -jnp.sum(probs * logp_all, axis=-1)
+        return gate_i.astype(bool), log_prob, entropy, probs[..., 1]
 
     def __call__(
         self,
@@ -477,7 +516,8 @@ class RecurrentDecentralizedActor(nnx.Module):
         base_signatures: jax.Array | None = None,
         base_values:   jax.Array | None = None,
         base_memory_masks: jax.Array | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        comm_gate_actions: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """Replay a rollout sequence for recurrent PPO updates.
 
         When TarMAC communication is enabled, the scan carries hidden,
@@ -489,26 +529,29 @@ class RecurrentDecentralizedActor(nnx.Module):
                 init_signature = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_sig_dim), dtype=init_hidden.dtype)
             if init_value is None:
                 init_value = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_val_dim), dtype=init_hidden.dtype)
+            if comm_gate_actions is None:
+                comm_gate_actions = jnp.ones(resets.shape, dtype=jnp.int32)
 
             def _step(carry, xs):
                 hidden, signature, value = carry
-                obs_t, act_t, reset_t, mask_t, active_t, base_sig_t, base_val_t, base_mask_t = xs
+                obs_t, act_t, reset_t, mask_t, active_t, base_sig_t, base_val_t, base_mask_t, gate_t = xs
+                gate_bool, gate_log_prob, gate_entropy, _ = self.sample_comm_gate(hidden, gate_actions=gate_t)
                 hidden, signature, value, mu, log_std = self.__call_team__(
                     obs_t, hidden, signature, value, reset_t, mask_t, active_t,
-                    base_sig_t, base_val_t, base_mask_t
+                    base_sig_t, base_val_t, base_mask_t, comm_gate=gate_bool
                 )
                 std = jnp.exp(log_std)
                 log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
                 ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
                 jacobian = 2.0 * (jnp.log(2.0) - act_t - jax.nn.softplus(-2.0 * act_t))
                 entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
-                return (hidden, signature, value), (log_prob, entropy)
-            (final_hidden, final_signature, final_value), (log_probs, entropy) = jax.lax.scan(
+                return (hidden, signature, value), (log_prob, entropy, gate_log_prob, gate_entropy)
+            (final_hidden, final_signature, final_value), (log_probs, entropy, gate_log_probs, gate_entropy) = jax.lax.scan(
                 _step,
                 (init_hidden, init_signature, init_value),
-                (obs, actions, resets, comm_masks, actives, base_signatures, base_values, base_memory_masks),
+                (obs, actions, resets, comm_masks, actives, base_signatures, base_values, base_memory_masks, comm_gate_actions),
             )
-            return final_hidden, log_probs, entropy
+            return final_hidden, log_probs, entropy, gate_log_probs, gate_entropy
 
         def _step(hidden, xs):
             obs_t, act_t, reset_t = xs
@@ -521,4 +564,5 @@ class RecurrentDecentralizedActor(nnx.Module):
             return hidden, (log_prob, entropy)
 
         final_hidden, (log_probs, entropy) = jax.lax.scan(_step, init_hidden, (obs, actions, resets))
-        return final_hidden, log_probs, entropy
+        zeros = jnp.zeros_like(log_probs)
+        return final_hidden, log_probs, entropy, zeros, zeros
