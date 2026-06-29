@@ -179,8 +179,14 @@ class AdaptiveTargetSpawnController:
     def _configured_category_rates(self) -> np.ndarray:
         out = np.zeros(len(self.categories), dtype=np.float32)
         for i, cat in enumerate(self.categories):
-            out[i] = float(self._position_probs[self._target_categories == cat].sum())
+            mask = self._target_categories == cat
+            count = np.sum(mask)
+            if count > 0:
+                out[i] = float(self._position_probs[mask].sum()) / float(count)
+            else:
+                out[i] = 0.0
         return out
+
 
     def _categories_for_cells(self, cells: np.ndarray) -> np.ndarray:
         cats = []
