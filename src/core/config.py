@@ -573,3 +573,33 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
+    if int(cfg.network.memory_comm_every_k_steps) < 1:
+        raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
+    if int(cfg.network.tarmac_sig_dim) < 1:
+        raise ValueError("network.tarmac_sig_dim must be >= 1.")
+    if int(cfg.network.tarmac_val_dim) < 1:
+        raise ValueError("network.tarmac_val_dim must be >= 1.")
+    if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
+        num_envs = int(cfg.training.num_envs)
+        mb = int(cfg.training.num_minibatches)
+        if num_envs % mb != 0:
+            below, above = find_closest_divisors(num_envs, mb)
+            suggestions = []
+            if below is not None:
+                suggestions.append(str(below))
+            if above is not None:
+                suggestions.append(str(above))
+            sugg_str = " or ".join(suggestions)
+            sugg_msg = f"\n\n ⚠️  Suggested valid choices close to {mb}: {sugg_str}. ⚠️" if suggestions else ""
+            raise ValueError(
+                f"Recurrent MAPPO requires training.num_envs ({num_envs}) divisible by training.num_minibatches ({mb}).{sugg_msg}"
+            )
+
+
+if __name__ == "__main__":
+    # Quick self-test: load and print the resolved config.
+    cfg = load_config(cli_overrides=False)
+    validate_config(cfg)
+    print(OmegaConf.to_yaml(cfg))
+    print(f"\nObs dim  : {compute_obs_dim(cfg)}")
+    print(f"Action dim: {compute_action_dim(cfg)}")
