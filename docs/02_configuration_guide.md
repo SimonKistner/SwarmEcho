@@ -21,11 +21,7 @@ The recurrent MAPPO extension is controlled from `network`:
 | `actor_memory` | `false` | Replaces the feed-forward actor with a per-agent GRU actor. |
 | `critic_memory` | `false` | Replaces the agent-centric critic with a per-agent GRU critic before cross-agent attention. Requires `critic_type: agent_centric`. |
 | `memory_comm_enabled` | `false` | Enables TarMAC communication for the recurrent actor. Requires `actor_memory: true`. |
-| `memory_comm_frequency_control` | `static` | Selects TarMAC sender control: `static` lets all reachable agents send on each `memory_comm_every_k_steps` slot; `ic3` samples learned sender gates within those same slots. |
-| `memory_comm_every_k_steps` | `5` | Defines the communication slots used by both static agent-agent communication and IC3 gated agent-agent communication; base replay also uses this cadence. |
-| `ic3_comm_gate_entropy_coef` | `0.001` | Extra entropy weight applied to IC3 gate entropy inside the recurrent PPO entropy term. |
-| `ic3_comm_gate_cost` | `0.0` | Optional sparsity cost on sampled IC3 communicate actions. |
-| `ic3_comm_always_threshold` | `0.95` | Episode-rate threshold for always-true / always-false IC3 diagnostics. |
+| `memory_comm_every_k_steps` | `5` | Defines the static agent-agent communication slots; base replay also uses this cadence. |
 | `tarmac_sig_dim` | `64` | Query/signature dimension used for TarMAC sender addressing. |
 | `tarmac_val_dim` | `128` | Value/message dimension used for TarMAC communicated payloads. |
 | `tarmac_include_self` | `true` | Adds the receiver's own previous signature/value as an attention candidate only when it is already receiving at least one external agent message. |
