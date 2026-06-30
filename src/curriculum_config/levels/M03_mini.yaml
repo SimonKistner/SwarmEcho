@@ -3,12 +3,12 @@
 
 env:
   map_names: ["M03_small_grid_maze"]
-  num_agents: 6
+  num_agents: 7
   num_targets: 1
   num_bases: 1
-  max_steps: 700
+  max_steps: 1000
   visual_radius: 5.0
-  max_speed: 4.17   # 10.0 * 5/12
+  max_speed: 6.0   # 10.0 * 5/12
   max_force: 20.83  # 50.0 * 5/12
   comm_radius: 20.83       # 50.0 * 5/12
   comm_radius_base: 16.67  # 40.0 * 5/12
@@ -16,7 +16,7 @@ env:
   use_random_base_spawn: false
   use_random_drone_spawn: false
   target_spawn_method: map_defined   # spawn from wall-buffered valid_target_coords (see M03_small_grid_maze.yaml)
-  adaptive_target_spawn: true
+  adaptive_target_spawn: false
   static_maze_optimal_path: true
   precover_base_comm: true
   hold_chain_for: 50
@@ -40,12 +40,12 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 500_000_000
+  total_timesteps: 250_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 14141414
+  seed: 6302026950
 
   eval_parallel: true
   eval_parallel_envs: 4000
@@ -61,15 +61,19 @@ network:
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
-  memory_comm_frequency_control: "ic3"  # "static" | "ic3"
+  memory_comm_frequency_control: "static"  # "static" | "ic3"
   memory_comm_every_k_steps: 5
-  ic3_comm_gate_mode: "sample"
   ic3_comm_gate_entropy_coef: 0.001
   ic3_comm_gate_cost: 0.0
   ic3_comm_always_threshold: 0.95
   tarmac_sig_dim: 64
   tarmac_val_dim: 128
-  tarmac_include_self: true
+  tarmac_include_self: false
+
+curriculum:
+  success_threshold: 0.95
+  metric: "success"             # "success" or "target_found"
+  mode: "eval"                 # "train" or "eval"
 
 logging:
   adaptive_spawn_diagnostics: true
