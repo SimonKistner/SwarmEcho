@@ -61,11 +61,7 @@ network:
   actor_memory: true
   critic_memory: true
   memory_comm_enabled: true
-  memory_comm_frequency_control: "static"  # "static" | "ic3"
   memory_comm_every_k_steps: 5
-  ic3_comm_gate_entropy_coef: 0.001
-  ic3_comm_gate_cost: 0.0
-  ic3_comm_always_threshold: 0.95
   tarmac_sig_dim: 64
   tarmac_val_dim: 128
   tarmac_include_self: false

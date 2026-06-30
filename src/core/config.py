@@ -142,11 +142,7 @@ class NetworkConfig:
     actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
     memory_comm_enabled: bool = False
-    memory_comm_frequency_control: str = "static"  # "static" | "ic3"
     memory_comm_every_k_steps: int = 5
-    ic3_comm_gate_entropy_coef: float = 0.001
-    ic3_comm_gate_cost: float = 0.0
-    ic3_comm_always_threshold: float = 0.95
     tarmac_sig_dim: int = 64
     tarmac_val_dim: int = 128
     tarmac_include_self: bool = True
@@ -577,43 +573,3 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
-    if str(cfg.network.get("memory_comm_frequency_control", "static")) not in ("static", "ic3"):
-        raise ValueError("network.memory_comm_frequency_control must be 'static' or 'ic3'.")
-    if str(cfg.network.get("memory_comm_frequency_control", "static")) == "ic3" and not bool(cfg.network.memory_comm_enabled):
-        raise ValueError("network.memory_comm_frequency_control='ic3' requires network.memory_comm_enabled=true.")
-    if float(cfg.network.get("ic3_comm_gate_entropy_coef", 0.001)) < 0.0:
-        raise ValueError("network.ic3_comm_gate_entropy_coef must be >= 0.")
-    if float(cfg.network.get("ic3_comm_gate_cost", 0.0)) < 0.0:
-        raise ValueError("network.ic3_comm_gate_cost must be >= 0.")
-    if not (0.0 <= float(cfg.network.get("ic3_comm_always_threshold", 0.95)) <= 1.0):
-        raise ValueError("network.ic3_comm_always_threshold must be in [0, 1].")
-    if int(cfg.network.memory_comm_every_k_steps) < 1:
-        raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
-    if int(cfg.network.tarmac_sig_dim) < 1:
-        raise ValueError("network.tarmac_sig_dim must be >= 1.")
-    if int(cfg.network.tarmac_val_dim) < 1:
-        raise ValueError("network.tarmac_val_dim must be >= 1.")
-    if (bool(cfg.network.actor_memory) or bool(cfg.network.critic_memory)):
-        num_envs = int(cfg.training.num_envs)
-        mb = int(cfg.training.num_minibatches)
-        if num_envs % mb != 0:
-            below, above = find_closest_divisors(num_envs, mb)
-            suggestions = []
-            if below is not None:
-                suggestions.append(str(below))
-            if above is not None:
-                suggestions.append(str(above))
-            sugg_str = " or ".join(suggestions)
-            sugg_msg = f"\n\n ⚠️  Suggested valid choices close to {mb}: {sugg_str}. ⚠️" if suggestions else ""
-            raise ValueError(
-                f"Recurrent MAPPO requires training.num_envs ({num_envs}) divisible by training.num_minibatches ({mb}).{sugg_msg}"
-            )
-
-
-if __name__ == "__main__":
-    # Quick self-test: load and print the resolved config.
-    cfg = load_config(cli_overrides=False)
-    validate_config(cfg)
-    print(OmegaConf.to_yaml(cfg))
-    print(f"\nObs dim  : {compute_obs_dim(cfg)}")
-    print(f"Action dim: {compute_action_dim(cfg)}")
