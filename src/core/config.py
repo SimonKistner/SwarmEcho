@@ -186,6 +186,7 @@ class LoggingConfig:
     eval_failed_chain_heatmap: bool = True  # Generate heatmap of target positions for failed chain deliveries from sliding window
     eval_not_delivered_or_visually_found_heatmap: bool = True  # Generate heatmap of target positions not delivered/visually found
     eval_not_deliv_not_visual_splitt_in_two: bool = False      # If true, split the not-delivered/not-visual heatmap into two separate files
+    eval_broadcast_on_curriculum_early_stop: bool = True  # Carry threshold-hitting eval metrics to remaining eval steps in W&B
 
     # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
     video_freq: Optional[int] = None # legacy
