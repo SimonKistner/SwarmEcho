@@ -40,7 +40,7 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 250_000_000
+  total_timesteps: 500_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -80,6 +80,6 @@ logging:
   eval_offset: 1
   eval_not_delivered_or_visually_found_heatmap: true
 
-  eval_video: true
+  eval_video: false
   eval_video_freq: 100
   eval_video_offset: 1
