@@ -36,7 +36,7 @@ The model framework is built using Flax (`nnx` API).
       -> GRU_i
       -> next signature_i/value_i and policy head
   ```
-  The base station is passive: it stores the first target-knowing reporter's emitted TarMAC signature/value pair, then replays that saved token to non-knowing agents that are in base communication range. No previous action is fed back into the actor GRU or communication state.
+  Every reachable sender may broadcast during each `memory_comm_every_k_steps` communication slot. `tarmac_include_self` adds the receiver's own previous token only when the receiver has at least one external agent message to attend over. The base station is passive: it stores the first target-knowing reporter's emitted TarMAC signature/value pair, then replays that saved token to non-knowing agents that are in base communication range. Base replay remains governed by `memory_comm_every_k_steps`, and no previous action is fed back into the actor GRU or communication state.
 - **Critic memory** is available for the agent-centric critic:
   ```text
   obs_i -> critic encoder -> GRU_i -> masked cross-agent attention -> V_i

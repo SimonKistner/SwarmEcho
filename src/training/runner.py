@@ -323,7 +323,7 @@ def _batched_rollout_and_memory_step_impl(
             )
 
             def _rollout_one_env(obs_n, keys_n, actor_h_n, actor_sig_n, actor_val_n, critic_h_n, resets_n, comm_mask_n, active_n, base_sig_n, base_val_n, base_memory_mask_n):
-                return model.rollout_step_recurrent(
+                actor_h_out, actor_sig_out, actor_val_out, critic_h_out, actions_n, log_probs_n, values_n = model.rollout_step_recurrent(
                     obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
                     actor_signature=actor_sig_n,
                     actor_value=actor_val_n,
@@ -333,6 +333,7 @@ def _batched_rollout_and_memory_step_impl(
                     base_value=base_val_n,
                     base_memory_mask=base_memory_mask_n,
                 )
+                return actor_h_out, actor_sig_out, actor_val_out, critic_h_out, actions_n, log_probs_n, values_n
 
             actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
                 obs_batch, act_keys, actor_h_in, actor_signature_in, actor_value_in, critic_h_in, reset_agents_b,
@@ -372,7 +373,7 @@ def _batched_rollout_and_memory_step_impl(
             return actions, log_probs, value
 
         actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
-        return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None
+        return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +455,6 @@ def _collect_rollout_mappo(
     completed_r_found    = []
     completed_r_succ     = []
     completed_coverage   = []
-
     for t in range(T):
         key, act_key = jax.random.split(key)
 
@@ -584,7 +584,6 @@ def _collect_rollout_mappo(
             completed_r_found.append(float(r_found_accum[e]))
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
-
             is_diag_valid = (
                 model.actor_memory and model.memory_comm_enabled
                 and base_signature is not None
@@ -616,6 +615,7 @@ def _collect_rollout_mappo(
         r_found_accum    = np.where(dones_np, 0.0, r_found_accum)
         r_succ_accum     = np.where(dones_np, 0.0, r_succ_accum)
         cov_accum        = np.where(dones_np, 0.0, cov_accum)
+
 
         # Store normalised actions in the buffer
         buf.add(MAPPOTransition(
@@ -669,6 +669,7 @@ def _collect_rollout_mappo(
     ep_trackers["r_found"]    = r_found_accum
     ep_trackers["r_succ"]     = r_succ_accum
     ep_trackers["coverage"]   = cov_accum
+
 
     comm_summary = {}
 
@@ -762,7 +763,8 @@ def _evaluate(
                 if model.memory_comm_enabled:
                     N_eval = obs.shape[0]
                     step_share = (int(model.memory_comm_every_k_steps) <= 1) or ((t % int(model.memory_comm_every_k_steps)) == 0)
-                    comm_mask = (state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)) & jnp.asarray(step_share)
+                    raw_comm_mask = state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)
+                    comm_mask = raw_comm_mask & jnp.asarray(step_share)
                     # Base-memory relay is only offered to drones that do not already know the target.
                     # Once the relay makes target_known true, later base-memory shares to that drone are masked out.
                     base_mask = (
@@ -943,7 +945,8 @@ def _run_parallel_eval_jit(
                 if memory_comm_enabled:
                     N_eval = obs.shape[0]
                     step_share = (memory_comm_every_k_steps <= 1) | ((t % memory_comm_every_k_steps) == 0)
-                    comm_mask = (state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)) & step_share
+                    raw_comm_mask = state.adj_matrix[:N_eval, :N_eval] if state.adj_matrix.shape[-1] else jnp.zeros((N_eval, N_eval), dtype=bool)
+                    comm_mask = raw_comm_mask & step_share
                     base_mask = (
                         (
                             state.adj_matrix[:N_eval, N_eval]
@@ -1008,7 +1011,6 @@ def _run_parallel_eval_jit(
 
             new_returns = jnp.where(episode_ended_prev, returns, returns + rew.sum())
             new_lengths = jnp.where(episode_ended_prev, lengths, lengths + 1)
-
             new_carry = (state, actor_h, actor_signature, actor_value, base_signature, base_value, base_memory_valid, new_has_succeeded, new_has_found_delivered, new_has_found_visual, new_max_found, new_returns, new_lengths)
             return new_carry, (info["chain_gap_dist"], info["chain_progress_pct"])
 
@@ -1630,6 +1632,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_r_succ.extend(raw_r_succ)
                 window_cov.extend(raw_cov)
 
+
                 if adaptive_spawn is not None:
                     adaptive_spawn.record_completed(raw_target_positions, raw_success)
 
@@ -1809,6 +1812,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "rewards/target_found":     float(np.mean(window_r_found)),
                         "rewards/success_bonus":    float(np.mean(window_r_succ)),
                     })
+
                     if bool(cfg.logging.get("adaptive_spawn_diagnostics", False)) and adaptive_spawn_diag is not None:
                         logs.update(diagnostics_to_wandb(adaptive_spawn_diag))
                     if len(window_diag_acc) > 0:

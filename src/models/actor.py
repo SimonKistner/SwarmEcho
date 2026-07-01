@@ -332,9 +332,15 @@ class RecurrentDecentralizedActor(nnx.Module):
             active = jnp.ones((N,), dtype=bool)
 
         active_pair = active[:, None] & active[None, :]
-        share_mask = comm_mask & active_pair
-        if not self.tarmac_include_self:
-            share_mask = share_mask & ~jnp.eye(N, dtype=bool)
+        eye = jnp.eye(N, dtype=bool)
+        external_mask = comm_mask & active_pair & ~eye
+
+        has_external_sender = jnp.any(external_mask, axis=-1)
+        if self.tarmac_include_self:
+            self_mask = eye & active[:, None] & has_external_sender[:, None]
+            share_mask = external_mask | self_mask
+        else:
+            share_mask = external_mask
 
         sender_signature = prev_signature
         sender_value = prev_value
@@ -489,13 +495,12 @@ class RecurrentDecentralizedActor(nnx.Module):
                 init_signature = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_sig_dim), dtype=init_hidden.dtype)
             if init_value is None:
                 init_value = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_val_dim), dtype=init_hidden.dtype)
-
             def _step(carry, xs):
                 hidden, signature, value = carry
                 obs_t, act_t, reset_t, mask_t, active_t, base_sig_t, base_val_t, base_mask_t = xs
                 hidden, signature, value, mu, log_std = self.__call_team__(
                     obs_t, hidden, signature, value, reset_t, mask_t, active_t,
-                    base_sig_t, base_val_t, base_mask_t
+                    base_sig_t, base_val_t, base_mask_t,
                 )
                 std = jnp.exp(log_std)
                 log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
