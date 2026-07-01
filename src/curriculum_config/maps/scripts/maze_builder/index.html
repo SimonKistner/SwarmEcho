@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SwarmEcho Maze Builder</title>
+  <style>
+    :root {
+      --cell: 32px;
+      --cols: 40;
+      --rows: 30;
+      --edge-hit: 10px;
+      --edge-active: #111;
+      --bg: #fff;
+      --grid: #f0f0f0;
+      --exclude: rgba(220, 38, 38, .52);
+      --base: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f7f7; color: #111; }
+    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 16px; background: white; border-bottom: 1px solid #ddd; position: sticky; top: 0; z-index: 20; }
+    label { font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
+    input[type="number"] { width: 70px; padding: 5px; }
+    input[type="text"] { width: 190px; padding: 6px 8px; }
+    button, .file-label { padding: 7px 10px; border: 1px solid #bbb; border-radius: 6px; background: white; cursor: pointer; font-size: 14px; }
+    button:hover, .file-label:hover { background: #f1f1f1; }
+    button.primary { background: #111827; border-color: #111827; color: white; }
+    button.primary:hover { background: #374151; }
+    button.active { border-color: #111827; box-shadow: inset 0 0 0 2px #111827; }
+    button.danger.active { border-color: #dc2626; box-shadow: inset 0 0 0 2px #dc2626; }
+    input[type="file"] { display: none; }
+    main { padding: 20px; overflow: auto; }
+    #boardWrap { width: max-content; background: white; padding: 16px; border: 1px solid #ddd; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+    #board { position: relative; width: calc(var(--cols) * var(--cell)); height: calc(var(--rows) * var(--cell)); background: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px), var(--bg); background-size: var(--cell) var(--cell); user-select: none; }
+    .edge { position: absolute; box-sizing: border-box; cursor: pointer; border-radius: 999px; transition: background .06s, opacity .06s; opacity: .95; z-index: 5; }
+    .edge:hover { background: #777; opacity: 1; }
+    .edge.h { height: var(--edge-hit); width: var(--cell); transform: translateY(calc(var(--edge-hit) / -2)); background: transparent; }
+    .edge.v { width: var(--edge-hit); height: var(--cell); transform: translateX(calc(var(--edge-hit) / -2)); background: transparent; }
+    .edge.active.h { height: 6px; transform: translateY(-3px); background: var(--edge-active); }
+    .edge.active.v { width: 6px; transform: translateX(-3px); background: var(--edge-active); }
+    .cell { position: absolute; width: var(--cell); height: var(--cell); cursor: crosshair; z-index: 2; background: transparent; }
+    .cell.excluded { background: var(--exclude); outline: 1px solid rgba(153, 27, 27, .45); }
+    .cell:hover { background: rgba(220, 38, 38, .20); }
+    .base-marker { position: absolute; z-index: 9; width: 18px; height: 18px; margin-left: -9px; margin-top: -9px; border-radius: 999px; background: var(--base); border: 3px solid white; box-shadow: 0 0 0 2px var(--base), 0 2px 8px rgba(0,0,0,.25); pointer-events: none; display: none; }
+    .base-marker::after { content: "Base"; position: absolute; left: 22px; top: -5px; color: var(--base); font-size: 13px; font-weight: 700; white-space: nowrap; }
+    .note { font-size: 13px; color: #555; margin-left: auto; }
+    #status { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff; border: 1px solid #ddd; max-width: 1100px; white-space: pre-wrap; }
+    #status.ok { border-color: #16a34a; background: #f0fdf4; color: #14532d; }
+    #status.err { border-color: #dc2626; background: #fef2f2; color: #7f1d1d; }
+    #previewCommand { width: min(100%, 1100px); margin-top: 8px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <label>Canvas-Spalten <input id="cols" type="number" min="4" max="120" value="40"></label>
+    <label>Canvas-Zeilen <input id="rows" type="number" min="4" max="120" value="30"></label>
+    <label>Karo-Größe <input id="cell" type="number" min="12" max="80" value="32"> px</label>
+    <label>Map-Name <input id="mapName" type="text" value="custom_grid_maze"></label>
+    <label><input id="overwrite" type="checkbox"> überschreiben</label>
+    <button id="resize">Raster anwenden</button>
+    <button id="modeWalls" class="active">Wände zeichnen</button>
+    <button id="modeExcludes" class="danger">No-Spawn rot malen</button>
+    <button id="basePreview">Preview base spawn</button>
+    <button id="clear">Alles löschen</button>
+    <button id="exportJson">JSON exportieren</button>
+    <label class="file-label" for="importJson">JSON importieren</label><input id="importJson" type="file" accept="application/json,.json">
+    <button id="create" class="primary">Map + Level erstellen</button>
+    <button id="copyPreview">Preview-Befehl kopieren</button>
+    <span class="note">Wände frei auf Canvas zeichnen; äußerste Wände bestimmen die Maze-Größe.</span>
+  </header>
+
+  <main>
+    <div id="boardWrap"><div id="board"><div id="baseMarker" class="base-marker"></div></div></div>
+    <textarea id="previewCommand" readonly></textarea>
+    <div id="status">Bereit. Modus: Wände zeichnen.</div>
+  </main>
+
+  <script>
+    const board = document.getElementById("board");
+    const baseMarker = document.getElementById("baseMarker");
+    const colsInput = document.getElementById("cols");
+    const rowsInput = document.getElementById("rows");
+    const cellInput = document.getElementById("cell");
+    const mapNameInput = document.getElementById("mapName");
+    const statusBox = document.getElementById("status");
+    const previewCommand = document.getElementById("previewCommand");
+
+    let cols = +colsInput.value;
+    let rows = +rowsInput.value;
+    let cell = +cellInput.value;
+    let mode = "walls";
+    let showBase = false;
+    const activeEdges = new Map();
+    const excludedCells = new Set();
+
+    const edgeKey = (type, x, y) => `${type}:${x}:${y}`;
+    const cellKey = (row, col) => `${row}:${col}`;
+
+    function setStatus(message, kind = "") {
+      statusBox.textContent = message;
+      statusBox.className = kind;
+    }
+
+    function setMode(next) {
+      mode = next;
+      document.getElementById("modeWalls").classList.toggle("active", mode === "walls");
+      document.getElementById("modeExcludes").classList.toggle("active", mode === "exclude");
+      setStatus(`Modus: ${mode === "walls" ? "Wände zeichnen" : "No-Spawn-Zellen rot malen"}.`);
+    }
+
+    function buildBoard() {
+      cols = +colsInput.value;
+      rows = +rowsInput.value;
+      cell = +cellInput.value;
+      document.documentElement.style.setProperty("--cols", cols);
+      document.documentElement.style.setProperty("--rows", rows);
+      document.documentElement.style.setProperty("--cell", `${cell}px`);
+      board.innerHTML = "";
+      board.appendChild(baseMarker);
+
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) addCell(x, y);
+      }
+      for (let y = 0; y <= rows; y++) {
+        for (let x = 0; x < cols; x++) addEdge("h", x, y);
+      }
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x <= cols; x++) addEdge("v", x, y);
+      }
+      restoreClasses();
+      updateBaseMarker();
+    }
+
+    function addCell(x, y) {
+      const e = document.createElement("div");
+      e.className = "cell";
+      e.dataset.x = x;
+      e.dataset.y = y;
+      e.style.left = `${x * cell}px`;
+      e.style.top = `${y * cell}px`;
+      e.addEventListener("click", () => {
+        if (mode !== "exclude") return;
+        const k = cellKey(y, x);
+        if (excludedCells.has(k)) excludedCells.delete(k);
+        else excludedCells.add(k);
+        restoreClasses();
+      });
+      board.appendChild(e);
+    }
+
+    function addEdge(type, x, y) {
+      const e = document.createElement("div");
+      e.className = `edge ${type}`;
+      e.dataset.type = type;
+      e.dataset.x = x;
+      e.dataset.y = y;
+      e.style.left = `${x * cell}px`;
+      e.style.top = `${y * cell}px`;
+      e.addEventListener("click", (event) => {
+        if (mode !== "walls") return;
+        event.stopPropagation();
+        const k = edgeKey(type, x, y);
+        if (activeEdges.has(k)) activeEdges.delete(k);
+        else activeEdges.set(k, { type, x, y });
+        restoreClasses();
+        updateBaseMarker();
+      });
+      board.appendChild(e);
+    }
+
+    function restoreClasses() {
+      for (const e of board.querySelectorAll(".edge")) {
+        const k = edgeKey(e.dataset.type, +e.dataset.x, +e.dataset.y);
+        e.classList.toggle("active", activeEdges.has(k));
+      }
+      for (const e of board.querySelectorAll(".cell")) {
+        const k = cellKey(+e.dataset.y, +e.dataset.x);
+        e.classList.toggle("excluded", excludedCells.has(k));
+      }
+    }
+
+    function boundsFromEdges() {
+      if (!activeEdges.size) return null;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const edge of activeEdges.values()) {
+        if (edge.type === "h") {
+          minX = Math.min(minX, edge.x); maxX = Math.max(maxX, edge.x + 1);
+          minY = Math.min(minY, edge.y); maxY = Math.max(maxY, edge.y);
+        } else {
+          minX = Math.min(minX, edge.x); maxX = Math.max(maxX, edge.x);
+          minY = Math.min(minY, edge.y); maxY = Math.max(maxY, edge.y + 1);
+        }
+      }
+      return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+    }
+
+    function updateBaseMarker() {
+      const b = boundsFromEdges();
+      if (!showBase || !b) {
+        baseMarker.style.display = "none";
+        return;
+      }
+      baseMarker.style.display = "block";
+      baseMarker.style.left = `${(b.minX + b.width / 2) * cell}px`;
+      baseMarker.style.top = `${(b.minY + b.height / 2) * cell}px`;
+    }
+
+    function payload() {
+      return {
+        map_name: mapNameInput.value.trim(),
+        overwrite: document.getElementById("overwrite").checked,
+        cell_size_m: 10.0,
+        edges: Array.from(activeEdges.values()),
+        target_exclude_cells: Array.from(excludedCells).map(k => k.split(":").map(Number))
+      };
+    }
+
+    async function postJson(url, data) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.error || `Request failed: ${response.status}`);
+      return json;
+    }
+
+    function applyMachineMaze(machine) {
+      activeEdges.clear();
+      excludedCells.clear();
+      colsInput.value = Math.max(+colsInput.value, machine.width + 4);
+      rowsInput.value = Math.max(+rowsInput.value, machine.height + 4);
+      cols = +colsInput.value; rows = +rowsInput.value; cell = +cellInput.value;
+      const offsetX = 2, offsetY = 2;
+      for (let y = 0; y < machine.h_walls.length; y++) {
+        for (let x = 0; x < machine.h_walls[y].length; x++) {
+          if (machine.h_walls[y][x]) activeEdges.set(edgeKey("h", x + offsetX, y + offsetY), { type: "h", x: x + offsetX, y: y + offsetY });
+        }
+      }
+      for (let y = 0; y < machine.v_walls.length; y++) {
+        for (let x = 0; x < machine.v_walls[y].length; x++) {
+          if (machine.v_walls[y][x]) activeEdges.set(edgeKey("v", x + offsetX, y + offsetY), { type: "v", x: x + offsetX, y: y + offsetY });
+        }
+      }
+      for (const [row, col] of machine.target_exclude_cells || []) {
+        excludedCells.add(cellKey(row + offsetY, col + offsetX));
+      }
+      if (machine.map_name) mapNameInput.value = machine.map_name;
+      buildBoard();
+      setStatus(`JSON importiert: ${machine.width}×${machine.height} Zellen.`, "ok");
+    }
+
+    document.getElementById("resize").addEventListener("click", buildBoard);
+    document.getElementById("modeWalls").addEventListener("click", () => setMode("walls"));
+    document.getElementById("modeExcludes").addEventListener("click", () => setMode("exclude"));
+    document.getElementById("basePreview").addEventListener("click", () => { showBase = !showBase; updateBaseMarker(); });
+    document.getElementById("clear").addEventListener("click", () => { activeEdges.clear(); excludedCells.clear(); previewCommand.style.display = "none"; restoreClasses(); updateBaseMarker(); setStatus("Alles gelöscht."); });
+
+    document.getElementById("exportJson").addEventListener("click", async () => {
+      try {
+        const result = await postJson("/api/export-machine", payload());
+        const text = JSON.stringify(result.machine_maze, null, 2);
+        await navigator.clipboard.writeText(text);
+        setStatus(`Machine-readable JSON in Zwischenablage kopiert:\n${text}`, "ok");
+      } catch (err) { setStatus(err.message, "err"); }
+    });
+
+    document.getElementById("importJson").addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const machine = JSON.parse(await file.text());
+        const result = await postJson("/api/normalize-machine", machine);
+        applyMachineMaze(result.machine_maze);
+      } catch (err) { setStatus(err.message, "err"); }
+      event.target.value = "";
+    });
+
+    document.getElementById("create").addEventListener("click", async () => {
+      try {
+        const result = await postJson("/api/create", payload());
+        previewCommand.value = result.preview_command;
+        previewCommand.style.display = "block";
+        setStatus(`Erstellt:\nMap: ${result.map_path}\nLevel: ${result.level_path}\n\nPreview-Befehl:\n${result.preview_command}`, "ok");
+      } catch (err) { setStatus(err.message, "err"); }
+    });
+
+    document.getElementById("copyPreview").addEventListener("click", async () => {
+      const cmd = previewCommand.value || `uv run python src/visualize/render_preview.py ${mapNameInput.value.trim()} --mode image --format png --no-spawns`;
+      await navigator.clipboard.writeText(cmd);
+      setStatus(`Preview-Befehl kopiert:\n${cmd}`, "ok");
+    });
+
+    buildBoard();
+  </script>
+</body>
+</html>

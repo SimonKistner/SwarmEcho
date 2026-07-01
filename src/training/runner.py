@@ -125,6 +125,71 @@ def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[objec
     return run
 
 
+def _broadcast_eval_metrics_to_remaining_wandb_steps(
+    *,
+    wandb_run,
+    cfg: DictConfig,
+    eval_logs: dict[str, float],
+    trigger_update: int,
+    n_updates: int,
+    steps_per_update: int,
+    total_timesteps: int,
+) -> None:
+    """Carry the final early-stop eval point forward for grouped W&B charts.
+
+    Curriculum stages can stop early once an eval crosses the configured
+    threshold. Without extra points, W&B grouped averages at later x-axis
+    steps only include slower/worse runs that are still training. This helper
+    logs the exact threshold-hitting eval metrics at each remaining scheduled
+    eval step and at the configured final timestep, without performing more
+    training or evaluation.
+    """
+    if wandb_run is None:
+        return
+    if not bool(cfg.logging.get("eval_broadcast_on_curriculum_early_stop", True)):
+        return
+    if not eval_logs:
+        return
+
+    eval_every = max(1, int(cfg.logging.get("eval_freq", 50)))
+    eval_offset = int(cfg.logging.get("eval_offset", 1))
+    future_steps: list[int] = []
+
+    for future_update in range(trigger_update + 1, n_updates + 1):
+        is_eval_step = (
+            ((future_update - eval_offset) % eval_every == 0)
+            and future_update > eval_offset
+        )
+        if future_update == n_updates:
+            is_eval_step = True
+        if is_eval_step:
+            future_steps.append(min(int(future_update * steps_per_update), int(total_timesteps)))
+
+    # Always include the configured budget endpoint, even when total_timesteps
+    # is not exactly divisible by the PPO update size or the final update was
+    # already included above.
+    if future_steps and future_steps[-1] != int(total_timesteps):
+        future_steps.append(int(total_timesteps))
+    elif not future_steps and int(trigger_update * steps_per_update) < int(total_timesteps):
+        future_steps.append(int(total_timesteps))
+
+    if not future_steps:
+        return
+
+    broadcast_logs = {
+        **eval_logs,
+        "eval/curriculum_early_stop_broadcast": 1.0,
+    }
+    unique_steps = sorted(set(future_steps))
+    for step in unique_steps:
+        wandb_run.log(broadcast_logs, step=step)
+
+    print(
+        f"  [wandb-carry-forward] broadcast final eval metrics to "
+        f"{len(unique_steps)} future W&B step(s), through step {unique_steps[-1]:,}."
+    )
+
+
 def _save_checkpoint_history(ckpt_path: Path, run_name: str, update: int, E: int, T: int, prior_history: list):
     try:
         import json
@@ -1882,17 +1947,18 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             f"par_envs={par_envs_val}"
                         )
 
+                        eval_wandb_logs = {
+                            "eval/ep_return":           eval_ret,
+                            "eval/ep_length":           eval_len,
+                            "eval/chain_progress_pct":  eval_prog_pct,
+                            "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
+                            "eval/success_rate":        eval_success,
+                            "eval/target_found_rate":   eval_found,
+                            "eval/map_coverage_pct":    eval_cov * 100.0,
+                        }
                         if wandb_run:
                             import wandb
-                            wandb.log({
-                                "eval/ep_return":           eval_ret,
-                                "eval/ep_length":           eval_len,
-                                "eval/chain_progress_pct":  eval_prog_pct,
-                                "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-                                "eval/success_rate":        eval_success,
-                                "eval/target_found_rate":   eval_found,
-                                "eval/map_coverage_pct":    eval_cov * 100.0,
-                            }, step=steps_done)
+                            wandb.log(eval_wandb_logs, step=steps_done)
 
                         # Generate mid-run evaluation heatmaps using parallel evaluation results
                         generate_any_heatmap = bool(
@@ -2120,6 +2186,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         label="eval-early",
                                     )
                                     time.sleep(1.0)
+                                _broadcast_eval_metrics_to_remaining_wandb_steps(
+                                    wandb_run=wandb_run,
+                                    cfg=cfg,
+                                    eval_logs=eval_wandb_logs,
+                                    trigger_update=update,
+                                    n_updates=n_updates,
+                                    steps_per_update=E * T,
+                                    total_timesteps=total_ts,
+                                )
                                 return early_ckpt_str
 
                     if is_video_step:
@@ -2169,6 +2244,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             time.sleep(1.0)
 
                         if is_eval_step:
+                            eval_wandb_logs = {
+                                "eval/ep_return":           eval_ret,
+                                "eval/ep_length":           eval_len,
+                                "eval/chain_gap_dist":      eval_gap,
+                                "eval/chain_progress_pct":  eval_prog_pct,
+                                "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
+                                "eval/success_rate":        eval_success,
+                                "eval/target_found_rate":   eval_found,
+                            }
                             print(
                                 f"  [eval-train] update={update}  "
                                 f"steps={steps_done:,}  "
@@ -2224,6 +2308,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                             label="eval-early",
                                         )
                                         time.sleep(1.0)
+                                    _broadcast_eval_metrics_to_remaining_wandb_steps(
+                                        wandb_run=wandb_run,
+                                        cfg=cfg,
+                                        eval_logs=eval_wandb_logs,
+                                        trigger_update=update,
+                                        n_updates=n_updates,
+                                        steps_per_update=E * T,
+                                        total_timesteps=total_ts,
+                                    )
                                     return early_ckpt_str
 
 
