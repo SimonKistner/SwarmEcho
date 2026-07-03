@@ -79,12 +79,27 @@ def test_coverage_radar():
     
     expected = jnp.array([0.0] * 9 + [1.0] * 7)
     
-    if jnp.allclose(cov_bits, expected):
-        print("✅ SUCCESS: Coverage radar correctly detects the boundary.")
-    else:
-        print("❌ FAILURE: Coverage radar mismatch.")
-        print(f"Expected: {expected}")
-        print(f"Actual:   {cov_bits}")
+    assert jnp.allclose(cov_bits, expected), (
+        "Coverage radar mismatch: "
+        f"expected {expected}, got {cov_bits}"
+    )
+    print("✅ SUCCESS: Coverage radar correctly detects the boundary.")
+
+    # Turning off only the coverage probe observation should shorten the
+    # observation vector by 16, while leaving coverage_grid intact for reward
+    # calculations elsewhere in the environment.
+    cfg_blind = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg_blind.env.observe_coverage_probe = False
+    obs_fn_blind, obs_dim_blind = make_obs_fns(cfg_blind, 100.0, 100.0, occ)
+    obs_blind = obs_fn_blind(state)
+
+    assert obs_dim_blind == obs_dim - 16
+    assert obs_blind.shape == (1, obs_dim_blind)
+    assert state.coverage_grid is coverage
+    # With the coverage block removed, radar follows immediately after the
+    # 9-dim self block. For B=4, the radar contributes 16 dims.
+    assert obs_blind.shape[-1] == 9 + 4 * 4
+    print("✅ SUCCESS: Coverage probe observation can be disabled without mutating coverage state.")
 
 if __name__ == "__main__":
     test_coverage_radar()

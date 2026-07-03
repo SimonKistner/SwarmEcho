@@ -74,6 +74,7 @@ class EnvConfig:
     mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
     observe_target_vector: bool = False            # if False, remove target odometry vector from actor observations
     observe_base_vector: bool = False              # if False, remove base odometry vector from actor observations
+    observe_coverage_probe: bool = True            # if False, remove local coverage probe observations (reward calculations still use coverage)
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
     terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
     experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
@@ -260,7 +261,7 @@ def compute_obs_dim(cfg: DictConfig) -> int:
         ├─ target_known_flag                     (1)   explicit 0/1 flag
         └─ (target_pos - pos_i) / max_dim × mask (2)   masked until target_known
 
-        Local Coverage (16) — per circular direction (evenly spaced):
+        Local Coverage (16, optional) — per circular direction (evenly spaced):
         ├─ is_cell_covered                        (1)   0/1 flag at sampling distance
         
         Radar (B × 4)  — per angular bin:
@@ -271,7 +272,9 @@ def compute_obs_dim(cfg: DictConfig) -> int:
 
     Total: 9 + 16 + B * 4 by default. The base and target odometry vectors
     can be removed independently with env.observe_base_vector and
-    env.observe_target_vector; the target-known flag remains present.
+    env.observe_target_vector; the target-known flag remains present. The
+    16-dim local coverage probe block can be removed independently with
+    env.observe_coverage_probe without disabling coverage/reward calculations.
     """
     B = cfg.env.radar_bins
     self_dim = 9
@@ -279,7 +282,8 @@ def compute_obs_dim(cfg: DictConfig) -> int:
         self_dim -= 2
     if not bool(cfg.env.get("observe_target_vector", True)):
         self_dim -= 2
-    return self_dim + 16 + B * 4
+    coverage_dim = 16 if bool(cfg.env.get("observe_coverage_probe", True)) else 0
+    return self_dim + coverage_dim + B * 4
 
 
 def compute_action_dim(_cfg: DictConfig) -> int:

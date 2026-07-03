@@ -6,7 +6,7 @@ Ego-centric, permutation-invariant Radar + Graph observation model.
 All functions are pure JAX — JIT/vmap/scan compatible.
 Use `make_obs_fns(cfg)` so config scalars become XLA compile-time constants.
 
-Observation structure per agent i  (obs_dim = 9 + 16 + B*4)
+Observation structure per agent i  (obs_dim = 9 + optional 16 + B*4)
 ---------------------------------------------------------
 
 ┌──────────────────────────── Self state (9) ───────────────────────────────┐
@@ -16,7 +16,7 @@ Observation structure per agent i  (obs_dim = 9 + 16 + B*4)
 │  is_connected_to_target                  (1)  multi-hop graph flag        │
 │  target_known_flag                       (1)  1.0 if drone knows target   │
 │  (target_pos - pos_i) / max_dim × mask   (2)  masked until target_known  │
-├────────────────────── Local Coverage Probes (16) ─────────────────────────┤
+├───────────────── Local Coverage Probes (16, optional) ────────────────────┤
 │  16 radial probes (evenly spaced circle) at sampling_radius:               │
 │  returns 1.0 if covered, 0.0 otherwise                                    │
 ├─────────────────────── 360° Radar  (B bins × 4) ──────────────────────────┤
@@ -106,6 +106,7 @@ def make_obs_fns(
     mem_test_mask_nonlocal_obs = bool(cfg.env.get("mem_test_mask_nonlocal_obs", False))
     observe_base_vector = bool(cfg.env.get("observe_base_vector", True))
     observe_target_vector = bool(cfg.env.get("observe_target_vector", True))
+    observe_coverage_probe = bool(cfg.env.get("observe_coverage_probe", True))
 
     obs_dim: int = compute_obs_dim(cfg)
     if comm_occ_grid is None:
@@ -455,7 +456,11 @@ def make_obs_fns(
             ], axis=-1)                                                      # (B, 4)
             radar_block = radar.reshape(-1)                                  # (B*4,)
 
-            return jnp.concatenate([self_block_final, local_cov, radar_block])                # (obs_dim,)
+            obs_parts = [self_block_final]
+            if observe_coverage_probe:
+                obs_parts.append(local_cov)
+            obs_parts.append(radar_block)
+            return jnp.concatenate(obs_parts)                # (obs_dim,)
 
         return jax.vmap(single_obs)(jnp.arange(N, dtype=jnp.int32))         # (N, obs_dim)
 
