@@ -1892,8 +1892,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 logs.update(comm_summary)
                 wandb.log(logs, step=steps_done)
 
-            is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset
-            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0) and update > eval_video_offset)
+            # Calculate rolling training success rate and check threshold (always allow evaluation on final update)
+            train_succ_rate = np.mean(window_succ) if len(window_succ) > 0 else 0.0
+            eval_min_succ = float(cfg.training.get("eval_min_train_success", 0.0))
+            succ_threshold_met = (train_succ_rate >= eval_min_succ) or (update == n_updates)
+
+            is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset and succ_threshold_met
+            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0) and update > eval_video_offset) and succ_threshold_met
             if update == n_updates:
                 # Run the same train-eval artifact path one final time instead of
                 # using the legacy special final eval renderer/output folder.
