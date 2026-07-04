@@ -57,6 +57,7 @@ from omegaconf import DictConfig
 from core.config import MAP_DIR
 from env.state import EnvState
 from env.maps import MapDefinition
+from env.grid_utils import has_inner_obstacles
 from env.raycast import dda_raycast, get_ray_stencil, compute_local_visibility, PAD_RADIUS
 
 
@@ -174,6 +175,7 @@ def make_env_fns(cfg: DictConfig):
         raise ValueError("Occupancy grid missing. A valid map MUST be loaded for physics.")
     if comm_occ_grid is None:
         comm_occ_grid = occ_grid
+    comm_has_inner_obstacles = has_inner_obstacles(comm_occ_grid)
 
     # Padding size in cells
     R_cells = int(PAD_RADIUS / cell_size) + 2
@@ -315,12 +317,16 @@ def make_env_fns(cfg: DictConfig):
 
         idx_all = jax.vmap(_get_cell_idx)(state.pos) # (N,)
 
-        # 1. Comm graph logic using DDA Raycasting
+        # 1. Comm graph logic using DDA Raycasting, unless the communication
+        # grid only contains outer-border walls.
         def _check_comm(i, j):
             dist = jnp.linalg.norm(state.pos[i] - state.pos[j])
             in_range = (dist <= comm_r) & state.active[i] & state.active[j] & (i != j)
-            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
-            can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid)
+            if comm_has_inner_obstacles:
+                # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+                can_see = dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid)
+            else:
+                can_see = True
             return in_range & can_see
 
         adj_dd = jax.vmap(jax.vmap(_check_comm, (None, 0)), (0, None))(
@@ -331,8 +337,11 @@ def make_env_fns(cfg: DictConfig):
         def _check_base_comm(i):
             dist = jnp.linalg.norm(state.pos[i] - state.base_pos)
             in_range = (dist <= comm_r_base) & state.active[i]
-            # DDA raycast against the communication grid: mesh walls are transparent only for comm.
-            can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid)
+            if comm_has_inner_obstacles:
+                # DDA raycast against the communication grid: mesh walls are transparent only for comm.
+                can_see = dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid)
+            else:
+                can_see = True
             return in_range & can_see
 
         adj_db = jax.vmap(_check_base_comm)(jnp.arange(N)).astype(jnp.float32)
