@@ -66,6 +66,7 @@ import jax.numpy as jnp
 from omegaconf import DictConfig
 
 from env.state import EnvState
+from env.grid_utils import has_inner_obstacles
 from env.raycast import dda_raycast, dda_dist
 from core.config import compute_obs_dim
 
@@ -114,7 +115,7 @@ def make_obs_fns(
 
     GW, GH = occ_grid.shape
     is_unobstructed = (not jnp.any(occ_grid))
-    is_comm_unobstructed = (not jnp.any(comm_occ_grid))
+    is_comm_unobstructed = not has_inner_obstacles(comm_occ_grid)
 
     # Pre-compute bin centre angles: θ_b ∈ (−π, π]
     _bin_angles  = (jnp.arange(B, dtype=jnp.float32) + 0.5) * (2.0 * jnp.pi / B) - jnp.pi

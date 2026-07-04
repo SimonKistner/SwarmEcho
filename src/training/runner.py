@@ -66,6 +66,7 @@ from core.config import compute_obs_dim, compute_action_dim
 from env.physics import make_env_fns
 from env.observations import make_obs_fns
 from env.rewards import make_reward_fn
+from env.grid_utils import has_inner_obstacles
 from models.mappo import MAPPOModel
 from training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from training.mappo_trainer import MAPPOTrainer
@@ -1307,6 +1308,11 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
     compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
     compute_reward     = make_reward_fn(cfg)
+    comm_has_inner_obstacles = has_inner_obstacles(comm_occ_grid)
+    if comm_has_inner_obstacles:
+        print("  [comm-los] inner communication obstacles detected; using wall-aware raycasts")
+    else:
+        print("  [comm-los] no inner communication obstacles detected; skipping communication LOS raycasts")
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
