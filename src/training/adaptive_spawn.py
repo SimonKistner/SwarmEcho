@@ -214,6 +214,25 @@ class AdaptiveTargetSpawnController:
         probs[mask] = 1.0 / float(count)
         return probs
 
+
+    def exploration_reward_mask(self) -> np.ndarray:
+        """Return a 1 m-grid mask for cells eligible for exploration reward.
+
+        Hard-gate mode disables exploration reward in known path-length
+        categories that are not currently active. The map coverage grid still
+        updates normally; this mask only controls the reward delta.
+        """
+        active = set(int(c) for c in self.categories[: self.active_category_count])
+        width = int(round(float(self.map_def.width)))
+        height = int(round(float(self.map_def.height)))
+        xs = np.arange(width, dtype=np.float32) + 0.5
+        ys = np.arange(height, dtype=np.float32) + 0.5
+        xx, yy = np.meshgrid(xs, ys, indexing="ij")
+        points = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=-1)
+        cats = self._categories_for_cells(self.positions_to_cells(points))
+        enabled = np.asarray([(int(cat) in active) or (int(cat) < 0) for cat in cats], dtype=bool)
+        return enabled.reshape(width, height)
+
     def _configured_category_rates(self) -> np.ndarray:
         out = np.zeros(len(self.categories), dtype=np.float32)
         for i, cat in enumerate(self.categories):

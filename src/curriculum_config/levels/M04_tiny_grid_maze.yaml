@@ -79,6 +79,7 @@ curriculum:
 logging:
   eval_broadcast_on_curriculum_early_stop: true
 
+  train_target_spawn_heatmap: true
   adaptive_spawn_diagnostics: true
   checkpoint_freq: 50
   checkpoint_offset: 0

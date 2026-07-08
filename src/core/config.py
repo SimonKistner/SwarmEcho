@@ -186,6 +186,7 @@ class LoggingConfig:
     obs_log: bool = False
     memory_diagnostic_probe: bool = False  # Train a linear probe on base memory to predict target cell
     adaptive_spawn_diagnostics: bool = False  # Log adaptive target-spawn bucket diagnostics to WandB
+    train_target_spawn_heatmap: bool = False  # Save recent-rollout train target spawn heatmap snapshots at eval_freq
 
     # --- Mid-run Evaluation Toggles ---
     eval_video: bool = True       # Render rollout video for evaluation episodes
