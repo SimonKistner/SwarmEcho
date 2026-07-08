@@ -463,6 +463,47 @@ def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, su
     return csv_path
 
 
+
+
+def render_and_save_train_target_spawn_heatmap(target_positions, map_data, map_def, run_dir, video_dir, run_timestamp, artifact_stem=None):
+    """Render target spawn positions from the most recent training rollout."""
+    artifact_stem = artifact_stem or f"train_target_spawns_{run_timestamp}"
+    heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
+
+    positions = np.asarray(target_positions, dtype=np.float32)
+    if positions.ndim == 3:
+        positions = positions[:, 0, :]
+    positions = positions.reshape((-1, 2)) if positions.size else np.zeros((0, 2), dtype=np.float32)
+
+    background_img = render_png(
+        data=map_data,
+        map_def=map_def,
+        state=None,
+        show_zones=SHOW_SPAWN_ZONES,
+        show_spawns=False,
+        scale=SCALE,
+    )
+
+    overlay = background_img.copy()
+    height = float(map_data["height"])
+    for pos in positions:
+        px = int(pos[0] * SCALE)
+        py = int((height - pos[1]) * SCALE)
+        cv2.circle(overlay, (px, py), HEATMAP_DOT_RADIUS, (74, 163, 22), -1, cv2.LINE_AA)
+
+    heatmap_img = cv2.addWeighted(overlay, HEATMAP_ALPHA, background_img, 1.0 - HEATMAP_ALPHA, 0)
+    padded_img = cv2.copyMakeBorder(heatmap_img, 60, 0, 0, 0, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
+    info_str = f"Run: {run_dir.name} | Recent rollout train target spawns: {len(positions)}"
+    cv2.putText(padded_img, info_str, (10, 25), cv2.FONT_HERSHEY_DUPLEX, 0.42, (55, 41, 31), 1, cv2.LINE_AA)
+    cv2.circle(padded_img, (15, 46), 4, (74, 163, 22), -1, cv2.LINE_AA)
+    cv2.putText(padded_img, "Recent rollout target spawn", (25, 50), cv2.FONT_HERSHEY_DUPLEX, 0.38, (55, 41, 31), 1, cv2.LINE_AA)
+
+    Path(video_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(heatmap_path), padded_img)
+    print(f"Saved train target spawn heatmap to: {heatmap_path.name}")
+    return heatmap_path
+
 def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
     """
     Generates a secondary heatmap plotting target coordinates that were not found/delivered.
