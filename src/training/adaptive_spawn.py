@@ -218,20 +218,25 @@ class AdaptiveTargetSpawnController:
     def exploration_reward_mask(self) -> np.ndarray:
         """Return a 1 m-grid mask for cells eligible for exploration reward.
 
-        Hard-gate mode disables exploration reward in known path-length
-        categories that are not currently active. The map coverage grid still
-        updates normally; this mask only controls the reward delta.
+        Hard-gate mode disables exploration reward only for currently inactive
+        target-spawn-valid cells. Cells excluded from target spawning (for
+        example no-spawn/exclude zones or wall-clearance rejects) remain
+        exploration-reward eligible regardless of the active path category.
+        The map coverage grid still updates normally; this mask only controls
+        the reward delta.
         """
         active = set(int(c) for c in self.categories[: self.active_category_count])
         width = int(round(float(self.map_def.width)))
         height = int(round(float(self.map_def.height)))
-        xs = np.arange(width, dtype=np.float32) + 0.5
-        ys = np.arange(height, dtype=np.float32) + 0.5
-        xx, yy = np.meshgrid(xs, ys, indexing="ij")
-        points = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=-1)
-        cats = self._categories_for_cells(self.positions_to_cells(points))
-        enabled = np.asarray([(int(cat) in active) or (int(cat) < 0) for cat in cats], dtype=bool)
-        return enabled.reshape(width, height)
+        enabled = np.ones((width, height), dtype=bool)
+
+        valid_inactive = np.asarray([int(cat) not in active for cat in self._target_categories], dtype=bool)
+        inactive_positions = self._target_positions[valid_inactive]
+        if len(inactive_positions) > 0:
+            ix = np.clip(np.floor(inactive_positions[:, 0]).astype(np.int32), 0, width - 1)
+            iy = np.clip(np.floor(inactive_positions[:, 1]).astype(np.int32), 0, height - 1)
+            enabled[ix, iy] = False
+        return enabled
 
     def _configured_category_rates(self) -> np.ndarray:
         out = np.zeros(len(self.categories), dtype=np.float32)
