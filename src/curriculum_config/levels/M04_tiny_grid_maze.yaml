@@ -61,8 +61,8 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_every_k_steps: 5
-  tarmac_sig_dim: 64
-  tarmac_val_dim: 128
+  tarmac_sig_dim: 16
+  tarmac_val_dim: 32
   tarmac_include_self: false
 
 curriculum:
@@ -82,5 +82,5 @@ logging:
   eval_not_delivered_or_visually_found_heatmap: true
 
   eval_video: true
-  eval_video_freq: 100
+  eval_video_freq: 50
   eval_video_offset: 1
