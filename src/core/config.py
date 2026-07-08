@@ -68,6 +68,9 @@ class EnvConfig:
     target_spawn_radius_min: float = 0.0  # if > 0, target spawns in a ring (min to max radius) (for "ring")
     target_invalid_spawn_base_radius: float = 0.0 # if > 0, target cannot spawn within this radius of the base (for "outside_base")
     adaptive_target_spawn: bool = False            # if True, training target spawn cells adapt to per-category success
+    adaptive_target_spawn_mode: str = "soft_gate"  # "soft_gate" preserves legacy adaptive probabilities; "hard_gate" gates path categories
+    adaptive_spawn_success_lower: float = 0.0      # hard_gate: remove newest category when training success falls below this rate
+    adaptive_spawn_success_upper: float = 0.8      # hard_gate: add next category when training success reaches this rate
     static_maze_optimal_path: bool = True          # if True, compute maze-cell path categories once at training init
     precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
     hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
