@@ -1333,10 +1333,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             target_spawn_radius=float(cfg.env.get("target_spawn_radius", 0.0)),
             target_spawn_radius_min=float(cfg.env.get("target_spawn_radius_min", 0.0)),
             target_invalid_spawn_base_radius=float(cfg.env.get("target_invalid_spawn_base_radius", 0.0)),
+            mode=str(cfg.env.get("adaptive_target_spawn_mode", "soft_gate")),
+            hard_gate_success_lower=float(cfg.env.get("adaptive_spawn_success_lower", 0.0)),
+            hard_gate_success_upper=float(cfg.env.get("adaptive_spawn_success_upper", 0.8)),
         )
         train_reset = adaptive_spawn.make_reset(reset)
         print(
-            f"  [adaptive-spawn] enabled with {len(adaptive_spawn.categories)} path-length categories; "
+            f"  [adaptive-spawn] enabled in {adaptive_spawn.mode} mode with "
+            f"{len(adaptive_spawn.categories)} path-length categories; "
             f"update/report interval={adaptive_spawn_interval} PPO update(s)"
         )
 
@@ -1798,6 +1802,16 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             )
             if adaptive_spawn_due:
                 adaptive_spawn_diag = adaptive_spawn.update_probabilities()
+                if (
+                    adaptive_spawn.mode == "hard_gate"
+                    and adaptive_spawn_diag.previous_active_categories != adaptive_spawn_diag.active_categories
+                ):
+                    previous = ", ".join(str(c) for c in adaptive_spawn_diag.previous_active_categories)
+                    current = ", ".join(str(c) for c in adaptive_spawn_diag.active_categories)
+                    print(
+                        f"  [adaptive-spawn] hard_gate active categories changed: "
+                        f"[{previous}] -> [{current}]"
+                    )
                 train_reset = adaptive_spawn.make_reset(reset)
                 autoreset_step = _make_autoreset_step(env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
                 autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
