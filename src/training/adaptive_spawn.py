@@ -41,6 +41,7 @@ class AdaptiveTargetSpawnController:
         mode: str = "soft_gate",
         hard_gate_success_lower: float = 0.0,
         hard_gate_success_upper: float = 0.8,
+        threshold_hold_updates: int = 5,
     ):
         if not map_def.maze_cell_cols or not map_def.maze_cell_rows:
             raise ValueError("adaptive target spawning requires map.maze_cell_grid with cols/rows")
@@ -57,6 +58,11 @@ class AdaptiveTargetSpawnController:
         self.hard_gate_success_upper = float(hard_gate_success_upper)
         if not (0.0 <= self.hard_gate_success_lower <= self.hard_gate_success_upper <= 1.0):
             raise ValueError("hard-gate adaptive spawn thresholds must satisfy 0 <= lower <= upper <= 1")
+        self.threshold_hold_updates = int(threshold_hold_updates)
+        if self.threshold_hold_updates < 1:
+            raise ValueError("adaptive_spawn_threshold_hold_updates must be >= 1")
+        self._upper_hold_count = 0
+        self._lower_hold_count = 0
         self.cols = int(map_def.maze_cell_cols)
         self.rows = int(map_def.maze_cell_rows)
         self.cell_w = float(map_def.width) / self.cols
@@ -171,9 +177,23 @@ class AdaptiveTargetSpawnController:
             active_total = int(active_counts.sum())
             active_rate = float(active_successes.sum() / active_total) if active_total > 0 else 0.0
             if active_total > 0 and active_rate >= self.hard_gate_success_upper:
-                self.active_category_count = min(len(self.categories), self.active_category_count + 1)
+                self._upper_hold_count += 1
+                self._lower_hold_count = 0
             elif active_total > 0 and active_rate < self.hard_gate_success_lower:
+                self._lower_hold_count += 1
+                self._upper_hold_count = 0
+            else:
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
+
+            if self._upper_hold_count >= self.threshold_hold_updates:
+                self.active_category_count = min(len(self.categories), self.active_category_count + 1)
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
+            elif self._lower_hold_count >= self.threshold_hold_updates:
                 self.active_category_count = max(1, self.active_category_count - 1)
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
             self._position_probs = self._hard_gate_position_probs()
         else:
             cell_weights = np.ones(len(self._target_positions), dtype=np.float32)

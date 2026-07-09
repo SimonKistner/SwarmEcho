@@ -1337,6 +1337,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             mode=str(cfg.env.get("adaptive_target_spawn_mode", "soft_gate")),
             hard_gate_success_lower=float(cfg.env.get("adaptive_spawn_success_lower", 0.0)),
             hard_gate_success_upper=float(cfg.env.get("adaptive_spawn_success_upper", 0.8)),
+            threshold_hold_updates=int(cfg.env.get("adaptive_spawn_threshold_hold_updates", 3)),
         )
         train_reset = adaptive_spawn.make_reset(reset)
         if adaptive_spawn.mode == "hard_gate":
@@ -1347,6 +1348,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         print(
             f"  [adaptive-spawn] enabled in {adaptive_spawn.mode} mode with "
             f"{len(adaptive_spawn.categories)} path-length categories; "
+            f"threshold_hold={adaptive_spawn.threshold_hold_updates} adaptive update(s); "
             f"update/report interval={adaptive_spawn_interval} PPO update(s)"
         )
 
