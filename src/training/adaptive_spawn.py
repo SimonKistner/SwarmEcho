@@ -227,10 +227,21 @@ class AdaptiveTargetSpawnController:
     def _hard_gate_position_probs(self) -> np.ndarray:
         active = set(int(c) for c in self.categories[: self.active_category_count])
         mask = np.asarray([int(c) in active for c in self._target_categories], dtype=bool)
+        dynamic_wall_segments = self.inactive_category_wall_segments()
+        if dynamic_wall_segments and self.map_def.target_wall_clearance > 0.0:
+            dynamic_safe = _points_clear_wall_segments(
+                self._target_positions,
+                dynamic_wall_segments,
+                clearance=float(self.map_def.target_wall_clearance),
+            )
+            mask &= dynamic_safe
         probs = np.zeros(len(self._target_positions), dtype=np.float32)
         count = int(mask.sum())
         if count <= 0:
-            return self._uniform_position_probs()
+            raise ValueError(
+                "adaptive hard-gate target spawning has no active positions after applying "
+                "dynamic wall clearance; reduce target_wall_clearance or adjust category blockage"
+            )
         probs[mask] = 1.0 / float(count)
         return probs
 
@@ -372,6 +383,36 @@ def diagnostics_to_wandb(diag: AdaptiveSpawnDiagnostics) -> dict[str, float]:
             logs[f"actual count/spawn_actual_count/{label}"] = diag.actual_count[cat]
         logs[f"adaptive_spawn_control/spawn_active/category_{cat:03d}"] = float(cat in diag.active_categories)
     return logs
+
+
+def _points_clear_wall_segments(
+    points: np.ndarray,
+    segments: list[list[float]],
+    clearance: float,
+) -> np.ndarray:
+    """Return True for points at least ``clearance`` metres from all segments."""
+    pts = np.asarray(points, dtype=np.float32)
+    if len(pts) == 0 or not segments or clearance <= 0.0:
+        return np.ones(len(pts), dtype=bool)
+    seg = np.asarray(segments, dtype=np.float32)
+    starts = seg[:, :2]
+    ends = seg[:, 2:4]
+    vec = ends - starts
+    denom = np.sum(vec * vec, axis=1)
+    safe = np.ones(len(pts), dtype=bool)
+    for i, p in enumerate(pts):
+        rel = p[None, :] - starts
+        t = np.divide(
+            np.sum(rel * vec, axis=1),
+            denom,
+            out=np.zeros_like(denom),
+            where=denom > 0.0,
+        )
+        t = np.clip(t, 0.0, 1.0)
+        closest = starts + t[:, None] * vec
+        dists = np.linalg.norm(closest - p[None, :], axis=1)
+        safe[i] = bool(np.all(dists >= clearance))
+    return safe
 
 
 def _normalize_segment(seg: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
