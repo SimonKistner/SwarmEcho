@@ -1344,6 +1344,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             train_env_step = make_env_fns(
                 cfg,
                 exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
+                extra_walls=adaptive_spawn.inactive_category_wall_segments(),
             )[0]
         print(
             f"  [adaptive-spawn] enabled in {adaptive_spawn.mode} mode with "
@@ -1825,6 +1826,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     train_env_step = make_env_fns(
                         cfg,
                         exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
+                        extra_walls=adaptive_spawn.inactive_category_wall_segments(),
                     )[0]
                 autoreset_step = _make_autoreset_step(train_env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
                 autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
@@ -1963,6 +1965,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         video_dir=train_target_spawn_heatmap_dir,
                         run_timestamp=run_timestamp,
                         artifact_stem=f"train_target_spawns_{run_timestamp}",
+                        extra_walls=(adaptive_spawn.inactive_category_wall_segments() if adaptive_spawn is not None else None),
                     )
                 except Exception as heatmap_err:
                     print(f"  [heatmap-error] Failed to render train target spawn heatmap: {heatmap_err}")

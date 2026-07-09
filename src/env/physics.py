@@ -65,7 +65,7 @@ from env.raycast import dda_raycast, get_ray_stencil, compute_local_visibility, 
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_env_fns(cfg: DictConfig, exploration_reward_mask=None):
+def make_env_fns(cfg: DictConfig, exploration_reward_mask=None, extra_walls=None):
     """
     Build pure environment functions closed over config scalars.
 
@@ -134,7 +134,8 @@ def make_env_fns(cfg: DictConfig, exploration_reward_mask=None):
             map_def = MapDefinition.load(
                 map_path,
                 cell_size=1.0,
-                padding_radius=PAD_RADIUS
+                padding_radius=PAD_RADIUS,
+                extra_walls=extra_walls,
             )
             W, H = map_def.width, map_def.height
             if map_def.occupancy_grid is not None:

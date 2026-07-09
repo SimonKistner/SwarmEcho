@@ -82,7 +82,7 @@ class MapDefinition:
     valid_drone_coords:  jax.Array | None = None
 
     @classmethod
-    def load(cls, path: str | Path, cell_size: float | None = None, padding_radius: float = 60.0) -> MapDefinition:
+    def load(cls, path: str | Path, cell_size: float | None = None, padding_radius: float = 60.0, extra_walls: list[list[float]] | None = None) -> MapDefinition:
         path = Path(path)
         with open(path.with_suffix(".yaml"), "r") as f:
             data = yaml.safe_load(f)
@@ -98,7 +98,7 @@ class MapDefinition:
             drone_spawn_zone  = data["spawn_zones"]["drone"],
             rooms             = data.get("rooms", []),
             hallways          = data.get("hallways", []),
-            walls             = data.get("walls", []),
+            walls             = list(data.get("walls", [])) + list(extra_walls or []),
             mesh_walls        = data.get("mesh_walls", data.get("mesh", [])),
             target_wall_clearance = float(data.get("target_wall_clearance", 0.0)),
             base_wall_clearance   = float(data.get("base_wall_clearance",   0.0)),

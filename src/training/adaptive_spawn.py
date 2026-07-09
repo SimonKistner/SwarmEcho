@@ -258,6 +258,30 @@ class AdaptiveTargetSpawnController:
             enabled[ix, iy] = False
         return enabled
 
+
+    def inactive_category_wall_segments(self) -> list[list[float]]:
+        """Return cell-edge wall segments that box in currently inactive categories."""
+        if self.mode != "hard_gate":
+            return []
+        active = set(int(c) for c in self.categories[: self.active_category_count])
+        existing = {_normalize_segment(seg) for seg in self.map_def.walls}
+        segments: list[list[float]] = []
+        seen: set[tuple[float, float, float, float]] = set()
+        for (cx, cy), cat in self._cell_to_category.items():
+            if int(cat) in active:
+                continue
+            x0 = float(cx) * self.cell_w
+            x1 = float(cx + 1) * self.cell_w
+            y0 = float(cy) * self.cell_h
+            y1 = float(cy + 1) * self.cell_h
+            for seg in ([x0, y0, x1, y0], [x0, y1, x1, y1], [x0, y0, x0, y1], [x1, y0, x1, y1]):
+                key = _normalize_segment(seg)
+                if key in existing or key in seen:
+                    continue
+                seen.add(key)
+                segments.append(seg)
+        return segments
+
     def _configured_category_rates(self) -> np.ndarray:
         out = np.zeros(len(self.categories), dtype=np.float32)
         for i, cat in enumerate(self.categories):
@@ -337,3 +361,12 @@ def diagnostics_to_wandb(diag: AdaptiveSpawnDiagnostics) -> dict[str, float]:
             logs[f"actual count/spawn_actual_count/{label}"] = diag.actual_count[cat]
         logs[f"adaptive_spawn_control/spawn_active/category_{cat:03d}"] = float(cat in diag.active_categories)
     return logs
+
+
+def _normalize_segment(seg: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = (round(float(v), 6) for v in seg[:4])
+    a = (x1, y1)
+    b = (x2, y2)
+    if b < a:
+        x1, y1, x2, y2 = x2, y2, x1, y1
+    return (x1, y1, x2, y2)
