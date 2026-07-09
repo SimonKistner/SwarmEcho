@@ -434,14 +434,24 @@ def _cell_categories_for_preview(data: dict) -> dict[str, list]:
             dist[(nx,ny)]=dist[(cx,cy)]+1; q.append((nx,ny))
     return {"cells": [(cx, cy, cat) for (cx, cy), cat in sorted(dist.items())]}
 
-def _dynamic_walls_for_preview(data: dict, spec: str | None) -> list[list[float]]:
+def _dynamic_walls_for_preview(data: dict, spec: str | None, valid_target_coords=None) -> list[list[float]]:
     if not spec:
         return []
     blocked = _parse_category_block_spec(spec)
     width = float(data["width"]); height = float(data["height"])
     grid = data.get("maze_cell_grid") or {}; cols=int(grid.get("cols",1)); rows=int(grid.get("rows",1))
     cell_w=width/cols; cell_h=height/rows; existing={_normalize_segment(s) for s in _compile_segments(data)}; seen=set(); out=[]
-    for cx,cy,cat in _cell_categories_for_preview(data)["cells"]:
+    cat_by_cell = {(cx, cy): cat for cx, cy, cat in _cell_categories_for_preview(data)["cells"]}
+    if valid_target_coords is None:
+        candidate_cells = set(cat_by_cell)
+    else:
+        coords = np.asarray(valid_target_coords, dtype=np.float32)
+        candidate_cells = {
+            (min(cols - 1, max(0, int(np.floor(float(x) / cell_w)))), min(rows - 1, max(0, int(np.floor(float(y) / cell_h)))))
+            for x, y in coords
+        }
+    for cx, cy in sorted(candidate_cells):
+        cat = cat_by_cell.get((cx, cy))
         if cat not in blocked: continue
         x0=cx*cell_w; x1=(cx+1)*cell_w; y0=cy*cell_h; y1=(cy+1)*cell_h
         for seg in ([x0,y0,x1,y0],[x0,y1,x1,y1],[x0,y0,x0,y1],[x1,y0,x1,y1]):
@@ -578,6 +588,12 @@ def main() -> None:
         map_data = yaml.safe_load(f)
     map_name = map_data["name"]
 
+    base_preview_map_def = None
+    try:
+        base_preview_map_def = MapDefinition.load(map_path, cell_size=1.0)
+    except Exception as e:
+        print(f"[warn] Could not load base map definition for preview blockage filtering: {e}")
+
     # If --no-spawns was passed, we also imply no spawn zones to give a clean blueprint
     if not args.show_spawns:
         args.show_zones = False
@@ -604,7 +620,11 @@ def main() -> None:
     state = None
     env_step = None
     map_def = None
-    extra_wall_segments = _dynamic_walls_for_preview(map_data, args.block_categories)
+    extra_wall_segments = _dynamic_walls_for_preview(
+        map_data,
+        args.block_categories,
+        valid_target_coords=(base_preview_map_def.valid_target_coords if base_preview_map_def is not None else None),
+    )
     try:
         env_step, env_reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg, extra_walls=extra_wall_segments)
         state = env_reset(jax.random.PRNGKey(args.seed))

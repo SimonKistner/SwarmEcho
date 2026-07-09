@@ -260,16 +260,27 @@ class AdaptiveTargetSpawnController:
 
 
     def inactive_category_wall_segments(self) -> list[list[float]]:
-        """Return cell-edge wall segments that box in currently inactive categories."""
+        """Return cell-edge wall segments for inactive target-spawn-valid cells.
+
+        This mirrors the hard-gate spawn/reward mask domain: only cells that
+        contain valid target spawn coordinates for currently inactive categories
+        are blocked. Active-category cells and cells that were already excluded
+        from target spawning (for example base/no-spawn areas or wall-clearance
+        rejects) are intentionally left alone.
+        """
         if self.mode != "hard_gate":
             return []
         active = set(int(c) for c in self.categories[: self.active_category_count])
         existing = {_normalize_segment(seg) for seg in self.map_def.walls}
         segments: list[list[float]] = []
         seen: set[tuple[float, float, float, float]] = set()
-        for (cx, cy), cat in self._cell_to_category.items():
-            if int(cat) in active:
-                continue
+
+        inactive_target_cells = {
+            (int(cx), int(cy))
+            for (cx, cy), cat in zip(self._target_cells, self._target_categories)
+            if int(cat) not in active
+        }
+        for cx, cy in sorted(inactive_target_cells):
             x0 = float(cx) * self.cell_w
             x1 = float(cx + 1) * self.cell_w
             y0 = float(cy) * self.cell_h
