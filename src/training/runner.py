@@ -1319,6 +1319,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     adaptive_spawn = None
     adaptive_spawn_interval = 1
     train_reset = reset
+    train_env_step = env_step
     if bool(cfg.env.get("adaptive_target_spawn", False)):
         from core.config import MAP_DIR
         from env.maps import MapDefinition
@@ -1333,14 +1334,25 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             target_spawn_radius=float(cfg.env.get("target_spawn_radius", 0.0)),
             target_spawn_radius_min=float(cfg.env.get("target_spawn_radius_min", 0.0)),
             target_invalid_spawn_base_radius=float(cfg.env.get("target_invalid_spawn_base_radius", 0.0)),
+            mode=str(cfg.env.get("adaptive_target_spawn_mode", "soft_gate")),
+            hard_gate_success_lower=float(cfg.env.get("adaptive_spawn_success_lower", 0.0)),
+            hard_gate_success_upper=float(cfg.env.get("adaptive_spawn_success_upper", 0.8)),
+            threshold_hold_updates=int(cfg.env.get("adaptive_spawn_threshold_hold_updates", 3)),
         )
         train_reset = adaptive_spawn.make_reset(reset)
+        if adaptive_spawn.mode == "hard_gate":
+            train_env_step = make_env_fns(
+                cfg,
+                exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
+            )[0]
         print(
-            f"  [adaptive-spawn] enabled with {len(adaptive_spawn.categories)} path-length categories; "
+            f"  [adaptive-spawn] enabled in {adaptive_spawn.mode} mode with "
+            f"{len(adaptive_spawn.categories)} path-length categories; "
+            f"threshold_hold={adaptive_spawn.threshold_hold_updates} adaptive update(s); "
             f"update/report interval={adaptive_spawn_interval} PPO update(s)"
         )
 
-    autoreset_step   = _make_autoreset_step(env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+    autoreset_step   = _make_autoreset_step(train_env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
     reset_v          = jax.jit(jax.vmap(train_reset))
@@ -1798,8 +1810,23 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             )
             if adaptive_spawn_due:
                 adaptive_spawn_diag = adaptive_spawn.update_probabilities()
+                if (
+                    adaptive_spawn.mode == "hard_gate"
+                    and adaptive_spawn_diag.previous_active_categories != adaptive_spawn_diag.active_categories
+                ):
+                    previous = ", ".join(str(c) for c in adaptive_spawn_diag.previous_active_categories)
+                    current = ", ".join(str(c) for c in adaptive_spawn_diag.active_categories)
+                    print(
+                        f"  [adaptive-spawn] hard_gate active categories changed: "
+                        f"[{previous}] -> [{current}]"
+                    )
                 train_reset = adaptive_spawn.make_reset(reset)
-                autoreset_step = _make_autoreset_step(env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+                if adaptive_spawn.mode == "hard_gate":
+                    train_env_step = make_env_fns(
+                        cfg,
+                        exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
+                    )[0]
+                autoreset_step = _make_autoreset_step(train_env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
                 autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
                 reset_v = jax.jit(jax.vmap(train_reset))
 
@@ -1910,6 +1937,35 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 # using the legacy special final eval renderer/output folder.
                 is_eval_step = True
                 is_video_step = bool(eval_video)
+
+            is_train_target_heatmap_step = (
+                bool(cfg.logging.get("train_target_spawn_heatmap", False))
+                and ((update - eval_offset) % eval_every == 0)
+                and update > eval_offset
+            )
+            if update == n_updates and bool(cfg.logging.get("train_target_spawn_heatmap", False)):
+                is_train_target_heatmap_step = True
+
+            if is_train_target_heatmap_step and len(raw_target_positions) > 0:
+                try:
+                    from training.evaluate_pipeline import (
+                        load_map_data,
+                        render_and_save_train_target_spawn_heatmap,
+                    )
+                    _, map_data, map_def = load_map_data(cfg)
+                    run_timestamp = artifact_suffix(update, steps_done)
+                    train_target_spawn_heatmap_dir = train_artifacts / "train_target_spawn_heatmap"
+                    render_and_save_train_target_spawn_heatmap(
+                        target_positions=np.asarray(raw_target_positions, dtype=np.float32),
+                        map_data=map_data,
+                        map_def=map_def,
+                        run_dir=run_dir,
+                        video_dir=train_target_spawn_heatmap_dir,
+                        run_timestamp=run_timestamp,
+                        artifact_stem=f"train_target_spawns_{run_timestamp}",
+                    )
+                except Exception as heatmap_err:
+                    print(f"  [heatmap-error] Failed to render train target spawn heatmap: {heatmap_err}")
 
             # ── Training eval + optional single video ─────────────────────────
             if is_eval_step or is_video_step:
