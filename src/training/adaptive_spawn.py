@@ -41,7 +41,7 @@ class AdaptiveTargetSpawnController:
         mode: str = "soft_gate",
         hard_gate_success_lower: float = 0.0,
         hard_gate_success_upper: float = 0.8,
-        threshold_hold_updates: int = 3,
+        threshold_hold_updates: int = 5,
     ):
         if not map_def.maze_cell_cols or not map_def.maze_cell_rows:
             raise ValueError("adaptive target spawning requires map.maze_cell_grid with cols/rows")
