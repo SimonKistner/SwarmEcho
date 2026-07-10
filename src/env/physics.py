@@ -535,9 +535,22 @@ def make_env_fns(cfg: DictConfig, exploration_reward_mask=None, extra_walls=None
 
         delivery_freeze = bool(cfg.reward.get("target_found_requires_delivery", True))
         delivered_now = (~state.base_target_known) & new_base_target_known
+        delivered_known_path = known_valid & new_target_known & (new_base_target_known | state.base_target_known)
+        base_delivery_candidates = delivered_known_path & is_conn_base
+        # Normally the global finder path freezes on the exact delivery step from
+        # a base-connected target-knowing reporter.  Keep a defensive fallback for
+        # resumed/eval trajectories where the base-delivery transition may have
+        # occurred before renderer-relevant state was sampled: once the base knows
+        # the target, freeze from any preserved known path instead of leaving the
+        # visual/reward path permanently invalid.
+        delivery_candidates = jnp.where(
+            delivered_now & jnp.any(base_delivery_candidates),
+            base_delivery_candidates,
+            delivered_known_path,
+        )
         freeze_candidates = jnp.where(
             delivery_freeze,
-            known_valid & is_conn_base & new_target_known & delivered_now,
+            delivery_candidates,
             direct_valid,
         )
         first_find_now = (~state.finders_path_valid) & jnp.any(freeze_candidates)
