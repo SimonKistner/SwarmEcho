@@ -23,16 +23,8 @@ spawn_zones:
 target_wall_clearance: 1.25
 target_exclude_zones:
 - - 20.0
-  - 0.0
-  - 30.0
-  - 50.0
-- - 0.0
-  - 20.0
   - 20.0
   - 30.0
-- - 30.0
-  - 20.0
-  - 50.0
   - 30.0
 rooms: []
 hallways: []
