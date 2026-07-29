@@ -17,6 +17,8 @@ class AdaptiveSpawnDiagnostics:
     configured_rate: dict[int, float]
     actual_count: dict[int, int]
     actual_pct: dict[int, float]
+    active_categories: tuple[int, ...] = ()
+    previous_active_categories: tuple[int, ...] = ()
 
 
 class AdaptiveTargetSpawnController:
@@ -36,6 +38,10 @@ class AdaptiveTargetSpawnController:
         target_spawn_radius: float = 0.0,
         target_spawn_radius_min: float = 0.0,
         target_invalid_spawn_base_radius: float = 0.0,
+        mode: str = "soft_gate",
+        hard_gate_success_lower: float = 0.0,
+        hard_gate_success_upper: float = 0.8,
+        threshold_hold_updates: int = 5,
     ):
         if not map_def.maze_cell_cols or not map_def.maze_cell_rows:
             raise ValueError("adaptive target spawning requires map.maze_cell_grid with cols/rows")
@@ -45,6 +51,18 @@ class AdaptiveTargetSpawnController:
         self.map_def = map_def
         self.target_spawn_method = str(target_spawn_method)
         self.static_maze_optimal_path = bool(static_maze_optimal_path)
+        self.mode = str(mode)
+        if self.mode not in ("soft_gate", "hard_gate"):
+            raise ValueError("adaptive_target_spawn_mode must be 'soft_gate' or 'hard_gate'")
+        self.hard_gate_success_lower = float(hard_gate_success_lower)
+        self.hard_gate_success_upper = float(hard_gate_success_upper)
+        if not (0.0 <= self.hard_gate_success_lower <= self.hard_gate_success_upper <= 1.0):
+            raise ValueError("hard-gate adaptive spawn thresholds must satisfy 0 <= lower <= upper <= 1")
+        self.threshold_hold_updates = int(threshold_hold_updates)
+        if self.threshold_hold_updates < 1:
+            raise ValueError("adaptive_spawn_threshold_hold_updates must be >= 1")
+        self._upper_hold_count = 0
+        self._lower_hold_count = 0
         self.cols = int(map_def.maze_cell_cols)
         self.rows = int(map_def.maze_cell_rows)
         self.cell_w = float(map_def.width) / self.cols
@@ -72,7 +90,8 @@ class AdaptiveTargetSpawnController:
         self.spawn_counts = np.zeros(len(self.categories), dtype=np.int64)
         self.success_counts = np.zeros(len(self.categories), dtype=np.int64)
         self.actual_counts = np.zeros(len(self.categories), dtype=np.int64)
-        self._position_probs = self._uniform_position_probs()
+        self.active_category_count = 1
+        self._position_probs = self._hard_gate_position_probs() if self.mode == "hard_gate" else self._uniform_position_probs()
 
     @property
     def target_positions_jax(self) -> jax.Array:
@@ -150,14 +169,41 @@ class AdaptiveTargetSpawnController:
         else:
             deltas = (float(k) / float(k - 1)) * (float(np.mean(rates)) - rates)
 
-        cell_weights = np.ones(len(self._target_positions), dtype=np.float32)
-        for cat, delta in zip(self.categories, deltas):
-            cell_weights[self._target_categories == cat] += float(delta)
-        cell_weights = np.maximum(cell_weights, 0.0)
-        if float(cell_weights.sum()) <= 0.0:
-            self._position_probs = self._uniform_position_probs()
+        previous_active_categories = tuple(int(c) for c in self.categories[: self.active_category_count])
+
+        if self.mode == "hard_gate":
+            active_counts = self.spawn_counts[: self.active_category_count]
+            active_successes = self.success_counts[: self.active_category_count]
+            active_total = int(active_counts.sum())
+            active_rate = float(active_successes.sum() / active_total) if active_total > 0 else 0.0
+            if active_total > 0 and active_rate >= self.hard_gate_success_upper:
+                self._upper_hold_count += 1
+                self._lower_hold_count = 0
+            elif active_total > 0 and active_rate < self.hard_gate_success_lower:
+                self._lower_hold_count += 1
+                self._upper_hold_count = 0
+            else:
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
+
+            if self._upper_hold_count >= self.threshold_hold_updates:
+                self.active_category_count = min(len(self.categories), self.active_category_count + 1)
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
+            elif self._lower_hold_count >= self.threshold_hold_updates:
+                self.active_category_count = max(1, self.active_category_count - 1)
+                self._upper_hold_count = 0
+                self._lower_hold_count = 0
+            self._position_probs = self._hard_gate_position_probs()
         else:
-            self._position_probs = cell_weights / cell_weights.sum()
+            cell_weights = np.ones(len(self._target_positions), dtype=np.float32)
+            for cat, delta in zip(self.categories, deltas):
+                cell_weights[self._target_categories == cat] += float(delta)
+            cell_weights = np.maximum(cell_weights, 0.0)
+            if float(cell_weights.sum()) <= 0.0:
+                self._position_probs = self._uniform_position_probs()
+            else:
+                self._position_probs = cell_weights / cell_weights.sum()
 
         configured = self._configured_category_rates()
         total_actual = int(self.actual_counts.sum())
@@ -167,6 +213,8 @@ class AdaptiveTargetSpawnController:
             configured_rate={int(c): float(configured[i]) for i, c in enumerate(self.categories)},
             actual_count={int(c): int(v) for c, v in zip(self.categories, self.actual_counts)},
             actual_pct={int(c): float(v) for c, v in zip(self.categories, actual_pct)},
+            active_categories=tuple(int(c) for c in self.categories[: self.active_category_count]),
+            previous_active_categories=previous_active_categories,
         )
         self.spawn_counts[:] = 0
         self.success_counts[:] = 0
@@ -175,6 +223,86 @@ class AdaptiveTargetSpawnController:
 
     def _uniform_position_probs(self) -> np.ndarray:
         return np.full(len(self._target_positions), 1.0 / len(self._target_positions), dtype=np.float32)
+
+    def _hard_gate_position_probs(self) -> np.ndarray:
+        active = set(int(c) for c in self.categories[: self.active_category_count])
+        mask = np.asarray([int(c) in active for c in self._target_categories], dtype=bool)
+        dynamic_wall_segments = self.inactive_category_wall_segments()
+        if dynamic_wall_segments and self.map_def.target_wall_clearance > 0.0:
+            dynamic_safe = _points_clear_wall_segments(
+                self._target_positions,
+                dynamic_wall_segments,
+                clearance=float(self.map_def.target_wall_clearance),
+            )
+            mask &= dynamic_safe
+        probs = np.zeros(len(self._target_positions), dtype=np.float32)
+        count = int(mask.sum())
+        if count <= 0:
+            raise ValueError(
+                "adaptive hard-gate target spawning has no active positions after applying "
+                "dynamic wall clearance; reduce target_wall_clearance or adjust category blockage"
+            )
+        probs[mask] = 1.0 / float(count)
+        return probs
+
+
+    def exploration_reward_mask(self) -> np.ndarray:
+        """Return a 1 m-grid mask for cells eligible for exploration reward.
+
+        Hard-gate mode disables exploration reward only for currently inactive
+        target-spawn-valid cells. Cells excluded from target spawning (for
+        example no-spawn/exclude zones or wall-clearance rejects) remain
+        exploration-reward eligible regardless of the active path category.
+        The map coverage grid still updates normally; this mask only controls
+        the reward delta.
+        """
+        active = set(int(c) for c in self.categories[: self.active_category_count])
+        width = int(round(float(self.map_def.width)))
+        height = int(round(float(self.map_def.height)))
+        enabled = np.ones((width, height), dtype=bool)
+
+        valid_inactive = np.asarray([int(cat) not in active for cat in self._target_categories], dtype=bool)
+        inactive_positions = self._target_positions[valid_inactive]
+        if len(inactive_positions) > 0:
+            ix = np.clip(np.floor(inactive_positions[:, 0]).astype(np.int32), 0, width - 1)
+            iy = np.clip(np.floor(inactive_positions[:, 1]).astype(np.int32), 0, height - 1)
+            enabled[ix, iy] = False
+        return enabled
+
+
+    def inactive_category_wall_segments(self) -> list[list[float]]:
+        """Return cell-edge wall segments for inactive target-spawn-valid cells.
+
+        This mirrors the hard-gate spawn/reward mask domain: only cells that
+        contain valid target spawn coordinates for currently inactive categories
+        are blocked. Active-category cells and cells that were already excluded
+        from target spawning (for example base/no-spawn areas or wall-clearance
+        rejects) are intentionally left alone.
+        """
+        if self.mode != "hard_gate":
+            return []
+        active = set(int(c) for c in self.categories[: self.active_category_count])
+        existing = {_normalize_segment(seg) for seg in self.map_def.walls}
+        segments: list[list[float]] = []
+        seen: set[tuple[float, float, float, float]] = set()
+
+        inactive_target_cells = {
+            (int(cx), int(cy))
+            for (cx, cy), cat in zip(self._target_cells, self._target_categories)
+            if int(cat) not in active
+        }
+        for cx, cy in sorted(inactive_target_cells):
+            x0 = float(cx) * self.cell_w
+            x1 = float(cx + 1) * self.cell_w
+            y0 = float(cy) * self.cell_h
+            y1 = float(cy + 1) * self.cell_h
+            for seg in ([x0, y0, x1, y0], [x0, y1, x1, y1], [x0, y0, x0, y1], [x1, y0, x1, y1]):
+                key = _normalize_segment(seg)
+                if key in existing or key in seen:
+                    continue
+                seen.add(key)
+                segments.append(seg)
+        return segments
 
     def _configured_category_rates(self) -> np.ndarray:
         out = np.zeros(len(self.categories), dtype=np.float32)
@@ -253,4 +381,44 @@ def diagnostics_to_wandb(diag: AdaptiveSpawnDiagnostics) -> dict[str, float]:
         if cat in diag.actual_count:
             label = f"category_{cat:03d}"
             logs[f"actual count/spawn_actual_count/{label}"] = diag.actual_count[cat]
+        logs[f"adaptive_spawn_control/spawn_active/category_{cat:03d}"] = float(cat in diag.active_categories)
     return logs
+
+
+def _points_clear_wall_segments(
+    points: np.ndarray,
+    segments: list[list[float]],
+    clearance: float,
+) -> np.ndarray:
+    """Return True for points at least ``clearance`` metres from all segments."""
+    pts = np.asarray(points, dtype=np.float32)
+    if len(pts) == 0 or not segments or clearance <= 0.0:
+        return np.ones(len(pts), dtype=bool)
+    seg = np.asarray(segments, dtype=np.float32)
+    starts = seg[:, :2]
+    ends = seg[:, 2:4]
+    vec = ends - starts
+    denom = np.sum(vec * vec, axis=1)
+    safe = np.ones(len(pts), dtype=bool)
+    for i, p in enumerate(pts):
+        rel = p[None, :] - starts
+        t = np.divide(
+            np.sum(rel * vec, axis=1),
+            denom,
+            out=np.zeros_like(denom),
+            where=denom > 0.0,
+        )
+        t = np.clip(t, 0.0, 1.0)
+        closest = starts + t[:, None] * vec
+        dists = np.linalg.norm(closest - p[None, :], axis=1)
+        safe[i] = bool(np.all(dists >= clearance))
+    return safe
+
+
+def _normalize_segment(seg: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = (round(float(v), 6) for v in seg[:4])
+    a = (x1, y1)
+    b = (x2, y2)
+    if b < a:
+        x1, y1, x2, y2 = x2, y2, x1, y1
+    return (x1, y1, x2, y2)

@@ -65,7 +65,7 @@ from env.raycast import dda_raycast, get_ray_stencil, compute_local_visibility, 
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_env_fns(cfg: DictConfig):
+def make_env_fns(cfg: DictConfig, exploration_reward_mask=None, extra_walls=None):
     """
     Build pure environment functions closed over config scalars.
 
@@ -74,6 +74,9 @@ def make_env_fns(cfg: DictConfig):
     env_step        : (EnvState, actions (N,2)) -> EnvState
     reset           : (PRNGKey) -> EnvState
     update_coverage : (coverage_grid, pos, active) -> coverage_grid
+    exploration_reward_mask : optional (GW, GH) bool array. When provided,
+        coverage still updates normally but last_cov_delta only counts newly
+        covered cells where this mask is True.
     world_meta      : tuple (W, H, occ_grid, comm_occ_grid) - resolved box width, height,
                       physical occupancy grid, and communication occupancy grid
     """
@@ -131,7 +134,8 @@ def make_env_fns(cfg: DictConfig):
             map_def = MapDefinition.load(
                 map_path,
                 cell_size=1.0,
-                padding_radius=PAD_RADIUS
+                padding_radius=PAD_RADIUS,
+                extra_walls=extra_walls,
             )
             W, H = map_def.width, map_def.height
             if map_def.occupancy_grid is not None:
@@ -170,6 +174,10 @@ def make_env_fns(cfg: DictConfig):
 
     W, H = float(W), float(H)
     GW, GH = int(W / cell_size), int(H / cell_size)
+    if exploration_reward_mask is None:
+        coverage_reward_mask = jnp.ones((GW, GH), dtype=jnp.bool_)
+    else:
+        coverage_reward_mask = jnp.asarray(exploration_reward_mask, dtype=jnp.bool_)[:GW, :GH]
 
     if occ_grid is None:
         raise ValueError("Occupancy grid missing. A valid map MUST be loaded for physics.")
@@ -179,6 +187,8 @@ def make_env_fns(cfg: DictConfig):
 
     # Padding size in cells
     R_cells = int(PAD_RADIUS / cell_size) + 2
+    coverage_reward_mask_padded = jnp.zeros((GW + 2*R_cells, GH + 2*R_cells), dtype=jnp.bool_)
+    coverage_reward_mask_padded = coverage_reward_mask_padded.at[R_cells:R_cells+GW, R_cells:R_cells+GH].set(coverage_reward_mask)
     if padded_grid is None:
         raise ValueError("Padded occupancy grid missing. Map loading or padding logic failed.")
 
@@ -257,7 +267,6 @@ def make_env_fns(cfg: DictConfig):
         # is treated as already covered (delta = 0).
         cov_padded = jnp.ones((GW + 2*PAD, GH + 2*PAD), dtype=jnp.bool_)
         cov_padded = cov_padded.at[PAD:PAD+GW, PAD:PAD+GH].set(coverage_grid[:GW, :GH])
-
         def _update_one_drone(i, acc):
             acc_grid, cov_deltas = acc
             p_idx = g_indices[i] # world-relative grid index (0..GW, 0..GH)
@@ -278,8 +287,11 @@ def make_env_fns(cfg: DictConfig):
             old_region = jax.lax.dynamic_slice(acc_grid, slice_start, (L_size, L_size))
             merged = jnp.maximum(old_region, final_mask)
 
-            # Calculate how many new cells were covered
-            delta = jnp.sum(merged) - jnp.sum(old_region)
+            # Calculate how many newly covered cells are reward-eligible.
+            # The coverage grid itself still records all newly visible cells;
+            # this mask only gates exploration reward via last_cov_delta.
+            reward_region = jax.lax.dynamic_slice(coverage_reward_mask_padded, slice_start, (L_size, L_size))
+            delta = jnp.sum(merged & reward_region) - jnp.sum(old_region & reward_region)
             cov_deltas = cov_deltas.at[i].set(delta)
 
             return jax.lax.dynamic_update_slice(acc_grid, merged, slice_start), cov_deltas
@@ -523,9 +535,22 @@ def make_env_fns(cfg: DictConfig):
 
         delivery_freeze = bool(cfg.reward.get("target_found_requires_delivery", True))
         delivered_now = (~state.base_target_known) & new_base_target_known
+        delivered_known_path = known_valid & new_target_known & (new_base_target_known | state.base_target_known)
+        base_delivery_candidates = delivered_known_path & is_conn_base
+        # Normally the global finder path freezes on the exact delivery step from
+        # a base-connected target-knowing reporter.  Keep a defensive fallback for
+        # resumed/eval trajectories where the base-delivery transition may have
+        # occurred before renderer-relevant state was sampled: once the base knows
+        # the target, freeze from any preserved known path instead of leaving the
+        # visual/reward path permanently invalid.
+        delivery_candidates = jnp.where(
+            delivered_now & jnp.any(base_delivery_candidates),
+            base_delivery_candidates,
+            delivered_known_path,
+        )
         freeze_candidates = jnp.where(
             delivery_freeze,
-            known_valid & is_conn_base & new_target_known & delivered_now,
+            delivery_candidates,
             direct_valid,
         )
         first_find_now = (~state.finders_path_valid) & jnp.any(freeze_candidates)
