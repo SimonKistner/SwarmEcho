@@ -28,7 +28,7 @@ SwarmEcho/
 │   ├── models/               ← MARL network architectures (MAPPO, IPPO)
 │   ├── tests/                ← Environment smoke tests
 │   ├── training/             ← PPO trainers, rollout buffers, and runners
-│   └── visualize/            ← Video renderers (OpenCV, Matplotlib)
+│   └── visualize/            ← OpenCV video rendering
 └── README.md
 ```
 
@@ -76,10 +76,10 @@ uv run python src/training/train.py level=00
 uv run python src/training/train.py level=01 training.num_envs=512 logging.wandb_mode=online
 ```
 
-### 4. Architectural Map Builder
-Launch the Streamlit-based architectural designer to create new drone environments.
+### 4. 2D Grid Maze Builder
+Launch the browser-based grid editor to draw maze walls and target no-spawn cells.
 ```bash
-uv run streamlit run src/curriculum_config/maps/scripts/map_builder.py
+uv run python src/curriculum_config/maps/scripts/maze_builder/maze_builder_server.py
 ```
 
 
@@ -102,7 +102,7 @@ uv run streamlit run src/analysis/dashboard.py
 To maintain a clean separation of concerns, all deep-dive technical details have been modularized and moved into the `docs/` folder, directly mirroring the `src/` codebase structure:
 
 1. **[01_system_overview.md](docs/01_system_overview.md)**: High-level CTDE architectural layout and JAX `vmap` logic.
-2. **[02_configuration_guide.md](docs/02_configuration_guide.md)**: The single source of truth for global parameters (`base_params.yaml`), map curriculum scale up, and the visual Map Builder.
+2. **[02_configuration_guide.md](docs/02_configuration_guide.md)**: The single source of truth for global parameters, curriculum scale up, and map geometry.
 3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Deep dive into the 57-dimensional observation space, Euler physics, and continuous action clipping.
 4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
 5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.

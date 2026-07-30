@@ -1,479 +1,378 @@
 """
-training/grid_search.py
-=======================
-Sequentially launches SwarmEcho training runs for a grid of memory
-communication hyperparameters.
-Terminates each run after a 20-minute wallclock timeout, logging and parsing 
-the results to compare exploration performance (map coverage, target found) 
-across configurations.
+General sequential grid search for SwarmEcho training configurations.
 
-Only the memory-communication architecture knobs are swept here; training
-batching and PPO schedule values come from the selected level/config.
+Examples
+--------
+Sweep two training parameters:
+
+    uv run python src/training/grid_search.py M04_tiny_grid_maze \
+        --grid training.lr=0.0001,0.0003 \
+        --grid training.ent_coef=0.0,0.01
+
+Add fixed overrides, randomise run order, and cap each run at 20 minutes:
+
+    uv run python src/training/grid_search.py M04_tiny_grid_maze \
+        --name m04_optimizer \
+        --grid training.lr=0.0001,0.0003 \
+        --grid training.num_epochs=1,5 \
+        --set evaluation.eval_video=false \
+        --shuffle \
+        --timeout-seconds 1200
+
+Each ``--grid`` value is passed directly as an OmegaConf/Hydra override.
+Results are resumable and written to ``outputs/grid_search_<name>.json`` plus
+a human-readable Markdown summary.
 """
 
-import sys
-from pathlib import Path
+from __future__ import annotations
+
+import argparse
+import hashlib
 import itertools
-import subprocess
-import time
-import re
-import random
-import queue
-import threading
+import json
 import os
+import queue
+import random
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 
-# Add src/ to Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# --- Grid Parameters (Constants) ---
-MEM_SHARE_COMM_MERGES = ["residual", "concat"]
-MEM_SHARE_COMM_ATTENTION_MODES = [
-    "attend_global_learned_query",
-    "attend_cur_obs_query",
-    "attend_mem_query",
-    "attend_cur_obs_and_mem_query",
-]
-MEM_SHARE_COMM_GRADIENT_MODES = ["rial", "dial"]
+def _safe_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_.-")
+    return cleaned or "search"
 
-TIMEOUT_SECONDS = None  # Disabled (no wallclock limit) 
 
-def shorten_comm_mode(value):
-    return {
-        "residual": "res",
-        "concat": "cat",
-        "attend_global_learned_query": "gq",
-        "attend_cur_obs_query": "obsq",
-        "attend_mem_query": "memq",
-        "attend_cur_obs_and_mem_query": "obsmemq",
-        "rial": "rial",
-        "dial": "dial",
-    }[value]
+def _parse_assignment(text: str, *, multiple_values: bool) -> tuple[str, list[str]]:
+    if "=" not in text:
+        raise argparse.ArgumentTypeError(f"Expected KEY=VALUE, received: {text!r}")
+    key, raw_value = text.split("=", 1)
+    key = key.strip()
+    if not key or "." not in key:
+        raise argparse.ArgumentTypeError(
+            f"Configuration key must include its section, for example training.lr: {key!r}"
+        )
+    values = [value.strip() for value in raw_value.split(",")] if multiple_values else [raw_value.strip()]
+    if any(value == "" for value in values):
+        raise argparse.ArgumentTypeError(f"Empty value in assignment: {text!r}")
+    return key, values
 
-def format_duration(seconds):
-    h, r = divmod(int(seconds), 3600)
-    m, s = divmod(r, 60)
-    if h > 0:
-        return f"{h}h{m:02d}m"
-    if m > 0:
-        return f"{m}m{s:02d}s"
-    return f"{s}s"
 
-def enqueue_output(out, q):
-    for line in iter(out.readline, ''):
-        q.put(line)
-    out.close()
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a general SwarmEcho configuration grid search.")
+    parser.add_argument("level", help="Level name passed as level=<name> to train.py.")
+    parser.add_argument(
+        "--grid",
+        action="append",
+        required=True,
+        metavar="KEY=V1,V2",
+        help="Repeatable parameter axis. Values are comma-separated.",
+    )
+    parser.add_argument(
+        "--set",
+        dest="fixed_overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable fixed override applied to every run.",
+    )
+    parser.add_argument("--name", help="Search/output name; defaults to the level name.")
+    parser.add_argument("--timeout-seconds", type=float, default=None, help="Per-run wall-clock limit.")
+    parser.add_argument("--total-timesteps", type=int, help="Override training.total_timesteps for every run.")
+    parser.add_argument("--shuffle", action="store_true", help="Shuffle pending combinations.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed used for --shuffle.")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without launching training.")
+    args = parser.parse_args()
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
+    if args.total_timesteps is not None and args.total_timesteps <= 0:
+        parser.error("--total-timesteps must be positive")
+    return args
 
-def run_command_realtime_logging(cmd, timeout_seconds):
-    # Set PYTHONUNBUFFERED=1 environment variable to force real-time flushing
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    
+
+def _build_spec(args: argparse.Namespace) -> tuple[dict[str, list[str]], list[str]]:
+    axes: dict[str, list[str]] = {}
+    for text in args.grid:
+        key, values = _parse_assignment(text, multiple_values=True)
+        if key in axes:
+            raise ValueError(f"Duplicate --grid key: {key}")
+        axes[key] = values
+
+    fixed: list[str] = []
+    fixed_keys: set[str] = set()
+    for text in args.fixed_overrides:
+        key, values = _parse_assignment(text, multiple_values=False)
+        if key in axes:
+            raise ValueError(f"{key} cannot be both --grid and --set")
+        if key in fixed_keys:
+            raise ValueError(f"Duplicate --set key: {key}")
+        fixed_keys.add(key)
+        fixed.append(f"{key}={values[0]}")
+    return axes, fixed
+
+
+def _combo_id(combo: dict[str, str]) -> str:
+    payload = json.dumps(combo, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def _format_duration(seconds: float) -> str:
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _enqueue_output(stream, output_queue: queue.Queue[str]) -> None:
+    for line in iter(stream.readline, ""):
+        output_queue.put(line)
+    stream.close()
+
+
+def _run_command(cmd: list[str], timeout_seconds: float | None) -> tuple[str, bool, int | None]:
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=env
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
-    
-    q = queue.Queue()
-    t = threading.Thread(target=enqueue_output, args=(process.stdout, q))
-    t.daemon = True
-    t.start()
-    
-    output_lines = []
-    start_time = time.perf_counter()
+    output_queue: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(target=_enqueue_output, args=(process.stdout, output_queue), daemon=True)
+    reader.start()
+
+    output: list[str] = []
+    started = time.perf_counter()
     timed_out = False
-    
     try:
         while True:
             try:
-                line = q.get(timeout=1.0)
+                line = output_queue.get(timeout=1.0)
                 sys.stdout.write(line)
                 sys.stdout.flush()
-                output_lines.append(line)
+                output.append(line)
             except queue.Empty:
-                # Check if the process has terminated naturally
                 if process.poll() is not None:
                     break
-                    
-            elapsed = time.perf_counter() - start_time
-            if timeout_seconds is not None and elapsed > timeout_seconds:
+            if timeout_seconds is not None and time.perf_counter() - started > timeout_seconds:
                 timed_out = True
-                print(f"\n⚠️ Run exceeded timeout limit of {format_duration(timeout_seconds)}. Terminating...")
                 process.terminate()
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    print("⚠️ Process did not exit cleanly. Force killing...")
                     process.kill()
                 break
     except KeyboardInterrupt:
-        print("\n🛑 KeyboardInterrupt caught. Terminating child process...")
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            print("⚠️ Process did not exit cleanly on interrupt. Force killing...")
             process.kill()
         raise
-            
-    # Drain any remaining output from the queue
-    while not q.empty():
-        try:
-            line = q.get_nowait()
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            output_lines.append(line)
-        except queue.Empty:
-            break
-            
-    return_code = process.poll()
-    full_output = "".join(output_lines)
-    
-    return full_output, timed_out, return_code
 
-def extract_oom_size(output_text: str) -> str | None:
-    # JAX OOM pattern: "trying to allocate 49.49GiB" or similar
-    pattern = r"(?:trying to allocate|allocate)\s+([\d\.]+\s*(?:GiB|MiB|KiB|B|GB|MB|KB))"
-    match = re.search(pattern, output_text, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    if "RESOURCE_EXHAUSTED" in output_text or "Out of memory" in output_text:
-        return "Unknown Size"
-    return None
+    while not output_queue.empty():
+        line = output_queue.get_nowait()
+        sys.stdout.write(line)
+        output.append(line)
+    return "".join(output), timed_out, process.poll()
 
-def parse_metrics(output_text: str):
-    stats = {
+
+def _parse_metrics(output: str) -> dict:
+    metrics = {
         "steps": 0,
         "sps": 0.0,
         "ep_return": "----",
-        "cov": "----",
+        "coverage": "----",
         "found": "----",
-        "chain": "---%",
-        "succ": "----"
+        "success": "----",
     }
-    
-    lines = output_text.splitlines()
-    
-    # Parse last printed PPO logging output
+    lines = output.splitlines()
     for line in reversed(lines):
         if "steps=" in line and "sps=" in line:
-            m_steps = re.search(r"steps=\s*([\d,]+)", line)
-            if m_steps:
-                stats["steps"] = int(m_steps.group(1).replace(",", ""))
-            m_sps = re.search(r"sps=\s*([\d,]+)", line)
-            if m_sps:
-                stats["sps"] = float(m_sps.group(1).replace(",", ""))
-            m_cov = re.search(r"cov=\s*([^\s]+)", line)
-            if m_cov:
-                stats["cov"] = m_cov.group(1)
-            m_found = re.search(r"found=\s*([^\s]+)", line)
-            if m_found:
-                stats["found"] = m_found.group(1)
-            m_chain = re.search(r"chain=\s*([^\s]+)", line)
-            if m_chain:
-                stats["chain"] = m_chain.group(1)
-            m_succ = re.search(r"succ=\s*([^\s]+)", line)
-            if m_succ:
-                stats["succ"] = m_succ.group(1)
+            patterns = {
+                "steps": r"steps=\s*([\d,]+)",
+                "sps": r"sps=\s*([\d,]+)",
+                "coverage": r"cov=\s*([^\s]+)",
+                "found": r"found=\s*([^\s]+)",
+                "success": r"succ=\s*([^\s]+)",
+            }
+            for key, pattern in patterns.items():
+                match = re.search(pattern, line)
+                if match:
+                    value = match.group(1)
+                    if key == "steps":
+                        metrics[key] = int(value.replace(",", ""))
+                    elif key == "sps":
+                        metrics[key] = float(value.replace(",", ""))
+                    else:
+                        metrics[key] = value
             break
-            
-    # Parse last eval log for ep_return
     for line in reversed(lines):
         if "[eval]" in line and "ep_return=" in line:
-            m_ret = re.search(r"ep_return=\s*([-\d\.]+)", line)
-            if m_ret:
-                stats["ep_return"] = m_ret.group(1)
-            break
-            
-    return stats
-
-def write_summary_markdown(level, results):
-    def get_sort_key(res):
-        try:
-            cov_str = res["metrics"]["cov"]
-            cov_val = float(cov_str.replace("%", "")) if cov_str != "----" else -1.0
-        except ValueError:
-            cov_val = -1.0
-            
-        is_oom = (res["status"] == "OOM")
-        
-        oom_bytes = 0.0
-        if is_oom:
-            details = res["details"]
-            match = re.search(r"Allocation failed:\s*([\d\.]+)\s*(GiB|MiB|KiB|B|GB|MB|KB)", details, re.IGNORECASE)
+            match = re.search(r"ep_return=\s*([-\d.]+)", line)
             if match:
-                val = float(match.group(1))
-                unit = match.group(2).lower()
-                if "g" in unit:
-                    oom_bytes = val * 1024 * 1024 * 1024
-                elif "m" in unit:
-                    oom_bytes = val * 1024 * 1024
-                elif "k" in unit:
-                    oom_bytes = val * 1024
-                else:
-                    oom_bytes = val
-            else:
-                oom_bytes = 999999999999.0
-                
-        return (cov_val, -1.0 if is_oom else 0.0, -oom_bytes)
-        
-    sorted_results = sorted(results, key=get_sort_key, reverse=True)
-    
-    summary_path = Path("outputs") / f"grid_search_{level}_summary.md"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write(f"# Grid Search Results for Level: {level}\n\n")
-        f.write(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        f.write("Runs are sorted by **Map Coverage** (descending). OOMs at the bottom are sorted by allocation size (ascending).\n\n")
-        f.write("| Rank | Run Name | Comm Merge | Attention Mode | Gradient Mode | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |\n")
-        f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
-        for rank, res in enumerate(sorted_results, 1):
-            run_name = res["run_name"]
-            comm_merge = res.get("comm_merge", "-")
-            attention_mode = res.get("attention_mode", "-")
-            gradient_mode = res.get("gradient_mode", "-")
-            status = res["status"]
-            steps_done = f"{res['metrics']['steps']:,}"
-            sps = f"{res['metrics']['sps']:,.0f}" if res['metrics']['sps'] > 0 else "----"
-            cov = res["metrics"]["cov"]
-            found = res["metrics"]["found"]
-            succ = res["metrics"]["succ"]
-            ret = res["metrics"]["ep_return"]
-            details = res["details"]
-            
-            f.write(f"| {rank} | `{run_name}` | {comm_merge} | {attention_mode} | {gradient_mode} | **{status}** | {steps_done} | {sps} | {cov} | {found} | {succ} | {ret} | {details} |\n")
+                metrics["ep_return"] = match.group(1)
+            break
+    return metrics
 
-def load_existing_results(level):
-    results = []
-    summary_path = Path("outputs") / f"grid_search_{level}_summary.md"
-    if not summary_path.exists():
-        return results
-        
-    try:
-        with open(summary_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            
-        for line in lines:
-            line = line.strip()
-            if not line.startswith("|") or "Rank" in line or set(line.replace(" ", "")).issubset({"|", "-", ":"}):
-                continue
-            parts = [p.strip() for p in line.split("|")]
-            # Format: | Rank | Run Name | Comm Merge | Attention Mode | Gradient Mode | Status | Steps | SPS | Map Coverage | Target Found | Success Rate | Eval Return | Details |
-            if len(parts) < 15:
-                continue
-            
-            run_name = parts[2].strip("`")
-            if not run_name.startswith(f"grid_{level}_"):
-                continue
 
-            comm_merge = parts[3]
-            attention_mode = parts[4]
-            gradient_mode = parts[5]
-            if (
-                comm_merge not in MEM_SHARE_COMM_MERGES
-                or attention_mode not in MEM_SHARE_COMM_ATTENTION_MODES
-                or gradient_mode not in MEM_SHARE_COMM_GRADIENT_MODES
-            ):
-                continue
-            status_idx = 6
-            status = parts[status_idx].strip("*")
-            
-            raw_steps = parts[status_idx + 1].replace(",", "")
-            steps_done = int(raw_steps) if raw_steps.isdigit() else 0
-            
-            raw_sps = parts[status_idx + 2].replace(",", "")
-            sps = float(raw_sps) if raw_sps.replace(".", "", 1).isdigit() else 0.0
-            
-            cov = parts[status_idx + 3]
-            found = parts[status_idx + 4]
-            succ = parts[status_idx + 5]
-            ret = parts[status_idx + 6]
-            details = parts[status_idx + 7]
-            
-            results.append({
+def _failure_status(output: str, return_code: int | None) -> tuple[str, str]:
+    allocation = re.search(
+        r"(?:trying to allocate|allocate)\s+([\d.]+\s*(?:GiB|MiB|KiB|B|GB|MB|KB))",
+        output,
+        re.IGNORECASE,
+    )
+    if allocation or "RESOURCE_EXHAUSTED" in output or "Out of memory" in output:
+        return "OOM", f"Allocation failed: {allocation.group(1) if allocation else 'unknown size'}"
+    if "ValueError" in output:
+        return "INVALID_CONFIG", "Validation ValueError"
+    return "FAILED", f"Exit code {return_code}"
+
+
+def _write_outputs(path_base: Path, payload: dict) -> None:
+    path_base.parent.mkdir(parents=True, exist_ok=True)
+    json_path = path_base.with_suffix(".json")
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    axes = list(payload["axes"])
+    results = payload["results"]
+
+    def coverage_key(result: dict) -> float:
+        raw = str(result["metrics"]["coverage"]).replace("%", "")
+        try:
+            return float(raw)
+        except ValueError:
+            return -1.0
+
+    lines = [
+        f"# Grid Search: {payload['name']}",
+        "",
+        f"Level: `{payload['level']}`",
+        "",
+        "| Rank | Run | " + " | ".join(axes) + " | Status | Steps | SPS | Coverage | Found | Success | Eval Return | Details |",
+        "|---|---|" + "---|" * len(axes) + "---|---|---|---|---|---|---|---|",
+    ]
+    for rank, result in enumerate(sorted(results, key=coverage_key, reverse=True), 1):
+        values = " | ".join(str(result["combo"][key]).replace("|", "\\|") for key in axes)
+        metrics = result["metrics"]
+        lines.append(
+            f"| {rank} | `{result['run_name']}` | {values} | **{result['status']}** | "
+            f"{metrics['steps']:,} | {metrics['sps']:,.0f} | {metrics['coverage']} | "
+            f"{metrics['found']} | {metrics['success']} | {metrics['ep_return']} | {result['details']} |"
+        )
+    path_base.with_suffix(".md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    args = _parse_args()
+    axes, fixed = _build_spec(args)
+    search_name = _safe_name(args.name or args.level)
+    output_base = Path("outputs") / f"grid_search_{search_name}"
+    spec = {
+        "name": search_name,
+        "level": args.level,
+        "axes": axes,
+        "fixed_overrides": fixed,
+        "total_timesteps": args.total_timesteps,
+    }
+
+    payload = {**spec, "results": []}
+    json_path = output_base.with_suffix(".json")
+    if json_path.exists():
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        existing_spec = {key: payload.get(key) for key in spec}
+        if existing_spec != spec:
+            raise ValueError(
+                f"Existing search {json_path} has a different specification. "
+                "Choose another --name or restore the original grid."
+            )
+
+    axis_names = list(axes)
+    combinations = [
+        dict(zip(axis_names, values))
+        for values in itertools.product(*(axes[key] for key in axis_names))
+    ]
+    completed_ids = {result["combo_id"] for result in payload["results"]}
+    pending = [combo for combo in combinations if _combo_id(combo) not in completed_ids]
+    if args.shuffle:
+        random.Random(args.seed).shuffle(pending)
+
+    print(f"Grid search: {search_name}")
+    print(f"Level: {args.level}")
+    print(f"Total combinations: {len(combinations)}")
+    print(f"Already completed: {len(completed_ids)}")
+    print(f"Pending: {len(pending)}")
+
+    for index, combo in enumerate(pending, 1):
+        combo_id = _combo_id(combo)
+        run_name = f"grid_{search_name}_{combo_id}"
+        overrides = [f"{key}={value}" for key, value in combo.items()]
+        cmd = [
+            "uv",
+            "run",
+            "python",
+            "-u",
+            "src/training/train.py",
+            f"level={args.level}",
+            f"logging.run_name={run_name}",
+            f"logging.wandb_group=grid_search_{search_name}",
+            "logging.use_timestamp_postfix=false",
+            *fixed,
+            *overrides,
+        ]
+        if args.total_timesteps is not None:
+            cmd.append(f"training.total_timesteps={args.total_timesteps}")
+
+        print(f"\n[{index}/{len(pending)}] {run_name}")
+        print("  " + " ".join(overrides))
+        if args.dry_run:
+            print("  " + subprocess.list2cmdline(cmd))
+            continue
+
+        started = time.perf_counter()
+        try:
+            output, timed_out, return_code = _run_command(cmd, args.timeout_seconds)
+        except KeyboardInterrupt:
+            print("\nGrid search interrupted; completed results were already saved.")
+            return
+
+        metrics = _parse_metrics(output)
+        if timed_out:
+            status = "TIMEOUT"
+            details = f"Exceeded {_format_duration(args.timeout_seconds)}"
+        elif return_code == 0:
+            status = "SUCCESS"
+            details = "Completed budget or early exit"
+        else:
+            status, details = _failure_status(output, return_code)
+
+        payload["results"].append(
+            {
+                "combo_id": combo_id,
+                "combo": combo,
                 "run_name": run_name,
-                "comm_merge": comm_merge,
-                "attention_mode": attention_mode,
-                "gradient_mode": gradient_mode,
                 "status": status,
                 "details": details,
-                "metrics": {
-                    "steps": steps_done,
-                    "sps": sps,
-                    "ep_return": ret,
-                    "cov": cov,
-                    "found": found,
-                    "chain": "---%",
-                    "succ": succ
-                }
-            })
-    except Exception as e:
-        print(f"⚠️ Warning: Failed to parse existing summary file: {e}. Starting fresh.")
-        results = []
-        
-    return results
-
-def print_progress_bar(completed, total, elapsed_time, session_completed):
-    percent = (completed / total) * 100
-    bar_length = 20
-    filled_length = int(bar_length * completed // total)
-    bar = "█" * filled_length + "-" * (bar_length - filled_length)
-    
-    if session_completed > 0:
-        avg_time = elapsed_time / session_completed
-        remaining = total - completed
-        eta_seconds = avg_time * remaining
-        eta_str = format_duration(eta_seconds)
-    else:
-        eta_str = "----"
-    
-    print("\n" + "=" * 80)
-    print(f"GRID SEARCH PROGRESS: [{bar}] {percent:.1f}% ({completed}/{total} Runs Completed)")
-    print(f"Session Elapsed Time: {format_duration(elapsed_time)} | ETA: {eta_str}")
-    print("=" * 80 + "\n")
-
-def run_benchmarks():
-    # Parse CLI Arguments
-    level = "MEM_SHARE_T8_memory_comm"
-    extra_args = []
-    if len(sys.argv) > 1:
-        if "=" not in sys.argv[1]:
-            level = sys.argv[1]
-            extra_args = sys.argv[2:]
-        else:
-            extra_args = sys.argv[1:]
-
-    # Generate all memory-communication combinations. The old batching/PPO
-    # hyperparameter grid intentionally is not searched here.
-    combinations = list(itertools.product(
-        MEM_SHARE_COMM_MERGES,
-        MEM_SHARE_COMM_ATTENTION_MODES,
-        MEM_SHARE_COMM_GRADIENT_MODES,
-    ))
-    total_runs = len(combinations)
-    
-    # Load already-completed results to support resume functionality
-    results = load_existing_results(level)
-    completed_combos = {
-        (r.get("comm_merge", "-"), r.get("attention_mode", "-"), r.get("gradient_mode", "-"))
-        for r in results
-    }
-    
-    # Filter remaining combinations
-    remaining_combinations = [c for c in combinations if c not in completed_combos]
-    
-    # Randomly shuffle remaining runs as requested
-    random.shuffle(remaining_combinations)
-    
-    print(f"🚀 Starting/Resuming memory-communication grid search for Level: {level}")
-    print(f"   Total valid combinations in grid : {total_runs}")
-    print(f"   Completed in previous runs       : {len(completed_combos)}")
-    print(f"   Remaining runs to evaluate       : {len(remaining_combinations)}")
-    print("=" * 80)
-    
-    if len(remaining_combinations) == 0:
-        print("✅ All combinations have already been completed!")
-        return
-        
-    session_completed = 0
-    start_session_time = time.perf_counter()
-    
-    for comm_merge, attention_mode, gradient_mode in remaining_combinations:
-        run_name = (
-            f"grid_{level}"
-            f"_{shorten_comm_mode(comm_merge)}"
-            f"_{shorten_comm_mode(attention_mode)}"
-            f"_{shorten_comm_mode(gradient_mode)}"
+                "duration_seconds": round(time.perf_counter() - started, 3),
+                "metrics": metrics,
+            }
         )
-        
-        current_idx = len(results) + 1
-        print(f"\n[{current_idx}/{total_runs}] Launching run: {run_name}")
-        print(f"          Comm Merge   : {comm_merge} | Attention : {attention_mode} | Gradient : {gradient_mode}")
-        print("-" * 80)
-        
-        # Build training CLI command with python -u to ensure unbuffered stdout
-        cmd = [
-            "uv", "run", "python", "-u", "src/training/train.py",
-            f"level={level}",
-            "training.total_timesteps=50000000",  # prevent natural exit
-            f"logging.run_name={run_name}",
-            f"logging.wandb_group=grid_search_{level}",
-            "logging.use_timestamp_postfix=False",
-            "network.tarmac_sig_dim=64",
-            "network.tarmac_val_dim=128",
-            "network.tarmac_include_self=True",
-        ]
-        
-        cmd.extend(extra_args)
-        
-        status = "UNKNOWN"
-        details = "-"
-        metrics = {
-            "steps": 0,
-            "sps": 0.0,
-            "ep_return": "----",
-            "cov": "----",
-            "found": "----",
-            "chain": "---%",
-            "succ": "----"
-        }
-        
-        try:
-            full_output, timed_out, return_code = run_command_realtime_logging(cmd, TIMEOUT_SECONDS)
-            metrics = parse_metrics(full_output)
-            
-            if timed_out:
-                status = "TIMEOUT"
-                details = f"Reached {format_duration(TIMEOUT_SECONDS)} wallclock limit"
-                print(f"✅ {run_name} timed out after the limit.")
-            elif return_code == 0:
-                status = "SUCCESS"
-                details = "Completed budget or early exit"
-                print(f"✅ {run_name} completed successfully.")
-            else:
-                oom_size = extract_oom_size(full_output)
-                if oom_size:
-                    status = "OOM"
-                    details = f"Allocation failed: {oom_size}"
-                    print(f"❌ {run_name} failed with Out Of Memory. Size: {oom_size}")
-                elif "ValueError" in full_output:
-                    status = "INVALID_CONFIG"
-                    details = "Validation ValueError"
-                    print(f"❌ {run_name} failed with config validation error.")
-                else:
-                    status = "FAILED"
-                    details = f"Exit code {return_code}"
-                    print(f"❌ {run_name} crashed (exit code {return_code}).")
-                    
-        except KeyboardInterrupt:
-            print("\n🛑 Grid search manually interrupted by user. Exiting.")
-            sys.exit(0)
-        except Exception as e:
-            status = "ERROR"
-            details = str(e)
-            print(f"❌ {run_name} encountered execution error: {e}")
-            
-        results.append({
-            "run_name": run_name,
-            "comm_merge": comm_merge,
-            "attention_mode": attention_mode,
-            "gradient_mode": gradient_mode,
-            "status": status,
-            "details": details,
-            "metrics": metrics
-        })
-        
-        session_completed += 1
-        
-        # Update Markdown table in real-time
-        write_summary_markdown(level, results)
-        
-        # Print progress bar and ETA
-        elapsed_session = time.perf_counter() - start_session_time
-        print_progress_bar(len(results), total_runs, elapsed_session, session_completed)
+        _write_outputs(output_base, payload)
+        print(f"{status}: {details}")
+
+    if args.dry_run:
+        print("\nDry run only; no result files were written.")
+    else:
+        _write_outputs(output_base, payload)
+        print(f"\nResults: {output_base.with_suffix('.md')}")
+
 
 if __name__ == "__main__":
-    run_benchmarks()
+    main()

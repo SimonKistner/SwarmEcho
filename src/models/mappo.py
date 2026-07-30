@@ -3,9 +3,8 @@ swarmecho/models/mappo.py
 ==========================
 MAPPO model wrapper for SwarmEcho.
 
-Holds a DecentralizedActor and one of two critic variants, selected via config:
-  - "agent_centric"  (default) : AgentCentricCritic → V_i per agent  (..., N)
-  - "global_mean"              : GlobalMeanCritic   → scalar V        (...,)
+Holds a DecentralizedActor and an AgentCentricCritic that returns one value
+per agent.
 
 Optional recurrent actor and critic paths are selected by config flags. When
 disabled, the architecture and call contract are the original feed-forward MAPPO.
@@ -26,7 +25,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from models.actor import DecentralizedActor, RecurrentDecentralizedActor
-from models.critic import AgentCentricCritic, GlobalMeanCritic, RecurrentAgentCentricCritic
+from models.critic import AgentCentricCritic, RecurrentAgentCentricCritic
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +44,6 @@ class MAPPOModel(nnx.Module):
     hidden_dim       : hidden layer width (shared by actor and critic)
     num_layers       : number of hidden layers in the CRITIC
     actor_num_layers : number of hidden layers in the ACTOR (recommended: 2)
-    critic_type      : "agent_centric" | "global_mean"
     actor_memory     : if True, use a per-agent GRU actor
     critic_memory    : if True, use a per-agent GRU agent-centric critic
     rngs             : Flax NNX RNG state
@@ -59,7 +57,6 @@ class MAPPOModel(nnx.Module):
         hidden_dim:       int,
         num_layers:       int,
         actor_num_layers: int,
-        critic_type:      str,
         rngs:             nnx.Rngs,
         actor_memory:     bool = False,
         critic_memory:    bool = False,
@@ -73,7 +70,6 @@ class MAPPOModel(nnx.Module):
         self.obs_dim     = obs_dim
         self.act_dim     = act_dim
         self.hidden_dim  = hidden_dim
-        self.critic_type = critic_type
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
         self.memory_comm_enabled = memory_comm_enabled
@@ -104,34 +100,19 @@ class MAPPOModel(nnx.Module):
                 rngs             = rngs,
             )
 
-        if critic_memory and critic_type != "agent_centric":
-            raise ValueError("critic_memory=True requires critic_type='agent_centric'.")
-
-        if critic_type == "agent_centric" and critic_memory:
+        if critic_memory:
             self.critic = RecurrentAgentCentricCritic(
                 obs_dim    = obs_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
                 rngs       = rngs,
             )
-        elif critic_type == "agent_centric":
+        else:
             self.critic = AgentCentricCritic(
                 obs_dim    = obs_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
                 rngs       = rngs,
-            )
-        elif critic_type == "global_mean":
-            self.critic = GlobalMeanCritic(
-                obs_dim    = obs_dim,
-                hidden_dim = hidden_dim,
-                num_layers = num_layers,
-                rngs       = rngs,
-            )
-        else:
-            raise ValueError(
-                f"Unknown critic_type '{critic_type}'. "
-                "Expected 'agent_centric' or 'global_mean'."
             )
 
     # ── Convenience wrappers ────────────────────────────────────────────────
@@ -146,8 +127,7 @@ class MAPPOModel(nnx.Module):
 
         Returns
         -------
-        agent_centric : (..., N)  — one value per agent
-        global_mean   : (...,)    — one value for the team
+        (..., N) — one value per agent
         """
         if self.critic_memory:
             hidden = self.initial_critic_hidden(all_obs.shape[:-2])
@@ -205,7 +185,7 @@ class MAPPOModel(nnx.Module):
         -------
         actions   : (N, act_dim)  — pre-squash u values
         log_probs : (N,)          — Gaussian log-prob on u
-        value     : (N,) for agent_centric  |  () for global_mean
+        value     : (N,)
         """
         def _act_one(obs_i, key_i):
             a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
@@ -305,7 +285,6 @@ if __name__ == "__main__":
     print(f"  obs_dim        : {obs_dim}")
     print(f"  act_dim        : {act_dim}")
     print(f"  N              : {N}")
-    print(f"  critic_type    : {cfg.network.critic_type}")
     print(f"  actor_layers   : {cfg.network.actor_num_layers}")
     print(f"  critic_layers  : {cfg.network.num_layers}")
     print(f"  actor_memory   : {cfg.network.get('actor_memory', False)}")
@@ -319,7 +298,6 @@ if __name__ == "__main__":
         hidden_dim       = int(cfg.network.hidden_dim),
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
-        critic_type      = str(cfg.network.critic_type),
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
@@ -342,10 +320,7 @@ if __name__ == "__main__":
 
     assert acts.shape == (N, act_dim), f"actions shape {acts.shape}"
     assert lps.shape  == (N,),         f"log_probs shape {lps.shape}"
-    if str(cfg.network.critic_type) == "agent_centric":
-        assert val.shape == (N,), f"value shape {val.shape} (expected ({N},))"
-    else:
-        assert val.shape == (), f"value shape {val.shape} (expected ())"
+    assert val.shape == (N,), f"value shape {val.shape} (expected ({N},))"
     print(f"  rollout_step : acts={acts.shape} lps={lps.shape} val={val.shape}  ✓")
 
     # Action normalisation check — acts are pre-squash u; squashed = tanh(u) must be in (-1, 1)
@@ -356,10 +331,7 @@ if __name__ == "__main__":
     # Batched get_value
     obs_batch  = jnp.zeros((8, N, obs_dim))
     vals_batch = model.get_value(obs_batch)
-    if str(cfg.network.critic_type) == "agent_centric":
-        assert vals_batch.shape == (8, N), f"batched value shape {vals_batch.shape}"
-    else:
-        assert vals_batch.shape == (8,), f"batched value shape {vals_batch.shape}"
+    assert vals_batch.shape == (8, N), f"batched value shape {vals_batch.shape}"
     print(f"  get_value batch: {vals_batch.shape}  ✓")
 
     print("\nMAPPOModel self-test passed ✓")

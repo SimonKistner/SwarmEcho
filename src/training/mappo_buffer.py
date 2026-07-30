@@ -1,18 +1,11 @@
 """
 swarmecho/training/mappo_buffer.py
 =====================================
-Rollout buffer for MAPPO — supports both critic variants.
+Rollout buffer for agent-centric MAPPO.
 
-per_agent=False  (GlobalMeanCritic)
-  values shape : (T, E)         — one centralised value per env
-  GAE output   : advantages/returns (T, E)
-
-per_agent=True   (AgentCentricCritic)
-  values shape : (T, E, N)      — one value per agent per env
-  GAE output   : advantages/returns (T, E, N)
-  Shared reward (E,) is broadcast to (E, 1) → each agent sees the same
-  team reward but has its own value baseline → learns from its own
-  geometric perspective on the global signal.
+Values, advantages, and returns have shape (T, E, N). Shared reward (E,) is
+broadcast to every agent, so each agent sees the same team reward but has its
+own value baseline.
 
 All storage is numpy (CPU). JAX arrays are converted on add().
 """
@@ -30,7 +23,7 @@ class MAPPOTransition(NamedTuple):
     obs:       np.ndarray   # (E, N, D)       local observations
     actions:   np.ndarray   # (E, N, A)       normalised actions in [-1, 1]
     log_probs: np.ndarray   # (E, N)
-    values:    np.ndarray   # (E,) or (E, N)  depends on critic type
+    values:    np.ndarray   # (E, N)
     rewards:   np.ndarray   # (E,)
     dones:     np.ndarray   # (E,)
     rnn_resets: Optional[np.ndarray] = None  # (E, N), recurrent path only
@@ -54,7 +47,6 @@ class MAPPORolloutBuffer:
     act_dim    : action dimension A
     gamma      : discount factor
     gae_lambda : GAE λ
-    per_agent  : True → values shape (T,E,N); False → (T,E)
     recurrent  : True → minibatches preserve rollout time order
     """
 
@@ -67,7 +59,6 @@ class MAPPORolloutBuffer:
         act_dim:    int,
         gamma:      float = 0.99,
         gae_lambda: float = 0.95,
-        per_agent:  bool  = True,
         recurrent:  bool  = False,
         hidden_dim: int   = 0,
         tarmac_sig_dim: int = 64,
@@ -82,7 +73,6 @@ class MAPPORolloutBuffer:
         self.A          = act_dim
         self.gamma      = gamma
         self.gae_lambda = gae_lambda
-        self.per_agent  = per_agent
         self.recurrent  = recurrent
         self.hidden_dim = hidden_dim
         self.tarmac_sig_dim = tarmac_sig_dim
@@ -95,12 +85,8 @@ class MAPPORolloutBuffer:
         self._log_probs = np.zeros((self.T, self.E, self.N),          dtype=np.float32)
         self._dones     = np.zeros((self.T, self.E),                   dtype=np.float32)
 
-        if per_agent:
-            self._rewards = np.zeros((self.T, self.E, self.N), dtype=np.float32)
-            self._values = np.zeros((self.T, self.E, self.N), dtype=np.float32)
-        else:
-            self._rewards = np.zeros((self.T, self.E), dtype=np.float32)
-            self._values = np.zeros((self.T, self.E),  dtype=np.float32)
+        self._rewards = np.zeros((self.T, self.E, self.N), dtype=np.float32)
+        self._values = np.zeros((self.T, self.E, self.N), dtype=np.float32)
 
         self._rnn_resets = np.zeros((self.T, self.E, self.N), dtype=bool)
         self._comm_masks = np.zeros((self.T, self.E, self.N, self.N), dtype=bool)
@@ -133,21 +119,13 @@ class MAPPORolloutBuffer:
         self._actions[self._ptr]   = np.asarray(tr.actions)
         self._log_probs[self._ptr] = np.asarray(tr.log_probs)
         self._values[self._ptr]    = np.asarray(tr.values)
-        if self.per_agent:
-            rew_arr = np.asarray(tr.rewards)
-            if rew_arr.ndim == 1:
-                # Received global rewards (E,) -> broadcast to (E, N)
-                self._rewards[self._ptr] = np.broadcast_to(rew_arr[:, None], (self.E, self.N))
-            else:
-                # Received per-agent rewards (E, N) -> store directly
-                self._rewards[self._ptr] = rew_arr
+        rew_arr = np.asarray(tr.rewards)
+        if rew_arr.ndim == 1:
+            # Received global rewards (E,) -> broadcast to (E, N)
+            self._rewards[self._ptr] = np.broadcast_to(rew_arr[:, None], (self.E, self.N))
         else:
-            rew_arr = np.asarray(tr.rewards)
-            if rew_arr.ndim == 2:
-                # Received per-agent rewards -> sum for global critic
-                self._rewards[self._ptr] = rew_arr.sum(axis=1)
-            else:
-                self._rewards[self._ptr] = rew_arr
+            # Received per-agent rewards (E, N) -> store directly
+            self._rewards[self._ptr] = rew_arr
         
         self._dones[self._ptr]     = np.asarray(tr.dones)
         if self.recurrent and tr.rnn_resets is not None:
@@ -168,7 +146,7 @@ class MAPPORolloutBuffer:
 
     def compute_gae(
         self,
-        last_value: jax.Array,   # (E,) or (E, N) matching per_agent
+        last_value: jax.Array,   # (E, N)
         last_done:  jax.Array,   # (E,)
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -176,53 +154,33 @@ class MAPPORolloutBuffer:
 
         Returns
         -------
-        advantages : (T, E) or (T, E, N)
-        returns    : (T, E) or (T, E, N)
+        advantages : (T, E, N)
+        returns    : (T, E, N)
         """
-        last_value_np = np.asarray(last_value)   # (E,) or (E, N)
+        last_value_np = np.asarray(last_value)   # (E, N)
         last_done_np  = np.asarray(last_done)    # (E,)
 
         advantages = np.zeros_like(self._values)
 
-        if self.per_agent:
-            # gae: (E, N)
-            gae = np.zeros((self.E, self.N), dtype=np.float32)
-            # done mask needs to broadcast over N agents: (E,) → (E, 1)
-            last_nonterminal = (1.0 - last_done_np)[:, None]   # (E, 1)
+        gae = np.zeros((self.E, self.N), dtype=np.float32)
+        last_nonterminal = (1.0 - last_done_np)[:, None]
 
-            for t in reversed(range(self.T)):
-                if t == self.T - 1:
-                    next_values      = last_value_np             # (E, N)
-                    next_nonterminal = last_nonterminal          # (E, 1)
-                else:
-                    next_values      = self._values[t + 1]                        # (E, N)
-                    next_nonterminal = (1.0 - self._dones[t + 1])[:, None]        # (E, 1)
+        for t in reversed(range(self.T)):
+            if t == self.T - 1:
+                next_values      = last_value_np
+                next_nonterminal = last_nonterminal
+            else:
+                next_values      = self._values[t + 1]
+                next_nonterminal = (1.0 - self._dones[t + 1])[:, None]
 
-                reward_t = self._rewards[t]                       # (E, N)
-
-                delta = (
-                    reward_t
-                    + self.gamma * next_values * next_nonterminal
-                    - self._values[t]
-                )
-                done_mask = (1.0 - self._dones[t])[:, None]      # (E, 1)
-                gae       = delta + self.gamma * self.gae_lambda * next_nonterminal * gae * done_mask
-                advantages[t] = gae
-
-        else:
-            # Scalar centralised value — original behaviour
-            gae = np.zeros(self.E, dtype=np.float32)
-            for t in reversed(range(self.T)):
-                next_value = last_value_np if t == self.T - 1 else self._values[t + 1]
-                next_done  = last_done_np  if t == self.T - 1 else self._dones[t + 1]
-
-                delta = (
-                    self._rewards[t]
-                    + self.gamma * next_value * (1.0 - next_done)
-                    - self._values[t]
-                )
-                gae = delta + self.gamma * self.gae_lambda * (1.0 - self._dones[t]) * gae
-                advantages[t] = gae
+            delta = (
+                self._rewards[t]
+                + self.gamma * next_values * next_nonterminal
+                - self._values[t]
+            )
+            done_mask = (1.0 - self._dones[t])[:, None]
+            gae = delta + self.gamma * self.gae_lambda * next_nonterminal * gae * done_mask
+            advantages[t] = gae
 
         returns = advantages + self._values
         return advantages.astype(np.float32), returns.astype(np.float32)
@@ -231,8 +189,8 @@ class MAPPORolloutBuffer:
 
     def get_minibatches(
         self,
-        advantages:    np.ndarray,   # (T, E) or (T, E, N)
-        returns:       np.ndarray,   # (T, E) or (T, E, N)
+        advantages:    np.ndarray,   # (T, E, N)
+        returns:       np.ndarray,   # (T, E, N)
         n_minibatches: int,
         key:           jax.Array,
     ) -> list[dict]:
@@ -242,18 +200,13 @@ class MAPPORolloutBuffer:
         Minibatch dict keys:
             obs, actions, old_log_probs, old_values, advantages, returns
 
-        Shapes (per_agent=True):
+        Shapes:
             obs           : (MB, N, D)
             actions       : (MB, N, A)
             old_log_probs : (MB, N)
             old_values    : (MB, N)
             advantages    : (MB, N)
             returns       : (MB, N)
-
-        Shapes (per_agent=False):
-            old_values    : (MB,)
-            advantages    : (MB,)
-            returns       : (MB,)
         """
         if self.recurrent:
             return self._get_sequence_minibatches(advantages, returns, n_minibatches, key)
@@ -267,9 +220,9 @@ class MAPPORolloutBuffer:
         obs_f       = _flat(self._obs)        # (B, N, D)
         actions_f   = _flat(self._actions)    # (B, N, A)
         lp_f        = _flat(self._log_probs)  # (B, N)
-        values_f    = _flat(self._values)     # (B, N) or (B,)
-        adv_f       = _flat(advantages)        # (B, N) or (B,)
-        returns_f   = _flat(returns)           # (B, N) or (B,)
+        values_f    = _flat(self._values)     # (B, N)
+        adv_f       = _flat(advantages)        # (B, N)
+        returns_f   = _flat(returns)           # (B, N)
 
         # Normalise advantages over the whole batch
         adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)

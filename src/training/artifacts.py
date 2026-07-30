@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
@@ -65,3 +68,41 @@ def write_manifest(path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def save_eval_info_csv(
+    path: str | Path,
+    target_positions: Any,
+    base_positions: Any,
+    successes: Any,
+) -> Path:
+    """Save compact, per-episode information from a parallel evaluation."""
+    targets = np.asarray(target_positions, dtype=np.float32).reshape((-1, 2))
+    bases = np.asarray(base_positions, dtype=np.float32)
+    if bases.shape == (2,):
+        bases = np.broadcast_to(bases, targets.shape)
+    else:
+        bases = bases.reshape((-1, 2))
+    outcomes = np.asarray(successes, dtype=bool).reshape((-1,))
+
+    if len(targets) != len(bases) or len(targets) != len(outcomes):
+        raise ValueError(
+            "Evaluation CSV arrays must contain the same number of targets, bases, and outcomes."
+        )
+
+    distances = np.linalg.norm(targets - bases, axis=-1)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["x", "y", "success", "distance_to_base"])
+        writer.writerows(
+            (
+                f"{target[0]:.6f}",
+                f"{target[1]:.6f}",
+                "true" if success else "false",
+                f"{distance:.6f}",
+            )
+            for target, success, distance in zip(targets, outcomes, distances)
+        )
+    return path

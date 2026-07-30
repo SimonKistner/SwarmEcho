@@ -866,29 +866,15 @@ def _advanced_html(ckpt_opt: CheckpointOption) -> str:
         f'<div class="advanced-wrap">'
         f'  <button class="advanced-btn" id="advanced-toggle" aria-expanded="false" '
         f'    onclick="_artefactsToggleAdv()">'
-        f'    Advanced / Legacy Tools <span class="chevron">⌄</span>'
+        f'    Advanced Tools <span class="chevron">⌄</span>'
         f'  </button>'
         f'  <div class="advanced-body" id="advanced-body">'
         f'    <div class="advanced-grid">'
         
-        # Selective render
-        f'      <div class="adv-card">'
-        f'        <div class="adv-card-title">Selective Render</div>'
-        f'        <div style="font-size:9px; color:var(--text-muted); margin-bottom:6px; line-height:1.2;">Render selected success/failure rollout videos.</div>'
-        f'        <input class="overrides-input" id="sel-max" name="sel_max" type="number" value="100" placeholder="Max computation episodes" style="margin-top:0">'
-        f'        <input class="overrides-input" id="sel-succ" name="sel_succ" type="number" value="5" placeholder="Success count" style="margin-top:4px">'
-        f'        <input class="overrides-input" id="sel-fail" name="sel_fail" type="number" value="5" placeholder="Failure count" style="margin-top:4px">'
-        f'        <button class="btn btn-sm w-full" style="margin-top:8px"'
-        f'          hx-post="/eval/queue-job"'
-        f'          hx-include="#sel-max,#sel-succ,#sel-fail"'
-        f'          hx-vals=\'{{"job":"selective","ckpt":"{ckpt_str}"}}\''
-        f'          hx-target="#queue-panel" hx-swap="outerHTML">Queue selective render</button>'
-        f'      </div>'
- 
         # Heatmap pipeline
         f'      <div class="adv-card">'
         f'        <div class="adv-card-title">Heatmap Pipeline</div>'
-        f'        <div style="font-size:9px; color:var(--text-muted); margin-bottom:6px; line-height:1.2;">Options: --heatmap, --cluster, --videos, --no-csv</div>'
+        f'        <div style="font-size:9px; color:var(--text-muted); margin-bottom:6px; line-height:1.2;">Options: --heatmap, --cluster, --csv, --no-csv</div>'
         f'        <input class="overrides-input" id="pipe-overrides" name="pipe_overrides" type="text" '
         f'          value="--heatmap --cluster" style="margin-top:0" placeholder="e.g. --heatmap --cluster">'
         f'        <button class="btn btn-sm w-full" style="margin-top:8px"'
@@ -897,20 +883,6 @@ def _advanced_html(ckpt_opt: CheckpointOption) -> str:
         f'          hx-vals=\'{{"job":"pipeline","ckpt":"{ckpt_str}"}}\''
         f'          hx-target="#queue-panel" hx-swap="outerHTML">Queue pipeline</button>'
         f'      </div>'
- 
-        # Corner render
-        f'      <div class="adv-card">'
-        f'        <div class="adv-card-title">Corner Render</div>'
-        f'        <div style="font-size:9px; color:var(--text-muted); margin-bottom:6px; line-height:1.2;">Overrides for evaluating success closest to corners.</div>'
-        f'        <input class="overrides-input" id="corner-overrides" name="corner_overrides" type="text"'
-        f'          value="selective=true render_success_closest_to_corners=true" style="margin-top:0">'
-        f'        <button class="btn btn-sm w-full" style="margin-top:8px"'
-        f'          hx-post="/eval/queue-job"'
-        f'          hx-include="#corner-overrides"'
-        f'          hx-vals=\'{{"job":"corner","ckpt":"{ckpt_str}"}}\''
-        f'          hx-target="#queue-panel" hx-swap="outerHTML">Queue corner render</button>'
-        f'      </div>'
- 
         f'    </div>'  # advanced-grid
         f'  </div>'   # advanced-body
         f'</div>'     # advanced-wrap
@@ -1355,7 +1327,6 @@ def eval_queue_render(
         "uv", "run", "python", "src/training/evaluate.py",
         f"checkpoint={ckpt}",
         f"target_pos={tx:.3f},{ty:.3f}",
-        "--renderer=fast",  # evaluate.py uses its own arg loop, NOT Hydra, for this flag
     ]
     if overrides_input.strip():
         command.extend(overrides_input.strip().split())
@@ -1370,11 +1341,7 @@ def eval_queue_job(
     session,
     job: str,
     ckpt: str,
-    sel_max: Optional[int] = None,
-    sel_succ: Optional[int] = None,
-    sel_fail: Optional[int] = None,
     pipe_overrides: Optional[str] = None,
-    corner_overrides: Optional[str] = None,
 ):
     rd = _run(session)
     opt = _ckpt(session, rd)
@@ -1388,23 +1355,10 @@ def eval_queue_job(
     elif job == "default_heatmaps":
         cmd = ["uv", "run", "python", "src/training/evaluate_pipeline.py", f"checkpoint={ckpt}", "--heatmap"]
         start_job(eval_root, "default_heatmaps", cmd, _REPO)
-    elif job == "selective":
-        cmd = [
-            "uv", "run", "python", "src/training/evaluate.py", f"checkpoint={ckpt}",
-            "selective=true",
-            f"eval_max_compute_episodes={sel_max or 100}",
-            f"render_successes={sel_succ or 5}",
-            f"render_failures={sel_fail or 5}",
-        ]
-        start_job(eval_root, "selective_render", cmd, _REPO)
     elif job == "pipeline":
         extra = (pipe_overrides or "--heatmap --cluster").strip().split()
         cmd = ["uv", "run", "python", "src/training/evaluate_pipeline.py", f"checkpoint={ckpt}"] + extra
         start_job(eval_root, "heatmap_pipeline", cmd, _REPO)
-    elif job == "corner":
-        extra = (corner_overrides or "selective=true render_success_closest_to_corners=true").strip().split()
-        cmd = ["uv", "run", "python", "src/training/evaluate.py", f"checkpoint={ckpt}"] + extra
-        start_job(eval_root, "corner_render", cmd, _REPO)
 
     return HTMLResponse(_queue_html(eval_root))
 

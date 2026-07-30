@@ -43,80 +43,63 @@ MAP_DIR = _SRC_ROOT / "curriculum_config" / "maps"
 
 @dataclass
 class EnvConfig:
-    num_agents: int = 8
+    # --- World and swarm ---
+    num_agents: int = 6
     box_width: Optional[float] = None
     box_height: Optional[float] = None
     dt: float = 0.1
+
+    # --- Perception and communication ---
     visual_radius: float = 5.0
     comm_radius: float = 10.0
     comm_radius_base: float = 15.0  # comm radius for base-station first hop (defaults to comm_radius)
+    radar_bins: int = 8        # B — angular radar slices
+
+    # --- Movement and physics ---
     max_speed: float = 10.0
     drag: float = 0.85
     wall_restitution: float = 0.2
     max_force: float = 50.0
-    max_steps: int = 1000
-    radar_bins: int = 8        # B — angular radar slices
-    spawn_delay: int = 0      # steps between drone activations (0 = all at once)
-    map_names: list[str] = field(default_factory=list) # if set, samples from these maps
-    num_targets: int = 1       # 0 = exploration focus, 1 = find target goal
-    num_bases: int = 1         # 0 = exploration focus, 1 = tethered relay goal
-    # --- Spawn overrides (B-series curriculum) ---
-    use_random_base_spawn: bool = True    # if False, base always spawns at map centre
-    use_random_drone_spawn: bool = True   # if False, drones spawn stacked at base_pos
-    target_spawn_method: str = "map_defined"  # "map_defined", "ring", "outside_base"
-    target_spawn_radius: float = 0.0      # if > 0, target spawns in a circle of this max radius around base (for "ring")
-    target_spawn_radius_min: float = 0.0  # if > 0, target spawns in a ring (min to max radius) (for "ring")
-    target_invalid_spawn_base_radius: float = 0.0 # if > 0, target cannot spawn within this radius of the base (for "outside_base")
-    adaptive_target_spawn: bool = False            # if True, training target spawn cells adapt to per-category success
-    adaptive_target_spawn_mode: str = "soft_gate"  # "soft_gate" preserves legacy adaptive probabilities; "hard_gate" gates path categories
-    adaptive_spawn_success_lower: float = 0.0      # hard_gate: remove newest category when training success falls below this rate
-    adaptive_spawn_success_upper: float = 0.8      # hard_gate: add next category when training success reaches this rate
-    adaptive_spawn_threshold_hold_updates: int = 3 # hard_gate: consecutive adaptive updates required beyond lower/upper threshold
-    static_maze_optimal_path: bool = True          # if True, compute maze-cell path categories once at training init
-    precover_base_comm: bool = False              # if True, cells in communication range of the base station are covered from reset
-    hold_chain_for: int = 0                       # number of consecutive timesteps the chain must be held before success
-    mem_test_mask_nonlocal_obs: bool = False      # MEM_T8-only: zero non-local observation channels to prevent T identity leaks
+
+    # --- Episode and map ---
+    max_steps: int = 700
+    spawn_delay: int = 5      # steps between drone activations (0 = all at once)
+    map_names: list[str] = field(default_factory=lambda: ["M04a_tiny_grid_maze"])
+    hold_chain_for: int = 50                       # number of consecutive timesteps the chain must be held before success
+    terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
+
+    # --- Observation and diagnostic state ---
     observe_target_vector: bool = False            # if False, remove target odometry vector from actor observations
     observe_base_vector: bool = False              # if False, remove base odometry vector from actor observations
-    observe_coverage_probe: bool = True            # if False, remove local coverage probe observations (reward calculations still use coverage)
+    observe_coverage_probe: bool = False            # if False, remove local coverage probe observations (reward calculations still use coverage)
     log_adjacency_matrix: bool = False            # if True, log direct connection matrix in EnvState (can be costly in training)
-    terminate_on_target_found: bool = False       # if True, terminate episode immediately after target is found/delivered
-    experimental_setup: bool = False              # if True, disable normal task-only machinery such as chain/finder-path rewards
-
-
 
 @dataclass
 class RewardConfig:
     # --- Local Rewards (Not divided by N) ---
-    exploration_bonus: float = 0.05
+    exploration_bonus: float = 0.25
     collision_penalty: float = 0.5
-    proximity_penalty: float = 0.00
     finder_bonus: float = 50.0
-    base_proximity_bonus: float = 0.000    # intuition drive toward base
-    target_proximity_bonus: float = 0  # intuition drive toward target (if known)
 
     # --- Global Rewards (Divided by N) ---
     max_gap_penalty: float = 5.0       # absolute penalty when gap is at its maximum
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
     target_found_requires_delivery: bool = True
-    back_to_target_after_delivery: bool = False
     chain_reward_system: str = "euclidean"  # "euclidean" | "discrete_finders_path"
-    only_reward_chain_from_target: bool = False
-    only_shortest_path_chain_reward: bool = False
-    reward_single_shortest_path: bool = True
-    only_explor_individual: bool = False  # keep exploration/safety local; share chain-related rewards
-    every_reward_global: bool = False     # share every reward/penalty equally across agents
-
 
 
 @dataclass
 class TrainingConfig:
+    # --- Training budget and rollout ---
+    total_timesteps: int = 250_000_000
     seed: int = 42
-    num_envs: int = 1024
-    num_steps: int = 256
+    num_envs: int = 4000
+    num_steps: int = 100
     num_epochs: int = 4
-    num_minibatches: Optional[int] = 8
+    num_minibatches: Optional[int] = 20
+
+    # --- PPO optimization ---
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -124,35 +107,66 @@ class TrainingConfig:
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
-    total_timesteps: int = 50_000_000
+
+    # --- Checkpoint loading and resume behavior ---
     checkpoint_path: Optional[str] = None  # if set, resumes training from this path
     checkpoint_step_offset: Optional[int] = None  # if set, starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
     ckpt_loading_mode: str = "branch"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
-    resume_update: Optional[bool] = None  # Deprecated legacy parameter (use ckpt_loading_mode instead)
+
+    # --- VRAM safeguards ---
     warn_vram_limit: bool = False
     abort_on_vram_limit: bool = False
     vram_limit_gb: float = 20.0
-    eval_parallel: bool = False
+
+
+@dataclass
+class EvalConfig:
+    # --- Evaluation schedule and training gate ---
+    eval_freq: int = 20
+    eval_offset: int = 1
+    eval_min_train_success: float = 0.0
+
+    # --- Parallel evaluation ---
     eval_parallel_envs: int = 4000
-    eval_parallel_early_exit_threshold: Optional[float] = None
-    eval_min_train_success: float = 0.0  # Only start evaluation once rolling train success rate reaches this threshold
+    eval_broadcast_on_curriculum_early_stop: bool = False
 
+    # --- Evaluation-success early exit ---
+    early_exit: bool = False
+    early_exit_threshold: float = 0.99
 
+    # --- Evaluation video ---
+    eval_video: bool = True
+    eval_video_freq: int = 20
+    eval_video_offset: int = 1
+
+    # --- Evaluation data and heatmaps ---
+    save_eval_info_as_csv: bool = False
+    eval_failed_chain_heatmap: bool = True
+    eval_not_delivered_or_visually_found_heatmap: bool = True
+    eval_not_deliv_not_visual_splitt_in_two: bool = False
+
+    # --- Checkpoint saving ---
+    save_model: bool = True
+    checkpoint_freq: int = 50
+    checkpoint_offset: int = 0
+    checkpoint_dir: Optional[str] = None
 
 
 @dataclass
 class NetworkConfig:
+    # --- Actor and critic ---
     hidden_dim:       int = 256
     num_layers:       int = 3    # critic depth
     actor_num_layers: int = 3    # actor depth (lighter, separate)
-    critic_type:      str = "agent_centric"  # "agent_centric" | "global_mean"
-    actor_memory:     bool = False  # if True, actor uses per-agent GRU memory
-    critic_memory:    bool = False  # if True, agent-centric critic uses per-agent GRU memory
-    memory_comm_enabled: bool = False
+    actor_memory:     bool = True  # if True, actor uses per-agent GRU memory
+    critic_memory:    bool = True  # if True, agent-centric critic uses per-agent GRU memory
+
+    # --- Recurrent communication ---
+    memory_comm_enabled: bool = True
     memory_comm_every_k_steps: int = 5
-    tarmac_sig_dim: int = 64
-    tarmac_val_dim: int = 128
-    tarmac_include_self: bool = True
+    tarmac_sig_dim: int = 16
+    tarmac_val_dim: int = 32
+    tarmac_include_self: bool = False
 
 
 @dataclass
@@ -169,73 +183,29 @@ class LoggingConfig:
     wandb_entity: Optional[str] = None
     wandb_group: Optional[str] = None
 
-    # --- Frequencies ---
+    # --- Training logging ---
     log_freq: int = 10
-    eval_freq: int = 50           # Run evaluation and heatmap generation every N updates
-    eval_offset: int = 1          # Offset for eval_freq modulo scheduling
-    eval_video_freq: Optional[int] = 50 # Run video rendering evaluation every N updates. If None, defaults to eval_freq.
-    eval_video_offset: int = 1     # Offset for eval_video_freq modulo scheduling
-
-    # --- Model Checkpointing ---
-    save_model: bool = True
-    checkpoint_freq: int = 50     # Save model checkpoint every N updates
-    checkpoint_offset: int = 0    # Offset for checkpoint_freq modulo scheduling
-    checkpoint_dir: Optional[str] = None
 
     # --- Diagnostics & Details ---
     suppress_xla_warnings: bool = True
     obs_log: bool = False
-    memory_diagnostic_probe: bool = False  # Train a linear probe on base memory to predict target cell
-    adaptive_spawn_diagnostics: bool = False  # Log adaptive target-spawn bucket diagnostics to WandB
-    train_target_spawn_heatmap: bool = False  # Save recent-rollout train target spawn heatmap snapshots at eval_freq
-
-    # --- Mid-run Evaluation Toggles ---
-    eval_video: bool = True       # Render rollout video for evaluation episodes
-    eval_failed_chain_heatmap: bool = True  # Generate heatmap of target positions for failed chain deliveries from sliding window
-    eval_not_delivered_or_visually_found_heatmap: bool = True  # Generate heatmap of target positions not delivered/visually found
-    eval_not_deliv_not_visual_splitt_in_two: bool = False      # If true, split the not-delivered/not-visual heatmap into two separate files
-    eval_broadcast_on_curriculum_early_stop: bool = False  # Carry threshold-hitting eval metrics to remaining eval steps in W&B
-
-    # --- Deprecated / Legacy parameters (kept for backward compatibility with older runs) ---
-    video_freq: Optional[int] = None # legacy
-    eval_episodes: Optional[int] = None
-    async_video: Optional[bool] = None
 
 
 @dataclass
 class VisualizeConfig:
-    renderer: str = "fast"              # LEGACY fallback; prefer explicit params below
-    train_eval_renderer: str = "fast"   # renderer used for mid-training single-episode videos
-    final_eval_renderer: str = "fast"   # renderer used for final eval / standalone evaluate.py
-
-    # --- Eval rendering control ---
-    selective_eval_render: bool = False  # False = legacy mode; True = selective bucket mode
-
-    # if selective_eval_render=False:
-    eval_render_videos: int = 1          # episodes to compute AND render immediately (legacy)
-
-    # if selective_eval_render=True:
-    eval_max_compute_episodes: int = 100  # hard ceiling on episodes simulated
-    eval_render_successes: int = 0       # SUCCESS_ bucket target  (0 = skip success renders)
-    eval_render_failures:  int = 3       # FAIL_ bucket target     (0 = skip fail renders)
-    # Note: both buckets=0 is valid → runs eval_max_compute_episodes, prints full stats, no videos.
-
+    # --- Communication overlay ---
     comm_color: str = "#03fbff"
     comm_fill_alpha: float = 0.02
     comm_edge_alpha: float = 0.50
+
+    # --- Visibility overlay ---
     vis_color: str = "#03fbff"
     vis_fill_alpha: float = 0.10
     vis_edge_alpha: float = 0.50
+
+    # --- Debug overlays ---
     render_conn_matrix: bool = True       # if True, render the connections matrix in the legend
     render_finders_path_debug: bool = False  # if True, render the finders path list in the legend when valid
-
-
-@dataclass
-class CurriculumConfig:
-    success_threshold: Optional[float] = None
-    metric: str = "success"             # "success" or "target_found"
-    mode: str = "train"                 # "train" or "eval"
-
 
 
 @dataclass
@@ -244,10 +214,10 @@ class SwarmEchoConfig:
     env: EnvConfig = field(default_factory=EnvConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    evaluation: EvalConfig = field(default_factory=EvalConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     visualize: VisualizeConfig = field(default_factory=VisualizeConfig)
-    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +445,6 @@ def load_config(
     if cfg.logging.run_name:
         print(f"  Run Name         : {cfg.logging.run_name}")
 
-    if cfg.reward.every_reward_global:
-        cfg.reward.only_explor_individual = False
-        cfg.reward.only_shortest_path_chain_reward = False
-    elif cfg.reward.only_explor_individual:
-        cfg.reward.only_shortest_path_chain_reward = False
-
     if bool(cfg.network.memory_comm_enabled):
         # Memory communication already requires the direct adjacency matrix to build
         # sender/receiver masks, so expose it in EnvState/logging as well.
@@ -502,11 +466,6 @@ def load_config(
             if not explicit_false:
                 OmegaConf.set_readonly(cfg, False)
                 cfg.env.log_adjacency_matrix = True
-
-    # Auto-false diagnostic probe if memory or memory communication is false/off
-    if not (bool(cfg.network.actor_memory) and bool(cfg.network.memory_comm_enabled)):
-        OmegaConf.set_readonly(cfg, False)
-        cfg.logging.memory_diagnostic_probe = False
 
     # Make read-only at runtime to prevent accidental mutation
     OmegaConf.set_readonly(cfg, True)
@@ -548,7 +507,6 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.env.dt > 0, "dt must be positive."
     assert cfg.env.radar_bins >= 4, "radar_bins must be >= 4."
     assert cfg.env.spawn_delay >= 0, "spawn_delay must be >= 0."
-    assert cfg.env.target_spawn_radius >= 0.0, "target_spawn_radius must be non-negative."
     assert 0.0 <= cfg.env.wall_restitution <= 1.0, "wall_restitution must be [0, 1]."
     if str(cfg.reward.get("chain_reward_system", "euclidean")) not in ("euclidean", "discrete_finders_path"):
         raise ValueError("reward.chain_reward_system must be 'euclidean' or 'discrete_finders_path'.")
@@ -556,33 +514,15 @@ def validate_config(cfg: DictConfig) -> None:
     assert cfg.training.num_steps > 0
     assert 0 < cfg.training.gamma <= 1.0
     assert 0 < cfg.training.gae_lambda <= 1.0
-    # Visualize / eval rendering
-    assert str(cfg.visualize.train_eval_renderer) in ("fast", "slow"), \
-        "visualize.train_eval_renderer must be 'fast' or 'slow'"
-    assert str(cfg.visualize.final_eval_renderer) in ("fast", "slow"), \
-        "visualize.final_eval_renderer must be 'fast' or 'slow'"
-    assert int(cfg.visualize.eval_render_videos) >= 1, \
-        "visualize.eval_render_videos must be >= 1"
-    if bool(cfg.visualize.selective_eval_render):
-        assert int(cfg.visualize.eval_max_compute_episodes) > 0, \
-            "visualize.eval_max_compute_episodes must be > 0 when selective_eval_render=True"
-        assert int(cfg.visualize.eval_render_successes) >= 0, \
-            "visualize.eval_render_successes must be >= 0"
-        assert int(cfg.visualize.eval_render_failures) >= 0, \
-            "visualize.eval_render_failures must be >= 0"
-        # Both buckets=0 is valid: compute episodes, print stats, render nothing.
-    if hasattr(cfg, "curriculum") and cfg.curriculum is not None:
-        if cfg.curriculum.get("metric", None) is not None:
-            valid_metrics = ("success", "target_found")
-            if str(cfg.curriculum.metric) not in valid_metrics:
-                raise ValueError(f"curriculum.metric must be one of {valid_metrics}")
-        if cfg.curriculum.get("mode", None) is not None:
-            valid_modes = ("train", "eval")
-            if str(cfg.curriculum.mode) not in valid_modes:
-                raise ValueError(f"curriculum.mode must be one of {valid_modes}")
+    assert int(cfg.evaluation.eval_freq) > 0, "evaluation.eval_freq must be positive."
+    assert int(cfg.evaluation.eval_parallel_envs) > 0, "evaluation.eval_parallel_envs must be positive."
+    assert int(cfg.evaluation.eval_video_freq) > 0, "evaluation.eval_video_freq must be positive."
+    assert int(cfg.evaluation.checkpoint_freq) > 0, "evaluation.checkpoint_freq must be positive."
+    assert 0.0 <= float(cfg.evaluation.eval_min_train_success) <= 1.0, \
+        "evaluation.eval_min_train_success must be in [0, 1]."
+    assert 0.0 <= float(cfg.evaluation.early_exit_threshold) <= 1.0, \
+        "evaluation.early_exit_threshold must be in [0, 1]."
 
-    if bool(cfg.network.critic_memory) and str(cfg.network.critic_type) != "agent_centric":
-        raise ValueError("network.critic_memory=true requires network.critic_type='agent_centric'.")
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
     if int(cfg.network.memory_comm_every_k_steps) < 1:

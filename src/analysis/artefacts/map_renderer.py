@@ -102,13 +102,6 @@ def render_and_save(map_yaml_path: Path, out_path: Path, scale: float = 4.0) -> 
             p2 = (int(x2 * scale), int((height - y2) * scale))
             cv2.line(img, p1, p2, (31, 41, 55), wall_w, cv2.LINE_AA)
 
-        # Mesh walls (movement blockers, comm-transparent)
-        for seg in data.get("mesh_walls", data.get("mesh", [])):
-            x1, y1, x2, y2 = seg
-            p1 = (int(x1 * scale), int((height - y1) * scale))
-            p2 = (int(x2 * scale), int((height - y2) * scale))
-            cv2.line(img, p1, p2, (235, 165, 14), wall_w, cv2.LINE_AA)
-
         # Base station marker (from spawn zone centre — no random spawn needed)
         base_pos = None
         if "spawn_zones" in data and "base" in data["spawn_zones"]:
@@ -186,7 +179,7 @@ def validate_target(data: dict, x: float, y: float) -> tuple[bool, str]:
     Checks (in order):
       1. Within map bounds
       2. target_wall_clearance from all four world borders
-      3. Not inside any target_exclude_zone rectangle
+      3. Not inside any rectangular or circular target exclusion
       4. target_wall_clearance from every wall segment
 
     Returns (is_valid, human_readable_reason).
@@ -219,6 +212,9 @@ def validate_target(data: dict, x: float, y: float) -> tuple[bool, str]:
         zx1, zy1, zx2, zy2 = zone
         if (min(zx1, zx2) <= x <= max(zx1, zx2)) and (min(zy1, zy2) <= y <= max(zy1, zy2)):
             return False, "inside excluded zone (e.g. spawn room)"
+    for centre_x, centre_y, radius in data.get("target_exclude_circles", []):
+        if (x - float(centre_x)) ** 2 + (y - float(centre_y)) ** 2 <= float(radius) ** 2:
+            return False, "inside circular excluded zone"
 
     # 4. Clearance from every interior wall segment
     if clearance > 0:

@@ -564,7 +564,7 @@ with eval_tab:
         st.session_state.target_x = tx
         st.session_state.target_y = ty
 
-        overrides = st.text_input("Overrides", value="", placeholder="env.max_steps=5000 --renderer=slow")
+        overrides = st.text_input("Overrides", value="", placeholder="env.max_steps=5000")
         inside = (env_width <= 0 or 0 <= tx <= env_width) and (env_height <= 0 or 0 <= ty <= env_height)
         if not inside:
             st.error("Target is outside the configured map bounds.")
@@ -572,7 +572,6 @@ with eval_tab:
             "uv", "run", "python", "src/training/evaluate.py",
             f"checkpoint={selected_ckpt.path}",
             f"target_pos={tx},{ty}",
-            "--renderer=fast",
         ] + overrides.split()
         with st.expander("Command preview"):
             st.code(" ".join(command), language="bash")
@@ -585,30 +584,12 @@ with eval_tab:
             for path in cluster_paths:
                 st.write(path.name)
 
-    with st.expander("Advanced / legacy eval tools"):
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            max_eps = st.number_input("Max compute episodes", min_value=1, value=100, step=10)
-            successes = st.number_input("Success videos", min_value=0, value=5, step=1)
-            failures = st.number_input("Failure videos", min_value=0, value=5, step=1)
-            overrides_sel = st.text_input("Selective overrides", key="selective_overrides")
-            selective_cmd = [
-                "uv", "run", "python", "src/training/evaluate.py", f"checkpoint={selected_ckpt.path}",
-                "selective=true", f"eval_max_compute_episodes={int(max_eps)}",
-                f"render_successes={int(successes)}", f"render_failures={int(failures)}",
-            ] + overrides_sel.split()
-            if st.button("Queue selective render", width="stretch"):
-                start_job(eval_root, "selective_render", selective_cmd)
-                st.rerun()
-        with col_b:
-            pipeline_overrides = st.text_input("Pipeline overrides", value="--heatmap --cluster")
-            pipeline_cmd = ["uv", "run", "python", "src/training/evaluate_pipeline.py", f"checkpoint={selected_ckpt.path}"] + pipeline_overrides.split()
-            if st.button("Queue heatmap pipeline", width="stretch"):
-                start_job(eval_root, "heatmap_pipeline", pipeline_cmd)
-                st.rerun()
-        with col_c:
-            corner_overrides = st.text_input("Corner overrides", value="selective=true render_success_closest_to_corners=true")
-            corner_cmd = ["uv", "run", "python", "src/training/evaluate.py", f"checkpoint={selected_ckpt.path}"] + corner_overrides.split()
-            if st.button("Queue corner render", width="stretch"):
-                start_job(eval_root, "corner_render", corner_cmd)
-                st.rerun()
+    with st.expander("Advanced eval tools"):
+        pipeline_overrides = st.text_input("Pipeline overrides", value="--heatmap --cluster")
+        pipeline_cmd = [
+            "uv", "run", "python", "src/training/evaluate_pipeline.py",
+            f"checkpoint={selected_ckpt.path}",
+        ] + pipeline_overrides.split()
+        if st.button("Queue heatmap pipeline", width="stretch"):
+            start_job(eval_root, "heatmap_pipeline", pipeline_cmd)
+            st.rerun()

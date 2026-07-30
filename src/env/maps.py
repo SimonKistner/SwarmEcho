@@ -51,14 +51,12 @@ class MapDefinition:
     # target spawn pool (e.g., to keep target out of the base room).
     # Each entry: [x_min, y_min, x_max, y_max] in world metres.
     target_exclude_zones: list[list[float]] = dataclasses.field(default_factory=list)
+    # Circular target no-spawn areas: [centre_x, centre_y, radius] in metres.
+    target_exclude_circles: list[list[float]] = dataclasses.field(default_factory=list)
 
     # Physical walls (Occupancy grid)
     # shape (H_cells, W_cells), True where wall exists
     occupancy_grid: np.ndarray | None = None
-
-    # Communication occupancy grid: normal walls block communication, mesh walls do not.
-    # Movement, coverage, and visual line-of-sight still use occupancy_grid.
-    communication_occupancy_grid: np.ndarray | None = None
 
     # Padded occupancy grid (for safe local slicing in JAX)
     # shape (W+2R, H+2R), True where wall exists
@@ -70,19 +68,12 @@ class MapDefinition:
     rooms:    list[dict] = dataclasses.field(default_factory=list)
     hallways: list[dict] = dataclasses.field(default_factory=list)
     walls:    list[list[float]] = dataclasses.field(default_factory=list) # Raw segments
-    # Mesh walls block movement/coverage/visual LoS like walls, but communication can pass through them.
-    mesh_walls: list[list[float]] = dataclasses.field(default_factory=list)
-    drone_spawn_points:       jax.Array | None = None
-    # MEM_T8-only diagnostic scaffolding: fixed per-agent target/anti-target slots.
-    # Normal SwarmEcho task maps use one target sampled from target_spawn_zone.
-    target_spawn_points:      jax.Array | None = None
-    anti_target_spawn_points: jax.Array | None = None
     valid_base_coords:   jax.Array | None = None
     valid_target_coords: jax.Array | None = None
     valid_drone_coords:  jax.Array | None = None
 
     @classmethod
-    def load(cls, path: str | Path, cell_size: float | None = None, padding_radius: float = 60.0, extra_walls: list[list[float]] | None = None) -> MapDefinition:
+    def load(cls, path: str | Path, cell_size: float | None = None, padding_radius: float = 60.0) -> MapDefinition:
         path = Path(path)
         with open(path.with_suffix(".yaml"), "r") as f:
             data = yaml.safe_load(f)
@@ -98,23 +89,19 @@ class MapDefinition:
             drone_spawn_zone  = data["spawn_zones"]["drone"],
             rooms             = data.get("rooms", []),
             hallways          = data.get("hallways", []),
-            walls             = list(data.get("walls", [])) + list(extra_walls or []),
-            mesh_walls        = data.get("mesh_walls", data.get("mesh", [])),
+            walls             = list(data.get("walls", [])),
             target_wall_clearance = float(data.get("target_wall_clearance", 0.0)),
             base_wall_clearance   = float(data.get("base_wall_clearance",   0.0)),
             drone_wall_clearance  = float(data.get("drone_wall_clearance",  0.0)),
             target_exclude_zones  = data.get("target_exclude_zones", []),
+            target_exclude_circles = data.get("target_exclude_circles", []),
         )
-        if data.get("spawn_points", {}).get("drone") is not None:
-            m.drone_spawn_points = jnp.array(data["spawn_points"]["drone"], dtype=jnp.float32)
-        # MEM_T8-only: when env.num_targets > 1, physics interprets these as
-        # fixed per-agent target slots for the memory diagnostic.
-        if data.get("spawn_points", {}).get("target") is not None:
-            m.target_spawn_points = jnp.array(data["spawn_points"]["target"], dtype=jnp.float32)
-        # MEM_T8-only: paired wrong-branch decoys for the memory diagnostic.
-        if data.get("spawn_points", {}).get("anti_target") is not None:
-            m.anti_target_spawn_points = jnp.array(data["spawn_points"]["anti_target"], dtype=jnp.float32)
-
+        for circle in m.target_exclude_circles:
+            if len(circle) != 3 or float(circle[2]) < 0.0:
+                raise ValueError(
+                    f"Map {m.name!r} target_exclude_circles entries must be "
+                    "[centre_x, centre_y, non-negative_radius]."
+                )
         # Grid dimensions at 1m resolution (or custom cell_size)
         res = cell_size if cell_size is not None else 1.0
         m.rasterize(res)
@@ -146,7 +133,15 @@ class MapDefinition:
         safe_base   = _build_clearance_mask(m.base_wall_clearance)
         safe_drone  = _build_clearance_mask(m.drone_wall_clearance)
 
-        def _get_valid_coords(zone, safe_mask, exclude_zones=None):
+        def _get_valid_coords(
+            zone,
+            safe_mask,
+            exclude_zones=None,
+            exclude_circles=None,
+            *,
+            strict: bool = False,
+            label: str = "spawn",
+        ):
             x_min, y_min, x_max, y_max = zone
             # Convert zone to pixel ranges
             ix_lo = int(np.floor(x_min * sx_scale))
@@ -165,6 +160,13 @@ class MapDefinition:
                 (w_idx + ix_lo + 0.5) / sx_scale,
                 (h_idx + iy_lo + 0.5) / sy_scale,
             ], axis=-1).astype(np.float32)
+            in_zone = (
+                (coords_m[:, 0] >= min(x_min, x_max))
+                & (coords_m[:, 0] <= max(x_min, x_max))
+                & (coords_m[:, 1] >= min(y_min, y_max))
+                & (coords_m[:, 1] <= max(y_min, y_max))
+            )
+            coords_m = coords_m[in_zone]
 
             # Apply optional exclusion zones (e.g., base spawn room)
             if exclude_zones:
@@ -172,20 +174,63 @@ class MapDefinition:
                 for ez in exclude_zones:
                     ex0, ey0, ex1, ey1 = ez
                     in_zone = (
-                        (coords_m[:, 0] >= ex0) & (coords_m[:, 0] <= ex1) &
-                        (coords_m[:, 1] >= ey0) & (coords_m[:, 1] <= ey1)
+                        (coords_m[:, 0] >= min(ex0, ex1)) & (coords_m[:, 0] <= max(ex0, ex1)) &
+                        (coords_m[:, 1] >= min(ey0, ey1)) & (coords_m[:, 1] <= max(ey0, ey1))
                     )
                     keep &= ~in_zone
                 coords_m = coords_m[keep]
 
+            if exclude_circles:
+                keep = np.ones(len(coords_m), dtype=bool)
+                for circle in exclude_circles:
+                    centre_x, centre_y, radius = (float(value) for value in circle)
+                    dist_sq = (
+                        (coords_m[:, 0] - centre_x) ** 2
+                        + (coords_m[:, 1] - centre_y) ** 2
+                    )
+                    keep &= dist_sq > radius**2
+                coords_m = coords_m[keep]
+
             if len(coords_m) == 0:
+                is_point = np.isclose(x_min, x_max) and np.isclose(y_min, y_max)
+                if strict and is_point:
+                    point = np.array([float(x_min), float(y_min)], dtype=np.float32)
+                    ix = int(np.floor(point[0] * sx_scale))
+                    iy = int(np.floor(point[1] * sy_scale))
+                    valid = (
+                        0 <= ix < safe_mask.shape[0]
+                        and 0 <= iy < safe_mask.shape[1]
+                        and bool(safe_mask[ix, iy])
+                    )
+                    for ez in exclude_zones or []:
+                        ex0, ey0, ex1, ey1 = (float(value) for value in ez)
+                        valid &= not (
+                            min(ex0, ex1) <= point[0] <= max(ex0, ex1)
+                            and min(ey0, ey1) <= point[1] <= max(ey0, ey1)
+                        )
+                    for circle in exclude_circles or []:
+                        centre_x, centre_y, radius = (float(value) for value in circle)
+                        valid &= (
+                            (point[0] - centre_x) ** 2 + (point[1] - centre_y) ** 2
+                            > radius**2
+                        )
+                    if valid:
+                        return jnp.array([point], dtype=jnp.float32)
+                if strict:
+                    raise ValueError(
+                        f"Map {m.name!r} {label} zone contains no valid positions "
+                        "after wall-clearance and no-spawn exclusions."
+                    )
                 # Fallback to zone centre
                 return jnp.array([[(x_min + x_max) / 2, (y_min + y_max) / 2]], dtype=jnp.float32)
             return jnp.array(coords_m, dtype=jnp.float32)
 
         m.valid_base_coords   = _get_valid_coords(m.base_spawn_zone,   safe_base)
         m.valid_target_coords = _get_valid_coords(m.target_spawn_zone, safe_target,
-                                                   exclude_zones=m.target_exclude_zones)
+                                                   exclude_zones=m.target_exclude_zones,
+                                                   exclude_circles=m.target_exclude_circles,
+                                                   strict=True,
+                                                   label="target spawn")
         m.valid_drone_coords  = _get_valid_coords(m.drone_spawn_zone,  safe_drone)
 
         # 1. Create JAX Occupational Grid
@@ -200,12 +245,9 @@ class MapDefinition:
 
     def rasterize(self, resolution: float = 1.0):
         """
-        Convert logical wall edges into high-res occupancy grids.
+        Convert logical wall edges into a high-resolution occupancy grid.
 
-        Normal walls block movement, coverage/visual line-of-sight, and
-        communication. Mesh walls block movement and coverage/visual line-of-sight
-        but are omitted from ``communication_occupancy_grid`` so drones can share
-        memory through them.
+        Walls block movement, coverage, visual line-of-sight, and communication.
         """
         W_px = int(self.width / resolution)
         H_px = int(self.height / resolution)
@@ -274,16 +316,10 @@ class MapDefinition:
             grid_flipped = np.array(img.transpose(Image.FLIP_TOP_BOTTOM)) # (H, W), y=0 at index 0
             return (grid_flipped < 128).T # (W, H)
 
-        physical_segments = normal_segments + list(self.mesh_walls)
-        if physical_segments:
-            self.occupancy_grid = _draw_segments(physical_segments)
+        if normal_segments:
+            self.occupancy_grid = _draw_segments(normal_segments)
         else:
             self.occupancy_grid = np.zeros((W_px, H_px), dtype=bool)
-
-        if normal_segments:
-            self.communication_occupancy_grid = _draw_segments(normal_segments)
-        else:
-            self.communication_occupancy_grid = np.zeros((W_px, H_px), dtype=bool)
 
     def sample_base(self, key: jax.Array) -> jax.Array:
         if self.valid_base_coords is None:
@@ -293,17 +329,12 @@ class MapDefinition:
         return self.valid_base_coords[idx]
 
     def sample_target(self, key: jax.Array) -> jax.Array:
-        if self.target_spawn_points is not None:
-            return self.target_spawn_points[0]
-        if self.valid_target_coords is None:
-            return jnp.array([(self.target_spawn_zone[0] + self.target_spawn_zone[2])/2,
-                              (self.target_spawn_zone[1] + self.target_spawn_zone[3])/2], dtype=jnp.float32)
+        if self.valid_target_coords is None or len(self.valid_target_coords) == 0:
+            raise ValueError(f"Map {self.name!r} has no valid target spawn positions.")
         idx = jax.random.randint(key, shape=(), minval=0, maxval=len(self.valid_target_coords))
         return self.valid_target_coords[idx]
 
     def sample_drones(self, key: jax.Array, N: int) -> jax.Array:
-        if self.drone_spawn_points is not None and len(self.drone_spawn_points) >= N:
-            return self.drone_spawn_points[:N]
         if self.valid_drone_coords is None:
             return jnp.zeros((N, 2), dtype=jnp.float32)
         keys = jax.random.split(key, N)

@@ -6,8 +6,6 @@ env:
   map_names: ["warehouse"]
   num_agents: 15
   max_steps: 1000
-  num_targets: 1
-  num_bases: 1
 
 
 # 128, 256, 512, 1024, 2048, 4096, 8192, 16384              
@@ -20,11 +18,7 @@ training:
   num_minibatches: 16           # batch split into this many minibatches per epoch
 
 reward:  
-  only_shortest_path_chain_reward: True
 
 
-network:
-  critic_type: "agent_centric" # "agent_centric" (recommended) | "global_mean"
-
-logging:
+evaluation:
   eval_freq: 40

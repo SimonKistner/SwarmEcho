@@ -469,8 +469,6 @@ if len(selected_operations) == 1:
         ("map_names", str(env_cfg.get("map_names", "N/A"))),
         ("max_steps", str(env_cfg.get("max_steps", "N/A"))),
         ("num_agents", str(env_cfg.get("num_agents", "N/A"))),
-        ("num_bases", str(env_cfg.get("num_bases", "0"))),
-        ("num_targets", str(env_cfg.get("num_targets", "0"))),
         ("actual_steps_trained", str(tel_cfg.get("actual_steps_trained", "Unknown")))
     ]
 

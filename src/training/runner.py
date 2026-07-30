@@ -53,7 +53,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 import dataclasses
 
 import jax
@@ -71,9 +71,7 @@ from models.mappo import MAPPOModel
 from training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from training.mappo_trainer import MAPPOTrainer
 from training.video_worker import render_eval_video
-from training.artifacts import artifact_suffix, train_artifact_root
-from training.adaptive_spawn import AdaptiveTargetSpawnController, diagnostics_to_wandb
-from visualize.renderer import render_video
+from training.artifacts import artifact_suffix, save_eval_info_csv, train_artifact_root
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +145,13 @@ def _broadcast_eval_metrics_to_remaining_wandb_steps(
     """
     if wandb_run is None:
         return
-    if not bool(cfg.logging.get("eval_broadcast_on_curriculum_early_stop", True)):
+    if not bool(cfg.evaluation.get("eval_broadcast_on_curriculum_early_stop", True)):
         return
     if not eval_logs:
         return
 
-    eval_every = max(1, int(cfg.logging.get("eval_freq", 50)))
-    eval_offset = int(cfg.logging.get("eval_offset", 1))
+    eval_every = max(1, int(cfg.evaluation.get("eval_freq", 50)))
+    eval_offset = int(cfg.evaluation.get("eval_offset", 1))
     future_steps: list[int] = []
 
     for future_update in range(trigger_update + 1, n_updates + 1):
@@ -493,11 +491,9 @@ def _collect_rollout_mappo(
     ep_found_accum   = ep_trackers["found"]
     ep_gap_accum     = ep_trackers["gap"]
     ep_prog_pct_accum = ep_trackers.get("prog_pct", np.zeros(E))
-    ep_finder_return_accum = ep_trackers.get("finder_return", np.zeros(E))
     r_coverage_accum = ep_trackers.get("r_coverage", np.zeros(E))
     r_gap_accum      = ep_trackers.get("r_gap",      np.zeros(E))
     r_coll_accum     = ep_trackers.get("r_coll",     np.zeros(E))
-    r_prox_accum     = ep_trackers.get("r_prox",     np.zeros(E))
     r_found_accum    = ep_trackers.get("r_found",    np.zeros(E))
     r_succ_accum     = ep_trackers.get("r_succ",     np.zeros(E))
     cov_accum        = ep_trackers.get("coverage",   np.zeros(E))
@@ -508,16 +504,9 @@ def _collect_rollout_mappo(
     completed_found    = []
     completed_gaps     = []
     completed_prog_pcts = []
-    completed_finder_returns = []
-    completed_diag_memories = []
-    completed_diag_targets = []
-    completed_diag_valids = []
-    completed_target_positions = []
-
     completed_r_coverage = []
     completed_r_gap      = []
     completed_r_coll     = []
-    completed_r_prox     = []
     completed_r_found    = []
     completed_r_succ     = []
     completed_coverage   = []
@@ -610,21 +599,15 @@ def _collect_rollout_mappo(
         ep_ret_accum     += rewards_np
         ep_len_accum     += 1
         ep_success_accum  = np.maximum(ep_success_accum, np.array(info["fully_connected"]))
-        # MEM_T8-only diagnostic fallback: normal levels report global_target_found.
-        found_metric = np.array(info.get("target_found_fraction", info["global_target_found"]))
+        found_metric = np.array(info["global_target_found"])
         ep_found_accum    = np.maximum(ep_found_accum, found_metric)
         ep_gap_accum      = np.array(info["chain_gap_dist"])
         ep_prog_pct_accum  = np.array(info["chain_progress_pct"])
-        ep_finder_return_accum = np.maximum(
-            ep_finder_return_accum,
-            np.array(info.get("finder_returned_to_target_after_delivery", 0.0)),
-        )
 
         # Track reward components
         r_coverage_accum += np.array(info["r_coverage"])
         r_gap_accum      += np.array(info["r_chain_gap"])
         r_coll_accum     += np.array(info["r_collision"])
-        r_prox_accum     += np.array(info["r_proximity"])
         r_found_accum    += np.array(info["r_target_found"])
         r_succ_accum     += np.array(info["r_success"])
         cov_accum         = np.array(info["global_coverage"])
@@ -637,34 +620,12 @@ def _collect_rollout_mappo(
             completed_found.append(float(ep_found_accum[e]))
             completed_gaps.append(float(ep_gap_accum[e]))
             completed_prog_pcts.append(float(ep_prog_pct_accum[e]))
-            completed_finder_returns.append(float(ep_finder_return_accum[e]))
-            t_pos_completed = np.array(info["terminal_target_pos"])[e]
-            if t_pos_completed.ndim == 2:
-                t_pos_completed = t_pos_completed[0]
-            completed_target_positions.append(t_pos_completed.astype(np.float32))
-
             completed_r_coverage.append(float(r_coverage_accum[e]))
             completed_r_gap.append(float(r_gap_accum[e]))
             completed_r_coll.append(float(r_coll_accum[e]))
-            completed_r_prox.append(float(r_prox_accum[e]))
             completed_r_found.append(float(r_found_accum[e]))
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
-            is_diag_valid = (
-                model.actor_memory and model.memory_comm_enabled
-                and base_signature is not None
-                and bool(np.array(info["terminal_delivered"])[e])
-                and np.any(np.array(base_value)[e] != 0.0)
-            )
-            completed_diag_valids.append(is_diag_valid)
-            if is_diag_valid:
-                t_pos_diag = np.array(info["terminal_target_pos"][e])
-                if t_pos_diag.ndim == 2:
-                    t_pos_diag = t_pos_diag[0]
-                completed_diag_memories.append(
-                    np.concatenate([np.array(base_signature)[e], np.array(base_value)[e]], axis=0)
-                )
-                completed_diag_targets.append(t_pos_diag)
 
         ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
         ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
@@ -672,12 +633,10 @@ def _collect_rollout_mappo(
         ep_found_accum   = np.where(dones_np, 0.0, ep_found_accum)
         ep_gap_accum     = np.where(dones_np, 0.0, ep_gap_accum)  # reset so next ep starts clean
         ep_prog_pct_accum = np.where(dones_np, 0.0, ep_prog_pct_accum)
-        ep_finder_return_accum = np.where(dones_np, 0.0, ep_finder_return_accum)
 
         r_coverage_accum = np.where(dones_np, 0.0, r_coverage_accum)
         r_gap_accum      = np.where(dones_np, 0.0, r_gap_accum)
         r_coll_accum     = np.where(dones_np, 0.0, r_coll_accum)
-        r_prox_accum     = np.where(dones_np, 0.0, r_prox_accum)
         r_found_accum    = np.where(dones_np, 0.0, r_found_accum)
         r_succ_accum     = np.where(dones_np, 0.0, r_succ_accum)
         cov_accum        = np.where(dones_np, 0.0, cov_accum)
@@ -726,12 +685,10 @@ def _collect_rollout_mappo(
     ep_trackers["found"]   = ep_found_accum
     ep_trackers["gap"]     = ep_gap_accum
     ep_trackers["prog_pct"] = ep_prog_pct_accum
-    ep_trackers["finder_return"] = ep_finder_return_accum
 
     ep_trackers["r_coverage"] = r_coverage_accum
     ep_trackers["r_gap"]      = r_gap_accum
     ep_trackers["r_coll"]     = r_coll_accum
-    ep_trackers["r_prox"]     = r_prox_accum
     ep_trackers["r_found"]    = r_found_accum
     ep_trackers["r_succ"]     = r_succ_accum
     ep_trackers["coverage"]   = cov_accum
@@ -746,13 +703,8 @@ def _collect_rollout_mappo(
         completed_returns, completed_lengths, completed_success,
         completed_found, completed_gaps, completed_prog_pcts,
         completed_r_coverage, completed_r_gap, completed_r_coll,
-        completed_r_prox, completed_r_found, completed_r_succ,
+        completed_r_found, completed_r_succ,
         completed_coverage,
-        completed_finder_returns,
-        np.array(completed_target_positions, dtype=np.float32),
-        np.array(completed_diag_memories, dtype=np.float32),
-        np.array(completed_diag_targets, dtype=np.float32),
-        completed_diag_valids,
     )
 
 
@@ -760,7 +712,7 @@ def _collect_rollout_mappo(
 # Deterministic eval rollout (single env)
 # ---------------------------------------------------------------------------
 
-def _evaluate(
+def _collect_video_episode(
     model:        MAPPOModel,
     reset_fn,
     env_step_fn,
@@ -768,25 +720,13 @@ def _evaluate(
     reward_fn,
     cfg:          DictConfig,
     key:          jax.Array,
-    num_episodes: int = 1,
-    episode_callback: Optional[Callable] = None,
 ) -> tuple:
-    """
-    Run deterministic evaluation episodes.
-
-    Parameters
-    ----------
-    episode_callback : optional callable(ep_idx, success, ep_states, ep_rewards, ep_metrics) -> bool
-        Called after each episode completes.  Return True to stop early
-        (e.g. when selective render buckets are full).
-        If None, all num_episodes are run and data is collected normally.
-    """
+    """Collect exactly one deterministic episode trajectory for video rendering."""
     max_force = float(cfg.env.max_force)
     max_steps = int(cfg.env.max_steps)
     collect_obs_logs = bool(cfg.logging.get("obs_log", cfg.logging.get("log_obs", True)))
 
     all_states, all_rewards, all_metrics = [], [], []
-    total_ret = total_len = total_gap = total_prog_pct = total_success = total_found = 0.0
 
     # Pre-build vmapped action functions to avoid recreation and compilation triggers inside the loop
     if model.actor_memory:
@@ -802,7 +742,7 @@ def _evaluate(
             return model.actor(o)[0]
         vmapped_act = jax.vmap(_act_eval_ff)
 
-    for ep_idx in range(num_episodes):
+    for _ in range(1):
         key, rk = jax.random.split(key)
         state   = reset_fn(rk)
         actor_h = model.initial_actor_hidden(()) if model.actor_memory else None
@@ -892,8 +832,7 @@ def _evaluate(
             ep_gap    = float(info["chain_gap_dist"])
             ep_prog_pct = float(info["chain_progress_pct"])
             ep_success = ep_success or bool(success_achieved)
-            # MEM_T8-only diagnostic fallback: normal levels report global_target_found.
-            found_metric = info.get("target_found_fraction", info["global_target_found"])
+            found_metric = info["global_target_found"]
             ep_found = max(float(ep_found), float(found_metric))
             ep_rewards.append(np.array(rew))
 
@@ -927,29 +866,7 @@ def _evaluate(
         all_states.append(ep_states)
         all_rewards.append(ep_rewards)
         all_metrics.append(final_metrics)
-        total_ret     += ep_ret
-        total_len     += ep_len
-        total_gap     += ep_gap
-        total_prog_pct += ep_prog_pct
-        total_success += float(ep_success)
-        total_found   += float(ep_found)
-
-        # Fire per-episode callback (used for streaming selective renders)
-        if episode_callback is not None:
-            stop = episode_callback(ep_idx, ep_success, ep_states, ep_rewards, final_metrics)
-            if stop:
-                break
-
-    n = max(1, len(all_states))
-    return (
-        all_states, all_rewards, all_metrics,
-        total_ret / n,
-        total_len / n,
-        total_gap / n,
-        total_prog_pct / n,
-        total_success / n,
-        total_found / n,
-    )
+    return all_states, all_rewards, all_metrics
 
 
 @functools.partial(
@@ -1067,7 +984,7 @@ def _run_parallel_eval_jit(
             new_has_found_delivered = has_found_delivered | state.base_target_known
             new_has_found_visual = has_found_visual | jnp.any(state.target_known, axis=-1)
 
-            found_metric = info.get("target_found_fraction", info["global_target_found"])
+            found_metric = info["global_target_found"]
             new_max_found = jnp.maximum(max_found, found_metric)
 
             # Check for early episode termination (target found when terminate_on_target_found is True)
@@ -1123,120 +1040,10 @@ def _release_video_eval_trajectory() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Selective eval render callback factory
-# ---------------------------------------------------------------------------
-
-def _make_selective_eval_callback(
-    n_success:    int,
-    n_fail:       int,
-    out_dir:      Path,
-    ckpt_name:    str,
-    renderer:     str,
-    cfg,
-) -> Callable:
-    """
-    Returns a closure for use as episode_callback in _evaluate().
-
-    Behaviour per episode
-    ---------------------
-    * success=True  and rendered_success < n_success  → render with SUCCESS_ prefix
-    * success=False and rendered_fail    < n_fail      → render with FAIL_ prefix
-    * otherwise                                        → skip rendering
-    Returns True (early-exit signal) when both buckets are full.
-
-    Note: both n_success=0 and n_fail=0 is valid — episodes are computed and
-    counted but nothing is rendered (useful for stats-only mode).
-    """
-    rendered_success     = [0]
-    rendered_fail        = [0]
-    cumulative_successes = [0]
-
-    def callback(ep_idx: int, success: bool, ep_states, ep_rewards, ep_metrics) -> bool:
-        nonlocal rendered_success, rendered_fail, cumulative_successes
-
-        if success:
-            cumulative_successes[0] += 1
-
-        should_render = False
-        prefix = ""
-
-        if success and rendered_success[0] < n_success:
-            should_render = True
-            prefix = "SUCCESS_"
-        elif not success and rendered_fail[0] < n_fail:
-            should_render = True
-            prefix = "FAIL_"
-
-        # Calculate running stats
-        total_eps = ep_idx + 1
-        success_rate = (cumulative_successes[0] / total_eps) * 100.0
-        steps = len(ep_states)
-        ep_ret = float(ep_metrics["r_total"].sum())
-
-        status_str = f"Ep {ep_idx:>2}: success={str(success):<5} steps={steps:>3} return={ep_ret:>7.1f} | Success Rate={success_rate:>5.1f}% ({cumulative_successes[0]}/{total_eps})"
-
-        if should_render:
-            if success:
-                rendered_success[0] += 1
-            else:
-                rendered_fail[0] += 1
-
-            ep_num = rendered_success[0] + rendered_fail[0] - 1
-            stem = f"{prefix}{ckpt_name}_ep{ep_num:02d}"
-            render_status = f"Render: {rendered_success[0]}/{n_success} Success, {rendered_fail[0]}/{n_fail} Fail"
-
-            print(f"  [eval] {status_str} | {render_status} | RENDERED {stem}.mp4")
-
-            render_eval_video(
-                ep_states  = ep_states,
-                ep_rewards = ep_rewards,
-                ep_metrics = ep_metrics,
-                cfg        = cfg,
-                out_dir    = out_dir,
-                filename_stem = stem,
-                renderer   = renderer,
-            )
-            _release_video_eval_trajectory()
-        else:
-            reason = "Bucket Full" if (success and n_success > 0) or (not success and n_fail > 0) else "Render Target is 0"
-            render_status = f"Render: {rendered_success[0]}/{n_success} Success, {rendered_fail[0]}/{n_fail} Fail"
-            print(f"  [eval] {status_str} | {render_status} | SKIPPED ({reason})")
-
-        # Stop early if both buckets are full
-        buckets_full = (rendered_success[0] >= n_success) and (rendered_fail[0] >= n_fail)
-        return buckets_full
-
-    return callback
-
-
-# ---------------------------------------------------------------------------
-# Utility: print eval stats summary
-# ---------------------------------------------------------------------------
-
-def _print_eval_stats(
-    label: str,
-    num_computed: int,
-    mean_ret: float,
-    mean_len: float,
-    mean_prog: float,
-    success_rate: float,
-    found_rate: float,
-) -> None:
-    print(
-        f"  [{label}] episodes={num_computed}  "
-        f"ep_return={mean_ret:.2f}  "
-        f"chain={mean_prog:.1f}%  "
-        f"success={success_rate:.1%}  "
-        f"found={found_rate:.1%}  "
-        f"ep_len={mean_len:.0f}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(cfg: DictConfig, success_threshold: Optional[float] = None):
+def train(cfg: DictConfig):
     """
     Main MAPPO training loop.
 
@@ -1244,29 +1051,18 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     ----------
     cfg : DictConfig
         Fully-merged configuration.
-    success_threshold : float or None
-        If set, stop training early once the 2000-episode sliding-window
-        success rate reaches this value (e.g. 0.95 for 95%).
-        None (default) = always train for the full total_timesteps.
     """
     # ── Logging config ────────────────────────────────────────────────────
-    if success_threshold is not None:
-        OmegaConf.set_readonly(cfg, False)
-        cfg.curriculum.success_threshold = success_threshold
-        OmegaConf.set_readonly(cfg, True)
-
     if cfg.logging.get("suppress_xla_warnings", True):
         os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
         os.environ["NVIDIA_TF32_OVERRIDE"]  = "0"
 
-    critic_type = str(cfg.network.critic_type)
-    per_agent   = (critic_type == "agent_centric")
     actor_memory = bool(cfg.network.get("actor_memory", False))
     critic_memory = bool(cfg.network.get("critic_memory", False))
     recurrent   = actor_memory or critic_memory
 
     print("\n══════════════════════════════════════════════════════")
-    print(f"  SwarmEcho — MAPPO  [{critic_type} critic]")
+    print("  SwarmEcho — MAPPO  [agent-centric critic]")
     print("══════════════════════════════════════════════════════")
 
     N         = int(cfg.env.num_agents)
@@ -1305,10 +1101,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     print()
 
     # ── Environment ───────────────────────────────────────────────────────
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
-    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
+    compute_obs, _     = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
     compute_reward     = make_reward_fn(cfg)
-    comm_has_inner_obstacles = has_inner_obstacles(comm_occ_grid)
+    comm_has_inner_obstacles = has_inner_obstacles(occ_grid)
     if comm_has_inner_obstacles:
         print("  [comm-los] inner communication obstacles detected; using wall-aware raycasts")
     else:
@@ -1316,71 +1112,14 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
-    adaptive_spawn = None
-    adaptive_spawn_interval = 1
-    train_reset = reset
-    train_env_step = env_step
-    if bool(cfg.env.get("adaptive_target_spawn", False)):
-        from core.config import MAP_DIR
-        from env.maps import MapDefinition
-        if not cfg.env.get("map_names"):
-            raise ValueError("env.adaptive_target_spawn requires env.map_names[0] to load maze-cell metadata")
-        adaptive_map = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
-        adaptive_spawn_interval = max(1, (max_steps + T - 1) // T)
-        adaptive_spawn = AdaptiveTargetSpawnController(
-            adaptive_map,
-            target_spawn_method=str(cfg.env.get("target_spawn_method", "map_defined")),
-            static_maze_optimal_path=bool(cfg.env.get("static_maze_optimal_path", True)),
-            target_spawn_radius=float(cfg.env.get("target_spawn_radius", 0.0)),
-            target_spawn_radius_min=float(cfg.env.get("target_spawn_radius_min", 0.0)),
-            target_invalid_spawn_base_radius=float(cfg.env.get("target_invalid_spawn_base_radius", 0.0)),
-            mode=str(cfg.env.get("adaptive_target_spawn_mode", "soft_gate")),
-            hard_gate_success_lower=float(cfg.env.get("adaptive_spawn_success_lower", 0.0)),
-            hard_gate_success_upper=float(cfg.env.get("adaptive_spawn_success_upper", 0.8)),
-            threshold_hold_updates=int(cfg.env.get("adaptive_spawn_threshold_hold_updates", 3)),
-        )
-        train_reset = adaptive_spawn.make_reset(reset)
-        if adaptive_spawn.mode == "hard_gate":
-            train_env_step = make_env_fns(
-                cfg,
-                exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
-                extra_walls=adaptive_spawn.inactive_category_wall_segments(),
-            )[0]
-        print(
-            f"  [adaptive-spawn] enabled in {adaptive_spawn.mode} mode with "
-            f"{len(adaptive_spawn.categories)} path-length categories; "
-            f"threshold_hold={adaptive_spawn.threshold_hold_updates} adaptive update(s); "
-            f"update/report interval={adaptive_spawn_interval} PPO update(s)"
-        )
-
-    autoreset_step   = _make_autoreset_step(train_env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+    autoreset_step   = _make_autoreset_step(env_step, reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
-    reset_v          = jax.jit(jax.vmap(train_reset))
+    reset_v          = jax.jit(jax.vmap(reset))
     reset_s          = jax.jit(reset)
     env_step_jit       = jax.jit(env_step)
     compute_obs_jit    = jax.jit(compute_obs)
     compute_reward_jit = jax.jit(compute_reward)
-    diag_decoder = None
-    if (
-        bool(cfg.logging.get("memory_diagnostic_probe", True))
-        and bool(cfg.network.get("memory_comm_enabled", False))
-        and bool(cfg.network.get("actor_memory", False))
-        and cfg.env.get("map_names")
-    ):
-        from core.config import MAP_DIR
-        from env.maps import MapDefinition
-        diag_map = MapDefinition.load(MAP_DIR / f"{cfg.env.map_names[0]}.yaml", cell_size=1.0)
-        if diag_map.maze_cell_cols and diag_map.maze_cell_rows:
-            diag_decoder = {
-                "cols": int(diag_map.maze_cell_cols),
-                "rows": int(diag_map.maze_cell_rows),
-                "w": float(diag_map.width) / int(diag_map.maze_cell_cols),
-                "h": float(diag_map.height) / int(diag_map.maze_cell_rows),
-                "W": np.zeros((int(cfg.network.tarmac_sig_dim) + int(cfg.network.tarmac_val_dim), int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows)), dtype=np.float32),
-                "b": np.zeros((int(diag_map.maze_cell_cols) * int(diag_map.maze_cell_rows),), dtype=np.float32),
-            }
-
     # ── Model ─────────────────────────────────────────────────────────────
     master_key = jax.random.PRNGKey(int(cfg.training.seed))
     model_key, env_key, master_key = jax.random.split(master_key, 3)
@@ -1393,7 +1132,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         hidden_dim       = int(cfg.network.hidden_dim),
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
-        critic_type      = critic_type,
         actor_memory     = actor_memory,
         critic_memory    = critic_memory,
         rngs             = rngs,
@@ -1411,7 +1149,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         vf_coef       = float(cfg.training.vf_coef),
         ent_coef      = float(cfg.training.ent_coef),
         num_epochs    = int(cfg.training.num_epochs),
-        per_agent     = per_agent,
         actor_memory  = actor_memory,
         critic_memory = critic_memory,
     )
@@ -1423,7 +1160,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         act_dim    = act_dim,
         gamma      = float(cfg.training.gamma),
         gae_lambda = float(cfg.training.gae_lambda),
-        per_agent  = per_agent,
         recurrent  = actor_memory or critic_memory,
         hidden_dim = int(cfg.network.hidden_dim),
         tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
@@ -1487,26 +1223,24 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
     log_root = Path(cfg.logging.get("log_dir", "outputs")).absolute()
     run_dir  = log_root / run_name
-    ckpt_dir = run_dir / "checkpoints"
+    configured_ckpt_dir = cfg.evaluation.get("checkpoint_dir", None)
+    ckpt_dir = (
+        Path(str(configured_ckpt_dir).replace("\\", "/")).absolute()
+        if configured_ckpt_dir
+        else run_dir / "checkpoints"
+    )
     train_artifacts = train_artifact_root(run_dir)
     train_video_dir = train_artifacts / "vids"
     train_data_dir = train_artifacts / "data"
     train_manifest_dir = train_artifacts / "manifests"
     eval_video_dir = run_dir / "artifacts" / "eval" / "early" / "vids"
+    run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Update config with resolved world dimensions for the snapshot
     OmegaConf.set_readonly(cfg, False)
     cfg.env.box_width  = float(resolved_W)
     cfg.env.box_height = float(resolved_H)
-
-    # Auto-disable evaluation target heatmaps if parallel evaluation is disabled
-    if not bool(cfg.training.get("eval_parallel", False)):
-        if bool(cfg.logging.get("eval_failed_chain_heatmap", False)) or bool(cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False)):
-            print("\n  ⚠️  [WARNING] training.eval_parallel is False. Heatmap generation requires parallel evaluation.")
-            print("               Automatically setting logging.eval_failed_chain_heatmap and logging.eval_not_delivered_or_visually_found_heatmap to False.\n")
-            cfg.logging.eval_failed_chain_heatmap = False
-            cfg.logging.eval_not_delivered_or_visually_found_heatmap = False
 
     OmegaConf.set_readonly(cfg, True)
 
@@ -1519,40 +1253,25 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         print(f"  W&B run      : {wandb_run.url}")
 
     # ── Renderer config ───────────────────────────────────────────────────
-    eval_video   = bool(cfg.logging.get("eval_video", True))
-    save_model   = bool(cfg.logging.get("save_model", True))
+    eval_video   = bool(cfg.evaluation.get("eval_video", True))
+    save_model   = bool(cfg.evaluation.get("save_model", True))
     is_benchmark = bool(cfg.logging.get("benchmark_mode", False))
 
-    train_eval_renderer = str(cfg.visualize.get("train_eval_renderer", "fast"))
-    final_eval_renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))
-    # is_benchmark forces fast rendering everywhere regardless of config
-    effective_train_renderer = "fast" if is_benchmark else train_eval_renderer
-    effective_final_renderer = "fast" if is_benchmark else final_eval_renderer
-
-    # Selective render config
-    selective_eval_render    = bool(cfg.visualize.get("selective_eval_render", False))
-    eval_render_videos       = int(cfg.visualize.get("eval_render_videos", 1))
-    eval_max_compute_episodes = int(cfg.visualize.get("eval_max_compute_episodes", 50))
-    eval_render_successes    = int(cfg.visualize.get("eval_render_successes", 3))
-    eval_render_failures     = int(cfg.visualize.get("eval_render_failures", 3))
-
     if not save_model:
-        print("  [ckpt] Checkpoint saving disabled")
+        print("  [ckpt] Scheduled and final checkpoint saving disabled")
     if not eval_video:
         print("  [render] Eval video rendering disabled")
     else:
-        mode_str = "selective" if selective_eval_render else "legacy"
-        print(f"  [render] Sequential mode | train={effective_train_renderer} | final={effective_final_renderer} | eval_mode={mode_str}")
+        print("  [render] OpenCV mode | one episode per video step")
 
     # ── Training loop ─────────────────────────────────────────────────────
-    eval_every  = int(cfg.logging.get("eval_freq", cfg.logging.get("video_freq", 30) or 30))
-    eval_offset = int(cfg.logging.get("eval_offset", 0) or 0)
-    eval_video_freq = cfg.logging.get("eval_video_freq", None)
-    eval_video_every = int(eval_video_freq) if eval_video_freq is not None else eval_every
-    eval_video_offset = int(cfg.logging.get("eval_video_offset", 0) or 0)
+    eval_every  = int(cfg.evaluation.get("eval_freq", 50))
+    eval_offset = int(cfg.evaluation.get("eval_offset", 0) or 0)
+    eval_video_every = int(cfg.evaluation.get("eval_video_freq", eval_every))
+    eval_video_offset = int(cfg.evaluation.get("eval_video_offset", 0) or 0)
 
-    checkpoint_freq = int(cfg.logging.get("checkpoint_freq", 50))
-    checkpoint_offset = int(cfg.logging.get("checkpoint_offset", 0) or 0)
+    checkpoint_freq = int(cfg.evaluation.get("checkpoint_freq", 50))
+    checkpoint_offset = int(cfg.evaluation.get("checkpoint_offset", 0) or 0)
     ckpt_every = checkpoint_freq
     ckpt_offset = checkpoint_offset
     if save_model:
@@ -1567,7 +1286,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
         "success": np.zeros(E, dtype=np.float32),
         "found":   np.zeros(E, dtype=np.float32),
         "gap":     np.zeros(E, dtype=np.float32),
-        "finder_return": np.zeros(E, dtype=np.float32),
     }
 
     # Sliding window for stable logging metrics
@@ -1577,25 +1295,18 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
     window_fnd  = deque(maxlen=E)
     window_gap  = deque(maxlen=E)
     window_prog_pct = deque(maxlen=E)
-    window_finder_return = deque(maxlen=E)
 
     window_r_cov   = deque(maxlen=E)
     window_r_gap   = deque(maxlen=E)
     window_r_coll  = deque(maxlen=E)
-    window_r_prox  = deque(maxlen=E)
     window_r_found = deque(maxlen=E)
     window_r_succ  = deque(maxlen=E)
     window_cov     = deque(maxlen=E)
-    window_diag_acc = deque(maxlen=E)
-    window_diag_samples = deque(maxlen=E)
 
     completed_eps_count = 0
 
     start_update = 0
     loading_mode = cfg.training.get("ckpt_loading_mode", "branch").lower()
-    # Backward compatibility fallback
-    if cfg.training.get("resume_update", None) is not None:
-        loading_mode = "resume" if bool(cfg.training.resume_update) else "branch"
 
     loaded_history = []
     total_checkpoint_steps = 0
@@ -1684,9 +1395,8 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
              last_values, last_dones, actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
              comm_summary,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
-             raw_r_cov, raw_r_gap, raw_r_coll, raw_r_prox, raw_r_found, raw_r_succ,
-             raw_cov,
-             raw_finder_return, raw_target_positions, raw_diag_memories, raw_diag_targets, raw_diag_valids) = _collect_rollout_mappo(
+             raw_r_cov, raw_r_gap, raw_r_coll, raw_r_found, raw_r_succ,
+             raw_cov) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
@@ -1694,10 +1404,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── Update sliding window from COMPLETED episodes only ───────────────
             n_eps = len(raw_ret)
-            diag_acc = None
-            diag_samples = 0
-            adaptive_spawn_diag = None
-
             if n_eps > 0:
                 completed_eps_count += n_eps
                 window_ret.extend(raw_ret)
@@ -1706,97 +1412,13 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 window_fnd.extend(raw_found)
                 window_gap.extend(raw_gap)
                 window_prog_pct.extend(raw_prog_pct)
-                window_finder_return.extend(raw_finder_return)
 
                 window_r_cov.extend(raw_r_cov)
                 window_r_gap.extend(raw_r_gap)
                 window_r_coll.extend(raw_r_coll)
-                window_r_prox.extend(raw_r_prox)
                 window_r_found.extend(raw_r_found)
                 window_r_succ.extend(raw_r_succ)
                 window_cov.extend(raw_cov)
-
-
-                if adaptive_spawn is not None:
-                    adaptive_spawn.record_completed(raw_target_positions, raw_success)
-
-                if diag_decoder is not None:
-                    window_diag_samples.extend(raw_diag_valids)
-                    if len(raw_diag_memories) > 0:
-                        X = np.asarray(raw_diag_memories, dtype=np.float32)
-                        pos = np.asarray(raw_diag_targets, dtype=np.float32)
-                        cx = np.clip(np.floor(pos[:, 0] / diag_decoder["w"]).astype(np.int32), 0, diag_decoder["cols"] - 1)
-                        cy = np.clip(np.floor(pos[:, 1] / diag_decoder["h"]).astype(np.int32), 0, diag_decoder["rows"] - 1)
-                        y = cx * diag_decoder["rows"] + cy
-                        logits = X @ diag_decoder["W"] + diag_decoder["b"]
-                        pred = np.argmax(logits, axis=-1)
-                        diag_acc = float(np.mean(pred == y))
-                        diag_samples = int(len(y))
-                        window_diag_acc.extend(pred == y)
-                        logits = logits - logits.max(axis=-1, keepdims=True)
-                        probs = np.exp(logits)
-                        probs /= np.maximum(probs.sum(axis=-1, keepdims=True), 1e-8)
-                        probs[np.arange(len(y)), y] -= 1.0
-                        lr_diag = 1e-3
-                        diag_decoder["W"] -= lr_diag * (X.T @ probs) / max(1, len(y))
-                        diag_decoder["b"] -= lr_diag * probs.mean(axis=0)
-
-            # -- Curriculum transition check (Training stats) -----------------
-            curr_thresh = cfg.curriculum.get("success_threshold", None)
-            curr_mode = cfg.curriculum.get("mode", "train")
-            if curr_thresh is not None and curr_mode == "train":
-                curr_metric = cfg.curriculum.get("metric", "success")
-                if curr_metric == "target_found":
-                    window_metric = window_fnd
-                    metric_label = "Target found rate"
-                else:
-                    window_metric = window_succ
-                    metric_label = "Success rate"
-
-                if len(window_metric) == window_metric.maxlen and float(np.mean(window_metric)) >= float(curr_thresh):
-                    print(
-                        f"  [curriculum] Training {metric_label} {float(np.mean(window_metric)):.1%} >= "
-                        f"threshold {curr_thresh:.1%} -- advancing to next level."
-                    )
-                    # Save an intermediate checkpoint before breaking
-                    early_ckpt_str = ""
-                    if save_model:
-                        import orbax.checkpoint as ocp
-                        import shutil
-                        early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                        if early_ckpt.exists():
-                            shutil.rmtree(early_ckpt)
-                        _, state_dict = nnx.split(model)
-                        checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                        checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                        _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
-                        print(f"  [ckpt-early] saved -> {early_ckpt}")
-                        early_ckpt_str = str(early_ckpt)
-                    else:
-                        print("  [ckpt-early] skipped (save_model=false)")
-
-                    # ── Early-exit eval + video (same logic as final eval) ────────
-                    if eval_video:
-                        master_key, eval_key = jax.random.split(master_key)
-                        _run_eval_with_render(
-                            model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                            compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                            cfg=cfg, eval_key=eval_key,
-                            out_dir=eval_video_dir,
-                            ckpt_name=f"early_{update:06d}",
-                            renderer=effective_final_renderer,
-                            selective=selective_eval_render,
-                            eval_render_videos=eval_render_videos,
-                            eval_max_compute=eval_max_compute_episodes,
-                            n_success=eval_render_successes,
-                            n_fail=eval_render_failures,
-                            wandb_run=wandb_run,
-                            steps_done=steps_done,
-                            max_steps=max_steps,
-                            label="eval-early",
-                        )
-
-                    return early_ckpt_str
 
             # ── GAE + minibatches ─────────────────────────────────────────────
             advs, rets = buf.compute_gae(last_values, last_dones)
@@ -1804,33 +1426,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
 
             # ── PPO update ────────────────────────────────────────────────────
             ppo_stats = trainer.update(mbs)
-
-            adaptive_spawn_due = (
-                adaptive_spawn is not None
-                and ((update - start_update) % adaptive_spawn_interval == 0)
-            )
-            if adaptive_spawn_due:
-                adaptive_spawn_diag = adaptive_spawn.update_probabilities()
-                if (
-                    adaptive_spawn.mode == "hard_gate"
-                    and adaptive_spawn_diag.previous_active_categories != adaptive_spawn_diag.active_categories
-                ):
-                    previous = ", ".join(str(c) for c in adaptive_spawn_diag.previous_active_categories)
-                    current = ", ".join(str(c) for c in adaptive_spawn_diag.active_categories)
-                    print(
-                        f"  [adaptive-spawn] hard_gate active categories changed: "
-                        f"[{previous}] -> [{current}]"
-                    )
-                train_reset = adaptive_spawn.make_reset(reset)
-                if adaptive_spawn.mode == "hard_gate":
-                    train_env_step = make_env_fns(
-                        cfg,
-                        exploration_reward_mask=adaptive_spawn.exploration_reward_mask(),
-                        extra_walls=adaptive_spawn.inactive_category_wall_segments(),
-                    )[0]
-                autoreset_step = _make_autoreset_step(train_env_step, train_reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
-                autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
-                reset_v = jax.jit(jax.vmap(train_reset))
 
             elapsed = time.perf_counter() - t_start
             sps     = ((update - start_update) * E * T) / max(1e-6, elapsed)
@@ -1845,7 +1440,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 _red  = f"{(1.0 - (np.mean(window_len) / max_steps)) * 100.0:>5.1f}%" if window_full else "  ---%"
                 _s = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
                 _f = f"{np.mean(window_fnd):>5.1%}"  if window_full else " ----"
-                _diag = f"{np.mean(window_diag_acc):>5.1%}" if (diag_decoder is not None and len(window_diag_acc) > 0) else " ----"
 
                 now_str = datetime.now().strftime("%H:%M:%S")
 
@@ -1866,7 +1460,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                     f"found={_f}  "
                     f"chain={_prog}  "
                     f"succ={_s}  "
-                    f"mem_probe={_diag}  "
                     f"eta={eta_str}"
                 )
 
@@ -1900,7 +1493,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "train/success_rate":       float(np.mean(window_succ)),
                         "train/target_found_rate":  float(np.mean(window_fnd)),
                         "train/chain_progress_pct": float(np.mean(window_prog_pct)),
-                        "train/finder_return_to_target_after_delivery_rate": float(np.mean(window_finder_return)),
                         "train/ep_length_reduction": (1.0 - (float(np.mean(window_len)) / max_steps)) * 100.0,
                         "train/map_coverage_pct":   float(np.mean(window_cov)) * 100.0,
                         "train/episodes_completed": completed_eps_count,
@@ -1908,28 +1500,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         "rewards/exploration":      float(np.mean(window_r_cov)),
                         "rewards/chain_gap":        float(np.mean(window_r_gap)),
                         "rewards/collision":        float(np.mean(window_r_coll)),
-                        "rewards/proximity":        float(np.mean(window_r_prox)),
                         "rewards/target_found":     float(np.mean(window_r_found)),
                         "rewards/success_bonus":    float(np.mean(window_r_succ)),
                     })
-
-                    if bool(cfg.logging.get("adaptive_spawn_diagnostics", False)) and adaptive_spawn_diag is not None:
-                        logs.update(diagnostics_to_wandb(adaptive_spawn_diag))
-                    if len(window_diag_acc) > 0:
-                        diag_samples_pct = float(np.mean(window_diag_samples))
-                        logs.update({
-                            "diagnostics/memory_target_cell_samples": diag_samples_pct,
-                        })
-                        if diag_samples_pct >= 0.7:
-                            logs.update({
-                                "diagnostics/memory_target_cell_accuracy": float(np.mean(window_diag_acc)),
-                            })
                 logs.update(comm_summary)
                 wandb.log(logs, step=steps_done)
 
             # Calculate rolling training success rate and check threshold (always allow evaluation on final update)
             train_succ_rate = np.mean(window_succ) if len(window_succ) > 0 else 0.0
-            eval_min_succ = float(cfg.training.get("eval_min_train_success", 0.0))
+            eval_min_succ = float(cfg.evaluation.get("eval_min_train_success", 0.0))
             succ_threshold_met = (train_succ_rate >= eval_min_succ) or (update == n_updates)
 
             is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset and succ_threshold_met
@@ -1940,48 +1519,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                 is_eval_step = True
                 is_video_step = bool(eval_video)
 
-            is_train_target_heatmap_step = (
-                bool(cfg.logging.get("train_target_spawn_heatmap", False))
-                and ((update - eval_offset) % eval_every == 0)
-                and update > eval_offset
-            )
-            if update == n_updates and bool(cfg.logging.get("train_target_spawn_heatmap", False)):
-                is_train_target_heatmap_step = True
-
-            if is_train_target_heatmap_step and len(raw_target_positions) > 0:
-                try:
-                    from training.evaluate_pipeline import (
-                        load_map_data,
-                        render_and_save_train_target_spawn_heatmap,
-                    )
-                    _, map_data, map_def = load_map_data(cfg)
-                    run_timestamp = artifact_suffix(update, steps_done)
-                    train_target_spawn_heatmap_dir = train_artifacts / "train_target_spawn_heatmap"
-                    render_and_save_train_target_spawn_heatmap(
-                        target_positions=np.asarray(raw_target_positions, dtype=np.float32),
-                        map_data=map_data,
-                        map_def=map_def,
-                        run_dir=run_dir,
-                        video_dir=train_target_spawn_heatmap_dir,
-                        run_timestamp=run_timestamp,
-                        artifact_stem=f"train_target_spawns_{run_timestamp}",
-                        extra_walls=(adaptive_spawn.inactive_category_wall_segments() if adaptive_spawn is not None else None),
-                    )
-                except Exception as heatmap_err:
-                    print(f"  [heatmap-error] Failed to render train target spawn heatmap: {heatmap_err}")
-
             # ── Training eval + optional single video ─────────────────────────
             if is_eval_step or is_video_step:
-                eval_timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M")
-                heatmaps_generated = False
-
-                if bool(cfg.training.get("eval_parallel", False)):
+                if is_eval_step or is_video_step:
                     if is_eval_step:
                         master_key, eval_key = jax.random.split(master_key)
                         (rets, lengths, gaps, progs, succs, fnds,
                          final_state, final_succs, final_delivered, final_visual) = _evaluate_parallel(
                             model, reset, env_step, compute_obs, compute_reward,
-                            cfg, eval_key, num_envs=int(cfg.training.eval_parallel_envs),
+                            cfg, eval_key, num_envs=int(cfg.evaluation.eval_parallel_envs),
                         )
                         eval_ret = float(jnp.mean(rets))
                         eval_len = float(jnp.mean(lengths))
@@ -1998,7 +1544,7 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         _prog_eval = f"{eval_prog_pct:>5.1f}%"
                         _s_eval = f"{eval_success:>5.1%}"
 
-                        num_envs = int(cfg.training.eval_parallel_envs)
+                        num_envs = int(cfg.evaluation.eval_parallel_envs)
                         if num_envs >= 1000:
                             if num_envs % 1000 == 0:
                                 par_envs_val = f"{num_envs // 1000}k"
@@ -2030,11 +1576,31 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             import wandb
                             wandb.log(eval_wandb_logs, step=steps_done)
 
-                        # Generate mid-run evaluation heatmaps using parallel evaluation results
+                        # Persist compact evaluation information and generate heatmaps
+                        # from the same already-computed parallel evaluation results.
+                        save_eval_info = bool(cfg.evaluation.get("save_eval_info_as_csv", False))
                         generate_any_heatmap = bool(
-                            cfg.logging.get("eval_failed_chain_heatmap", False) or
-                            cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False)
+                            cfg.evaluation.get("eval_failed_chain_heatmap", False) or
+                            cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False)
                         )
+                        if save_eval_info or generate_any_heatmap:
+                            target_pos_arr = np.asarray(final_state.target_pos)
+                            target_success_arr = np.asarray(final_succs)
+                            n_completed = len(target_success_arr)
+                            run_timestamp = artifact_suffix(update, steps_done)
+
+                        if save_eval_info:
+                            try:
+                                eval_info_path = save_eval_info_csv(
+                                    train_data_dir / f"eval_info_{run_timestamp}.csv",
+                                    target_positions=target_pos_arr,
+                                    base_positions=np.asarray(final_state.base_pos),
+                                    successes=target_success_arr,
+                                )
+                                print(f"  [eval-csv] Saved {n_completed} episodes to: {eval_info_path.name}")
+                            except Exception as csv_err:
+                                print(f"  [eval-csv-error] Failed to save evaluation information: {csv_err}")
+
                         if generate_any_heatmap:
                             try:
                                 from training.evaluate_pipeline import (
@@ -2045,20 +1611,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                 )
                                 _, map_data, map_def = load_map_data(cfg)
                                 
-                                target_pos_arr = np.asarray(final_state.target_pos)
-                                target_success_arr = np.asarray(final_succs)
                                 target_delivered_arr = np.asarray(final_delivered)
                                 target_visually_found_arr = np.asarray(final_visual)
-                                
-                                n_completed = len(target_success_arr)
-                                run_timestamp = artifact_suffix(update, steps_done)
                                 
                                 # Create subfolders for heatmaps if not exist
                                 chain_heatmaps_dir = train_artifacts / "chain_heatmaps"
                                 found_heatmaps_dir = train_artifacts / "found_heatmaps"
 
                                 # 1. Failed Chain Heatmap
-                                if cfg.logging.get("eval_failed_chain_heatmap", False):
+                                if cfg.evaluation.get("eval_failed_chain_heatmap", False):
                                     failed_positions = target_pos_arr[~target_success_arr]
                                     success_rate = (np.sum(target_success_arr) / n_completed * 100.0)
                                     num_fail = len(failed_positions)
@@ -2071,17 +1632,15 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                         run_dir=run_dir,
                                         video_dir=chain_heatmaps_dir,
                                         run_timestamp=run_timestamp,
-                                        save_csv=True,
                                         save_png=True,
                                         total_episodes=n_completed,
-                                        data_dir=train_data_dir,
                                         manifest_dir=train_manifest_dir,
                                         artifact_stem=f"failed_chain_{run_timestamp}"
                                     )
                                     
                                 # 2 & 3. Combined or Separate Target Found/Delivered Heatmaps
-                                if cfg.logging.get("eval_not_delivered_or_visually_found_heatmap", False):
-                                    split_in_two = bool(cfg.logging.get("eval_not_deliv_not_visual_splitt_in_two", False))
+                                if cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False):
+                                    split_in_two = bool(cfg.evaluation.get("eval_not_deliv_not_visual_splitt_in_two", False))
                                     if not split_in_two:
                                         not_delivered_positions = target_pos_arr[~target_delivered_arr]
                                         delivered_rate = (np.sum(target_delivered_arr) / n_completed * 100.0)
@@ -2150,7 +1709,6 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                                             manifest_dir=train_manifest_dir,
                                             artifact_stem=f"found_{run_timestamp}"
                                         )
-                                heatmaps_generated = True
                             except Exception as heatmap_err:
                                 print(f"  [heatmap-error] Failed to render evaluation heatmaps: {heatmap_err}")
 
@@ -2166,114 +1724,57 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                         jax.block_until_ready(jnp.asarray(0, dtype=jnp.int32))
                         time.sleep(1.0)
 
-                        # Check for parallel evaluation early exit
-                        eval_success_metric = eval_found if int(cfg.env.get("num_bases", 1)) == 0 else eval_success
-                        early_exit_thresh = cfg.training.get("eval_parallel_early_exit_threshold", None)
-                        if early_exit_thresh is not None and eval_success_metric >= float(early_exit_thresh):
+                        early_exit_thresh = float(cfg.evaluation.get("early_exit_threshold", 0.95))
+                        if bool(cfg.evaluation.get("early_exit", False)) and eval_success >= early_exit_thresh:
                             print(
-                                f"\n  [eval-early-exit] Evaluation success metric {eval_success_metric:.1%} >= "
+                                f"\n  [eval-early-exit] Evaluation success {eval_success:.1%} >= "
                                 f"threshold {early_exit_thresh:.1%} -- concluding training early."
                             )
-                            early_ckpt_str = ""
-                            if save_model:
-                                import orbax.checkpoint as ocp
-                                import shutil
-                                early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                                if early_ckpt.exists():
-                                    shutil.rmtree(early_ckpt)
-                                _, state_dict = nnx.split(model)
-                                checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                                checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                                _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
-                                print(f"  [ckpt-early] saved -> {early_ckpt}")
-                                early_ckpt_str = str(early_ckpt)
+                            import orbax.checkpoint as ocp
+                            import shutil
+                            early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
+                            if early_ckpt.exists():
+                                shutil.rmtree(early_ckpt)
+                            _, state_dict = nnx.split(model)
+                            checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+                            checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
+                            _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
+                            print(f"  [ckpt-early] saved -> {early_ckpt}")
 
                             if eval_video:
-                                master_key, eval_key = jax.random.split(master_key)
-                                _run_eval_with_render(
-                                    model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                                    compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                                    cfg=cfg, eval_key=eval_key,
-                                    out_dir=eval_video_dir,
-                                    ckpt_name=f"early_{update:06d}",
-                                    renderer=effective_final_renderer,
-                                    selective=selective_eval_render,
-                                    eval_render_videos=eval_render_videos,
-                                    eval_max_compute=eval_max_compute_episodes,
-                                    n_success=eval_render_successes,
-                                    n_fail=eval_render_failures,
-                                    wandb_run=wandb_run,
-                                    steps_done=steps_done,
-                                    max_steps=max_steps,
-                                    label="eval-early",
+                                master_key, video_key = jax.random.split(master_key)
+                                ep_states_list, ep_rewards_list, all_metrics_list = _collect_video_episode(
+                                    model, reset_s, env_step_jit, compute_obs_jit,
+                                    compute_reward_jit, cfg, video_key,
                                 )
-                                time.sleep(1.0)
-                            return early_ckpt_str
-
-                        # Check for curriculum transition (Eval stats, parallel eval)
-                        curr_thresh = cfg.curriculum.get("success_threshold", None)
-                        curr_mode = cfg.curriculum.get("mode", "train")
-                        if curr_thresh is not None and curr_mode == "eval":
-                            curr_metric = cfg.curriculum.get("metric", "success")
-                            eval_val = eval_found if curr_metric == "target_found" else eval_success
-                            metric_label = "target_found" if curr_metric == "target_found" else "success"
-                            if eval_val >= float(curr_thresh):
-                                print(
-                                    f"\n  [curriculum-eval-exit] Evaluation metric '{metric_label}' {eval_val:.1%} >= "
-                                    f"threshold {curr_thresh:.1%} -- advancing to next level."
-                                )
-                                early_ckpt_str = ""
-                                if save_model:
-                                    import orbax.checkpoint as ocp
-                                    import shutil
-                                    early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                                    if early_ckpt.exists():
-                                        shutil.rmtree(early_ckpt)
-                                    _, state_dict = nnx.split(model)
-                                    checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                                    checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                                    _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
-                                    print(f"  [ckpt-early] saved -> {early_ckpt}")
-                                    early_ckpt_str = str(early_ckpt)
-
-                                if eval_video:
-                                    master_key, eval_key = jax.random.split(master_key)
-                                    _run_eval_with_render(
-                                        model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                                        compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                                        cfg=cfg, eval_key=eval_key,
-                                        out_dir=eval_video_dir,
-                                        ckpt_name=f"early_{update:06d}",
-                                        renderer=effective_final_renderer,
-                                        selective=selective_eval_render,
-                                        eval_render_videos=eval_render_videos,
-                                        eval_max_compute=eval_max_compute_episodes,
-                                        n_success=eval_render_successes,
-                                        n_fail=eval_render_failures,
-                                        wandb_run=wandb_run,
-                                        steps_done=steps_done,
-                                        max_steps=max_steps,
-                                        label="eval-early",
-                                    )
-                                    time.sleep(1.0)
-                                _broadcast_eval_metrics_to_remaining_wandb_steps(
-                                    wandb_run=wandb_run,
+                                render_eval_video(
+                                    ep_states=ep_states_list[0],
+                                    ep_rewards=ep_rewards_list[0],
+                                    ep_metrics=all_metrics_list[0],
                                     cfg=cfg,
-                                    eval_logs=eval_wandb_logs,
-                                    trigger_update=update,
-                                    n_updates=n_updates,
-                                    steps_per_update=E * T,
-                                    total_timesteps=total_ts,
+                                    out_dir=eval_video_dir,
+                                    filename_stem=f"eval_early_{update:06d}",
                                 )
-                                return early_ckpt_str
+                                del ep_states_list, ep_rewards_list, all_metrics_list
+                                _release_video_eval_trajectory()
+                                time.sleep(1.0)
+                            _broadcast_eval_metrics_to_remaining_wandb_steps(
+                                wandb_run=wandb_run,
+                                cfg=cfg,
+                                eval_logs=eval_wandb_logs,
+                                trigger_update=update,
+                                n_updates=n_updates,
+                                steps_per_update=E * T,
+                                total_timesteps=total_ts,
+                            )
+                            return str(early_ckpt)
 
                     if is_video_step:
                         master_key, video_key = jax.random.split(master_key)
-                        (ep_states_list, ep_rewards_list, all_metrics_list,
-                         _, _, _, _, _, _) = _evaluate(
+                        ep_states_list, ep_rewards_list, all_metrics_list = _collect_video_episode(
                             model, reset_s,
                             env_step_jit, compute_obs_jit, compute_reward_jit,
-                            cfg, video_key, num_episodes=1,
+                            cfg, video_key,
                         )
                         stem = f"eval_{artifact_suffix(update, steps_done)}"
                         render_eval_video(
@@ -2283,129 +1784,10 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
                             cfg        = cfg,
                             out_dir    = train_video_dir,
                             filename_stem = stem,
-                            renderer   = effective_train_renderer,
                         )
                         del ep_states_list, ep_rewards_list, all_metrics_list
                         _release_video_eval_trajectory()
                         time.sleep(1.0)
-                else:
-                    if is_eval_step or is_video_step:
-                        master_key, eval_key = jax.random.split(master_key)
-                        (ep_states_list, ep_rewards_list, all_metrics_list,
-                         eval_ret, eval_len, eval_gap, eval_prog_pct, eval_success, eval_found) = _evaluate(
-                            model, reset_s,
-                            env_step_jit, compute_obs_jit, compute_reward_jit,
-                            cfg, eval_key, num_episodes=1,
-                        )
-
-                        if is_video_step:
-                            stem = f"eval_{artifact_suffix(update, steps_done)}"
-                            render_eval_video(
-                                ep_states  = ep_states_list[0],
-                                ep_rewards = ep_rewards_list[0],
-                                ep_metrics = all_metrics_list[0],
-                                cfg        = cfg,
-                                out_dir    = train_video_dir,
-                                filename_stem = stem,
-                                renderer   = effective_train_renderer,
-                            )
-                            del ep_states_list, ep_rewards_list, all_metrics_list
-                            _release_video_eval_trajectory()
-                            time.sleep(1.0)
-
-                        if is_eval_step:
-                            eval_wandb_logs = {
-                                "eval/ep_return":           eval_ret,
-                                "eval/ep_length":           eval_len,
-                                "eval/chain_gap_dist":      eval_gap,
-                                "eval/chain_progress_pct":  eval_prog_pct,
-                                "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-                                "eval/success_rate":        eval_success,
-                                "eval/target_found_rate":   eval_found,
-                            }
-                            print(
-                                f"  [eval-train] update={update}  "
-                                f"steps={steps_done:,}  "
-                                f"ep_return={eval_ret:.2f}  "
-                                f"chain={eval_prog_pct:.1f}%  "
-                                f"success={eval_success:.1%}"
-                            )
-                            time.sleep(1.0)
-
-                            # Check for curriculum transition (Eval stats, non-parallel eval)
-                            curr_thresh = cfg.curriculum.get("success_threshold", None)
-                            curr_mode = cfg.curriculum.get("mode", "train")
-                            if curr_thresh is not None and curr_mode == "eval":
-                                curr_metric = cfg.curriculum.get("metric", "success")
-                                eval_val = eval_found if curr_metric == "target_found" else eval_success
-                                metric_label = "target_found" if curr_metric == "target_found" else "success"
-                                if eval_val >= float(curr_thresh):
-                                    print(
-                                        f"\n  [curriculum-eval-exit] Evaluation metric '{metric_label}' {eval_val:.1%} >= "
-                                        f"threshold {curr_thresh:.1%} -- advancing to next level."
-                                    )
-                                    early_ckpt_str = ""
-                                    if save_model:
-                                        import orbax.checkpoint as ocp
-                                        import shutil
-                                        early_ckpt = (ckpt_dir / f"ckpt_early_{update:06d}").absolute()
-                                        if early_ckpt.exists():
-                                            shutil.rmtree(early_ckpt)
-                                        _, state_dict = nnx.split(model)
-                                        checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-                                        checkpointer.save(str(early_ckpt), args=ocp.args.StandardSave(state_dict))
-                                        _save_checkpoint_history(early_ckpt, run_name, update, E, T, prior_history)
-                                        print(f"  [ckpt-early] saved -> {early_ckpt}")
-                                        early_ckpt_str = str(early_ckpt)
-
-                                    if eval_video:
-                                        master_key, eval_key = jax.random.split(master_key)
-                                        _run_eval_with_render(
-                                            model=model, reset_s=reset_s, env_step_jit=env_step_jit,
-                                            compute_obs_jit=compute_obs_jit, compute_reward_jit=compute_reward_jit,
-                                            cfg=cfg, eval_key=eval_key,
-                                            out_dir=eval_video_dir,
-                                            ckpt_name=f"early_{update:06d}",
-                                            renderer=effective_final_renderer,
-                                            selective=selective_eval_render,
-                                            eval_render_videos=eval_render_videos,
-                                            eval_max_compute=eval_max_compute_episodes,
-                                            n_success=eval_render_successes,
-                                            n_fail=eval_render_failures,
-                                            wandb_run=wandb_run,
-                                            steps_done=steps_done,
-                                            max_steps=max_steps,
-                                            label="eval-early",
-                                        )
-                                        time.sleep(1.0)
-                                    _broadcast_eval_metrics_to_remaining_wandb_steps(
-                                        wandb_run=wandb_run,
-                                        cfg=cfg,
-                                        eval_logs=eval_wandb_logs,
-                                        trigger_update=update,
-                                        n_updates=n_updates,
-                                        steps_per_update=E * T,
-                                        total_timesteps=total_ts,
-                                    )
-                                    return early_ckpt_str
-
-
-
-                # TODO: Mid-training eval W&B metrics are based on a single episode and carry
-                #       little statistical weight. Replace with a proper multi-episode test
-                #       harness before re-enabling.
-                # if wandb_run:
-                #     import wandb
-                #     wandb.log({
-                #         "eval/ep_return":           eval_ret,
-                #         "eval/ep_length":           eval_len,
-                #         "eval/chain_gap_dist":      eval_gap,
-                #         "eval/chain_progress_pct":  eval_prog_pct,
-                #         "eval/ep_length_reduction": (1.0 - (eval_len / max_steps)) * 100.0,
-                #         "eval/success_rate":        eval_success,
-                #         "eval/target_found":        eval_found,
-                #     }, step=steps_done)
-
                 # Small sleep to allow XLA to settle after the eval/render spike
                 time.sleep(1.0)
 
@@ -2452,84 +1834,3 @@ def train(cfg: DictConfig, success_threshold: Optional[float] = None):
             import wandb
             wandb.finish()
 
-
-# ---------------------------------------------------------------------------
-# Shared eval + render helper (used for both final and early-exit evals)
-# ---------------------------------------------------------------------------
-
-def _run_eval_with_render(
-    model, reset_s, env_step_jit, compute_obs_jit, compute_reward_jit,
-    cfg, eval_key,
-    out_dir: Path,
-    ckpt_name: str,
-    renderer: str,
-    selective: bool,
-    eval_render_videos: int,
-    eval_max_compute: int,
-    n_success: int,
-    n_fail: int,
-    wandb_run,
-    steps_done: int,
-    max_steps: int,
-    label: str = "eval",
-) -> None:
-    """Run evaluation and render videos to out_dir. Handles both legacy and selective modes."""
-
-    if selective:
-        # Selective mode: stream episodes, fill SUCCESS_/FAIL_ buckets first-come-first-served
-        callback = _make_selective_eval_callback(
-            n_success = n_success,
-            n_fail    = n_fail,
-            out_dir   = out_dir,
-            ckpt_name = ckpt_name,
-            renderer  = renderer,
-            cfg       = cfg,
-        )
-        (_, _, _,
-         eval_ret, eval_len, eval_gap, eval_prog_pct,
-         eval_success, eval_found) = _evaluate(
-            model, reset_s,
-            env_step_jit, compute_obs_jit, compute_reward_jit,
-            cfg, eval_key,
-            num_episodes=eval_max_compute,
-            episode_callback=callback,
-        )
-        n_computed = callback.__closure__[0].cell_contents[0] + callback.__closure__[1].cell_contents[0]
-        # Note: n_computed above is approximate (only rendered counts); full episode count from _evaluate
-    else:
-        # Legacy mode: compute and render eval_render_videos episodes sequentially
-        (ep_states_list, ep_rewards_list, all_metrics_list,
-         eval_ret, eval_len, eval_gap, eval_prog_pct,
-         eval_success, eval_found) = _evaluate(
-            model, reset_s,
-            env_step_jit, compute_obs_jit, compute_reward_jit,
-            cfg, eval_key,
-            num_episodes=eval_render_videos,
-        )
-        for idx in range(eval_render_videos):
-            stem = f"eval_{ckpt_name}_ep{idx:02d}"
-            render_eval_video(
-                ep_states  = ep_states_list[idx],
-                ep_rewards = ep_rewards_list[idx],
-                ep_metrics = all_metrics_list[idx],
-                cfg        = cfg,
-                out_dir    = out_dir,
-                filename_stem = stem,
-                renderer   = renderer,
-            )
-            ep_states_list[idx] = None
-            ep_rewards_list[idx] = None
-            all_metrics_list[idx] = None
-            _release_video_eval_trajectory()
-        del ep_states_list, ep_rewards_list, all_metrics_list
-        _release_video_eval_trajectory()
-
-    _print_eval_stats(
-        label=label,
-        num_computed=eval_max_compute if selective else eval_render_videos,
-        mean_ret=eval_ret,
-        mean_len=eval_len,
-        mean_prog=eval_prog_pct,
-        success_rate=eval_success,
-        found_rate=eval_found,
-    )

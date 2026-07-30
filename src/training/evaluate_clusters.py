@@ -2,8 +2,7 @@
 training/evaluate_clusters.py
 ==============================
 Cluster failed target positions from SwarmEcho runs, visualize colored clusters
-on the map blueprint with highlighted representatives, and render evaluation
-rollout videos of representative positions.
+on the map blueprint, and highlight representative positions.
 
 Usage
 -----
@@ -12,29 +11,18 @@ Usage
 """
 
 import sys
-import re
 import csv
 import time
 from pathlib import Path
-import dataclasses
 import numpy as np
 import cv2
 import yaml
-import jax
-import jax.numpy as jnp
-from flax import nnx
-from omegaconf import OmegaConf
 
 # Add project src root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.config import load_config, validate_config, compute_obs_dim, compute_action_dim
-from env.physics import make_env_fns
-from env.observations import make_obs_fns
-from env.rewards import make_reward_fn
-from models.mappo import MAPPOModel
-from training.runner import _evaluate
-from training.video_worker import render_eval_video
+from core.config import load_config, validate_config
+from training.artifacts import eval_checkpoint_artifact_root
 from env.maps import MapDefinition
 from visualize.render_preview import render_png, _resolve_map_path
 
@@ -57,9 +45,6 @@ HDBSCAN_MIN_CLUSTER_FRACTION = 0.035 # Min fraction of total failures to form a 
 HDBSCAN_MIN_SAMPLES = None          # Min samples for core points (None defaults to min_cluster_size)
 HDBSCAN_EPSILON = 0.0               # cluster_selection_epsilon (0.0 means no threshold)
 
-RENDER_VIDEOS = True           # Set to False to skip simulating and rendering rollout videos
-RENDER_NUM_CLUSTERS = None    # Number of cluster representatives to render. None = all. (Ignored if RENDER_VIDEOS=False)
-SEED = 42                     # Random seed for env reset and evaluations
 HEATMAP_ALPHA = 0.5          # Heatmap opacity blending factor
 SCALE = 8.0                  # Resolution scale (pixels per world-meter) for map image
 SHOW_SPAWN_ZONES = False     # Set to False to disable the red target/base spawn zones overlay
@@ -238,76 +223,41 @@ def main():
     )
     validate_config(cfg)
 
-    # ── Build Model ───────────────────────────────────────────────────────
-    obs_dim = compute_obs_dim(cfg)
-    act_dim = compute_action_dim(cfg)
-    N = int(cfg.env.num_agents)
-    critic_type = str(cfg.network.critic_type)
-
-    rngs = nnx.Rngs(SEED)
-    model = MAPPOModel(
-        obs_dim          = obs_dim,
-        act_dim          = act_dim,
-        num_agents       = N,
-        hidden_dim       = int(cfg.network.hidden_dim),
-        num_layers       = int(cfg.network.num_layers),
-        actor_num_layers = int(cfg.network.actor_num_layers),
-        critic_type      = critic_type,
-        actor_memory     = bool(cfg.network.get("actor_memory", False)),
-        critic_memory    = bool(cfg.network.get("critic_memory", False)),
-        rngs             = rngs,
-        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
-        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
-        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
-        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
-    )
-
-    # ── Load Checkpoint ───────────────────────────────────────────────────
-    import orbax.checkpoint as ocp
-    graphdef, empty_state = nnx.split(model)
-    checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-    restored_state = checkpointer.restore(
-        str(checkpoint_path.absolute()),
-        args=ocp.args.StandardRestore(empty_state),
-    )
-    nnx.update(model, restored_state)
-    print("Checkpoint loaded successfully ✓")
-
     map_names = cfg.env.get("map_names", [])
     if not map_names:
         print("ERROR: No map specified in configuration.")
         sys.exit(1)
     map_name = map_names[0]
 
-    video_dir = run_dir / "videos" / "eval"
-    video_dir.mkdir(parents=True, exist_ok=True)
+    artifact_root = eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg)
+    data_dir = artifact_root / "data"
+    clusters_dir = artifact_root / "clusters"
+    clusters_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Load CSV ──────────────────────────────────────────────────────────
-    csv_candidates = list(video_dir.glob("failed_target_positions*.csv"))
+    csv_candidates = list(data_dir.glob("eval_info_*.csv"))
     if not csv_candidates:
-        print(f"ERROR: No failed target positions CSV found in: {video_dir}")
-        print("Please run parallel evaluation first using evaluate_heatmap.py to generate CSV.")
+        print(f"ERROR: No comprehensive evaluation CSV found in: {data_dir}")
+        print("Run evaluate.py with evaluation.save_eval_info_as_csv=true first.")
         sys.exit(1)
     csv_path = max(csv_candidates, key=lambda p: p.stat().st_mtime)
     print(f"Loading failed target positions from CSV: {csv_path.name}")
 
     failed_positions = []
     with open(csv_path, "r", newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)  # skip header row if present
-        if header:
-            try:
-                x, y = float(header[0]), float(header[1])
-                failed_positions.append((x, y))
-            except ValueError:
-                pass  # text header
+        reader = csv.DictReader(f)
+        required_columns = {"x", "y", "success"}
+        if not required_columns.issubset(set(reader.fieldnames or [])):
+            raise ValueError(
+                f"Evaluation CSV must contain columns {sorted(required_columns)}: {csv_path}"
+            )
         for row in reader:
-            if len(row) >= 2:
-                try:
-                    failed_positions.append((float(row[0]), float(row[1])))
-                except ValueError:
-                    continue
+            try:
+                succeeded = row["success"].strip().lower() in {"1", "true", "yes"}
+                if not succeeded:
+                    failed_positions.append((float(row["x"]), float(row["y"])))
+            except (AttributeError, TypeError, ValueError):
+                continue
 
     n_failures = len(failed_positions)
     print(f"Found {n_failures} total failures.")
@@ -394,7 +344,6 @@ def main():
         cv2.circle(overlay, (px, py), 2, (200, 200, 200), -1, cv2.LINE_AA)
 
     # 2. Draw clusters and highlight representatives
-    rep_coords = []
     for c_idx, c_members in enumerate(cluster_indices):
         color = CLUSTER_COLORS[c_idx % len(CLUSTER_COLORS)]
         
@@ -414,7 +363,6 @@ def main():
     for c_idx, rep_idx in enumerate(reps):
         color = CLUSTER_COLORS[c_idx % len(CLUSTER_COLORS)]
         pos = failed_positions_np[rep_idx]
-        rep_coords.append(pos)
         px = int(pos[0] * SCALE)
         py = int((height - pos[1]) * SCALE)
 
@@ -433,70 +381,13 @@ def main():
         info_str = f"BFS: {n_clusters} clusters found | EPS={eps}m | MinFract={min_fract*100:.0f}% (MinSize={min_size})"
     cv2.putText(img, info_str, (10, 20), cv2.FONT_HERSHEY_DUPLEX, 0.45, (55, 41, 31), 1, cv2.LINE_AA)
 
-    clustered_path = video_dir / "failed_targets_clustered.png"
+    clustered_path = clusters_dir / "failed_targets_clustered.png"
     if clustered_path.exists():
         ts = time.strftime("%Y%m%d_%H%M%S")
-        clustered_path = video_dir / f"failed_targets_clustered_{ts}.png"
+        clustered_path = clusters_dir / f"failed_targets_clustered_{ts}.png"
         print("Default clustered heatmap file already exists. Saving with timestamp suffix solver.")
     cv2.imwrite(str(clustered_path), img)
     print(f"Saved clustered failed targets map to: {clustered_path}")
-
-    # ── Simulation & Rendering for Reps ──────────────────────────────────
-    if not RENDER_VIDEOS:
-        print("Video rendering is disabled (RENDER_VIDEOS = False). Skipping rollout simulations.")
-        return
-
-    num_to_render = RENDER_NUM_CLUSTERS if RENDER_NUM_CLUSTERS is not None else n_clusters
-    num_to_render = min(num_to_render, n_clusters)
-    print(f"Simulating rollout videos for the first {num_to_render} cluster representative(s)...")
-
-    # Environment fns
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
-    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
-    compute_reward = make_reward_fn(cfg)
-
-    renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))
-    key = jax.random.PRNGKey(SEED)
-
-    for c_idx in range(num_to_render):
-        tx, ty = rep_coords[c_idx]
-        print(f"  Cluster {c_idx} Representative Target: ({tx:.2f}, {ty:.2f})")
-
-        # Wrapper reset_fn to force the target position
-        def make_override_reset(r_fn, target_x, target_y):
-            def override_reset(k):
-                s = r_fn(k)
-                return s.replace(target_pos=jnp.array([target_x, target_y], dtype=jnp.float32))
-            return override_reset
-
-        custom_reset = make_override_reset(reset, tx, ty)
-
-        # Run 1 evaluation episode
-        (all_states, all_rewards, all_metrics,
-         _, _, _, _, _, _) = _evaluate(
-            model=model,
-            reset_fn=jax.jit(custom_reset),
-            env_step_fn=jax.jit(env_step),
-            obs_fn=jax.jit(compute_obs),
-            reward_fn=jax.jit(compute_reward),
-            cfg=cfg,
-            key=key,
-            num_episodes=1,
-        )
-
-        # Render video
-        filename_stem = f"FAIL_cluster_{c_idx}_rep_{tx:.2f}_{ty:.2f}"
-        vid_path = render_eval_video(
-            ep_states=all_states[0],
-            ep_rewards=all_rewards[0],
-            ep_metrics=all_metrics[0],
-            cfg=cfg,
-            out_dir=video_dir,
-            filename_stem=filename_stem,
-            renderer=renderer,
-        )
-        print(f"    ✓ Video saved: {vid_path}")
-
 
 if __name__ == "__main__":
     main()

@@ -3,14 +3,10 @@ swarmecho/models/critic.py
 ===========================
 Centralised critic networks for SwarmEcho MAPPO.
 
-Both critics receive the full team observation stack (..., N, obs_dim) and
-are therefore permutation-invariant by construction.
+The critic receives the full team observation stack (..., N, obs_dim) and is
+permutation-invariant by construction.
 
-GlobalMeanCritic   (kept for ablations)
-  MLP encoder → Self-Attention → Global Mean Pool → scalar V
-  Output: (...,)   — ONE value for the entire team
-
-AgentCentricCritic  (MAAC-style, recommended)
+AgentCentricCritic  (MAAC-style)
   MLP encoder → Masked Cross-Agent Attention → Concat → MLP head → per-agent V_i
   Output: (..., N) — one value per agent, computed from every other agent's
                      perspective (agent i does NOT attend to itself)
@@ -63,45 +59,7 @@ class MLP(nnx.Module):
 
 
 # ---------------------------------------------------------------------------
-# GlobalMeanCritic  (kept for ablations)
-# ---------------------------------------------------------------------------
-
-class GlobalMeanCritic(nnx.Module):
-    """
-    Centralised critic that pools the team into a single value.
-
-    Architecture
-    ------------
-    1. Shared MLP encoder          : (..., N, obs_dim) → (..., N, H)
-    2. Multi-Head Self-Attention   : (..., N, H)       → (..., N, H)  + residual + LN
-    3. Global Mean Pool            : (..., N, H)       → (..., H)
-    4. Value MLP head              : (..., H)           → (...,)
-
-    Output shape: (...,)  — one scalar per environment
-    """
-
-    def __init__(
-        self,
-        obs_dim:    int,
-        hidden_dim: int,
-        num_layers: int,
-        rngs:       nnx.Rngs,
-    ) -> None:
-        self.encoder   = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
-        self.mha       = nnx.MultiHeadAttention(num_heads=4, in_features=hidden_dim, rngs=rngs)
-        self.ln        = nnx.LayerNorm(hidden_dim, rngs=rngs)
-        self.trunk     = MLP(hidden_dim, hidden_dim, num_layers, 1, rngs)
-
-    def __call__(self, obs: jax.Array, deterministic: bool = True) -> jax.Array:
-        """obs: (..., N, obs_dim) → value (...,)"""
-        h = self.encoder(obs)                                              # (..., N, H)
-        h = self.ln(h + self.mha(h, decode=False, deterministic=deterministic))  # residual + LN
-        g = jnp.mean(h, axis=-2)                                           # (..., H)
-        return self.trunk(g).squeeze(-1)                                   # (...,)
-
-
-# ---------------------------------------------------------------------------
-# AgentCentricCritic  (MAAC-style — recommended)
+# AgentCentricCritic  (MAAC-style)
 # ---------------------------------------------------------------------------
 
 class AgentCentricCritic(nnx.Module):

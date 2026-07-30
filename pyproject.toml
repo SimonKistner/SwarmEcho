@@ -14,7 +14,6 @@ dependencies = [
     "omegaconf>=2.3.0", # Hierarchical YAML config with dot-notation + CLI overrides
     # Logging & visualization
     "wandb>=0.18.0",
-    "matplotlib>=3.9.0",
     "opencv-python-headless>=4.9.0", # Fast OpenCV renderer
     "imageio[ffmpeg]>=2.35.0", # Video writing (no system ffmpeg dep needed)
     # Checkpointing

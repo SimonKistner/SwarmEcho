@@ -86,15 +86,12 @@ class _FrameData(NamedTuple):
     pos:           np.ndarray   # (N, 2)
     vel:           np.ndarray   # (N, 2)
     base_pos:      np.ndarray   # (2,)
-    target_pos:    np.ndarray   # (2,) normally; (N, 2) only for MEM_T8 diagnostics
-    anti_target_pos: np.ndarray | None  # MEM_T8-only diagnostic markers
+    target_pos:    np.ndarray   # (2,)
     coverage_grid: np.ndarray   # (G, G) bool
     step:          int
     active:        np.ndarray | None  # (N,) bool
     collides:      np.ndarray | None  # (N,) bool
     occ_grid:      np.ndarray | None  # (W_px, H_px) bool
-    comm_occ_grid: np.ndarray | None  # communication blockers; mesh walls are transparent
-    mesh_walls:    np.ndarray | None  # (M, 4), drawn blue for communication-transparent blockers
     box_width:     float
     box_height:    float
     extra_metrics: dict[str, any]
@@ -341,12 +338,6 @@ def _draw_frame_cv2(
     cell_size = 1.0
     B = int(cfg.env.radar_bins); v_cfg = cfg.visualize
     rew_cfg = cfg.reward
-    use_shortest_path_visuals = (
-        bool(rew_cfg.get("only_shortest_path_chain_reward", False))
-        and str(rew_cfg.get("chain_reward_system", "euclidean")) in ("euclidean", "discrete_finders_path")
-        and not bool(rew_cfg.get("only_explor_individual", False))
-        and not bool(rew_cfg.get("every_reward_global", False))
-    )
 
     # Backgrounds
     img = np.full((lay.total_h, lay.total_w, 3), _C["bg_outer"], dtype=np.uint8)
@@ -360,7 +351,6 @@ def _draw_frame_cv2(
     # For now, we try to get it from the state if we were to add it, or
     # we'll have to load it from the map.
     occ_grid = getattr(frame, "occ_grid", None)
-    comm_occ_grid = getattr(frame, "comm_occ_grid", occ_grid)
     if occ_grid is not None:
         wall_img = np.zeros((occ_grid.shape[1], occ_grid.shape[0]), dtype=np.uint8)
         # grid is (W, H), opencv wants (H, W)
@@ -369,12 +359,6 @@ def _draw_frame_cv2(
         mask = wall_full > 0
         roi = img[lay.mt:lay.mt+lay.ph, lay.ml:lay.ml+lay.pw]
         roi[mask] = 50 # Solid walls
-
-    mesh_walls = getattr(frame, "mesh_walls", None)
-    if mesh_walls is not None:
-        mesh_width = max(2, int(round(lay.scale)))
-        for x1, y1, x2, y2 in np.asarray(mesh_walls):
-            cv2.line(img, lay.w2p(float(x1), float(y1)), lay.w2p(float(x2), float(y2)), (235, 165, 14), mesh_width, cv2.LINE_AA)
 
     # Axis labels removed per request
 
@@ -442,8 +426,6 @@ def _draw_frame_cv2(
             best_rank = max(ranks[i] for i in valid_b)
             tied = [i for i in valid_b if ranks[i] == best_rank]
             ref = np.asarray(frame.target_pos if best_rank >= frame.finders_path_len - 2 else center(best_rank + 1), dtype=np.float32)
-            if ref.ndim > 1:
-                ref = ref[0]
             base_tip = tied[int(np.argmin(np.linalg.norm(frame.pos[tied] - ref[None, :], axis=-1)))] + drone_start
 
         target_tip = -1
@@ -455,29 +437,9 @@ def _draw_frame_cv2(
         return base_tip, target_tip
 
     # ── Connectivity ──────────────────────────────────────────────────────
-    num_bases = int(cfg.env.num_bases or 0)
-    num_targets = int(cfg.env.num_targets or 0)
-
-    target_points = np.asarray(frame.target_pos)
-    if target_points.ndim == 1:
-        target_points = target_points[None, :]
-    elif target_points.ndim == 2:
-        mask = ~np.all(target_points == 0.0, axis=1)
-        target_points = target_points[mask]
-        _, indices = np.unique(target_points, axis=0, return_index=True)
-        target_points = target_points[np.sort(indices)]
-
-    ents_comp = []
-    base_idx = -1; target_idx = -1; target_indices = []
-    if num_bases > 0:
-        base_idx = len(ents_comp)
-        ents_comp.append(frame.base_pos)
-    if num_targets > 0:
-        for tp in target_points:
-            if target_idx < 0:
-                target_idx = len(ents_comp)
-            target_indices.append(len(ents_comp))
-            ents_comp.append(tp)
+    ents_comp = [frame.base_pos, frame.target_pos]
+    base_idx = 0
+    target_idx = 1
 
     drone_start = len(ents_comp)
     for i in range(N):
@@ -497,54 +459,39 @@ def _draw_frame_cv2(
             #   - Drone-to-drone edges use comm_r
             if i == base_idx or j == base_idx:
                 threshold = comm_r_base
-            elif i in target_indices or j in target_indices:
+            elif i == target_idx or j == target_idx:
                 threshold = vis_r
             else:
                 threshold = comm_r
 
             if dists[i, j] <= threshold:
-                if comm_occ_grid is not None:
-                    # Communication raycast: mesh walls are transparent only for comm.
+                if occ_grid is not None:
                     p1_grid = ents[i] / cell_size
                     p2_grid = ents[j] / cell_size
-                    if _dda_raycast_np(p1_grid, p2_grid, comm_occ_grid):
+                    if _dda_raycast_np(p1_grid, p2_grid, occ_grid):
                         adj[i, j] = adj[j, i] = True
                 else:
                     adj[i, j] = adj[j, i] = True
 
     base_comp = _bfs(adj, base_idx) if base_idx >= 0 else set()
-    target_comp = set()
-    for ti in target_indices:
-        target_comp |= _bfs(adj, ti)
+    target_comp = _bfs(adj, target_idx)
 
-    # Calculate shortest path distances only when the reward mode actually uses
-    # shortest-path chain gating; otherwise render component links uniformly.
-    if use_shortest_path_visuals:
-        dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
-        dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
-        full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
-    else:
-        dist_from_base = np.full(M, 999, dtype=np.int32)
-        dist_from_target = np.full(M, 999, dtype=np.int32)
-        full_chain = bool(base_idx >= 0 and target_idx >= 0 and target_idx in base_comp)
+    dist_from_base = _get_shortest_path_distances(adj, base_idx) if base_idx >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target = _get_shortest_path_distances(adj, target_idx) if target_idx >= 0 else np.full(M, 999, dtype=np.int32)
+    full_chain = bool(base_idx >= 0 and target_idx >= 0 and dist_from_base[target_idx] < 999)
     sp_nodes = set()
-    if use_shortest_path_visuals and full_chain:
-        if bool(rew_cfg.get("reward_single_shortest_path", True)):
-            full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
-            for u, v in full_chain_edges:
-                sp_nodes.add(u)
-                sp_nodes.add(v)
-        else:
-            for i in range(M):
-                if dist_from_base[i] + dist_from_target[i] == dist_from_base[target_idx]:
-                    sp_nodes.add(i)
+    if full_chain:
+        full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+        for u, v in full_chain_edges:
+            sp_nodes.add(u)
+            sp_nodes.add(v)
 
     drone_cols = []
     for i in range(N):
         idx = i + drone_start
         ib = idx in base_comp
         it = idx in target_comp
-        if use_shortest_path_visuals and full_chain:
+        if full_chain:
             if idx in sp_nodes: col = _C["both_chain"]
             elif dist_from_base[idx] <= dist_from_target[idx]: col = _C["base_chain"]
             else: col = _C["tgt_chain"]
@@ -573,7 +520,7 @@ def _draw_frame_cv2(
     # Identify tips (drones closest to hubs) for shortest path calc
     idx_base_tip = -1
     idx_target_tip = -1
-    if use_shortest_path_visuals and base_idx >= 0 and target_idx >= 0 and not full_chain:
+    if base_idx >= 0 and target_idx >= 0 and not full_chain:
         if str(rew_cfg.get("chain_reward_system", "euclidean")) == "discrete_finders_path":
             idx_base_tip, idx_target_tip = _finder_path_tips()
         else:
@@ -587,14 +534,12 @@ def _draw_frame_cv2(
             if valid_t:
                 idx_target_tip = valid_t[np.argmin(d_to_b[valid_t])] + drone_start
 
-    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if use_shortest_path_visuals and idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
-    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if use_shortest_path_visuals and idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_base_tip = _get_shortest_path_distances(adj, idx_base_tip) if idx_base_tip >= 0 else np.full(M, 999, dtype=np.int32)
+    dist_from_target_tip = _get_shortest_path_distances(adj, idx_target_tip) if idx_target_tip >= 0 else np.full(M, 999, dtype=np.int32)
 
-    reward_single = use_shortest_path_visuals and bool(rew_cfg.get("reward_single_shortest_path", True))
-    if reward_single:
-        full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
-        base_tip_edges = _get_single_shortest_path_edges(adj, base_idx, idx_base_tip, dist_from_base_tip)
-        target_tip_edges = _get_single_shortest_path_edges(adj, target_idx, idx_target_tip, dist_from_target_tip)
+    full_chain_edges = _get_single_shortest_path_edges(adj, base_idx, target_idx, dist_from_target)
+    base_tip_edges = _get_single_shortest_path_edges(adj, base_idx, idx_base_tip, dist_from_base_tip)
+    target_tip_edges = _get_single_shortest_path_edges(adj, target_idx, idx_target_tip, dist_from_target_tip)
 
     for i in range(M):
         for j in range(i + 1, M):
@@ -605,13 +550,9 @@ def _draw_frame_cv2(
             on_base_sp = False
             on_tgt_sp = False
 
-            if use_shortest_path_visuals and full_chain:
+            if full_chain:
                 # On full shortest path
-                if reward_single:
-                    is_both = (i, j) in full_chain_edges
-                else:
-                    if dist_from_base[i] + 1 + dist_from_target[j] == dist_from_base[target_idx] or dist_from_base[j] + 1 + dist_from_target[i] == dist_from_base[target_idx]:
-                        is_both = True
+                is_both = (i, j) in full_chain_edges
 
                 if is_both: ec, lw = _C["both_chain"], 2
                 else:
@@ -627,21 +568,13 @@ def _draw_frame_cv2(
                 else: ec, lw = _C["link_grey"], 1
 
                 if ib and jb and idx_base_tip >= 0:
-                    if reward_single:
-                        on_base_sp = (i, j) in base_tip_edges
-                    else:
-                        if dist_from_base[i] + 1 + dist_from_base_tip[j] == dist_from_base[idx_base_tip] or dist_from_base[j] + 1 + dist_from_base_tip[i] == dist_from_base[idx_base_tip]:
-                            on_base_sp = True
+                    on_base_sp = (i, j) in base_tip_edges
 
                 if it and jt and idx_target_tip >= 0:
-                    if reward_single:
-                        on_tgt_sp = (i, j) in target_tip_edges
-                    else:
-                        if dist_from_target[i] + 1 + dist_from_target_tip[j] == dist_from_target[idx_target_tip] or dist_from_target[j] + 1 + dist_from_target_tip[i] == dist_from_target[idx_target_tip]:
-                            on_tgt_sp = True
+                    on_tgt_sp = (i, j) in target_tip_edges
 
             # Draw the subtle "glow" for shortest paths
-            if use_shortest_path_visuals and (on_base_sp or on_tgt_sp or is_both):
+            if on_base_sp or on_tgt_sp or is_both:
                 glow_col = _C["both_chain"] if is_both else (_C["base_chain"] if on_base_sp else _C["tgt_chain"])
                 # Draw a thicker, semi-transparent line behind
                 overlay = img.copy()
@@ -672,47 +605,26 @@ def _draw_frame_cv2(
     scale = RendererConfig.RENDER_DPI / 100.0
 
     # ── Base station ──────────────────────────────────────────────────────
-    if int(cfg.env.num_bases) > 0:
-        bpx, bpy = lay.w2p(frame.base_pos[0], frame.base_pos[1])
-        bs = int(RendererConfig.BASE_MARKER_SIZE * scale)
-        # Draw base comm radius circle (same style as drone comm circles)
-        comm_r_base_px = lay.w2r(comm_r_base)
-        comm_col_cfg = _cfg_bgr(str(v_cfg.comm_color), None)
-        overlay = img.copy()
-        base_col = comm_col_cfg if comm_col_cfg else _C["base_mkr"]
-        cv2.circle(overlay, (bpx, bpy), comm_r_base_px, base_col, -1)
-        cv2.addWeighted(overlay, float(v_cfg.comm_fill_alpha), img, 1.0 - float(v_cfg.comm_fill_alpha), 0, img)
-        cv2.circle(img, (bpx, bpy), comm_r_base_px, base_col, 1, cv2.LINE_AA)
-        # Draw base station marker on top
-        cv2.rectangle(img, (bpx - bs, bpy - bs), (bpx + bs, bpy + bs), _C["base_mkr"], -1)
-        cv2.rectangle(img, (bpx - bs, bpy - bs), (bpx + bs, bpy + bs), (17, 24, 100), 1)
-        _draw_text(img, "B", (bpx, bpy + int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["white"], center=True)
+    bpx, bpy = lay.w2p(frame.base_pos[0], frame.base_pos[1])
+    bs = int(RendererConfig.BASE_MARKER_SIZE * scale)
+    # Draw base comm radius circle (same style as drone comm circles)
+    comm_r_base_px = lay.w2r(comm_r_base)
+    comm_col_cfg = _cfg_bgr(str(v_cfg.comm_color), None)
+    overlay = img.copy()
+    base_col = comm_col_cfg if comm_col_cfg else _C["base_mkr"]
+    cv2.circle(overlay, (bpx, bpy), comm_r_base_px, base_col, -1)
+    cv2.addWeighted(overlay, float(v_cfg.comm_fill_alpha), img, 1.0 - float(v_cfg.comm_fill_alpha), 0, img)
+    cv2.circle(img, (bpx, bpy), comm_r_base_px, base_col, 1, cv2.LINE_AA)
+    # Draw base station marker on top
+    cv2.rectangle(img, (bpx - bs, bpy - bs), (bpx + bs, bpy + bs), _C["base_mkr"], -1)
+    cv2.rectangle(img, (bpx - bs, bpy - bs), (bpx + bs, bpy + bs), (17, 24, 100), 1)
+    _draw_text(img, "B", (bpx, bpy + int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["white"], center=True)
 
     # ── Target ────────────────────────────────────────────────────────────
-    if int(cfg.env.num_targets) > 0:
-        tm = int(RendererConfig.TARGET_MARKER_SIZE * scale)
-        for k, tp in enumerate(target_points):
-            tpx, tpy = lay.w2p(tp[0], tp[1])
-            cv2.drawMarker(img, (tpx, tpy), _C["tgt_mkr"], cv2.MARKER_STAR, tm * 2, 2, cv2.LINE_AA)
-            label = "T" if len(target_points) == 1 else f"T{k}"
-            _draw_text(img, label, (tpx + tm + int(4 * scale), tpy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["tgt_mkr"])
-
-    # MEM_T8-only diagnostic markers for wrong-branch decoys.
-    if frame.anti_target_pos is not None:
-        am = int(RendererConfig.TARGET_MARKER_SIZE * scale)
-        anti_points = np.asarray(frame.anti_target_pos)
-        if anti_points.ndim == 1:
-            anti_points = anti_points[None, :]
-        elif anti_points.ndim == 2:
-            mask = ~np.all(anti_points == 0.0, axis=1)
-            anti_points = anti_points[mask]
-            _, indices = np.unique(anti_points, axis=0, return_index=True)
-            anti_points = anti_points[np.sort(indices)]
-        for k, ap in enumerate(anti_points):
-            apx, apy = lay.w2p(ap[0], ap[1])
-            cv2.drawMarker(img, (apx, apy), _C["anti_mkr"], cv2.MARKER_TILTED_CROSS, am * 2, 2, cv2.LINE_AA)
-            label = "A" if len(anti_points) == 1 else f"A{k}"
-            _draw_text(img, label, (apx + am + int(4 * scale), apy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["anti_mkr"])
+    tm = int(RendererConfig.TARGET_MARKER_SIZE * scale)
+    tpx, tpy = lay.w2p(frame.target_pos[0], frame.target_pos[1])
+    cv2.drawMarker(img, (tpx, tpy), _C["tgt_mkr"], cv2.MARKER_STAR, tm * 2, 2, cv2.LINE_AA)
+    _draw_text(img, "T", (tpx + tm + int(4 * scale), tpy - int(2 * scale)), scale * RendererConfig.CV2_FONT_SCALE_LABELS, _C["tgt_mkr"])
 
     # ── Drones ────────────────────────────────────────────────────────────
     dr = int(RendererConfig.DRONE_MARKER_SIZE * scale)
@@ -779,16 +691,11 @@ def _draw_frame_cv2(
     ly = lay.mt + int(20 * scale)
     _draw_text(img, "Legend", (lx, ly), scale * RendererConfig.CV2_FONT_SCALE_LEGEND * 1.2, _C["text"])
     legend_items = []
-    if num_bases > 0:   legend_items.append((_C["base_mkr"],   "Base station"))
-    if num_targets > 0: legend_items.append((_C["tgt_mkr"],    "Target"))
-    # MEM_T8-only diagnostic legend entry.
-    if frame.anti_target_pos is not None:
-        legend_items.append((_C["anti_mkr"], "Anti-target"))
-
-    if num_bases > 0:   legend_items.append((_C["base_chain"], "Base-connected"))
-    if num_targets > 0: legend_items.append((_C["tgt_chain"],  "Target-connected"))
-    if num_bases > 0 and num_targets > 0:
-        legend_items.append((_C["both_chain"], "Both (bridge)"))
+    legend_items.append((_C["base_mkr"],   "Base station"))
+    legend_items.append((_C["tgt_mkr"],    "Target"))
+    legend_items.append((_C["base_chain"], "Base-connected"))
+    legend_items.append((_C["tgt_chain"],  "Target-connected"))
+    legend_items.append((_C["both_chain"], "Both (bridge)"))
 
     legend_items.append((_C["iso"],        "Isolated"))
     legend_items.append((_C["coverage"],   "Coverage"))
@@ -1028,9 +935,6 @@ def render_video_cv2(
     from env.maps import MapDefinition
     from core.config import MAP_DIR
     occ_grid_static = None
-    comm_occ_grid_static = None
-    mesh_walls_static = None
-    anti_target_static = None
     maze_cell_grid_static = None
     if cfg.env.map_names and len(cfg.env.map_names) > 0:
         active_map_name = cfg.env.map_names[0]
@@ -1038,13 +942,8 @@ def render_video_cv2(
         if map_path.exists():
             map_def = MapDefinition.load(map_path, cell_size=1.0)
             occ_grid_static = map_def.occupancy_grid
-            comm_occ_grid_static = map_def.communication_occupancy_grid
-            mesh_walls_static = np.array(map_def.mesh_walls, dtype=np.float32) if map_def.mesh_walls else None
             if map_def.maze_cell_cols and map_def.maze_cell_rows:
                 maze_cell_grid_static = (int(map_def.maze_cell_cols), int(map_def.maze_cell_rows))
-            # MEM_T8-only diagnostic marker overlay.
-            if map_def.anti_target_spawn_points is not None:
-                anti_target_static = np.array(map_def.anti_target_spawn_points)
 
     # 1. Prepare frame data for parallel processing
     frame_args = []
@@ -1054,14 +953,11 @@ def render_video_cv2(
             vel           = np.array(traj_cpu.vel[t]),
             base_pos      = np.array(traj_cpu.base_pos[t]),
             target_pos    = np.array(traj_cpu.target_pos[t]),
-            anti_target_pos = anti_target_static,
             coverage_grid = np.array(traj_cpu.coverage_grid[t]),
             step          = int(traj_cpu.step[t]),
             active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
             collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
             occ_grid      = occ_grid_static,
-            comm_occ_grid = comm_occ_grid_static,
-            mesh_walls    = mesh_walls_static,
             box_width     = float(traj_cpu.box_width[t]),
             box_height    = float(traj_cpu.box_height[t]),
             extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},

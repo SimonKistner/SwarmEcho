@@ -6,11 +6,8 @@ env:
   map_names: ["complex_maze"]
   num_agents: 12
   max_steps: 1500
-  num_targets: 1
-  num_bases: 1
 
 
 training:
   total_timesteps: 100_000_000
   num_envs: 1024
-

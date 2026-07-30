@@ -5,8 +5,6 @@
 env:
   map_names: ["M02_small_grid_maze"]
   num_agents: 8
-  num_targets: 1
-  num_bases: 1
   max_steps: 1000
   visual_radius: 5.0
   max_speed: 4.17   # 10.0 * 5/12
@@ -14,22 +12,13 @@ env:
   comm_radius: 20.83       # 50.0 * 5/12
   comm_radius_base: 16.67  # 40.0 * 5/12
   spawn_delay: 5
-  use_random_base_spawn: false
-  use_random_drone_spawn: false
-  target_spawn_method: map_defined   # spawn from wall-buffered valid_target_coords (see M02_small_grid_maze.yaml)
-  precover_base_comm: true
   hold_chain_for: 50
   observe_target_vector: false
   observe_base_vector: false
 
 reward:
-  every_reward_global: false
-  only_explor_individual: false
-  only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
-  back_to_target_after_delivery: false
   chain_reward_system: discrete_finders_path
-  only_reward_chain_from_target: false
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
@@ -46,12 +35,7 @@ training:
   num_minibatches: 20
   seed: 14141414
 
-  eval_parallel: true
-  eval_parallel_envs: 4000
-  eval_parallel_early_exit_threshold: 1.0
-
 network:
-  critic_type: "agent_centric"
   num_layers: 3    # critic depth
   actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
@@ -62,7 +46,11 @@ network:
   tarmac_val_dim: 128
   tarmac_include_self: true
 
-logging:
+evaluation:
+  eval_parallel_envs: 4000
+  early_exit: true
+  early_exit_threshold: 1.0
+
   checkpoint_freq: 50
   checkpoint_offset: 0
 
@@ -73,11 +61,6 @@ logging:
   eval_video: true
   eval_video_freq: 100
   eval_video_offset: 1
-
-curriculum:
-  success_threshold: 1.00
-  metric: success
-  mode: eval
 
 
 

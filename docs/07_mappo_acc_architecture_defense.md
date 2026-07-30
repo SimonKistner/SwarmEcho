@@ -125,7 +125,7 @@ Rejected as the default. It is not agent-number-invariant by construction, scale
 
 ### Global mean critic
 
-Useful as an ablation, but too coarse for per-agent credit assignment. SwarmEcho rewards include local exploration, collision, proximity, finder, and chain-contribution effects. A single pooled value loses important agent-specific structure.
+Useful as an ablation, but too coarse for per-agent credit assignment. SwarmEcho rewards include local exploration, collision, finder, and chain-contribution effects. A single pooled value loses important agent-specific structure.
 
 ### Hand-crafted topology critic
 

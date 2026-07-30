@@ -16,7 +16,7 @@ uv run python src/visualize/render_preview.py M01_grid_maze --mode image
 uv run python src/visualize/render_preview.py M01_grid_maze --mode image --format svg --no-spawns --no-zones
 
 # 4. Render a snappy simulated GIF preview using a specific level configuration:
-uv run python src/visualize/render_preview.py memory_t_maze_8 --mode gif --level MEM_T8_memory
+uv run python src/visualize/render_preview.py M04_tiny_grid_maze --mode gif --level M04_tiny_grid_maze
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _resolve_map_path(name_or_path: str) -> Path:
     return MAP_DIR / f"{name_or_path}.yaml"
 
 
-def _compile_segments(data: dict, extra_wall_segments: Optional[list[list[float]]] = None) -> list[list[float]]:
+def _compile_segments(data: dict) -> list[list[float]]:
     segments = list(data.get("walls", []))
     door_width = 10.0
     for room in data.get("rooms", []):
@@ -91,7 +91,6 @@ def _compile_segments(data: dict, extra_wall_segments: Optional[list[list[float]
             segments.append([x1 + ux, y1 + uy, x2 + ux, y2 + uy])
             segments.append([x1 - ux, y1 - uy, x2 - ux, y2 - uy])
 
-    segments.extend(extra_wall_segments or [])
     return segments
 
 
@@ -102,8 +101,6 @@ def render_svg(
     show_zones: bool,
     show_spawns: bool,
     scale: float,
-    extra_wall_segments: Optional[list[list[float]]] = None,
-    show_cell_categories: bool = False,
 ) -> str:
     width = float(data["width"])
     height = float(data["height"])
@@ -154,28 +151,20 @@ def render_svg(
             ew = (x2 - x1) * scale
             eh = (y2 - y1) * scale
             svg.append(f'<rect x="{ex:.3f}" y="{ey:.3f}" width="{ew:.3f}" height="{eh:.3f}" fill="url(#excl_hatch)" fill-opacity="0.6" stroke="#7f1d1d" stroke-width="2" stroke-dasharray="6,3"/>')
-
-    if show_cell_categories:
-        for cx, cy, cat in _cell_categories_for_preview(data).get("cells", []):
-            tx = (cx * width / cols + 1.0) * scale
-            ty = (height - cy * height / rows - 1.0) * scale
-            svg.append(f'<text x="{tx:.3f}" y="{ty:.3f}" fill="#475569" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="700">{cat}</text>')
+        for centre_x, centre_y, radius in data.get("target_exclude_circles", []):
+            cx = float(centre_x) * scale
+            cy = (height - float(centre_y)) * scale
+            cr = float(radius) * scale
+            svg.append(f'<circle cx="{cx:.3f}" cy="{cy:.3f}" r="{cr:.3f}" fill="url(#excl_hatch)" fill-opacity="0.6" stroke="#7f1d1d" stroke-width="2" stroke-dasharray="6,3"/>')
 
     # Walls
     wall_width = max(2.0, scale)
-    segments = _compile_segments(data, extra_wall_segments)
+    segments = _compile_segments(data)
     for seg in segments:
         x1, y1, x2, y2 = seg
         px1, py1 = x1 * scale, (height - y1) * scale
         px2, py2 = x2 * scale, (height - y2) * scale
         svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#1f2937" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
-
-    # Mesh walls: movement/visual blockers, but communication-transparent.
-    for seg in data.get("mesh_walls", data.get("mesh", [])):
-        x1, y1, x2, y2 = seg
-        px1, py1 = x1 * scale, (height - y1) * scale
-        px2, py2 = x2 * scale, (height - y2) * scale
-        svg.append(f'<line x1="{px1:.3f}" y1="{py1:.3f}" x2="{px2:.3f}" y2="{py2:.3f}" stroke="#0ea5e9" stroke-width="{wall_width:.3f}" stroke-linecap="square"/>')
 
     # Zones
     if show_zones:
@@ -218,17 +207,13 @@ def render_svg(
 
         # Target
         if getattr(state, "target_pos", None) is not None:
-            target_points = np.asarray(state.target_pos)
-            if target_points.ndim == 1:
-                target_points = target_points[None, :]
-            for k, tp in enumerate(target_points):
-                tx, ty = float(tp[0]), float(tp[1])
-                px = tx * scale
-                py = (height - ty) * scale
-                tm = max(6.0, 6.0 * scale / 4.0)
-                svg.append(f'<circle cx="{px:.3f}" cy="{py:.3f}" r="{tm:.3f}" fill="#ef4444" stroke="#b91c1c" stroke-width="1.5"/>')
-                label = "T" if len(target_points) == 1 else f"T{k}"
-                svg.append(f'<text x="{px:.3f}" y="{py + tm/2 - 1:.3f}" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle">{label}</text>')
+            target_pos = np.asarray(state.target_pos)
+            tx, ty = float(target_pos[0]), float(target_pos[1])
+            px = tx * scale
+            py = (height - ty) * scale
+            tm = max(6.0, 6.0 * scale / 4.0)
+            svg.append(f'<circle cx="{px:.3f}" cy="{py:.3f}" r="{tm:.3f}" fill="#ef4444" stroke="#b91c1c" stroke-width="1.5"/>')
+            svg.append(f'<text x="{px:.3f}" y="{py + tm/2 - 1:.3f}" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle">T</text>')
 
         # Drones
         dr = max(4.0, 4.0 * scale / 4.0)
@@ -250,8 +235,6 @@ def render_png(
     show_zones: bool,
     show_spawns: bool,
     scale: float,
-    extra_wall_segments: Optional[list[list[float]]] = None,
-    show_cell_categories: bool = False,
 ) -> np.ndarray:
     width = float(data["width"])
     height = float(data["height"])
@@ -301,29 +284,22 @@ def render_png(
             cv2.rectangle(overlay, (px1, py1), (px2, py2), (28, 28, 185), -1)
             cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
             cv2.rectangle(img, (px1, py1), (px2, py2), (28, 28, 185), 2, cv2.LINE_AA)
-
-    if show_cell_categories:
-        cats = _cell_categories_for_preview(data).get("cells", [])
-        for cx, cy, cat in cats:
-            tx = int((cx * width / cols + 1.0) * scale)
-            ty = int((height - cy * height / rows - 1.0) * scale)
-            cv2.putText(img, str(cat), (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 0.35, (89, 74, 65), 1, cv2.LINE_AA)
+        for centre_x, centre_y, radius in data.get("target_exclude_circles", []):
+            centre = (int(float(centre_x) * scale), int((height - float(centre_y)) * scale))
+            radius_px = int(float(radius) * scale)
+            overlay = img.copy()
+            cv2.circle(overlay, centre, radius_px, (28, 28, 185), -1, cv2.LINE_AA)
+            cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+            cv2.circle(img, centre, radius_px, (28, 28, 185), 2, cv2.LINE_AA)
 
     # 5. Walls
     wall_width = max(2, int(scale))
-    segments = _compile_segments(data, extra_wall_segments)
+    segments = _compile_segments(data)
     for seg in segments:
         x1, y1, x2, y2 = seg
         p1 = (int(x1 * scale), int((height - y1) * scale))
         p2 = (int(x2 * scale), int((height - y2) * scale))
         cv2.line(img, p1, p2, (55, 41, 31), wall_width, cv2.LINE_AA)
-
-    # Mesh walls: movement/visual blockers, but communication-transparent.
-    for seg in data.get("mesh_walls", data.get("mesh", [])):
-        x1, y1, x2, y2 = seg
-        p1 = (int(x1 * scale), int((height - y1) * scale))
-        p2 = (int(x2 * scale), int((height - y2) * scale))
-        cv2.line(img, p1, p2, (235, 165, 14), wall_width, cv2.LINE_AA)
 
     # 6. Spawn Zones
     if show_zones:
@@ -370,18 +346,14 @@ def render_png(
 
         # Target
         if getattr(state, "target_pos", None) is not None:
-            target_points = np.asarray(state.target_pos)
-            if target_points.ndim == 1:
-                target_points = target_points[None, :]
-            for k, tp in enumerate(target_points):
-                tx, ty = float(tp[0]), float(tp[1])
-                px = int(tx * scale)
-                py = int((height - ty) * scale)
-                tm = max(6, int(6 * scale / 4))
-                cv2.circle(img, (px, py), tm, (68, 68, 239), -1, cv2.LINE_AA)
-                cv2.circle(img, (px, py), tm, (28, 28, 185), 1, cv2.LINE_AA)
-                label = "T" if len(target_points) == 1 else f"T{k}"
-                cv2.putText(img, label, (px - 4, py + 4), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+            target_pos = np.asarray(state.target_pos)
+            tx, ty = float(target_pos[0]), float(target_pos[1])
+            px = int(tx * scale)
+            py = int((height - ty) * scale)
+            tm = max(6, int(6 * scale / 4))
+            cv2.circle(img, (px, py), tm, (68, 68, 239), -1, cv2.LINE_AA)
+            cv2.circle(img, (px, py), tm, (28, 28, 185), 1, cv2.LINE_AA)
+            cv2.putText(img, "T", (px - 4, py + 4), cv2.FONT_HERSHEY_DUPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
         # Drones
         dr = max(4, int(4 * scale / 4))
@@ -396,74 +368,6 @@ def render_png(
     return img
 
 
-
-def _parse_category_block_spec(spec: str) -> set[int]:
-    out: set[int] = set()
-    for part in (p.strip() for p in spec.split(",") if p.strip()):
-        if part.endswith("+"):
-            start = int(part[:-1])
-            out.update(range(start, 10_000))
-        elif "-" in part:
-            a, b = part.split("-", 1)
-            out.update(range(int(a), int(b) + 1))
-        else:
-            out.add(int(part))
-    return out
-
-def _cell_categories_for_preview(data: dict) -> dict[str, list]:
-    from collections import deque
-    width = float(data["width"]); height = float(data["height"])
-    grid = data.get("maze_cell_grid") or {}
-    cols = int(grid.get("cols", max(1, int(width // 10))))
-    rows = int(grid.get("rows", max(1, int(height // 10))))
-    cell_w = width / cols; cell_h = height / rows
-    zones = data.get("spawn_zones", {})
-    base = zones.get("base", [0, 0, cell_w, cell_h])
-    bx = min(cols - 1, max(0, int(((base[0]+base[2])*0.5) // cell_w)))
-    by = min(rows - 1, max(0, int(((base[1]+base[3])*0.5) // cell_h)))
-    segs = _compile_segments(data)
-    def blocked(cx, cy, nx, ny):
-        x0=min(cx,nx)*cell_w; x1=max(cx,nx)*cell_w; y0=min(cy,ny)*cell_h; y1=max(cy,ny)*cell_h
-        edge = [x1 if cx!=nx else x0, y0, x1 if cx!=nx else x0, y1] if cx!=nx else [x0, y1 if cy!=ny else y0, x1, y1 if cy!=ny else y0]
-        return _normalize_segment(edge) in {_normalize_segment(s) for s in segs}
-    dist={(bx,by):0}; q=deque([(bx,by)])
-    while q:
-        cx,cy=q.popleft()
-        for nx,ny in ((cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1)):
-            if nx<0 or nx>=cols or ny<0 or ny>=rows or (nx,ny) in dist or blocked(cx,cy,nx,ny): continue
-            dist[(nx,ny)]=dist[(cx,cy)]+1; q.append((nx,ny))
-    return {"cells": [(cx, cy, cat) for (cx, cy), cat in sorted(dist.items())]}
-
-def _dynamic_walls_for_preview(data: dict, spec: str | None, valid_target_coords=None) -> list[list[float]]:
-    if not spec:
-        return []
-    blocked = _parse_category_block_spec(spec)
-    width = float(data["width"]); height = float(data["height"])
-    grid = data.get("maze_cell_grid") or {}; cols=int(grid.get("cols",1)); rows=int(grid.get("rows",1))
-    cell_w=width/cols; cell_h=height/rows; existing={_normalize_segment(s) for s in _compile_segments(data)}; seen=set(); out=[]
-    cat_by_cell = {(cx, cy): cat for cx, cy, cat in _cell_categories_for_preview(data)["cells"]}
-    if valid_target_coords is None:
-        candidate_cells = set(cat_by_cell)
-    else:
-        coords = np.asarray(valid_target_coords, dtype=np.float32)
-        candidate_cells = {
-            (min(cols - 1, max(0, int(np.floor(float(x) / cell_w)))), min(rows - 1, max(0, int(np.floor(float(y) / cell_h)))))
-            for x, y in coords
-        }
-    for cx, cy in sorted(candidate_cells):
-        cat = cat_by_cell.get((cx, cy))
-        if cat not in blocked: continue
-        x0=cx*cell_w; x1=(cx+1)*cell_w; y0=cy*cell_h; y1=(cy+1)*cell_h
-        for seg in ([x0,y0,x1,y0],[x0,y1,x1,y1],[x0,y0,x0,y1],[x1,y0,x1,y1]):
-            key=_normalize_segment(seg)
-            if key in existing or key in seen: continue
-            seen.add(key); out.append(seg)
-    return out
-
-def _normalize_segment(seg) -> tuple[float, float, float, float]:
-    x1,y1,x2,y2=(round(float(v),6) for v in seg[:4]); a=(x1,y1); b=(x2,y2)
-    if b<a: x1,y1,x2,y2=x2,y2,x1,y1
-    return (x1,y1,x2,y2)
 
 def convert_mp4_to_gif(input_vid: Path, output_gif: Path, frame_stride: int = 2) -> None:
     cap = cv2.VideoCapture(str(input_vid))
@@ -522,12 +426,6 @@ def main() -> None:
         help="Output image format for 'image' mode (default 'png')",
     )
     parser.add_argument(
-        "--renderer",
-        choices=["fast", "slow"],
-        default="fast",
-        help="Renderer to use for video/gif: 'fast' (OpenCV, default) or 'slow' (Matplotlib)",
-    )
-    parser.add_argument(
         "--level",
         default=None,
         help="Optional level name or YAML path to load environment variables from",
@@ -568,8 +466,6 @@ def main() -> None:
         dest="show_spawns",
         help="Do not render spawned entities or spawn zones (clean blueprint mode)",
     )
-    parser.add_argument("--show-cell-categories", action="store_true", help="Draw each maze cell category number in its top-left corner")
-    parser.add_argument("--block-categories", default=None, help="Preview dynamic blockage for categories, e.g. 4+, 4-6, or 2,4-6")
     parser.add_argument(
         "--seed",
         type=int,
@@ -588,12 +484,6 @@ def main() -> None:
         map_data = yaml.safe_load(f)
     map_name = map_data["name"]
 
-    base_preview_map_def = None
-    try:
-        base_preview_map_def = MapDefinition.load(map_path, cell_size=1.0)
-    except Exception as e:
-        print(f"[warn] Could not load base map definition for preview blockage filtering: {e}")
-
     # If --no-spawns was passed, we also imply no spawn zones to give a clean blueprint
     if not args.show_spawns:
         args.show_zones = False
@@ -606,8 +496,6 @@ def main() -> None:
         # Override to 3 drones, 1 target, 1 base when no level config is provided
         cfg = OmegaConf.to_container(cfg, resolve=True)
         cfg["env"]["num_agents"] = 3
-        cfg["env"]["num_targets"] = 1
-        cfg["env"]["num_bases"] = 1
         cfg = OmegaConf.create(cfg)
 
     # Force map override in curriculum config
@@ -620,15 +508,10 @@ def main() -> None:
     state = None
     env_step = None
     map_def = None
-    extra_wall_segments = _dynamic_walls_for_preview(
-        map_data,
-        args.block_categories,
-        valid_target_coords=(base_preview_map_def.valid_target_coords if base_preview_map_def is not None else None),
-    )
     try:
-        env_step, env_reset, _, (W, H, occ_grid, comm_occ_grid) = make_env_fns(cfg, extra_walls=extra_wall_segments)
+        env_step, env_reset, _, (W, H, occ_grid) = make_env_fns(cfg)
         state = env_reset(jax.random.PRNGKey(args.seed))
-        map_def = MapDefinition.load(map_path, cell_size=1.0, extra_walls=extra_wall_segments)
+        map_def = MapDefinition.load(map_path, cell_size=1.0)
     except Exception as e:
         print(f"[warn] Could not initialize environment or sample spawns: {e}")
 
@@ -653,8 +536,6 @@ def main() -> None:
                 show_zones=args.show_zones,
                 show_spawns=args.show_spawns,
                 scale=args.scale,
-                extra_wall_segments=extra_wall_segments,
-                show_cell_categories=args.show_cell_categories,
             )
             out_path.write_text(svg_content, encoding="utf-8")
         else:
@@ -665,8 +546,6 @@ def main() -> None:
                 show_zones=args.show_zones,
                 show_spawns=args.show_spawns,
                 scale=args.scale,
-                extra_wall_segments=extra_wall_segments,
-                show_cell_categories=args.show_cell_categories,
             )
             cv2.imwrite(str(out_path), img_bgr)
 
@@ -692,13 +571,12 @@ def main() -> None:
         trajectory = jax.tree.map(lambda *xs: jnp.stack(xs), *states)
 
         # Call the standard project visualizer
-        print(f"Rendering {args.num_frames} frames simulation rollout using '{args.renderer}' renderer...")
+        print(f"Rendering {args.num_frames} frames simulation rollout...")
         actual_mp4 = render_video(
             trajectory=trajectory,
             cfg=cfg,
             filename=render_path,
             fps=20,
-            renderer=args.renderer,
         )
 
         # Post-process to GIF if requested

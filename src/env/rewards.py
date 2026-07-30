@@ -15,15 +15,12 @@ The function returns an array of shape (N,) containing the scalar reward for eac
 Reward components
 -----------------
 
-    r_i = r_target_found + r_coverage + r_chain_gap + r_proximity + r_collision + r_success + r_hub_proximity
+    r_i = r_target_found + r_coverage + r_chain_gap + r_collision + r_success
 
     r_target_found  [sparse]
         Granted when the global target is first discovered.
         Contains a shared team bonus (target_found_bonus / N) and a local individual bonus
         (finder_bonus) given only to the drone(s) that physically spotted the target.
-        MEM_T8-only diagnostic path: when target_pos is (N, 2), each agent can
-        receive the local bonus for its own target, and paired anti-target
-        discovery gives that same local amount as a one-shot negative reward.
 
     r_coverage      [dense]
         Individual reward proportional to the area of NEW grid cells covered this step.
@@ -37,13 +34,9 @@ Reward components
         Measurement: The actual Euclidean distance between the two tips.
         Condition: The gap penalty is dynamic. Before the target is found, it uses the maximum
                    distance. Once the target is found, it scales with the actual chain gap.
-        Individual aspect: Only "contributing" drones (part of the connected chains or shortest path)
-                           receive the dynamic penalty. Non-contributing drones receive
-                           the maximum gap penalty.
-
-    r_proximity     [dense, penalty]
-        Individual penalty for drones that are too close to each other (collision avoidance).
-        Value: -number_of_nearby_drones × proximity_penalty.
+        Individual aspect: Only drones on one deterministic shortest route receive
+                           the dynamic penalty. Non-contributing drones receive the
+                           maximum gap penalty.
 
     r_collision     [dense, penalty]
         Individual penalty for agents hitting walls or obstacles.
@@ -53,11 +46,6 @@ Reward components
         One-shot shared terminal bonus when the episode ends with a fully connected chain.
         Value: is_done × fully_connected × (success_bonus / N).
 
-    r_hub_proximity [dense]
-        Encourages drones to stay near points of interest (base or target).
-        If the target is known, drones are rewarded for proximity to either the base or the target.
-        Otherwise, only proximity to the base is rewarded.
-        Normalized by the map diagonal to remain map-invariant.
 """
 
 from __future__ import annotations
@@ -86,7 +74,6 @@ def make_reward_fn(cfg: DictConfig):
 
     # ---- Extract scalars (XLA compile-time constants) --------------------
     N           = int(cfg.env.num_agents)
-    num_targets = int(cfg.env.num_targets)
     comm_r      = float(cfg.env.comm_radius)
     # Base station uses its own comm radius for the first hop.
     # Defaults to comm_radius if not set, so old configs are fully backward-compatible.
@@ -100,27 +87,10 @@ def make_reward_fn(cfg: DictConfig):
     w_finder     = float(cfg.reward.finder_bonus)
     p_gap_max = float(cfg.reward.max_gap_penalty)
     p_coll  = float(cfg.reward.collision_penalty)
-    p_prox  = float(cfg.reward.proximity_penalty)
     w_success    = float(cfg.reward.success_bonus)
-    w_base_prox  = float(cfg.reward.get("base_proximity_bonus", 0.0))
-    w_target_prox = float(cfg.reward.get("target_proximity_bonus", 0.0))
-    use_task     = bool(int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
     target_found_requires_delivery = bool(cfg.reward.get("target_found_requires_delivery", True))
-    back_to_target_after_delivery = bool(cfg.reward.get("back_to_target_after_delivery", False))
     chain_reward_system = str(cfg.reward.get("chain_reward_system", "euclidean"))
-    experimental_setup = bool(cfg.env.get("experimental_setup", False))
-    use_finders_path_reward = (chain_reward_system == "discrete_finders_path") and not experimental_setup
-    only_reward_chain_from_target = bool(cfg.reward.get("only_reward_chain_from_target", False))
-    every_reward_global = bool(cfg.reward.get("every_reward_global", False))
-    only_explor_individual = bool(cfg.reward.get("only_explor_individual", False)) and not every_reward_global
-    only_shortest_path_chain_reward = (
-        bool(cfg.reward.get("only_shortest_path_chain_reward", False))
-        and not only_explor_individual
-        and not every_reward_global
-    )
-    reward_single_shortest_path = bool(cfg.reward.get("reward_single_shortest_path", True))
-
-    chain_rewards_global = only_explor_individual or every_reward_global
+    use_finders_path_reward = chain_reward_system == "discrete_finders_path"
     maze_cols = 1
     maze_rows = 1
     maze_cell_w = 1.0
@@ -157,8 +127,7 @@ def make_reward_fn(cfg: DictConfig):
         H = H.at[:N, N].set(jnp.where(adj_db, 1, H[:N, N]))
         H = H.at[N, :N].set(jnp.where(adj_db, 1, H[N, :N]))
 
-        per_agent_targets = experimental_setup and (state.target_pos.ndim == 2)
-        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+        target_pos_agents = jnp.tile(state.target_pos[None, :], (N, 1))
         target_dists = jnp.linalg.norm(state.pos - target_pos_agents, axis=-1)
         adj_dt = (target_dists <= vis_r) & state.active
         H = H.at[:N, N+1].set(jnp.where(adj_dt, 1, H[:N, N+1]))
@@ -189,20 +158,12 @@ def make_reward_fn(cfg: DictConfig):
         # Safe gating. Only check path equality if the chain actually exists.
         is_on_base_path = jnp.where(
             has_b_chain,
-            jnp.where(
-                reward_single_shortest_path,
-                _trace_single_path(N, idx_b),
-                (H_final[N, :N] + H_final[:N, idx_b] == H_final[N, idx_b])
-            ),
+            _trace_single_path(N, idx_b),
             False
         )
         is_on_tgt_path = jnp.where(
             has_t_chain,
-            jnp.where(
-                reward_single_shortest_path,
-                _trace_single_path(N+1, idx_t),
-                (H_final[N+1, :N] + H_final[:N, idx_t] == H_final[N+1, idx_t])
-            ),
+            _trace_single_path(N+1, idx_t),
             False
         )
 
@@ -237,13 +198,7 @@ def make_reward_fn(cfg: DictConfig):
         next_cell = new_state.finders_path[next_idx]
         next_center = _path_cell_center(next_cell)
 
-        # Resolve target positions per-agent (needed for diagnostic target tasks)
-        per_agent_targets = experimental_setup and (new_state.target_pos.ndim == 2)
-        target_pos_agents = (
-            new_state.target_pos
-            if per_agent_targets
-            else jnp.tile(new_state.target_pos[None, :], (N, 1))
-        )
+        target_pos_agents = jnp.tile(new_state.target_pos[None, :], (N, 1))
         # If we reached the final path cell (target), tiebreak toward the actual target position
         base_target_center = jnp.where(
             base_best == valid_len - 1,
@@ -270,25 +225,14 @@ def make_reward_fn(cfg: DictConfig):
 
         base_cells = jnp.where(any_base_chain, base_best + 1, 0)
         tgt_cells = jnp.where(any_tgt_chain, valid_len - tgt_best, 0)
-        progress_cells = jnp.where(
-            only_reward_chain_from_target,
-            tgt_cells,
-            jnp.minimum(base_cells + tgt_cells, valid_len),
-        )
+        progress_cells = jnp.minimum(base_cells + tgt_cells, valid_len)
         progress_cells = jnp.where(fully_connected, valid_len, progress_cells)
         progress_frac = jnp.where(new_state.finders_path_valid, progress_cells.astype(jnp.float32) / valid_len.astype(jnp.float32), 0.0)
         chain_progress_pct = 100.0 * progress_frac
         chain_gap_dist = jnp.float32(0.0)
         base_gap_penalty = -p_gap_max * (1.0 - progress_frac)
 
-        if only_reward_chain_from_target:
-            contrib = is_tgt_chain & (path_idx >= tgt_best)
-        else:
-            base_side = is_base_chain & (path_idx <= base_best)
-            tgt_side = is_tgt_chain & (path_idx >= tgt_best)
-            contrib = base_side | tgt_side
-        contrib = contrib & new_state.finders_path_valid
-        return chain_gap_dist, chain_progress_pct, base_gap_penalty, contrib, idx_b, idx_t, any_base_chain, any_tgt_chain
+        return chain_gap_dist, chain_progress_pct, base_gap_penalty, idx_b, idx_t, any_base_chain, any_tgt_chain
 
     # ---- Public: compute_reward ------------------------------------------
 
@@ -298,19 +242,11 @@ def make_reward_fn(cfg: DictConfig):
         is_done:   jax.Array = jnp.bool_(False),
     ) -> tuple[jax.Array, dict]:
 
-        per_agent_targets = experimental_setup and (new_state.target_pos.ndim == 2)
-        target_pos_agents = (
-            new_state.target_pos
-            if per_agent_targets
-            else jnp.tile(new_state.target_pos[None, :], (N, 1))
-        )
-        primary_target_pos = target_pos_agents[0]
+        target_pos_agents = jnp.tile(new_state.target_pos[None, :], (N, 1))
+        primary_target_pos = new_state.target_pos
 
         # Dynamic world geometry from state
-        bt_vec = primary_target_pos - new_state.base_pos
-        bt_dist = jnp.linalg.norm(bt_vec)
-        # Avoid division by zero if base == target
-        bt_unit = jnp.where(bt_dist > 0, bt_vec / bt_dist, jnp.array([1.0, 0.0], dtype=jnp.float32))
+        bt_dist = jnp.linalg.norm(primary_target_pos - new_state.base_pos)
 
         # Normalized gap weight
         w_gap = jnp.where(bt_dist > 0, p_gap_max / bt_dist, 0.0)
@@ -327,82 +263,20 @@ def make_reward_fn(cfg: DictConfig):
         knew_or_sees_target = old_state.target_known | is_visible
         actual_deliverers = adj_db & knew_or_sees_target
 
-        finder_bonus_value = w_finder if (use_task and not chain_rewards_global) else 0.0
-        delivery_finder_bonus_value = jnp.where(
-            back_to_target_after_delivery,
-            finder_bonus_value / 2.0,
-            finder_bonus_value,
-        )
-        target_revisit_bonus_value = jnp.where(
-            back_to_target_after_delivery,
-            finder_bonus_value / 2.0,
-            0.0,
-        )
-
-        def _first_agent_mask(candidates):
-            any_candidate = jnp.any(candidates)
-            first_idx = jnp.argmax(candidates.astype(jnp.int32))
-            return any_candidate & (jnp.arange(N) == first_idx)
-
-        if per_agent_targets:
-            # MEM_T8-only diagnostic path: one fixed target slot per agent.
-            if target_found_requires_delivery:
-                newly_found_agents = actual_deliverers & ~old_state.target_known
-                newly_found_agents = jnp.where(
-                    back_to_target_after_delivery,
-                    _first_agent_mask(newly_found_agents),
-                    newly_found_agents,
-                )
-            else:
-                newly_found_agents = new_state.target_known & ~old_state.target_known
+        if target_found_requires_delivery:
+            was_target_found = old_state.base_target_known
+            global_target_found = new_state.base_target_known
+            target_found_local_receivers = actual_deliverers
+        else:
             was_target_found = jnp.any(old_state.target_known)
             global_target_found = jnp.any(new_state.target_known)
-            just_found = global_target_found & ~was_target_found
-            r_target_found_shared = jnp.where(use_task & just_found, w_found, 0.0)
-            r_target_found_local = jnp.where(newly_found_agents, delivery_finder_bonus_value, 0.0)
-        else:
-            if target_found_requires_delivery:
-                was_target_found = old_state.base_target_known
-                global_target_found = new_state.base_target_known
-                target_found_local_receivers = actual_deliverers
-                target_found_local_receivers = jnp.where(
-                    back_to_target_after_delivery,
-                    _first_agent_mask(target_found_local_receivers),
-                    target_found_local_receivers,
-                )
-            else:
-                was_target_found = jnp.any(old_state.target_known)
-                global_target_found = jnp.any(new_state.target_known)
-                target_found_local_receivers = is_visible & ~old_state.target_known
-            just_found = global_target_found & ~was_target_found
-            r_target_found_shared = jnp.where(use_task & just_found, w_found, 0.0)
-            r_target_found_local = jnp.where(just_found & target_found_local_receivers, delivery_finder_bonus_value, 0.0)
-
-        # MEM_T8-only diagnostic path: paired wrong-branch decoys.
-        if per_agent_targets and new_state.anti_target_known.size:
-            newly_found_anti = new_state.anti_target_known & ~old_state.anti_target_known
-            r_anti_target = jnp.where(newly_found_anti, -finder_bonus_value, 0.0)
-        else:
-            newly_found_anti = jnp.zeros(N, dtype=jnp.bool_)
-            r_anti_target = jnp.zeros(N, dtype=jnp.float32)
-
-        target_revisit_candidates = (
-            back_to_target_after_delivery
-            & ~per_agent_targets
-            & old_state.base_target_known
-            & ~old_state.target_revisit_reward_claimed
-            & new_state.target_revisit_reward_claimed
-            & new_state.target_known
-            & is_visible
-        )
-        r_target_revisit = jnp.where(
-            _first_agent_mask(target_revisit_candidates),
-            target_revisit_bonus_value,
-            0.0,
-        )
+            target_found_local_receivers = is_visible & ~old_state.target_known
+        just_found = global_target_found & ~was_target_found
+        r_target_found_shared = jnp.where(just_found, w_found, 0.0)
+        r_target_found_local = jnp.where(just_found & target_found_local_receivers, w_finder, 0.0)
 
         # Shared component is divided by N to be agent-invariant
-        r_target_found = (r_target_found_shared / N) + r_target_found_local + r_target_revisit + r_anti_target
+        r_target_found = (r_target_found_shared / N) + r_target_found_local
 
         delta_cells = new_state.last_cov_delta.astype(jnp.float32)
         # Stop exploration reward for drones that know the target position
@@ -425,136 +299,60 @@ def make_reward_fn(cfg: DictConfig):
         idx_t = jnp.argmin(jnp.where(is_tgt_chain, dist_to_base, 1e9))
         pos_t = jnp.where(any_tgt_chain, new_state.pos[idx_t], primary_target_pos)
 
-        # Projections for tracking (Clipped to [0, bt_dist] to fix 190% bug)
-        rel_b  = new_state.pos - new_state.base_pos[None, :]
-        proj_b = jnp.clip(jnp.sum(rel_b * bt_unit[None, :], axis=-1), 0.0, bt_dist)
-
-        rel_t = new_state.pos - target_pos_agents
-        proj_t = jnp.clip(jnp.sum(rel_t * (-bt_unit[None, :]), axis=-1), 0.0, bt_dist)
-
         # Gap/progress calculation selected once by the run config.
         if use_finders_path_reward:
-            (chain_gap_dist, chain_progress_pct, base_gap_penalty, path_contributing,
+            (chain_gap_dist, chain_progress_pct, base_gap_penalty,
              idx_b, idx_t, any_base_chain, any_tgt_chain) = _compute_finders_path_chain(new_state, fully_connected)
         else:
-            raw_gap_dist = jnp.where(
-                only_reward_chain_from_target,
-                jnp.linalg.norm(pos_t - new_state.base_pos),
-                jnp.linalg.norm(pos_b - pos_t),
-            )
+            raw_gap_dist = jnp.linalg.norm(pos_b - pos_t)
             chain_gap_dist = jnp.where(fully_connected, 0.0, raw_gap_dist)
             chain_progress_pct = jnp.where(
                 fully_connected,
                 100.0,
                 jnp.clip(100.0 * (1.0 - chain_gap_dist / (bt_dist + 1e-6)), 0.0, 100.0)
             )
-            use_dynamic_gap = jnp.logical_or(global_target_found, jnp.logical_not(use_task))
+            use_dynamic_gap = global_target_found
             active_gap = jnp.where(use_dynamic_gap, chain_gap_dist, bt_dist)
             base_gap_penalty = -active_gap * w_gap
-            path_contributing = jnp.zeros(N, dtype=jnp.bool_)
 
-        # Only apply dynamic gap penalty to contributing drones unless chain
-        # rewards are deliberately shared as a team signal.
-        if chain_rewards_global:
-            is_contributing = jnp.ones(N, dtype=jnp.bool_)
-            r_chain_gap = jnp.full((N,), base_gap_penalty / N, dtype=jnp.float32)
-        else:
-            if only_shortest_path_chain_reward:
-                if use_finders_path_reward and only_reward_chain_from_target:
-                    is_contributing = _compute_shortest_paths(new_state, idx_t, idx_t, False, any_tgt_chain) & is_conn_target
-                elif use_finders_path_reward:
-                    is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
-                elif only_reward_chain_from_target:
-                    is_contributing = _compute_shortest_paths(new_state, idx_t, idx_t, False, any_tgt_chain) & is_conn_target
-                else:
-                    is_contributing = _compute_shortest_paths(new_state, idx_b, idx_t, any_base_chain, any_tgt_chain)
-            else:
-                if use_finders_path_reward:
-                    is_contributing = path_contributing
-                elif only_reward_chain_from_target:
-                    is_contributing = is_conn_target
-                else:
-                    is_contributing = is_conn_base | is_conn_target
+        # Apply the dynamic penalty only to one deterministic shortest route.
+        is_contributing = _compute_shortest_paths(
+            new_state, idx_b, idx_t, any_base_chain, any_tgt_chain
+        )
+        r_chain_gap = jnp.where(
+            is_contributing,
+            base_gap_penalty / N,
+            -p_gap_max / N
+        )
 
-            r_chain_gap = jnp.where(
-                is_contributing,
-                base_gap_penalty / N,
-                -p_gap_max / N
-            )
-
-        # ---- 5. Proximity penalty ----------------------------------------
-        pairwise_dists = jnp.linalg.norm(new_state.pos[:, None, :] - new_state.pos[None, :, :], axis=-1)
-        too_close = (pairwise_dists <= vis_r) & ~jnp.eye(N, dtype=jnp.bool_) & new_state.active[:, None] & new_state.active[None, :]
-        r_proximity = -jnp.sum(too_close, axis=-1).astype(jnp.float32) * p_prox
-
-        # ---- 6. Collision penalty ----------------------------------------
+        # ---- 5. Collision penalty ----------------------------------------
         # Penalty is per-agent hitting a wall/obstacle
         r_collision = -new_state.collides.astype(jnp.float32) * p_coll
 
-        # ---- 7. Terminal success bonus -----------------------------------
+        # ---- 6. Terminal success bonus -----------------------------------
         # NOTE: Both `is_done` and `fully_connected` checks are intentional and NOT redundant.
         # `is_done` can be True for two reasons: (a) time_up=True with fully_connected=False
         # (timeout without chain), or (b) fully_connected=True which also sets done=True.
         # The `fully_connected` guard prevents awarding the bonus in case (a).
-        r_success_scalar = jnp.where(use_task, jnp.float32(is_done) * jnp.float32(fully_connected) * w_success, 0.0)
+        r_success_scalar = jnp.float32(is_done) * jnp.float32(fully_connected) * w_success
         r_success = r_success_scalar / N # Divide by N to be agent-invariant
 
-        # ---- 8. Hub Proximity Reward (Intuition) -------------------------
-        # Normalized by diagonal to be map-invariant
-        # Gated by individual knowledge (new_state.target_known accounts for comms)
-
-        diagonal = jnp.sqrt(new_state.box_width**2 + new_state.box_height**2 + 1e-6)
-
-        dist_to_base   = jnp.linalg.norm(new_state.pos - new_state.base_pos[None, :], axis=-1)
-        dist_to_target = jnp.linalg.norm(new_state.pos - target_pos_agents, axis=-1)
-
-        p_base   = jnp.clip(1.0 - (dist_to_base / diagonal), 0.0, 1.0)
-        p_target = jnp.clip(1.0 - (dist_to_target / diagonal), 0.0, 1.0)
-
-        # Selection: Closest hub if know target, else only base
-        hub_prox_reward = jnp.where(
-            new_state.target_known,
-            jnp.maximum(w_base_prox * p_base, w_target_prox * p_target),
-            w_base_prox * p_base
-        )
-        r_hub_proximity = hub_prox_reward / N  # Agent-invariant division
-
         # ---- Total -------------------------------------------------------
-        reward = r_coverage + r_target_found + r_chain_gap + r_proximity + r_collision + r_success + r_hub_proximity
-        if every_reward_global:
-            reward = jnp.full((N,), jnp.sum(reward) / N, dtype=jnp.float32)
-
-        # MEM_T8-only diagnostic reporting: fractional target-found progress
-        # for eight independent cue/choice tasks. Normal levels stay binary.
-        target_found_fraction = jnp.where(
-            per_agent_targets,
-            jnp.sum(new_state.target_known.astype(jnp.float32)) / num_targets,
-            global_target_found.astype(jnp.float32),
-        )
+        reward = r_coverage + r_target_found + r_chain_gap + r_collision + r_success
 
         info = {
             "r_coverage":     jnp.sum(r_coverage),
             "r_target_found": jnp.sum(r_target_found),
-            # MEM_T8-only diagnostic component; zero for normal one-target levels.
-            "r_anti_target":  jnp.sum(r_anti_target),
-            "r_target_revisit": jnp.sum(r_target_revisit),
             "r_chain_gap":    jnp.sum(r_chain_gap),
-            "r_proximity":    jnp.sum(r_proximity),
             "r_collision":    jnp.sum(r_collision),
             "r_success":      jnp.sum(jnp.full(N, r_success_scalar)) / N,
-            "r_hub_proximity": jnp.sum(r_hub_proximity),
             "chain_gap_dist": chain_gap_dist,
             "chain_progress_pct": chain_progress_pct,
             "is_contributing": is_contributing,
             "active_chain_drones": jnp.sum(is_contributing),
             "fully_connected": fully_connected.astype(jnp.float32),
-            "finder_returned_to_target_after_delivery": new_state.finder_returned_to_target.astype(jnp.float32),
             "global_target_found": global_target_found.astype(jnp.float32),
-            # MEM_T8-only diagnostic metric; same as global_target_found normally.
-            "target_found_fraction": target_found_fraction,
             "just_found":     just_found.astype(jnp.float32),
-            # MEM_T8-only diagnostic metric; zero for normal one-target levels.
-            "anti_target_found": jnp.sum(newly_found_anti.astype(jnp.float32)),
             "global_coverage": jnp.mean(new_state.coverage_grid.astype(jnp.float32)),
         }
 

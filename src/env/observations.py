@@ -80,7 +80,6 @@ def make_obs_fns(
     resolved_W: float,
     resolved_H: float,
     occ_grid: jax.Array,
-    comm_occ_grid: jax.Array | None = None,
 ):
     """
     Close over config scalars and return pure JAX observation functions.
@@ -95,27 +94,19 @@ def make_obs_fns(
     B         = int(cfg.env.radar_bins)
     W, H      = float(resolved_W), float(resolved_H)
     max_dim   = math.sqrt(W ** 2 + H ** 2)
-    use_task        = (int(cfg.env.num_targets) > 0) or (int(cfg.env.num_bases) > 0)
     vis_r           = float(cfg.env.visual_radius)
     sampling_radius = vis_r + 1.0
     comm_r          = float(cfg.env.comm_radius)
     comm_r_base     = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     v_max           = float(cfg.env.max_speed)
-    # MEM_T8-only diagnostic flag. Normal SwarmEcho levels keep the full
-    # observation; the memory test zeros non-local channels that reveal which
-    # fixed T-corridor an agent occupies.
-    mem_test_mask_nonlocal_obs = bool(cfg.env.get("mem_test_mask_nonlocal_obs", False))
     observe_base_vector = bool(cfg.env.get("observe_base_vector", True))
     observe_target_vector = bool(cfg.env.get("observe_target_vector", True))
     observe_coverage_probe = bool(cfg.env.get("observe_coverage_probe", True))
 
     obs_dim: int = compute_obs_dim(cfg)
-    if comm_occ_grid is None:
-        comm_occ_grid = occ_grid
-
     GW, GH = occ_grid.shape
     is_unobstructed = (not jnp.any(occ_grid))
-    is_comm_unobstructed = not has_inner_obstacles(comm_occ_grid)
+    is_comm_unobstructed = not has_inner_obstacles(occ_grid)
 
     # Pre-compute bin centre angles: θ_b ∈ (−π, π]
     _bin_angles  = (jnp.arange(B, dtype=jnp.float32) + 0.5) * (2.0 * jnp.pi / B) - jnp.pi
@@ -216,21 +207,12 @@ def make_obs_fns(
         diff_pp        = state.pos[:, None, :] - state.pos[None, :, :]
         pairwise_dists = jnp.linalg.norm(diff_pp, axis=-1)
 
-        # 2. Target/Base pings
-        # We only ping if they exist. If count is 0, dist becomes huge to avoid phantom hits.
-        num_bases = int(cfg.env.num_bases)
-        num_targets = int(cfg.env.num_targets)
-
         # Base pings
         base_dists = jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
-        base_dists = jnp.where(num_bases > 0, base_dists, 1e6)
-
-        per_agent_targets = (state.target_pos.ndim == 2)
-        target_pos_agents = state.target_pos if per_agent_targets else jnp.tile(state.target_pos[None, :], (N, 1))
+        target_pos_agents = jnp.tile(state.target_pos[None, :], (N, 1))
 
         # Target pings
         target_dists  = jnp.linalg.norm(state.pos - target_pos_agents, axis=-1)
-        target_dists  = jnp.where(num_targets > 0, target_dists, 1e6)
 
         p_base = jnp.where((base_dists <= comm_r_base) & state.active, 1.0, 0.0)  # comm_r_base: matches first-hop rule
         p_tgt  = jnp.where((target_dists <= vis_r) & state.active, 1.0, 0.0)
@@ -283,14 +265,14 @@ def make_obs_fns(
                 # Only raycast if within range
                 return jnp.where(
                     near_dd[i, j],
-                    dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, comm_occ_grid),
+                    dda_raycast(state.pos[i]/cell_size, state.pos[j]/cell_size, occ_grid),
                     False
                 )
 
             def _lo_db(i):
                 return jnp.where(
                     near_db[i],
-                    dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, comm_occ_grid),
+                    dda_raycast(state.pos[i]/cell_size, state.base_pos/cell_size, occ_grid),
                     False
                 )
 
@@ -332,19 +314,11 @@ def make_obs_fns(
             rel_target_m    = rel_target * target_mask # masked by knowledge
             rel_base        = (state.base_pos - pos_i) / max_dim
 
-            # Task Masking for self-block
-            rel_base_f      = jnp.where(use_task, rel_base, 0.0)
-            is_conn_base_f  = jnp.where(use_task, is_conn_base[i].astype(jnp.float32), 0.0)
-            is_conn_target_f= jnp.where(use_task, is_conn_target[i].astype(jnp.float32), 0.0)
-            target_mask_f   = jnp.where(use_task, target_mask, 0.0)
-            rel_target_f    = jnp.where(use_task, rel_target_m, 0.0)
-
-            if mem_test_mask_nonlocal_obs:
-                rel_base_f = jnp.zeros_like(rel_base_f)
-                is_conn_base_f = jnp.float32(0.0)
-                is_conn_target_f = jnp.float32(0.0)
-                target_mask_f = jnp.float32(0.0)
-                rel_target_f = jnp.zeros_like(rel_target_f)
+            rel_base_f       = rel_base
+            is_conn_base_f   = is_conn_base[i].astype(jnp.float32)
+            is_conn_target_f = is_conn_target[i].astype(jnp.float32)
+            target_mask_f    = target_mask
+            rel_target_f     = rel_target_m
 
             self_parts = [vel_i / v_max]
             if observe_base_vector:
@@ -378,10 +352,6 @@ def make_obs_fns(
 
             # Sample coverage grid (0 if out of bounds)
             local_cov = jnp.where(in_bounds, state.coverage_grid[gix, giy], False).astype(jnp.float32)
-            if mem_test_mask_nonlocal_obs:
-                # MEM_T8-only: coverage history can act as an external memory
-                # trace, so remove it when testing the recurrent actor itself.
-                local_cov = jnp.zeros_like(local_cov)
 
             # ── Radar block ───────────────────────────────────────────────────
 
@@ -420,11 +390,6 @@ def make_obs_fns(
             inv_drone      = _scatter_max(s_drone,    bins_j)               # (B,)
             inv_tgt_conn   = _scatter_max(s_tgt_conn, bins_j)               # (B,)
             inv_base_conn  = _scatter_max(s_base_conn, bins_j)              # (B,)
-            if mem_test_mask_nonlocal_obs:
-                # MEM_T8-only: keep local geometry and nearby-agent occupancy,
-                # but remove graph/topology channels unrelated to the cue task.
-                inv_tgt_conn = jnp.zeros_like(inv_tgt_conn)
-                inv_base_conn = jnp.zeros_like(inv_base_conn)
 
             # -- Base station point channel --
             # base_vec   = state.base_pos - pos_i                             # (2,)
@@ -499,8 +464,8 @@ if __name__ == "__main__":
         f"config.py formula mismatch: {compute_obs_dim(cfg)} ≠ {expected_obs_dim}"
 
     # Resolve world data from physics engine (Strict Flow)
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
-    compute_obs, obs_dim = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
+    compute_obs, obs_dim = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
 
     print(f"  N        : {N}")
     print(f"  B        : {B}")

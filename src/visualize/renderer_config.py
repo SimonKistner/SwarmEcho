@@ -1,10 +1,9 @@
 """
 swarmecho/visualize/renderer_config.py
 ======================================
-Centralized visual and layout configuration for both the Fast OpenCV (CV2)
-and Premium Matplotlib (MPL) renderers.
+Centralized visual and layout configuration for the OpenCV renderer.
 
-All dimensions are in logical pixels/points (rendered at target DPI)
+All dimensions are in logical pixels (rendered at target DPI)
 and are completely independent of the physical world bounds (meters).
 """
 
@@ -36,27 +35,13 @@ class RendererConfig:
 
     # --- Static Visual Entity/Marker Sizes ---
     # (Independent of the map dimensions in meters)
-    BASE_MARKER_SIZE: int = 10        # CV2 half-width (px), MPL scatter size `s` is proportional
-    TARGET_MARKER_SIZE: int = 14       # CV2 star size, MPL marker size
-    DRONE_MARKER_SIZE: int = 6         # CV2 circle radius (px), MPL scatter `s` is proportional
+    BASE_MARKER_SIZE: int = 10
+    TARGET_MARKER_SIZE: int = 14
+    DRONE_MARKER_SIZE: int = 6
     COLLISION_GLOW_RADIUS: int = 18    # Glow size around colliding drones
-    
-    # MPL specific scatter point sizes (s = Area in points^2)
-    MPL_BASE_S: float = 220.0
-    MPL_TARGET_S: float = 240.0
-    MPL_DRONE_S: float = 70.0
-    MPL_GLOW_S: float = 500.0
 
     # --- Static Font Scales / Sizes ---
-    # For CV2: OpenCV FONT_SCALE multiplier
     CV2_FONT_SCALE_TITLE: float = 0.55
     CV2_FONT_SCALE_LEGEND: float = 0.45
     CV2_FONT_SCALE_LABELS: float = 0.40
     CV2_FONT_SCALE_AXES: float = 0.35
-
-    # For Matplotlib: Pt sizes
-    MPL_FONT_SIZE_TITLE: float = 11.5
-    MPL_FONT_SIZE_LEGEND_TITLE: float = 9.5
-    MPL_FONT_SIZE_LEGEND: float = 7.5
-    MPL_FONT_SIZE_LABELS: float = 7.5
-    MPL_FONT_SIZE_AXES: float = 6.5

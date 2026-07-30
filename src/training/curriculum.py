@@ -7,23 +7,16 @@ stage inherits weights from the previous level's final checkpoint.
 Level naming convention
 -----------------------
 Levels use a prefix string followed by an underscore and a description:
-  A00_open_field, A01_warehouse, B01_agents_in_square_50m_comm_50m_base, ...
+  A00_open_field, A01_warehouse, B05a_open_square, ...
 
 The curriculum list uses just the prefix (e.g. "A00", "B01") and the loader
 resolves the matching YAML file automatically (glob: "{prefix}_*.yaml").
 
-B-series auto-generation
-------------------------
-If a B-series level YAML (or its map) is missing, the runner automatically
-calls generate_b_curriculum to create it before training starts.  The comm
-radii are read from the global config so the generated file name matches.
-
-Success-rate based transitions
--------------------------------
-If a level YAML contains `curriculum.success_threshold: 0.95`, the trainer
-will advance to the next level as soon as the 2000-episode sliding window
-success rate reaches that threshold, rather than waiting for total_timesteps.
-Omit the key (or set to 0.0) to use timesteps-only transitions.
+Evaluation-based transitions
+----------------------------
+If a level enables `evaluation.early_exit`, the trainer advances after the
+parallel evaluation success rate reaches `evaluation.early_exit_threshold`.
+Otherwise the level runs for its configured timestep budget.
 
 Usage
 -----
@@ -32,7 +25,6 @@ Usage
         logging.wandb_mode=online
 """
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -40,55 +32,10 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import jax
 from omegaconf import OmegaConf
 
 from core.config import load_config, validate_config
 from training.runner import train
-
-
-# ---------------------------------------------------------------------------
-# B-level auto-generation helper
-# ---------------------------------------------------------------------------
-
-def _ensure_b_level_exists(level_id: str, global_cfg) -> None:
-    """
-    If a B-series level file does not yet exist (matching the current comm
-    radii) generate it via generate_b_curriculum.
-
-    The number of agents is parsed from the numeric part of level_id ("B03" -> 3).
-    The expected file name encodes the comm radii, so changing radii always
-    triggers a fresh generation.
-    """
-    if not level_id.startswith("B"):
-        return
-
-    try:
-        n_agents = int(level_id[1:])
-    except ValueError:
-        print(f"  [curriculum] Cannot parse agent count from '{level_id}', skipping auto-gen")
-        return
-
-    comm_r      = float(global_cfg.env.comm_radius)
-    comm_r_base = float(global_cfg.env.get("comm_radius_base", comm_r))
-
-    # Build the expected stem -- must match generate_b_curriculum.py logic
-    comm_r_int      = int(comm_r)
-    comm_r_base_int = int(comm_r_base)
-    radius_suffix   = f"{comm_r_int}m_comm_{comm_r_base_int}m_base"
-    expected_stem   = f"{level_id}_agents_in_square_{radius_suffix}"
-
-    level_dir = Path(__file__).resolve().parents[1] / "curriculum_config" / "levels"
-    if (level_dir / f"{expected_stem}.yaml").exists():
-        return  # Already exists with the correct parameters
-
-    print(
-        f"  [curriculum] Level '{expected_stem}' not found -- auto-generating "
-        f"(n_agents={n_agents}, comm_r={comm_r}, comm_r_base={comm_r_base})"
-    )
-
-    from curriculum_config.maps.scripts.generate_b_curriculum import generate_level
-    generate_level(n_agents=n_agents, comm_r=comm_r, comm_r_base=comm_r_base)
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +99,6 @@ def run_curriculum():
         level_name = f"L{level_id}"
         print(f"\n  [LEVEL {idx+1}/{len(levels)}] Starting {level_name}...")
 
-        # Auto-generate B-series files if needed
-        _ensure_b_level_exists(level_id, global_cfg)
-
         # 1. Load baseline config defaults
         cfg = load_config(cli_overrides=False)
 
@@ -176,6 +120,10 @@ def run_curriculum():
             print(f"  Loading level YAML: {level_cfg_path.name}")
             level_overrides_yaml = OmegaConf.load(level_cfg_path)
             cfg = OmegaConf.merge(cfg, level_overrides_yaml)
+        else:
+            raise FileNotFoundError(
+                f"No explicit curriculum level YAML found for prefix {level_id!r} in {level_dir}."
+            )
 
         # 3. Apply CLI overrides (always win)
         OmegaConf.set_readonly(cfg, False)
@@ -193,20 +141,14 @@ def run_curriculum():
         cfg.logging.log_dir = str(curriculum_root)
         cfg.logging.run_name = f"{curriculum_id}_{level_id}"
 
-        # 6. Read success threshold (None = timesteps-only transition)
-        success_threshold = None
-        if hasattr(cfg, "curriculum") and cfg.curriculum is not None:
-            raw = cfg.curriculum.get("success_threshold", None)
-            if raw is not None:
-                success_threshold = float(raw)
-
         OmegaConf.set_readonly(cfg, True)
         validate_config(cfg)
 
-        # 7. Run training
-        final_ckpt_path = train(cfg, success_threshold=success_threshold)
+        # 6. Run training. It returns after the timestep budget or configured
+        # evaluation early exit; either result advances to the next level.
+        final_ckpt_path = train(cfg)
 
-        # 8. Update cumulative steps based on updates completed in this stage
+        # 7. Update cumulative steps based on updates completed in this stage
         if final_ckpt_path:
             try:
                 import re
@@ -223,7 +165,7 @@ def run_curriculum():
             except Exception as e:
                 print(f"  [curriculum] Failed to parse completed stage steps from '{final_ckpt_path}': {e}")
 
-        # 9. Pass checkpoint to the next stage
+        # 8. Pass checkpoint to the next stage
         last_checkpoint = final_ckpt_path
         print(f"  Stage {level_name} complete.")
 

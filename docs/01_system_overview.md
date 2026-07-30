@@ -11,8 +11,7 @@ The project heavily utilizes functional separation. The core logic lives in `src
 * **`src/curriculum_config/`**: Contains the curriculum progression `levels/` and geometry of the maps `maps/`. Defaults are defined in Python structured dataclasses inside `src/core/config.py`. See **[02_configuration_guide](02_configuration_guide.md)**.
 * **`src/env/`**: Houses the JAX physics simulator: action-space rules, raycasting, map rasterizing, and the ego-centric observation calculations. See **[03_environment_and_physics](03_environment_and_physics.md)**.
 * **`src/models/`** & **`src/training/`**: The neural brain. Multi-Agent PPO logic, centralized critics, custom rollout buffers, and Actor-Critic networks. See **[04_marl_and_training](04_marl_and_training.md)**.
-* **`src/analysis/`** & **`src/visualize/`**: Dashboard tools and OpenCV/Matplotlib logic used to render the rollout videos and evaluate training runs. See **[05_analysis_and_tools](05_analysis_and_tools.md)**.
-* **Unused/Inactive Features**: Refactoring priorities and categorization of inactive systems. See **[06_unused_and_inactive_features](06_unused_and_inactive_features.md)**.
+* **`src/analysis/`** & **`src/visualize/`**: Dashboard tools and OpenCV logic used to render rollout videos and evaluate training runs. See **[05_analysis_and_tools](05_analysis_and_tools.md)**.
 * **Architecture Defense**: Rationale for the current MAPPO + Agent-Centric Critic design over privileged world-state critics. See **[07_mappo_acc_architecture_defense](07_mappo_acc_architecture_defense.md)**.
 
 ## Core Concepts

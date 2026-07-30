@@ -1,6 +1,6 @@
 
 env:
-  map_names: ["M05_open_grid_square"]
+  map_names: ["M04a_tiny_grid_maze"]
   num_agents: 6
   max_steps: 700
   visual_radius: 5.0
@@ -16,7 +16,7 @@ env:
 
 reward:
   target_found_requires_delivery: true
-  chain_reward_system: euclidean
+  chain_reward_system: discrete_finders_path
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
@@ -43,17 +43,17 @@ network:
   critic_memory: true
   memory_comm_enabled: true
   memory_comm_every_k_steps: 5
-  tarmac_sig_dim: 64
-  tarmac_val_dim: 128
+  tarmac_sig_dim: 16
+  tarmac_val_dim: 32
   tarmac_include_self: false
 
 evaluation:
   eval_parallel_envs: 4000
   eval_broadcast_on_curriculum_early_stop: true
   early_exit: true
-  early_exit_threshold: 0.9
+  early_exit_threshold: 0.99
 
-  checkpoint_freq: 100
+  checkpoint_freq: 50
   checkpoint_offset: 0
 
   eval_freq: 20
@@ -61,5 +61,5 @@ evaluation:
   eval_not_delivered_or_visually_found_heatmap: true
 
   eval_video: true
-  eval_video_freq: 999999
+  eval_video_freq: 20
   eval_video_offset: 1

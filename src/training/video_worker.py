@@ -30,14 +30,13 @@ def render_eval_video(
     cfg: Any,
     out_dir: Path,
     filename_stem: str,
-    renderer: str,
 ) -> str:
     """
     Synchronously render one episode to ``<out_dir>/<filename_stem>.mp4``.
 
     Parameters
     ----------
-    ep_states     : list of EnvState snapshots collected by ``_evaluate()``
+    ep_states     : list of EnvState snapshots collected by the video episode collector
     ep_rewards    : list of per-step reward arrays
     ep_metrics    : dict of metric arrays (chain_pct, chain_gap, etc.)
     cfg           : OmegaConf DictConfig
@@ -45,8 +44,6 @@ def render_eval_video(
     filename_stem : base filename without extension, e.g.
                     ``"SUCCESS_eval_ckpt_000762_ep00"``
                     The renderer appends a timestamp + ``.mp4``.
-    renderer      : ``"fast"`` (OpenCV) or ``"slow"`` (Matplotlib)
-
     Returns
     ----------
     str : resolved path to the written .mp4 file
@@ -76,7 +73,6 @@ def render_eval_video(
         traj_ns, cfg,
         filename      = vid_path,
         fps           = 20,
-        renderer      = renderer,
         rewards       = np.array(ep_rewards, dtype=np.float32),
         extra_metrics = ep_metrics,
     )

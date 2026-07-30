@@ -4,8 +4,6 @@
 env:
   map_names: ["M03_small_grid_maze"]
   num_agents: 7
-  num_targets: 1
-  num_bases: 1
   max_steps: 1000
   visual_radius: 5.0
   max_speed: 6.0   # 10.0 * 5/12
@@ -13,24 +11,13 @@ env:
   comm_radius: 20.83       # 50.0 * 5/12
   comm_radius_base: 16.67  # 40.0 * 5/12
   spawn_delay: 5
-  use_random_base_spawn: false
-  use_random_drone_spawn: false
-  target_spawn_method: map_defined   # spawn from wall-buffered valid_target_coords (see M03_small_grid_maze.yaml)
-  adaptive_target_spawn: false
-  static_maze_optimal_path: true
-  precover_base_comm: true
   hold_chain_for: 50
   observe_target_vector: false
   observe_base_vector: false
 
 reward:
-  every_reward_global: false
-  only_explor_individual: false
-  only_shortest_path_chain_reward: true
   target_found_requires_delivery: true
-  back_to_target_after_delivery: false
   chain_reward_system: discrete_finders_path
-  only_reward_chain_from_target: false
 
   # --- Local Rewards (Not divided by N) ---
   exploration_bonus: 0.25
@@ -47,15 +34,10 @@ training:
   num_minibatches: 20
   seed: 6302026950
 
-  eval_parallel: true
-  eval_parallel_envs: 4000
-  eval_parallel_early_exit_threshold: 1.0
-
-  #checkpoint_path:  "outputs/mini_maze_adpTargetSpawn_v2/checkpoints/ckpt_001000"  # if set, resumes training from this path
+  #checkpoint_path: "outputs/previous_run/checkpoints/ckpt_001000"  # if set, resumes training from this path
   #ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
 
 network:
-  critic_type: "agent_centric"
   num_layers: 3    # critic depth
   actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
@@ -66,13 +48,11 @@ network:
   tarmac_val_dim: 128
   tarmac_include_self: false
 
-curriculum:
-  success_threshold: 0.95
-  metric: "success"             # "success" or "target_found"
-  mode: "eval"                 # "train" or "eval"
+evaluation:
+  eval_parallel_envs: 4000
+  early_exit: true
+  early_exit_threshold: 0.95
 
-logging:
-  adaptive_spawn_diagnostics: true
   checkpoint_freq: 50
   checkpoint_offset: 0
 

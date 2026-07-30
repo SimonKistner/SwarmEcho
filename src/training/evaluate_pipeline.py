@@ -4,31 +4,26 @@ training/evaluate_pipeline.py
 Unified High-Throughput Parallel Evaluation and Failure Analysis Pipeline.
 
 This pipeline performs the following in a single cohesive execution:
-  1. Runs parallel JAX evaluation rollouts across 4096 environments to sweep for failures.
-  2. Saves failed target positions to a CSV and generates a failed chain targets heatmap overlay.
-  3. Optionally generates a target-not-delivered heatmap.
-  4. Optionally generates a target-not-visually-found heatmap.
-  5. Optionally combines "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target groups
+  1. Runs the configured parallel JAX evaluation batch to sweep for failures.
+  2. Saves every target position, outcome, and target-to-base distance to CSV.
+  3. Generates a failed chain targets heatmap overlay.
+  4. Optionally generates a target-not-delivered heatmap.
+  5. Optionally generates a target-not-visually-found heatmap.
+  6. Optionally combines "Not Visually Found" (sky blue) and "Not Delivered" (dark blue) target groups
      into a single found-and-delivered heatmap with a top-padded title/legend layout.
-  6. Clusters failed positions using HDBSCAN (or BFS connected components) to detect spatial patterns.
-  7. Plots clustered failures and highlights cluster representatives on a map blueprint.
-  8. Optionally simulates and renders video rollouts of the cluster representatives.
+  7. Clusters failed positions using HDBSCAN (or BFS connected components) to detect spatial patterns.
+  8. Plots clustered failures and highlights cluster representatives on a map blueprint.
 
 Usage:
 ------
     # Run pipeline according to top-level toggle configurations:
     uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000
-
-    # Render specific failed target videos from CSV (legacy evaluate_heatmap.py feature):
-    uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000 --render-failed-csv=5
 """
 
 import sys
-import re
 import csv
 import time
 from pathlib import Path
-import dataclasses
 import yaml
 import numpy as np
 import cv2
@@ -44,32 +39,34 @@ from env.physics import make_env_fns
 from env.observations import make_obs_fns
 from env.rewards import make_reward_fn
 from models.mappo import MAPPOModel
-from training.runner import _evaluate, _evaluate_parallel
-from training.video_worker import render_eval_video
-from training.artifacts import eval_checkpoint_artifact_root, checkpoint_artifact_suffix, write_manifest
+from training.runner import _evaluate_parallel
+from training.artifacts import (
+    checkpoint_artifact_suffix,
+    eval_checkpoint_artifact_root,
+    save_eval_info_csv,
+    write_manifest,
+)
 from env.maps import MapDefinition
 from visualize.render_preview import render_png, _resolve_map_path
 
 # ==============================================================================
 # Pipeline Artifact Output Toggles
 # ==============================================================================
-CREATE_CSV = True                    # Save coordinates of failed episodes to CSV log (False = load from latest CSV)
-CREATE_FAILED_CHAIN_HEATMAP = True   # Render failed targets chain heatmap overlay image
-CREATE_NOT_DELIVERED_HEATMAP = True  # Render heatmap showing target positions as dots when NOT delivered to base
-CREATE_NOT_VISUALLY_FOUND_HEATMAP = True # Render heatmap showing target positions as dots when NOT visually found by any drone
+CREATE_CSV = None                    # None = use evaluation.save_eval_info_as_csv
+CREATE_FAILED_CHAIN_HEATMAP = None   # None = use evaluation.eval_failed_chain_heatmap
+CREATE_NOT_DELIVERED_HEATMAP = None  # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
+CREATE_NOT_VISUALLY_FOUND_HEATMAP = None # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
 CREATE_CLUSTER_MAP = False            # Run failure clustering and save colored overlay image
-CREATE_CLUSTER_VIDEOS = False         # Simulate and render rollout videos for cluster representatives
 
 # ==============================================================================
 # Pipeline Configuration Constants
 # ==============================================================================
 # 1. Parallel simulation parameters
-NUM_ENVS = 4096             # Number of environments to evaluate in parallel
 SEED = 42                   # Random seed for env reset and model initialization
 SCALE = 8.0                 # Resolution scale (pixels per world-meter) for map image
 SHOW_SPAWN_ZONES = False    # Set to False to disable target/base spawn zones overlay
 
-# Combine "Not Visually Found" and "Not Delivered" heatmaps into a found-and-delivered heatmap
+# Resolved from evaluation.eval_not_deliv_not_visual_splitt_in_two in main().
 COMBINE_FOUND_AND_DELIVERED_HEATMAPS = True
 
 # 2. Heatmap overlay parameters
@@ -102,10 +99,6 @@ CLUSTER_COLORS = [
     (8, 179, 234),    # Yellow
     (68, 68, 239),    # Red
 ]
-
-# 4. Representative rollout parameters
-RENDER_NUM_CLUSTERS = 3    # Number of cluster representatives to render. None = all.
-
 
 # ==============================================================================
 # Helper Algorithms
@@ -236,29 +229,20 @@ def cluster_points_hdbscan(points, min_cluster_size, min_samples=None, epsilon=0
     return cluster_indices, reps, outliers
 
 
-def make_override_reset(r_fn, target_x, target_y):
-    """Wraps environment reset to override the target_pos field."""
-    def override_reset(k):
-        s = r_fn(k)
-        return s.replace(target_pos=jnp.array([target_x, target_y], dtype=jnp.float32))
-    return override_reset
-
-
 # ==============================================================================
 # Pipeline Operations
 # ==============================================================================
 def setup_model_and_env(cfg, checkpoint_path):
     """Initializes environment functions and loads model from checkpoint."""
     # 1. Environment
-    env_step, reset, _, (resolved_W, resolved_H, occ_grid, comm_occ_grid) = make_env_fns(cfg)
-    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid, comm_occ_grid)
+    env_step, reset, _, (resolved_W, resolved_H, occ_grid) = make_env_fns(cfg)
+    compute_obs, _ = make_obs_fns(cfg, resolved_W, resolved_H, occ_grid)
     compute_reward = make_reward_fn(cfg)
 
     # 2. Model
     obs_dim = compute_obs_dim(cfg)
     act_dim = compute_action_dim(cfg)
     N = int(cfg.env.num_agents)
-    critic_type = str(cfg.network.critic_type)
 
     rngs = nnx.Rngs(SEED)
     model = MAPPOModel(
@@ -268,7 +252,6 @@ def setup_model_and_env(cfg, checkpoint_path):
         hidden_dim       = int(cfg.network.hidden_dim),
         num_layers       = int(cfg.network.num_layers),
         actor_num_layers = int(cfg.network.actor_num_layers),
-        critic_type      = critic_type,
         actor_memory     = bool(cfg.network.get("actor_memory", False)),
         critic_memory    = bool(cfg.network.get("critic_memory", False)),
         rngs             = rngs,
@@ -295,14 +278,14 @@ def setup_model_and_env(cfg, checkpoint_path):
 
 def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, track_delivered=True, track_visual=True):
     """Unified wrapper that runs _evaluate_parallel to satisfy DRY compliance and fix memory-communication evaluation."""
-    max_steps = int(cfg.env.max_steps)
+    num_envs = int(cfg.evaluation.eval_parallel_envs)
     eval_key = jax.random.PRNGKey(SEED)
 
     start_time = time.time()
     (rets, lengths, gaps, progs, succs, fnds,
      final_state, final_succs, final_delivered, final_visual) = _evaluate_parallel(
         model, reset, env_step, compute_obs, compute_reward,
-        cfg, eval_key, num_envs=NUM_ENVS
+        cfg, eval_key, num_envs=num_envs
     )
     final_succs.block_until_ready()
     elapsed = time.time() - start_time
@@ -310,23 +293,23 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
 
     # Calculate Stats
     num_success = int(jnp.sum(final_succs))
-    num_fail = NUM_ENVS - num_success
-    success_rate = (num_success / NUM_ENVS) * 100.0
-    print(f"         Successes:      {num_success}/{NUM_ENVS} ({success_rate:.2f}%)")
+    num_fail = num_envs - num_success
+    success_rate = (num_success / num_envs) * 100.0
+    print(f"         Successes:      {num_success}/{num_envs} ({success_rate:.2f}%)")
 
-    # Extract target positions
+    # Extract compact per-episode data once, after the parallel simulation.
     target_positions = np.array(final_state.target_pos)
-    if target_positions.ndim == 3:
-        target_positions = target_positions[:, 0, :]  # fallback for MEM_T8
+    base_positions = np.array(final_state.base_pos)
+    success_mask = np.array(final_succs, dtype=bool)
 
-    failed_mask = np.array(~final_succs)
+    failed_mask = ~success_mask
     failed_positions = target_positions[failed_mask]
 
     if track_delivered:
         num_delivered = int(jnp.sum(final_delivered))
-        num_not_delivered = NUM_ENVS - num_delivered
-        delivered_rate = (num_delivered / NUM_ENVS) * 100.0
-        print(f"         Delivered:      {num_delivered}/{NUM_ENVS} ({delivered_rate:.2f}%)")
+        num_not_delivered = num_envs - num_delivered
+        delivered_rate = (num_delivered / num_envs) * 100.0
+        print(f"         Delivered:      {num_delivered}/{num_envs} ({delivered_rate:.2f}%)")
         not_delivered_mask = np.array(~final_delivered)
         not_delivered_positions = target_positions[not_delivered_mask]
     else:
@@ -337,9 +320,9 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
 
     if track_visual:
         num_visually_found = int(jnp.sum(final_visual))
-        num_not_visually_found = NUM_ENVS - num_visually_found
-        visually_found_rate = (num_visually_found / NUM_ENVS) * 100.0
-        print(f"Results: Visually Found: {num_visually_found}/{NUM_ENVS} ({visually_found_rate:.2f}%)")
+        num_not_visually_found = num_envs - num_visually_found
+        visually_found_rate = (num_visually_found / num_envs) * 100.0
+        print(f"Results: Visually Found: {num_visually_found}/{num_envs} ({visually_found_rate:.2f}%)")
         not_visually_found_mask = np.array(~final_visual)
         not_visually_found_positions = target_positions[not_visually_found_mask]
     else:
@@ -351,7 +334,8 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
     return (
         failed_positions, not_delivered_positions, not_visually_found_positions,
         success_rate, delivered_rate, visually_found_rate,
-        num_fail, num_not_delivered, num_not_visually_found
+        num_fail, num_not_delivered, num_not_visually_found,
+        target_positions, base_positions, success_mask,
     )
 
 
@@ -393,26 +377,28 @@ def save_point_csv(path, positions, category, **extra_columns):
     print(f"Saved heatmap point data to: {path.name}")
 
 
-def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, success_rate, num_fail, run_dir, video_dir, run_timestamp, save_csv=True, save_png=True, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
+def render_and_save_failed_chain_heatmap(
+    failed_positions,
+    map_data,
+    map_def,
+    success_rate,
+    num_fail,
+    run_dir,
+    video_dir,
+    run_timestamp,
+    save_png=True,
+    total_episodes=4096,
+    manifest_dir=None,
+    artifact_stem=None,
+):
     """
-    Generates the failed targets CSV and/or renders the failed chain heatmap image.
+    Render the failed-chain heatmap from in-memory evaluation results.
+
     The heatmap is generated with a 60px white border at the top displaying the 
     sliding window size/total episodes, failed chain counts, success rate, and legend.
     """
     artifact_stem = artifact_stem or f"{run_timestamp}_failed_chain"
-    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
-    csv_path = data_dir / f"{artifact_stem}.points.csv"
     heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
-
-    # Save CSV
-    if save_csv:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["x", "y"])
-            for pos in failed_positions:
-                writer.writerow([f"{pos[0]:.6f}", f"{pos[1]:.6f}"])
-        print(f"Saved failed target position(s) to: {csv_path.name}")
 
     # Generate Heatmap image
     if save_png:
@@ -454,62 +440,11 @@ def render_and_save_failed_chain_heatmap(failed_positions, map_data, map_def, su
             "type": "heatmap",
             "kind": "failed_chain",
             "image_path": str(heatmap_path),
-            "points_path": str(csv_path) if save_csv else None,
             "total_episodes": int(total_episodes),
             "num_points": int(num_fail),
             "success_rate": None if success_rate is None else float(success_rate),
         })
 
-    return csv_path
-
-
-
-
-def render_and_save_train_target_spawn_heatmap(target_positions, map_data, map_def, run_dir, video_dir, run_timestamp, artifact_stem=None, extra_walls=None):
-    """Render target spawn positions from the most recent training rollout."""
-    artifact_stem = artifact_stem or f"train_target_spawns_{run_timestamp}"
-    heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
-
-    positions = np.asarray(target_positions, dtype=np.float32)
-    if positions.ndim == 3:
-        positions = positions[:, 0, :]
-    positions = positions.reshape((-1, 2)) if positions.size else np.zeros((0, 2), dtype=np.float32)
-
-    render_map_def = map_def
-    if extra_walls:
-        try:
-            render_map_def = MapDefinition.load(MAP_DIR / f"{map_def.name}.yaml", cell_size=1.0, extra_walls=extra_walls)
-        except Exception:
-            render_map_def = map_def
-
-    background_img = render_png(
-        data=map_data,
-        map_def=render_map_def,
-        state=None,
-        show_zones=SHOW_SPAWN_ZONES,
-        show_spawns=False,
-        scale=SCALE,
-        extra_wall_segments=extra_walls,
-    )
-
-    overlay = background_img.copy()
-    height = float(map_data["height"])
-    for pos in positions:
-        px = int(pos[0] * SCALE)
-        py = int((height - pos[1]) * SCALE)
-        cv2.circle(overlay, (px, py), HEATMAP_DOT_RADIUS, (74, 163, 22), -1, cv2.LINE_AA)
-
-    heatmap_img = cv2.addWeighted(overlay, HEATMAP_ALPHA, background_img, 1.0 - HEATMAP_ALPHA, 0)
-    padded_img = cv2.copyMakeBorder(heatmap_img, 60, 0, 0, 0, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-
-    info_str = f"Run: {run_dir.name} | Recent rollout train target spawns: {len(positions)}"
-    cv2.putText(padded_img, info_str, (10, 25), cv2.FONT_HERSHEY_DUPLEX, 0.42, (55, 41, 31), 1, cv2.LINE_AA)
-    cv2.circle(padded_img, (15, 46), 4, (74, 163, 22), -1, cv2.LINE_AA)
-    cv2.putText(padded_img, "Recent rollout target spawn", (25, 50), cv2.FONT_HERSHEY_DUPLEX, 0.38, (55, 41, 31), 1, cv2.LINE_AA)
-
-    Path(video_dir).mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(heatmap_path), padded_img)
-    print(f"Saved train target spawn heatmap to: {heatmap_path.name}")
     return heatmap_path
 
 def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
@@ -661,24 +596,29 @@ def render_and_save_found_and_delivered_heatmap(not_delivered_positions, not_vis
 
 
 def load_failures_from_csv(csv_path):
-    """Loads target coordinates from a previously generated CSV file."""
+    """Load failed target coordinates from a comprehensive evaluation CSV."""
     failed_positions = []
     with open(csv_path, "r", newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)  # skip header row if present
-        if header:
-            try:
-                x, y = float(header[0]), float(header[1])
-                failed_positions.append((x, y))
-            except ValueError:
-                pass
+        reader = csv.DictReader(f)
+        required_columns = {"x", "y", "success"}
+        if not required_columns.issubset(set(reader.fieldnames or [])):
+            raise ValueError(
+                f"Evaluation CSV must contain columns {sorted(required_columns)}: {csv_path}"
+            )
         for row in reader:
-            if len(row) >= 2:
-                try:
-                    failed_positions.append((float(row[0]), float(row[1])))
-                except ValueError:
-                    continue
+            try:
+                succeeded = row["success"].strip().lower() in {"1", "true", "yes"}
+                if not succeeded:
+                    failed_positions.append((float(row["x"]), float(row["y"])))
+            except (AttributeError, TypeError, ValueError):
+                continue
     return failed_positions
+
+
+def find_eval_csvs(data_dir):
+    """Return comprehensive evaluation CSVs."""
+    data_dir = Path(data_dir)
+    return list(data_dir.glob("eval_info_*.csv"))
 
 
 def run_failure_clustering(failed_positions, map_data, map_def, clusters_dir, run_timestamp, render_png_flag=True):
@@ -785,117 +725,6 @@ def run_failure_clustering(failed_positions, map_data, map_def, clusters_dir, ru
     return rep_coords
 
 
-def render_cluster_videos(model, cfg, env_step, reset, compute_obs, compute_reward, rep_coords, video_dir, run_timestamp):
-    """Simulates and renders rollout videos for identified representatives (explicitly timestamped)."""
-    num_to_render = RENDER_NUM_CLUSTERS if RENDER_NUM_CLUSTERS is not None else len(rep_coords)
-    num_to_render = min(num_to_render, len(rep_coords))
-    print(f"Simulating rollout videos for the first {num_to_render} cluster representative(s)...")
-
-    renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))
-    key = jax.random.PRNGKey(SEED)
-
-    for c_idx in range(num_to_render):
-        tx, ty = rep_coords[c_idx]
-        print(f"  Cluster {c_idx} Representative Target: ({tx:.2f}, {ty:.2f})")
-
-        custom_reset = make_override_reset(reset, tx, ty)
-
-        # Run rollout simulation
-        (all_states, all_rewards, all_metrics,
-         _, _, _, _, _, _) = _evaluate(
-            model=model,
-            reset_fn=jax.jit(custom_reset),
-            env_step_fn=jax.jit(env_step),
-            obs_fn=jax.jit(compute_obs),
-            reward_fn=jax.jit(compute_reward),
-            cfg=cfg,
-            key=key,
-            num_episodes=1,
-        )
-
-        filename_stem = f"{run_timestamp}_FAIL_cluster_{c_idx}_rep_{tx:.2f}_{ty:.2f}"
-        vid_path = render_eval_video(
-            ep_states=all_states[0],
-            ep_rewards=all_rewards[0],
-            ep_metrics=all_metrics[0],
-            cfg=cfg,
-            out_dir=video_dir,
-            filename_stem=filename_stem,
-            renderer=renderer,
-        )
-        print(f"    ✓ Video saved: {Path(vid_path).name}")
-
-
-def run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, data_dir, video_dir, limit, run_timestamp):
-    """Legacy feature: Simulates and renders failed videos directly from a previously saved CSV file."""
-    csv_candidates = list(Path(data_dir).glob("*.points.csv")) + list(Path(video_dir).glob("*failed_target_positions*.csv"))
-    if not csv_candidates:
-        print(f"ERROR: No failed target positions CSV found in: {video_dir}")
-        sys.exit(1)
-    csv_path = max(csv_candidates, key=lambda p: p.stat().st_mtime)
-    print(f"Loading failed target positions from CSV: {csv_path.name}")
-
-    # Load failed targets
-    failed_positions = load_failures_from_csv(csv_path)
-    print(f"Loaded {len(failed_positions)} failed target positions from CSV.")
-
-    # Identify already rendered targets
-    rendered_positions = set()
-    if video_dir.exists():
-        for f in video_dir.glob("*FAIL_target_*.mp4"):
-            # Check for name match including timestamp suffixes
-            match = re.search(r"FAIL_target_([0-9\.\-]+)_([0-9\.\-]+)", f.name)
-            if match:
-                rx = float(match.group(1))
-                ry = float(match.group(2))
-                rendered_positions.add((round(rx, 2), round(ry, 2)))
-
-    # Filter targets to render
-    to_render = []
-    for pos in failed_positions:
-        tx, ty = pos
-        if (round(tx, 2), round(ty, 2)) not in rendered_positions:
-            to_render.append(pos)
-            if len(to_render) >= limit:
-                break
-
-    if not to_render:
-        print("All failed targets from the CSV have already been rendered! ✓")
-        return
-
-    print(f"Identified {len(to_render)} new target position(s) to render.")
-    renderer = str(cfg.visualize.get("final_eval_renderer", "slow"))
-    key = jax.random.PRNGKey(SEED)
-
-    for idx, (tx, ty) in enumerate(to_render):
-        print(f"  [{idx+1}/{len(to_render)}] Simulating rollout for target: ({tx:.2f}, {ty:.2f})")
-        custom_reset = make_override_reset(reset, tx, ty)
-
-        (all_states, all_rewards, all_metrics,
-         _, _, _, _, _, _) = _evaluate(
-            model=model,
-            reset_fn=jax.jit(custom_reset),
-            env_step_fn=jax.jit(env_step),
-            obs_fn=jax.jit(compute_obs),
-            reward_fn=jax.jit(compute_reward),
-            cfg=cfg,
-            key=key,
-            num_episodes=1,
-        )
-
-        filename_stem = f"{run_timestamp}_FAIL_target_{tx:.2f}_{ty:.2f}"
-        vid_path = render_eval_video(
-            ep_states=all_states[0],
-            ep_rewards=all_rewards[0],
-            ep_metrics=all_metrics[0],
-            cfg=cfg,
-            out_dir=video_dir,
-            filename_stem=filename_stem,
-            renderer=renderer,
-        )
-        print(f"    ✓ Video saved: {Path(vid_path).name}")
-
-
 # ==============================================================================
 # Main Execution Entry Point
 # ==============================================================================
@@ -903,21 +732,16 @@ def main():
     # Generate Run-Start Timestamp for consistent output file labeling
     run_timestamp = time.strftime("%Y_%m_%d_%H_%M")
 
-    global CREATE_CSV, CREATE_FAILED_CHAIN_HEATMAP, CREATE_NOT_DELIVERED_HEATMAP, CREATE_NOT_VISUALLY_FOUND_HEATMAP, CREATE_CLUSTER_MAP, CREATE_CLUSTER_VIDEOS
+    global CREATE_CSV, CREATE_FAILED_CHAIN_HEATMAP, CREATE_NOT_DELIVERED_HEATMAP, CREATE_NOT_VISUALLY_FOUND_HEATMAP, CREATE_CLUSTER_MAP, COMBINE_FOUND_AND_DELIVERED_HEATMAPS
 
     # Parse CLI Arguments
     args = sys.argv[1:]
     checkpoint_path = None
-    render_failed_csv = None
     overrides = []
 
     for arg in args:
         if arg.startswith("checkpoint="):
             checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
-        elif arg.startswith("--render-failed-csv="):
-            render_failed_csv = int(arg.split("=", 1)[1])
-        elif arg.startswith("render_failed_csv="):
-            render_failed_csv = int(arg.split("=", 1)[1])
         elif arg.lower() in ["obs_log=true", "obs_saving=true", "--obs-log", "--obs-saving"]:
             overrides.append("logging.obs_log=true")
         elif arg.lower() in ["obs_log=false", "obs_saving=false", "--no-obs-log", "--no-obs-saving"]:
@@ -944,10 +768,6 @@ def main():
             CREATE_CLUSTER_MAP = True
         elif arg.lower() in ["cluster=false", "--no-cluster"]:
             CREATE_CLUSTER_MAP = False
-        elif arg.lower() in ["videos=true", "--videos"]:
-            CREATE_CLUSTER_VIDEOS = True
-        elif arg.lower() in ["videos=false", "--no-videos"]:
-            CREATE_CLUSTER_VIDEOS = False
         else:
             overrides.append(arg)
 
@@ -971,12 +791,27 @@ def main():
         overrides = overrides,
     )
     validate_config(cfg)
+    num_envs = int(cfg.evaluation.eval_parallel_envs)
+    if CREATE_CSV is None:
+        CREATE_CSV = bool(cfg.evaluation.get("save_eval_info_as_csv", False))
+    if CREATE_FAILED_CHAIN_HEATMAP is None:
+        CREATE_FAILED_CHAIN_HEATMAP = bool(cfg.evaluation.get("eval_failed_chain_heatmap", False))
+    if CREATE_NOT_DELIVERED_HEATMAP is None:
+        CREATE_NOT_DELIVERED_HEATMAP = bool(
+            cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False)
+        )
+    if CREATE_NOT_VISUALLY_FOUND_HEATMAP is None:
+        CREATE_NOT_VISUALLY_FOUND_HEATMAP = bool(
+            cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False)
+        )
+    COMBINE_FOUND_AND_DELIVERED_HEATMAPS = not bool(
+        cfg.evaluation.get("eval_not_deliv_not_visual_splitt_in_two", False)
+    )
 
     # Resolve artifact directories. New outputs are checkpoint-scoped under
     # artifacts/eval while legacy videos/eval remains readable by the dashboard.
     artifact_root = eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg)
     artifact_tag = checkpoint_artifact_suffix(checkpoint_path, cfg)
-    video_dir = artifact_root / "vids"
     chain_heatmaps_dir = artifact_root / "chain_heatmaps"
     found_heatmaps_dir = artifact_root / "found_heatmaps"
     clusters_dir = artifact_root / "clusters"
@@ -989,25 +824,17 @@ def main():
     # Initialize environment, model, and load checkpoint weights
     model, env_step, reset, compute_obs, compute_reward = setup_model_and_env(cfg, checkpoint_path)
 
-    # Execute Selected Mode
-    if render_failed_csv is not None:
-        # Mode A: Legacy mode to render failed target videos from CSV
-        print(f"\n--- Running Legacy CSV Target Replays (limit: {render_failed_csv}) ---")
-        run_legacy_csv_rendering(model, cfg, env_step, reset, compute_obs, compute_reward, data_dir, video_dir, render_failed_csv, run_timestamp)
-        print("\nEvaluation pipeline complete.")
-        return
-
     # ── Dependency Resolution & Execution Plan ────────────────────────────
     # Resolve CSV candidates early
-    csv_candidates = list(data_dir.glob("*failed_chain*.points.csv")) + list((run_dir / "videos" / "eval").glob("*failed_target_positions*.csv"))
+    csv_candidates = find_eval_csvs(data_dir)
 
     # We need to run parallel JAX simulation sweep if:
-    #   CREATE_CSV is requested (to get fresh coordinate logs) OR we want to render either of the target-not-found heatmaps
+    #   CREATE_CSV is requested (to get fresh evaluation data) OR we want to render either of the target-not-found heatmaps
     run_sweep = CREATE_CSV or CREATE_NOT_DELIVERED_HEATMAP or CREATE_NOT_VISUALLY_FOUND_HEATMAP
 
     # PREREQUISITE FALLBACK CHECK:
     # If the user wants to load from CSV (run_sweep = False), but no CSV actually exists:
-    # We must force the simulation sweep to run to generate the target coordinate log.
+    # We must force the simulation sweep to run to generate evaluation data.
     if not run_sweep:
         if not csv_candidates:
             print("\n[Prerequisite Warning] CREATE_CSV is False but no pre-existing CSV was found in output directory.")
@@ -1028,13 +855,23 @@ def main():
     if run_sweep:
         (failed_positions, not_delivered_positions, not_visually_found_positions,
          success_rate, delivered_rate, visually_found_rate,
-         num_fail, num_not_delivered, num_not_visually_found) = run_parallel_eval(
+         num_fail, num_not_delivered, num_not_visually_found,
+         target_positions, base_positions, success_mask) = run_parallel_eval(
             model, cfg, env_step, reset, compute_obs, compute_reward,
             track_delivered=CREATE_NOT_DELIVERED_HEATMAP,
             track_visual=CREATE_NOT_VISUALLY_FOUND_HEATMAP
         )
         
         print("\n--- Phase 2: Processing Swept Coordinates ---")
+
+        if CREATE_CSV:
+            eval_info_path = save_eval_info_csv(
+                data_dir / f"eval_info_{artifact_tag}.csv",
+                target_positions=target_positions,
+                base_positions=base_positions,
+                successes=success_mask,
+            )
+            print(f"Saved {len(target_positions)} evaluation episode(s) to: {eval_info_path.name}")
 
         # Check if we should combine visually not found and not delivered heatmaps
         if COMBINE_FOUND_AND_DELIVERED_HEATMAPS:
@@ -1052,7 +889,7 @@ def main():
                     run_dir=run_dir,
                     video_dir=found_heatmaps_dir,
                     run_timestamp=run_timestamp,
-                    total_episodes=NUM_ENVS,
+                    total_episodes=num_envs,
                     data_dir=data_dir,
                     manifest_dir=manifest_dir,
                     artifact_stem=f"found_and_delivered_{artifact_tag}"
@@ -1064,7 +901,7 @@ def main():
                 render_and_save_not_found_heatmap(
                     not_visually_found_positions, map_data, map_def, visually_found_rate, num_not_visually_found, 
                     run_dir, found_heatmaps_dir, run_timestamp, "found", "Not Visually Found",
-                    total_episodes=NUM_ENVS, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"found_{artifact_tag}"
+                    total_episodes=num_envs, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"found_{artifact_tag}"
                 )
 
             # 2. Delivered Heatmap (Phase 2b)
@@ -1073,16 +910,16 @@ def main():
                 render_and_save_not_found_heatmap(
                     not_delivered_positions, map_data, map_def, delivered_rate, num_not_delivered, 
                     run_dir, found_heatmaps_dir, run_timestamp, "delivered", "Not Delivered",
-                    total_episodes=NUM_ENVS, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"delivered_{artifact_tag}"
+                    total_episodes=num_envs, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"delivered_{artifact_tag}"
                 )
 
-        # 3. CSV and Failed Chain Heatmap (Phase 2c)
-        if CREATE_CSV or CREATE_FAILED_CHAIN_HEATMAP:
-            print("\n--- Phase 2c: Saving Coordinate Log & Failed Chain Heatmap overlay ---")
+        # 3. Failed Chain Heatmap (Phase 2c)
+        if CREATE_FAILED_CHAIN_HEATMAP:
+            print("\n--- Phase 2c: Generating Failed Chain Heatmap overlay ---")
             _ = render_and_save_failed_chain_heatmap(
                 failed_positions, map_data, map_def, success_rate, num_fail, run_dir, chain_heatmaps_dir, run_timestamp,
-                save_csv=CREATE_CSV, save_png=CREATE_FAILED_CHAIN_HEATMAP, total_episodes=NUM_ENVS,
-                data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
+                save_png=True, total_episodes=num_envs,
+                manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
             )
     else:
         # Load from the latest CSV
@@ -1096,8 +933,8 @@ def main():
             _ = render_and_save_failed_chain_heatmap(
                 failed_positions, map_data, map_def, success_rate=None, num_fail=num_fail, 
                 run_dir=run_dir, video_dir=chain_heatmaps_dir, run_timestamp=run_timestamp,
-                save_csv=False, save_png=True, total_episodes=NUM_ENVS,
-                data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
+                save_png=True, total_episodes=num_envs,
+                manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
             )
 
         if CREATE_NOT_DELIVERED_HEATMAP:
@@ -1105,21 +942,16 @@ def main():
         if CREATE_NOT_VISUALLY_FOUND_HEATMAP:
             print("\n[Prerequisite Warning] Visually-found heatmap cannot be generated when loading from static CSV.")
 
-    # 5. Clustering and representative rollouts
-    if not (CREATE_CLUSTER_MAP or CREATE_CLUSTER_VIDEOS):
-        print("\nClustering phase is disabled via config toggles. Skipping Phase 3 & 4.")
+    # 5. Clustering
+    if not CREATE_CLUSTER_MAP:
+        print("\nClustering phase is disabled via config toggles. Skipping Phase 3.")
     else:
         if len(failed_positions) > 0:
             print("\n--- Phase 3: Spatial Clustering Analysis ---")
-            rep_coords = run_failure_clustering(
+            run_failure_clustering(
                 failed_positions, map_data, map_def, clusters_dir, run_timestamp,
                 render_png_flag=CREATE_CLUSTER_MAP
             )
-
-            if CREATE_CLUSTER_VIDEOS:
-                if len(rep_coords) > 0:
-                    print("\n--- Phase 4: Simulating & Rendering Representative Rollout Videos ---")
-                    render_cluster_videos(model, cfg, env_step, reset, compute_obs, compute_reward, rep_coords, clusters_dir, f"cluster_{artifact_tag}")
         else:
             print("\nPerfect success rate! No failures to cluster.")
 

@@ -139,8 +139,6 @@ The reward function ([rewards.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho
   *Gated off individually once agent $i$ persistent-knows the target location, focusing its behavior on the relay task.*
 * **Collision Penalty ($r_{\text{collision}, i}$)**: Dense penalty applied if agent $i$ collides with a boundary.
   $$r_{\text{collision}, i} = -0.5 \times \mathbb{I}(\text{collision}_i)$$
-* **Proximity Penalty ($r_{\text{proximity}, i}$)**: Dense safety penalty for maintaining separation.
-  $$r_{\text{proximity}, i} = -0.05 \times \sum_{j \neq i} \mathbb{I}(\text{dist}(i, j) \le 5.0\,\text{m})$$
 * **Finder Bonus ($r_{\text{finder}, i}$)**: Sparse bonus awarded *only* to the specific agent(s) inside the communication link that deliver the discovered target information to the base station.
   $$r_{\text{finder}, i} = 125.0 \times \mathbb{I}(\text{first\_delivery}_i)$$
 
@@ -149,12 +147,6 @@ The reward function ([rewards.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho
   $$r_{\text{found}, i} = \frac{250.0}{N}$$
 * **Success Bonus ($r_{\text{success}}$)**: Terminal reward given when a continuous communication chain links base station and target.
   $$r_{\text{success}, i} = \frac{500.0}{N} \times \mathbb{I}(\text{fully\_connected} \land \text{episode\_end})$$
-* **Hub Proximity Bonus ($r_{\text{hub}}$)**: Dense spatial incentive normalized by the map diagonal ($D_{\text{map}} \approx 158.4\,\text{m}$).
-  $$r_{\text{hub}, i} = \frac{0.005}{N} \times \begin{cases} 
-  \max\left(1 - \frac{d_{\text{base}, i}}{D_{\text{map}}}, 0\right) & \text{if target unknown} \\
-  \max\left(1 - \frac{d_{\text{base}, i}}{D_{\text{map}}}, 1 - \frac{d_{\text{target}, i}}{D_{\text{map}}}\right) & \text{if target known}
-  \end{cases}$$
-
 ---
 
 ### 4.2 Shortest Path Chain Gap Penalty
@@ -169,8 +161,8 @@ The system dynamically computes the connected components from the base station a
    $$g = \lVert p_b - p_t \rVert_2$$
    If the chain is fully connected, $g = 0$.
 
-#### Shortest Path Optimization (`only_shortest_path_chain_reward = True`)
-To focus optimization and avoid rewarding redundant or idle drones, the chain gap penalty is restricted using **Min-Plus matrix multiplication** to identify the shortest-path hops between the base and target.
+#### Shortest-path credit assignment
+To focus optimization and avoid rewarding redundant or idle drones, the chain gap penalty uses **Min-Plus matrix multiplication** to identify one deterministic shortest route from each connected front to its selected tip.
 
 * Drones are determined to be **contributing** if they lie on the shortest topological path between the base station and target tips.
 * **Contributing Drones**: Receive the dynamic, distance-scaled gap penalty:
@@ -254,4 +246,4 @@ where $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.01$ (entropy coefficient
 | **Critic Layers** | $3$ (depth) | Post-attention MLP value head layers in the Critic |
 | **Hidden Dimension** | $256$ | Hidden layer width (units) for Actor and Critic MLPs |
 | **Critic Type** | `agent_centric` | Agent-centric masked attention Centralized Critic |
-| **Success Threshold** | $0.999$ | Evaluation performance target metric for curriculum termination |
+| **Early-exit Threshold** | $0.999$ | Optional parallel-evaluation success rate that saves a handoff checkpoint and returns from training |

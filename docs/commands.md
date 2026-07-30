@@ -18,10 +18,10 @@ source .venv/bin/activate
 
 ## Map Design & Analysis Dashboard
 
-### Architectural Map Builder
-Launch the interactive Streamlit editor to design new maps and obstacle layouts:
+### 2D Grid Maze Builder
+Launch the browser-based editor to draw grid mazes and target no-spawn cells:
 ```bash
-uv run streamlit run src/curriculum_config/maps/scripts/map_builder.py
+uv run python src/curriculum_config/maps/scripts/maze_builder/maze_builder_server.py
 ```
 
 ### Discovery & Analysis Dashboard
@@ -36,14 +36,14 @@ Render static images or short video/GIF rollouts (always simulated) of any map b
 # Render default static PNG blueprint image (showing spawn zones and real spawn positions)
 uv run python src/visualize/render_preview.py M01_grid_maze
 
-# Render a simulated video rollout (MP4, 10 frames, fast renderer, 3 drones, 1 target, 1 base)
+# Render a simulated video rollout (MP4, 10 frames, 3 drones, 1 target, 1 base)
 uv run python src/visualize/render_preview.py M01_grid_maze --mode video
 
 # Render a clean architectural SVG blueprint without spawns or zones
 uv run python src/visualize/render_preview.py M01_grid_maze --format svg --no-spawns --no-zones
 
 # Render a snappy simulated GIF preview using a specific level config
-uv run python src/visualize/render_preview.py memory_t_maze_8 --mode gif --level MEM_T8_memory
+uv run python src/visualize/render_preview.py M04_tiny_grid_maze --mode gif --level M04_tiny_grid_maze
 ```
 
 ---
@@ -64,6 +64,16 @@ Run multiple training iterations with the same configuration, utilizing differen
 uv run python src/training/multi_train.py level=M01 logging.run_name=maze01_v2 seeds=5 base_seed=99
 ```
 
+### General Grid Search
+Sweep arbitrary configuration values for one level. Repeat `--grid` for each
+parameter axis and use `--set` for overrides shared by every run:
+```bash
+uv run python src/training/grid_search.py M04_tiny_grid_maze \
+  --grid training.lr=0.0001,0.0003 \
+  --grid training.ent_coef=0.0,0.01 \
+  --set evaluation.eval_video=false
+```
+
 ### Curriculum Training
 Train through sequential levels (inheriting checkpoint weights from the previous level) either with default stages or custom levels:
 ```bash
@@ -79,13 +89,8 @@ uv run python src/training/curriculum.py levels=B02,B03,B04
 ## Spatial Failure Analysis Pipeline
 
 ### Run Evaluation Sweep & Generate Heatmaps
-Simulate parallel environments (4096 by default) to sweep for failure coordinates and generate heatmaps (failed chain targets, and found-and-delivered or split target-not-found heatmaps):
+Simulate the configured parallel evaluation batch, save comprehensive target/outcome/distance data, and generate heatmaps (failed chain targets, and found-and-delivered or split target-not-found heatmaps):
 ```bash
-uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000
+uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000 evaluation.save_eval_info_as_csv=true
 ```
 
-### Re-simulate & Render Failed Targets from CSV
-Extract the failed target positions from a generated CSV file and render individual simulation rollout videos for debugging (limiting to the first 5 in this example):
-```bash
-uv run python src/training/evaluate_pipeline.py checkpoint=outputs/my_run/checkpoints/ckpt_001000 --render-failed-csv=5
-```
