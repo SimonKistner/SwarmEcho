@@ -40,7 +40,8 @@ Symmetry breaking via staggered spawn
     encoding required.
 
 Persistent target knowledge
-    The target odometry vector is masked by `state.target_known[i]`, which
+    The target odometry vector is masked by
+    `state.communication.target_known[i]`, which
     is monotonically set to True once the drone has been informed (directly
     or via the comm chain). This persists across communication blackouts.
 
@@ -175,32 +176,35 @@ def make_obs_fns(
         -------
         jnp.ndarray  shape (N, obs_dim)
         """
+        physics = state.physics
+        communication = state.communication
+        coverage_grid = state.exploration.coverage_grid
 
         # ── Step 1: Shared precomputation (once for all agents) ──────────────
 
         # Pairwise drone distances: (N, N)
-        diff_pp        = state.pos[:, None, :] - state.pos[None, :, :]
+        diff_pp        = physics.pos[:, None, :] - physics.pos[None, :, :]
         pairwise_dists = jnp.linalg.norm(diff_pp, axis=-1)
 
-        target_pos_agents = jnp.tile(state.target_pos[None, :], (N, 1))
-        is_conn_base = state.is_conn_base
-        is_conn_target = state.is_conn_target
+        target_pos_agents = jnp.tile(physics.target_pos[None, :], (N, 1))
+        is_conn_base = communication.is_conn_base
+        is_conn_target = communication.is_conn_target
 
         # ── Step 2: Per-agent observation (vmapped over N) ────────────────────
 
         def single_obs(i: jnp.ndarray) -> jnp.ndarray:
 
-            pos_i = state.pos[i]   # (2,)
-            vel_i = state.vel[i]   # (2,)
+            pos_i = physics.pos[i]   # (2,)
+            vel_i = physics.vel[i]   # (2,)
 
             # ── Self block ────────────────────────────────────────────────────
 
-            # Target mask: use persistent knowledge (state.target_known), NOT
+            # Target mask: use persistent communication knowledge, NOT
             # current live connectivity. Once known, always known.
-            target_mask     = state.target_known[i].astype(jnp.float32)
+            target_mask     = communication.target_known[i].astype(jnp.float32)
             rel_target      = (target_pos_agents[i] - pos_i) / max_dim
             rel_target_m    = rel_target * target_mask # masked by knowledge
-            rel_base        = (state.base_pos - pos_i) / max_dim
+            rel_base        = (physics.base_pos - pos_i) / max_dim
 
             rel_base_f       = rel_base
             is_conn_base_f   = is_conn_base[i].astype(jnp.float32)
@@ -239,7 +243,7 @@ def make_obs_fns(
                         (giy >= 0) & (giy < GH)
 
             # Sample coverage grid (0 if out of bounds)
-            local_cov = jnp.where(in_bounds, state.coverage_grid[gix, giy], False).astype(jnp.float32)
+            local_cov = jnp.where(in_bounds, coverage_grid[gix, giy], False).astype(jnp.float32)
 
             # ── Radar block ───────────────────────────────────────────────────
 
@@ -254,7 +258,7 @@ def make_obs_fns(
             # We include ALL drones j ≠ i, then mask inactive ones to signal=0
 
             # Relative vectors from i to every other drone j: (N, 2)
-            rel_vecs = state.pos - pos_i[None, :]                           # (N, 2)
+            rel_vecs = physics.pos - pos_i[None, :]                           # (N, 2)
 
             # Angles: (N,)
             angles_j = jnp.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])         # (N,)
@@ -264,7 +268,7 @@ def make_obs_fns(
             dists_j  = pairwise_dists[i]                                    # (N,)
 
             # Self-exclusion: self-distance = 0.0 → signal 1.0, so force to 0
-            is_other  = (jnp.arange(N) != i) & state.active                # (N,) bool
+            is_other  = (jnp.arange(N) != i) & physics.active                # (N,) bool
 
             # All-drone signals (any active, non-self drone)
             s_drone   = jnp.maximum(0.0, 1.0 - dists_j / comm_r) * is_other.astype(jnp.float32)
@@ -280,7 +284,7 @@ def make_obs_fns(
             inv_base_conn  = _scatter_max(s_base_conn, bins_j)              # (B,)
 
             # -- Base station point channel --
-            # base_vec   = state.base_pos - pos_i                             # (2,)
+            # base_vec   = physics.base_pos - pos_i                           # (2,)
             # base_dist  = jnp.linalg.norm(base_vec)
             # base_angle = jnp.arctan2(base_vec[1], base_vec[0])
             # base_bin   = _angle_to_bin(base_angle)                          # scalar int
@@ -291,7 +295,7 @@ def make_obs_fns(
             # )  # (B,)
 
             # -- Target point channel (only non-zero if within vis_r) --
-            # tgt_vec   = state.target_pos - pos_i                            # (2,)
+            # tgt_vec   = physics.target_pos - pos_i                          # (2,)
             # tgt_dist  = jnp.linalg.norm(tgt_vec)
             # tgt_in_range = (tgt_dist <= vis_r).astype(jnp.float32)
             # tgt_angle = jnp.arctan2(tgt_vec[1], tgt_vec[0])
@@ -378,7 +382,7 @@ if __name__ == "__main__":
         "Graph connectivity / target_known flags are not binary!"
 
     # Target odometry must be zero for drones that don't know target position
-    target_known = jnp.array(state.target_known)
+    target_known = jnp.array(state.communication.target_known)
     for i in range(N):
         tgt_odo = obs[i, 7:9]   # shifted by 1 due to new flag
         if not target_known[i]:
@@ -388,14 +392,17 @@ if __name__ == "__main__":
     # ── Coverage Calibration Check (Ground Truth Test) ──────────────────
     print(f"\n  Coverage Calibration Check ...")
     # 1. Paint a 'coverage stripe' at X=10m in the physics grid
-    import dataclasses
     stripe_x = 10
-    new_grid = state.coverage_grid.at[stripe_x, :].set(True)
-    state = dataclasses.replace(state, coverage_grid=new_grid)
+    new_grid = state.exploration.coverage_grid.at[stripe_x, :].set(True)
+    state = state.replace(
+        exploration=state.exploration.replace(coverage_grid=new_grid),
+    )
 
     # 2. Place drone 0 exactly on that stripe
-    new_pos = state.pos.at[0].set(jnp.array([float(stripe_x), 25.0]))
-    state = dataclasses.replace(state, pos=new_pos)
+    new_pos = state.physics.pos.at[0].set(jnp.array([float(stripe_x), 25.0]))
+    state = state.replace(
+        physics=state.physics.replace(pos=new_pos),
+    )
 
     # 3. Compute observations
     obs = jax.jit(compute_obs)(state)
@@ -429,7 +436,11 @@ if __name__ == "__main__":
     for _ in range(50):
         state = step_fn(state, actions_zero)
     obs2 = obs_fn(state)
-    print(f"  step={state.step}  active={state.active}  target_known={state.target_known}")
-    print(f"  Coverage: {int(state.coverage_grid.sum())} / {state.coverage_grid.size} cells")
+    print(
+        f"  step={state.physics.step} active={state.physics.active} "
+        f"target_known={state.communication.target_known}"
+    )
+    coverage_grid = state.exploration.coverage_grid
+    print(f"  Coverage: {int(coverage_grid.sum())} / {coverage_grid.size} cells")
 
     print("\nObservation self-test passed ✓")

@@ -21,7 +21,7 @@ Otherwise the level runs for its configured timestep budget.
 Usage
 -----
     uv run swarmecho-curriculum logging.run_name=stage1_full
-    uv run swarmecho-curriculum levels=M00,M03,M02,M01
+    uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_maze,M01_small_maze
 """
 
 from datetime import datetime
@@ -40,7 +40,7 @@ from swarmecho.training.runner import train
 # ---------------------------------------------------------------------------
 
 def run_curriculum():
-    # Parse levels from sys.argv if present (e.g. levels=M00,M03,M02,M01)
+    # Parse levels from sys.argv if present (e.g. levels=M00_no_maze_open_square,...)
     levels = ["M01_small_maze"]
     filtered_args = []
     for arg in sys.argv[1:]:

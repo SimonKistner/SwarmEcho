@@ -107,7 +107,9 @@ The genuinely missing information in the current ACC is limited:
 
 These could improve sample efficiency. But they are not strong reasons to replace the ACC with a conventional perfect-state critic. They are better treated as targeted ablations or auxiliary signals.
 
-If the project later adds memory, even the coverage-history argument becomes weaker: agents and the critic can build a belief over explored regions from experience rather than receiving a global oracle.
+The maintained recurrent actor and critic already weaken the coverage-history
+argument: agents and the critic can build a belief over explored regions from
+experience rather than receiving a global oracle.
 
 ## Why Not Feed Reward Terms Directly
 
@@ -133,7 +135,8 @@ Potentially useful for diagnostics, but not ideal as the main architecture. Exac
 
 ### Recurrent actor or critic
 
-Supported as a toggleable extension. Actor memory lets each decentralized agent condition actions on episode history:
+The maintained defaults use recurrent actor and critic memory. Actor memory lets
+each decentralized agent condition actions on episode history:
 
 ```text
 obs_i -> actor encoder -> GRU_i -> policy head

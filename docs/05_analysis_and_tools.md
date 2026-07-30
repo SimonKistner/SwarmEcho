@@ -8,7 +8,11 @@ Monitoring SwarmEcho requires visualizing multi-agent behaviors dynamically. The
 The `dashboard.py` script boots a robust Streamlit UI designed for auditing curricula directly targeting the `outputs/` folder. It provides:
 - **Core Intelligence Profiles:** Detailed metric extraction.
 - **Hierarchical Parameter Matrices:** Intelligently grouping config sets logically (`ENV`, `REWARD`, `TRAINING`) and highlighting hyperparameter deviations between training runs.
-- **Video Inspection:** Watch baked JAX rollouts at specific curriculum levels.
+- **Video Inspection:** Watch rendered evaluation rollouts and checkpoint artifacts.
+
+The separate `swarmecho-eval-dashboard` entrypoint focuses on checkpoint-scoped
+evaluation CSVs, heatmaps, and videos; `swarmecho-dashboard` compares training
+runs and their configurations.
 
 ## Visual Rendering 
 *(Powered by `src/swarmecho/visualize/`)*
@@ -22,9 +26,9 @@ trajectories into MP4 evaluation files.
 
 The high-throughput evaluation pipeline runs the configured parallel JAX evaluation batch to isolate spatial behavior. It follows the `evaluation` CSV and heatmap settings (which can also be overridden by its CLI flags) and writes enabled artifacts inside the run's evaluation folder:
 
-- **Failed Chain Targets Heatmap (`[timestamp]_failed_chain_targets_heatmap.png`):** Plots red dots for target positions where the shortest-chain relay to the base station could not be completed and held.
-- **Evaluation Information CSV (`eval_info_[checkpoint].csv`):** Records every evaluated target position, success/failure outcome, and Euclidean target-to-base distance.
-- **Found-and-Delivered Heatmap (`found_and_delivered_u000700_s00070M.png`):** Combines two key target-spawner failure metrics onto a single blueprint by default:
+- **Failed Chain Targets Heatmap (`failed_chain_<update>_<steps>.png`):** Plots red dots for target positions where the shortest-chain relay to the base station could not be completed and held.
+- **Evaluation Information CSV (`eval_info_<update>_<steps>.csv`):** Records every evaluated target position, success/failure outcome, and Euclidean target-to-base distance.
+- **Found-and-Delivered Heatmap (`found_and_delivered_<update>_<steps>.png`):** Combines two key target-spawner failure metrics onto a single blueprint by default:
   - **Not Visually Found (Sky Blue BGR `(235, 99, 37)`):** Target coordinates that were never visually seen by any drone in the swarm.
   - **Visually Found, Not Delivered (Dark Blue BGR `(6, 119, 217)`):** Target coordinates that were successfully seen by a drone (and updated in `target_known`), but never successfully routed back to the base.
 - **Top Padded Legend Layout:** All heatmaps utilize a 60px top margin to print title stats and visual color legends, ensuring the blueprint remains un-cluttered.
@@ -34,12 +38,13 @@ The high-throughput evaluation pipeline runs the configured parallel JAX evaluat
 When training on Weights and Biases (`wandb`), the key metrics include:
 | Metric | Description |
 |---|---|
-| `train/ep_return` | Mean unified team return across the 1024 parallel environments. |
+| `train/ep_return` | Mean unified team return across completed training episodes. |
 | `train/success_rate` | Fraction of the batched episodes resolving with a full chain link. |
 | `train/target_found_rate` | Fraction of environments where the swarm found the target. |
-| `train/chain_gap_dist` | Physical distance (metres) between the Base network subset and Target network subset. |
+| `train/chain_progress_pct` | Mean chain progress percentage across completed training episodes. |
+| `train/map_coverage_pct` | Mean explored-map coverage percentage across completed training episodes. |
 | `ppo/policy_loss` | PPO clipped surrogate loss algorithm output. |
 | `ppo/value_loss` | MSE accuracy estimate of the generalized Critic module. |
 | `ppo/clip_fraction` | Fraction of PPO samples whose policy ratio was clipped. Useful for spotting overly aggressive recurrent updates. |
 | `ppo/approx_kl` | Approximate KL divergence between old and updated policies. |
-| `perf/sps` | System Steps per second. |
+| `perf/sps` | Environment steps per second across the configured training batch (default 4,000 environments). |

@@ -130,6 +130,21 @@ assumption, add it at the most appropriate level.
 
 - The environment state represents one base position and one target position,
   not variable-length entity collections.
+- `EnvState` is an ownership container, not a flat collection of every array
+  used during an episode. Kinematics and world entities, communication and
+  knowledge, exploration coverage, relay-task progress, and per-step reward
+  signals have separate nested state objects.
+- General physical state does not own maze cells or finder-path history. The
+  maintained discrete finder-path transition belongs to the 2D relay-task
+  layer, which consumes physical and communication results.
+- The 2D coverage grid belongs to the exploration scaffold rather than
+  physical state. This keeps the temporary coverage training aid identifiable
+  when it is reconsidered after the 3D transition.
+- Collision and newly covered-cell results are per-step signals retained
+  because rewards consume them; they are not persistent world geometry.
+- Rendering receives the nested environment trajectory and creates a flat,
+  CPU-only frame projection at the renderer boundary. Renderer presentation
+  data is not added to environment state.
 - The renderer uses the same single deterministic shortest-route convention as
   the reward implementation.
 - The maze builder emits maps and levels for the maintained core behavior; it

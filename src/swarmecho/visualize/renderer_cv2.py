@@ -860,7 +860,7 @@ def render_video_cv2(
 ) -> str:
     filename = Path(filename).resolve()
 
-    sample = getattr(trajectory, "pos", None)
+    sample = getattr(trajectory.physics, "pos", None)
     if sample is not None and isinstance(sample, np.ndarray):
         traj_cpu = trajectory; rewards_cpu = rewards
     else:
@@ -871,12 +871,12 @@ def render_video_cv2(
     if frame_stride is None:
         frame_stride = RendererConfig.FRAME_STRIDE
 
-    T = traj_cpu.pos.shape[0]
+    T = traj_cpu.physics.pos.shape[0]
     idxs = list(range(0, T, frame_stride))
 
     # Extract dynamic world dimensions from the first frame
-    W = float(traj_cpu.box_width[0]) if hasattr(traj_cpu, "box_width") else float(cfg.env.box_width)
-    H = float(traj_cpu.box_height[0]) if hasattr(traj_cpu, "box_height") else float(cfg.env.box_height)
+    W = float(traj_cpu.physics.box_width[0])
+    H = float(traj_cpu.physics.box_height[0])
 
     has_indiv_reward = (rewards_cpu is not None and getattr(rewards_cpu, "ndim", 0) == 2)
     lay = _Layout(W, H, rewards_cpu is not None, has_indiv_reward=has_indiv_reward)
@@ -899,28 +899,32 @@ def render_video_cv2(
     frame_args = []
     for t in idxs:
         frame_args.append(_FrameData(
-            pos           = np.array(traj_cpu.pos[t]),
-            vel           = np.array(traj_cpu.vel[t]),
-            base_pos      = np.array(traj_cpu.base_pos[t]),
-            target_pos    = np.array(traj_cpu.target_pos[t]),
-            coverage_grid = np.array(traj_cpu.coverage_grid[t]),
-            step          = int(traj_cpu.step[t]),
-            active        = (np.array(traj_cpu.active[t]) if hasattr(traj_cpu, "active") else None),
-            collides      = (np.array(traj_cpu.collides[t]) if hasattr(traj_cpu, "collides") else None),
+            pos=np.array(traj_cpu.physics.pos[t]),
+            vel=np.array(traj_cpu.physics.vel[t]),
+            base_pos=np.array(traj_cpu.physics.base_pos[t]),
+            target_pos=np.array(traj_cpu.physics.target_pos[t]),
+            coverage_grid=np.array(traj_cpu.exploration.coverage_grid[t]),
+            step=int(traj_cpu.physics.step[t]),
+            active=np.array(traj_cpu.physics.active[t]),
+            collides=np.array(traj_cpu.diagnostics.collides[t]),
             occ_grid      = occ_grid_static,
-            box_width     = float(traj_cpu.box_width[t]),
-            box_height    = float(traj_cpu.box_height[t]),
+            box_width=float(traj_cpu.physics.box_width[t]),
+            box_height=float(traj_cpu.physics.box_height[t]),
             extra_metrics = {k: float(v[t]) for k, v in extra_metrics.items()} if extra_metrics else {},
-            target_known  = (np.array(traj_cpu.target_known[t]) if hasattr(traj_cpu, "target_known") else None),
-            base_target_known = (bool(traj_cpu.base_target_known[t]) if hasattr(traj_cpu, "base_target_known") else None),
-            adj_matrix    = (np.array(traj_cpu.adj_matrix[t]) if hasattr(traj_cpu, "adj_matrix") else None),
-            directly_sees_target = (
-                np.array(traj_cpu.directly_sees_target[t])
-                if hasattr(traj_cpu, "directly_sees_target")
-                else None
+            target_known=np.array(
+                traj_cpu.communication.target_known[t]
             ),
-            finders_path  = (np.array(traj_cpu.finders_path[t]) if hasattr(traj_cpu, "finders_path") else None),
-            finders_path_len = (int(traj_cpu.finders_path_len[t]) if hasattr(traj_cpu, "finders_path_len") else 0),
+            base_target_known=bool(
+                traj_cpu.communication.base_target_known[t]
+            ),
+            adj_matrix=np.array(
+                traj_cpu.communication.adj_matrix[t]
+            ),
+            directly_sees_target=np.array(
+                traj_cpu.communication.directly_sees_target[t]
+            ),
+            finders_path=np.array(traj_cpu.relay.finders_path[t]),
+            finders_path_len=int(traj_cpu.relay.finders_path_len[t]),
             maze_cell_grid = maze_cell_grid_static,
         ))
 

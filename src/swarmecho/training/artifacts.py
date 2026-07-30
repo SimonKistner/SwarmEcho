@@ -20,8 +20,8 @@ def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
 
 def steps_for_update(update: int, cfg: Any) -> int:
     """Convert a PPO update number to environment steps using the run config."""
-    envs = int(cfg.training.get("num_envs", 1024))
-    rollout_steps = int(cfg.training.get("num_steps", 128))
+    envs = int(cfg.training.get("num_envs", 4000))
+    rollout_steps = int(cfg.training.get("num_steps", 100))
     return int(update) * envs * rollout_steps
 
 

@@ -354,10 +354,10 @@ def _cpu_reference_graph(
     occupancy_grid: np.ndarray,
 ) -> dict[str, np.ndarray | bool]:
     """Independent CPU expression of the intended physics graph."""
-    pos = np.asarray(state.pos, dtype=np.float32)
-    base_pos = np.asarray(state.base_pos, dtype=np.float32)
-    target_pos = np.asarray(state.target_pos, dtype=np.float32)
-    active = np.asarray(state.active, dtype=bool)
+    pos = np.asarray(state.physics.pos, dtype=np.float32)
+    base_pos = np.asarray(state.physics.base_pos, dtype=np.float32)
+    target_pos = np.asarray(state.physics.target_pos, dtype=np.float32)
+    active = np.asarray(state.physics.active, dtype=bool)
     num_agents = pos.shape[0]
     adjacency = np.zeros((num_agents + 1, num_agents + 1), dtype=bool)
 
@@ -426,9 +426,9 @@ def _renderer_graph_model(
     _occupancy_grid: np.ndarray,
 ) -> dict[str, np.ndarray | bool]:
     """Mirror the renderer translation of physics-owned compact graph data."""
-    pos = np.asarray(state.pos, dtype=np.float32)
-    base_pos = np.asarray(state.base_pos, dtype=np.float32)
-    target_pos = np.asarray(state.target_pos, dtype=np.float32)
+    pos = np.asarray(state.physics.pos, dtype=np.float32)
+    base_pos = np.asarray(state.physics.base_pos, dtype=np.float32)
+    target_pos = np.asarray(state.physics.target_pos, dtype=np.float32)
     entities = np.concatenate(
         [base_pos[None, :], target_pos[None, :], pos],
         axis=0,
@@ -440,7 +440,10 @@ def _renderer_graph_model(
         (entities.shape[0], entities.shape[0]),
         dtype=bool,
     )
-    physics_adjacency = np.asarray(state.adj_matrix, dtype=bool)
+    physics_adjacency = np.asarray(
+        state.communication.adj_matrix,
+        dtype=bool,
+    )
     num_agents = pos.shape[0]
     adjacency[drone_start:, drone_start:] = (
         physics_adjacency[:num_agents, :num_agents]
@@ -452,7 +455,7 @@ def _renderer_graph_model(
         physics_adjacency[:num_agents, num_agents]
     )
     target_edges = np.asarray(
-        state.directly_sees_target,
+        state.communication.directly_sees_target,
         dtype=bool,
     )
     adjacency[target_index, drone_start:] = target_edges
@@ -475,10 +478,10 @@ def _distance_edges_blocked_by_walls(
     occupancy_grid: np.ndarray,
 ) -> int:
     """Count edges the removed range-only reward graph would have admitted."""
-    pos = np.asarray(state.pos, dtype=np.float32)
-    base_pos = np.asarray(state.base_pos, dtype=np.float32)
-    target_pos = np.asarray(state.target_pos, dtype=np.float32)
-    active = np.asarray(state.active, dtype=bool)
+    pos = np.asarray(state.physics.pos, dtype=np.float32)
+    base_pos = np.asarray(state.physics.base_pos, dtype=np.float32)
+    target_pos = np.asarray(state.physics.target_pos, dtype=np.float32)
+    active = np.asarray(state.physics.active, dtype=bool)
     comm_radius = float(cfg.env.comm_radius)
     base_radius = float(
         cfg.env.get("comm_radius_base", cfg.env.comm_radius)
@@ -560,16 +563,25 @@ def _analyse_trajectory(
     }
 
     for frame_index, state in enumerate(states):
-        step = int(np.asarray(state.step))
-        active = np.asarray(state.active, dtype=bool)
-        physics_base = np.asarray(state.is_conn_base, dtype=bool)
-        physics_target = np.asarray(state.is_conn_target, dtype=bool)
+        step = int(np.asarray(state.physics.step))
+        active = np.asarray(state.physics.active, dtype=bool)
+        physics_base = np.asarray(
+            state.communication.is_conn_base,
+            dtype=bool,
+        )
+        physics_target = np.asarray(
+            state.communication.is_conn_target,
+            dtype=bool,
+        )
         physics_direct_target = np.asarray(
-            state.directly_sees_target,
+            state.communication.directly_sees_target,
             dtype=bool,
         )
         physics_full = bool(np.any(physics_base & physics_target))
-        physics_adjacency = np.asarray(state.adj_matrix, dtype=bool)
+        physics_adjacency = np.asarray(
+            state.communication.adj_matrix,
+            dtype=bool,
+        )
 
         obs = np.asarray(jax.device_get(obs_jit(state)))
         obs_base, obs_target, obs_known = _observation_connectivity(
@@ -684,9 +696,9 @@ def _analyse_trajectory(
             {
                 "frame_index": frame_index,
                 "step": step,
-                "pos": _rounded(state.pos),
-                "base_pos": _rounded(state.base_pos),
-                "target_pos": _rounded(state.target_pos),
+                "pos": _rounded(state.physics.pos),
+                "base_pos": _rounded(state.physics.base_pos),
+                "target_pos": _rounded(state.physics.target_pos),
                 "active": _bool_list(active),
                 "physics": {
                     "adjacency": _int_matrix(physics_adjacency),
@@ -936,7 +948,7 @@ def _run_performance_benchmark(
         )
         return (
             jnp.sum(checksums, dtype=jnp.float32)
-            + jnp.sum(final_states.step, dtype=jnp.float32)
+            + jnp.sum(final_states.physics.step, dtype=jnp.float32)
         )
 
     benchmark_jit = jax.jit(benchmark_once)
@@ -1174,8 +1186,8 @@ def main() -> None:
             "checks wiring rather than an independent graph implementation.",
             "The legacy range-only reward graph's wall-blocked candidates are "
             "still counted to show the risk removed by physics-owned routing.",
-            "The renderer model translates physics state.adj_matrix plus "
-            "state.directly_sees_target into renderer node order.",
+            "The renderer model translates communication adjacency plus "
+            "direct target visibility into renderer node order.",
         ],
     }
     current_path = output_dir / "current.json"

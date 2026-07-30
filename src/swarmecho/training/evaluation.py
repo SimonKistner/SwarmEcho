@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import gc
 from dataclasses import dataclass
@@ -89,9 +88,11 @@ def collect_video_episode(
     for step_index in range(max_steps):
         ep_states.append(jax.device_get(state))
         obs = obs_fn(state)
+        physics = state.physics
+        communication = state.communication
 
         if model.actor_memory:
-            resets = jnp.logical_not(state.active)
+            resets = jnp.logical_not(physics.active)
             if model.memory_comm_enabled:
                 num_agents = obs.shape[0]
                 share_now = (
@@ -99,18 +100,18 @@ def collect_video_episode(
                     or step_index % int(model.memory_comm_every_k_steps) == 0
                 )
                 raw_comm_mask = (
-                    state.adj_matrix[:num_agents, :num_agents]
-                    if state.adj_matrix.shape[-1]
+                    communication.adj_matrix[:num_agents, :num_agents]
+                    if communication.adj_matrix.shape[-1]
                     else jnp.zeros((num_agents, num_agents), dtype=bool)
                 )
                 comm_mask = raw_comm_mask & jnp.asarray(share_now)
                 base_mask = (
                     (
-                        state.adj_matrix[:num_agents, num_agents]
-                        if state.adj_matrix.shape[-1]
+                        communication.adj_matrix[:num_agents, num_agents]
+                        if communication.adj_matrix.shape[-1]
                         else jnp.zeros((num_agents,), dtype=bool)
                     )
-                    & ~state.target_known[:num_agents]
+                    & ~communication.target_known[:num_agents]
                     & base_memory_valid
                     & jnp.asarray(share_now)
                 )
@@ -127,17 +128,21 @@ def collect_video_episode(
                     actor_value,
                     resets,
                     comm_mask,
-                    state.active,
+                    physics.active,
                     base_signature,
                     base_value,
                     base_mask,
                 )
                 connected_to_base = (
-                    state.adj_matrix[:num_agents, num_agents]
-                    if state.adj_matrix.shape[-1]
+                    communication.adj_matrix[:num_agents, num_agents]
+                    if communication.adj_matrix.shape[-1]
                     else jnp.zeros((num_agents,), dtype=bool)
                 )
-                reporters = state.target_known & connected_to_base & state.active
+                reporters = (
+                    communication.target_known
+                    & connected_to_base
+                    & physics.active
+                )
                 first_index = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
                 has_reporter = jnp.any(reporters)
                 reported_signature = actor_signature[first_index]
@@ -162,10 +167,12 @@ def collect_video_episode(
         fully_connected = info["fully_connected"] > 0.5
         held_steps = jnp.where(
             fully_connected,
-            state.chain_held_steps + jnp.int32(1),
+            state.relay.chain_held_steps + jnp.int32(1),
             jnp.int32(0),
         )
-        state = dataclasses.replace(state, chain_held_steps=held_steps)
+        state = state.replace(
+            relay=state.relay.replace(chain_held_steps=held_steps),
+        )
         success_achieved = held_steps >= (hold_chain_for + 1)
 
         if bool(success_achieved):
@@ -281,27 +288,29 @@ def _run_parallel_evaluation_jit(
                 lengths,
             ) = carry
             obs = obs_fn(state)
+            physics = state.physics
+            communication = state.communication
 
             if actor_memory:
-                resets = jnp.logical_not(state.active)
+                resets = jnp.logical_not(physics.active)
                 if memory_comm_enabled:
                     num_agents = obs.shape[0]
                     share_now = (memory_comm_every_k_steps <= 1) | (
                         (step_index % memory_comm_every_k_steps) == 0
                     )
                     raw_comm_mask = (
-                        state.adj_matrix[:num_agents, :num_agents]
-                        if state.adj_matrix.shape[-1]
+                        communication.adj_matrix[:num_agents, :num_agents]
+                        if communication.adj_matrix.shape[-1]
                         else jnp.zeros((num_agents, num_agents), dtype=bool)
                     )
                     comm_mask = raw_comm_mask & share_now
                     base_mask = (
                         (
-                            state.adj_matrix[:num_agents, num_agents]
-                            if state.adj_matrix.shape[-1]
+                            communication.adj_matrix[:num_agents, num_agents]
+                            if communication.adj_matrix.shape[-1]
                             else jnp.zeros((num_agents,), dtype=bool)
                         )
-                        & ~state.target_known[:num_agents]
+                        & ~communication.target_known[:num_agents]
                         & base_memory_valid
                         & share_now
                     )
@@ -318,17 +327,21 @@ def _run_parallel_evaluation_jit(
                         actor_value,
                         resets,
                         comm_mask,
-                        state.active,
+                        physics.active,
                         base_signature,
                         base_value,
                         base_mask,
                     )
                     connected_to_base = (
-                        state.adj_matrix[:num_agents, num_agents]
-                        if state.adj_matrix.shape[-1]
+                        communication.adj_matrix[:num_agents, num_agents]
+                        if communication.adj_matrix.shape[-1]
                         else jnp.zeros((num_agents,), dtype=bool)
                     )
-                    reporters = state.target_known & connected_to_base & state.active
+                    reporters = (
+                        communication.target_known
+                        & connected_to_base
+                        & physics.active
+                    )
                     first_index = jnp.argmax(
                         reporters.astype(jnp.int32), axis=-1
                     )
@@ -366,10 +379,12 @@ def _run_parallel_evaluation_jit(
             fully_connected = info["fully_connected"] > 0.5
             held_steps = jnp.where(
                 fully_connected,
-                state.chain_held_steps + jnp.int32(1),
+                state.relay.chain_held_steps + jnp.int32(1),
                 jnp.int32(0),
             )
-            state = dataclasses.replace(state, chain_held_steps=held_steps)
+            state = state.replace(
+                relay=state.relay.replace(chain_held_steps=held_steps),
+            )
             success_achieved = held_steps >= (hold_chain_for + 1)
 
             _, terminal_info = reward_fn(old_state, state, jnp.bool_(True))
@@ -384,10 +399,11 @@ def _run_parallel_evaluation_jit(
 
             new_has_succeeded = has_succeeded | success_achieved
             new_has_found_delivered = (
-                has_found_delivered | state.base_target_known
+                has_found_delivered | state.communication.base_target_known
             )
             new_has_found_visual = (
-                has_found_visual | jnp.any(state.target_known, axis=-1)
+                has_found_visual
+                | jnp.any(state.communication.target_known, axis=-1)
             )
             new_max_found = jnp.maximum(
                 max_found, info["global_target_found"]

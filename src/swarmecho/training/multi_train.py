@@ -9,10 +9,10 @@ index, NOT the actual seed value).
 
 Usage
 -----
-    uv run swarmecho-multi-train level=M01 logging.run_name=maze01_v2 seeds=5
+    uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5
 
     # Specify the base seed used to generate the per-run seeds:
-    uv run swarmecho-multi-train level=M01 logging.run_name=maze01_v2 seeds=5 base_seed=42
+    uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5 base_seed=42
 
     # Any other training/env overrides work as usual:
     uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze seeds=3 \\

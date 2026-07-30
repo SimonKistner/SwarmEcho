@@ -113,7 +113,7 @@ def make_reward_fn(cfg: DictConfig):
         # Physics owns all range, activity, and wall checks. Its direct graph
         # uses nodes [drones..., base]; append the target endpoint from the
         # compact direct-visibility vector.
-        direct_graph = state.adj_matrix
+        direct_graph = state.communication.adj_matrix
         H = H.at[:N + 1, :N + 1].set(
             jnp.where(
                 direct_graph,
@@ -121,7 +121,7 @@ def make_reward_fn(cfg: DictConfig):
                 H[:N + 1, :N + 1],
             )
         )
-        adj_dt = state.directly_sees_target
+        adj_dt = state.communication.directly_sees_target
         H = H.at[:N, N+1].set(jnp.where(adj_dt, 1, H[:N, N+1]))
         H = H.at[N+1, :N].set(jnp.where(adj_dt, 1, H[N+1, :N]))
 
@@ -173,13 +173,17 @@ def make_reward_fn(cfg: DictConfig):
         ], dtype=jnp.float32)
 
     def _compute_finders_path_chain(new_state: EnvState, fully_connected):
-        cells_x, cells_y = jax.vmap(_maze_cell_from_pos)(new_state.pos)
-        path_idx = new_state.finders_path_index_grid[cells_x, cells_y].astype(jnp.int32)
-        on_path = path_idx >= 0
-        valid_len = jnp.maximum(new_state.finders_path_len.astype(jnp.int32), 1)
+        physics = new_state.physics
+        communication = new_state.communication
+        relay = new_state.relay
 
-        is_base_chain = new_state.is_conn_base & new_state.active & on_path
-        is_tgt_chain = new_state.is_conn_target & new_state.active & on_path
+        cells_x, cells_y = jax.vmap(_maze_cell_from_pos)(physics.pos)
+        path_idx = relay.finders_path_index_grid[cells_x, cells_y].astype(jnp.int32)
+        on_path = path_idx >= 0
+        valid_len = jnp.maximum(relay.finders_path_len.astype(jnp.int32), 1)
+
+        is_base_chain = communication.is_conn_base & physics.active & on_path
+        is_tgt_chain = communication.is_conn_target & physics.active & on_path
         any_base_chain = jnp.any(is_base_chain)
         any_tgt_chain = jnp.any(is_tgt_chain)
 
@@ -187,39 +191,43 @@ def make_reward_fn(cfg: DictConfig):
         base_best = jnp.max(base_rank)
         base_tied = is_base_chain & (path_idx == base_best)
         next_idx = jnp.minimum(base_best + 1, valid_len - 1)
-        next_cell = new_state.finders_path[next_idx]
+        next_cell = relay.finders_path[next_idx]
         next_center = _path_cell_center(next_cell)
 
-        target_pos_agents = jnp.tile(new_state.target_pos[None, :], (N, 1))
+        target_pos_agents = jnp.tile(physics.target_pos[None, :], (N, 1))
         # If we reached the final path cell (target), tiebreak toward the actual target position
         base_target_center = jnp.where(
             base_best == valid_len - 1,
             target_pos_agents,
             next_center[None, :]
         )
-        base_tie_dist = jnp.linalg.norm(new_state.pos - base_target_center, axis=-1)
+        base_tie_dist = jnp.linalg.norm(physics.pos - base_target_center, axis=-1)
         idx_b = jnp.argmin(jnp.where(base_tied, base_tie_dist, 1e9))
 
         tgt_rank = jnp.where(is_tgt_chain, path_idx, valid_len + 1)
         tgt_best = jnp.min(tgt_rank)
         tgt_tied = is_tgt_chain & (path_idx == tgt_best)
         prev_idx = jnp.maximum(tgt_best - 1, 0)
-        prev_cell = new_state.finders_path[prev_idx]
+        prev_cell = relay.finders_path[prev_idx]
         prev_center = _path_cell_center(prev_cell)
         # If we reached the start cell (base), tiebreak toward the actual base position
         tgt_target_center = jnp.where(
             tgt_best == 0,
-            new_state.base_pos[None, :],
+            physics.base_pos[None, :],
             prev_center[None, :]
         )
-        tgt_tie_dist = jnp.linalg.norm(new_state.pos - tgt_target_center, axis=-1)
+        tgt_tie_dist = jnp.linalg.norm(physics.pos - tgt_target_center, axis=-1)
         idx_t = jnp.argmin(jnp.where(tgt_tied, tgt_tie_dist, 1e9))
 
         base_cells = jnp.where(any_base_chain, base_best + 1, 0)
         tgt_cells = jnp.where(any_tgt_chain, valid_len - tgt_best, 0)
         progress_cells = jnp.minimum(base_cells + tgt_cells, valid_len)
         progress_cells = jnp.where(fully_connected, valid_len, progress_cells)
-        progress_frac = jnp.where(new_state.finders_path_valid, progress_cells.astype(jnp.float32) / valid_len.astype(jnp.float32), 0.0)
+        progress_frac = jnp.where(
+            relay.finders_path_valid,
+            progress_cells.astype(jnp.float32) / valid_len.astype(jnp.float32),
+            0.0,
+        )
         chain_progress_pct = 100.0 * progress_frac
         chain_gap_dist = jnp.float32(0.0)
         base_gap_penalty = -p_gap_max * (1.0 - progress_frac)
@@ -233,12 +241,15 @@ def make_reward_fn(cfg: DictConfig):
         new_state: EnvState,
         is_done:   jax.Array = jnp.bool_(False),
     ) -> tuple[jax.Array, dict]:
+        old_communication = old_state.communication
+        physics = new_state.physics
+        communication = new_state.communication
 
-        target_pos_agents = jnp.tile(new_state.target_pos[None, :], (N, 1))
-        primary_target_pos = new_state.target_pos
+        target_pos_agents = jnp.tile(physics.target_pos[None, :], (N, 1))
+        primary_target_pos = physics.target_pos
 
         # Dynamic world geometry from state
-        bt_dist = jnp.linalg.norm(primary_target_pos - new_state.base_pos)
+        bt_dist = jnp.linalg.norm(primary_target_pos - physics.base_pos)
 
         # Normalized gap weight
         w_gap = jnp.where(bt_dist > 0, p_gap_max / bt_dist, 0.0)
@@ -246,20 +257,20 @@ def make_reward_fn(cfg: DictConfig):
         # ---- 2. Global Target Found --------------------------------------
         # Direct delivery/visibility facts come from the same wall-aware graph
         # that drives communication and observations.
-        adj_db = new_state.adj_matrix[:N, N]
-        is_visible = new_state.directly_sees_target
+        adj_db = communication.adj_matrix[:N, N]
+        is_visible = communication.directly_sees_target
 
-        knew_or_sees_target = old_state.target_known | is_visible
+        knew_or_sees_target = old_communication.target_known | is_visible
         actual_deliverers = adj_db & knew_or_sees_target
 
         if target_found_requires_delivery:
-            was_target_found = old_state.base_target_known
-            global_target_found = new_state.base_target_known
+            was_target_found = old_communication.base_target_known
+            global_target_found = communication.base_target_known
             target_found_local_receivers = actual_deliverers
         else:
-            was_target_found = jnp.any(old_state.target_known)
-            global_target_found = jnp.any(new_state.target_known)
-            target_found_local_receivers = is_visible & ~old_state.target_known
+            was_target_found = jnp.any(old_communication.target_known)
+            global_target_found = jnp.any(communication.target_known)
+            target_found_local_receivers = is_visible & ~old_communication.target_known
         just_found = global_target_found & ~was_target_found
         r_target_found_shared = jnp.where(just_found, w_found, 0.0)
         r_target_found_local = jnp.where(just_found & target_found_local_receivers, w_finder, 0.0)
@@ -267,33 +278,34 @@ def make_reward_fn(cfg: DictConfig):
         # Shared component is divided by N to be agent-invariant
         r_target_found = (r_target_found_shared / N) + r_target_found_local
 
-        delta_cells = new_state.last_cov_delta.astype(jnp.float32)
+        delta_cells = new_state.diagnostics.last_cov_delta.astype(jnp.float32)
         # Stop exploration reward for drones that know the target position
-        r_coverage = (delta_cells * (cell_s**2) * w_exp) * (~new_state.target_known)
+        r_coverage = (delta_cells * (cell_s**2) * w_exp) * (~communication.target_known)
 
         # ---- 4. Chain Gap Distance ---------------------------------------
-        is_conn_base, is_conn_target = new_state.is_conn_base, new_state.is_conn_target
+        is_conn_base = communication.is_conn_base
+        is_conn_target = communication.is_conn_target
         fully_connected = jnp.any(is_conn_base & is_conn_target)
 
         # Base Chain "Tip" (Drone closest to Target)
         dist_to_target = jnp.linalg.norm(
-            new_state.pos - target_pos_agents,
+            physics.pos - target_pos_agents,
             axis=-1,
         )
-        is_base_chain = is_conn_base & new_state.active
+        is_base_chain = is_conn_base & physics.active
         any_base_chain = jnp.any(is_base_chain)
         idx_b = jnp.argmin(jnp.where(is_base_chain, dist_to_target, 1e9))
-        pos_b = jnp.where(any_base_chain, new_state.pos[idx_b], new_state.base_pos)
+        pos_b = jnp.where(any_base_chain, physics.pos[idx_b], physics.base_pos)
 
         # Target Chain "Tip" (Drone closest to Base)
-        is_tgt_chain = is_conn_target & new_state.active
+        is_tgt_chain = is_conn_target & physics.active
         any_tgt_chain = jnp.any(is_tgt_chain)
         dist_to_base = jnp.linalg.norm(
-            new_state.pos - new_state.base_pos[None, :],
+            physics.pos - physics.base_pos[None, :],
             axis=-1,
         )
         idx_t = jnp.argmin(jnp.where(is_tgt_chain, dist_to_base, 1e9))
-        pos_t = jnp.where(any_tgt_chain, new_state.pos[idx_t], primary_target_pos)
+        pos_t = jnp.where(any_tgt_chain, physics.pos[idx_t], primary_target_pos)
 
         # Gap/progress calculation selected once by the run config.
         if use_finders_path_reward:
@@ -323,7 +335,7 @@ def make_reward_fn(cfg: DictConfig):
 
         # ---- 5. Collision penalty ----------------------------------------
         # Penalty is per-agent hitting a wall/obstacle
-        r_collision = -new_state.collides.astype(jnp.float32) * p_coll
+        r_collision = -new_state.diagnostics.collides.astype(jnp.float32) * p_coll
 
         # ---- 6. Terminal success bonus -----------------------------------
         # NOTE: Both `is_done` and `fully_connected` checks are intentional and NOT redundant.
@@ -349,7 +361,9 @@ def make_reward_fn(cfg: DictConfig):
             "fully_connected": fully_connected.astype(jnp.float32),
             "global_target_found": global_target_found.astype(jnp.float32),
             "just_found":     just_found.astype(jnp.float32),
-            "global_coverage": jnp.mean(new_state.coverage_grid.astype(jnp.float32)),
+            "global_coverage": jnp.mean(
+                new_state.exploration.coverage_grid.astype(jnp.float32)
+            ),
         }
 
         return reward, info
@@ -401,7 +415,8 @@ if __name__ == "__main__":
         total_reward += float(rew.sum())
 
         if t < 5 or t % 100 == 99 or t == cfg.env.max_steps - 1:
-            cov_pct = 100.0 * int(state.coverage_grid.sum()) / state.coverage_grid.size
+            coverage_grid = state.exploration.coverage_grid
+            cov_pct = 100.0 * int(coverage_grid.sum()) / coverage_grid.size
             print(
                 f"  {t+1:>5}  {float(rew.sum()):>8.4f}  "
                 f"{float(info['chain_gap_dist']):>7.1f}  "
@@ -436,11 +451,12 @@ if __name__ == "__main__":
     print("\nReward self-test passed ✓")
 
     # ── Boundary Leak Regression Test ──────────────────────────────────
-    import dataclasses
     print(f"\n  Testing Boundary Leak Regression...")
     # Place drone 0 at the extreme corner (0.1, 0.1)
-    corner_pos = state.pos.at[0].set(jnp.array([0.1, 0.1]))
-    state = dataclasses.replace(state, pos=corner_pos)
+    corner_pos = state.physics.pos.at[0].set(jnp.array([0.1, 0.1]))
+    state = state.replace(
+        physics=state.physics.replace(pos=corner_pos),
+    )
 
     # Step once to "clear" initial coverage
     state = step_jit(state, actions)

@@ -379,8 +379,8 @@ def write_training_evaluation_artifacts(
     if not (save_eval_info or generate_any_heatmap):
         return
 
-    target_positions = np.asarray(result.final_state.target_pos)
-    base_positions = np.asarray(result.final_state.base_pos)
+    target_positions = np.asarray(result.final_state.physics.target_pos)
+    base_positions = np.asarray(result.final_state.physics.base_pos)
     successes = np.asarray(result.final_successes, dtype=bool)
     delivered = np.asarray(result.final_delivered, dtype=bool)
     visually_found = np.asarray(result.final_visually_found, dtype=bool)

@@ -11,7 +11,7 @@ The project heavily utilizes functional separation. The core logic lives in `src
 * **`src/swarmecho/curriculum_config/`**: Contains the curriculum progression `levels/` and map geometry in `maps/`. Defaults are defined by structured dataclasses in `src/swarmecho/core/config.py`. See **[02_configuration_guide](02_configuration_guide.md)**.
 * **`src/swarmecho/env/`**: Houses the JAX physics simulator, raycasting, map rasterization, and agent-centric observations. See **[03_environment_and_physics](03_environment_and_physics.md)**.
 * **`src/swarmecho/models/`** and **`src/swarmecho/training/`**: MAPPO models, centralized critics, rollout buffers, and training/evaluation orchestration. See **[04_marl_and_training](04_marl_and_training.md)**.
-* **`src/swarmecho/analysis/`** and **`src/swarmecho/visualize/`**: Dashboard tools and OpenCV rendering used to inspect training and evaluation runs. See **[05_analysis_and_tools](05_analysis_and_tools.md)**.
+* **`src/swarmecho/analysis/`** and **`src/swarmecho/visualize/`**: Streamlit dashboards and OpenCV rendering used to inspect training and evaluation runs. See **[05_analysis_and_tools](05_analysis_and_tools.md)**.
 * **Architecture Defense**: Rationale for the current MAPPO + Agent-Centric Critic design over privileged world-state critics. See **[07_mappo_acc_architecture_defense](07_mappo_acc_architecture_defense.md)**.
 
 ## Core Concepts
@@ -20,4 +20,13 @@ The project heavily utilizes functional separation. The core logic lives in `src
 - **Critic (centralized):** During training only, the critic receives the concatenated observations of all N agents (using self-attention to maintain permutation invariance). This produces low-variance value estimates.
 
 ### JAX and vmap
-The entire environment logic is written using pure JAX. Because the physics and observations are written as tensor operations (without python-level loops or external states), we use JAX's `vmap` (vectorizing map) to simulate exactly **1024 parallel universes** instantly on the GPU.
+The environment transition, observations, and rewards are pure JAX functions. Training vectorizes them with `vmap` over the configured batch, whose maintained default is **4,000 parallel environments**. The same functions also support smaller validation and evaluation batches.
+
+### Environment-state ownership
+
+`EnvState` is a nested ownership container. Kinematics live in `PhysicsState`;
+communication facts and persistent target knowledge live in
+`CommunicationState`; the temporary 2D coverage aid lives in
+`ExplorationState`; and discrete finder-path relay bookkeeping lives in
+`RelayTaskState` and `env/relay_task.py`. The renderer creates its flat CPU
+frame projection only at the rendering boundary.

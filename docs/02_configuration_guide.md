@@ -7,7 +7,7 @@ Rather than a global YAML file, baseline configurations are declared in the stru
 
 | Domain | Description / Usage |
 |---|---|
-| `env` | World physics, drone radius, vision limits, total agent count, and map name. |
+| `env` | World physics, vision and communication limits, agent count, and map name. |
 | `reward` | Scaling coefficients for exploration, chain gaps, and success bonuses. |
 | `training` | PPO optimization, rollout shape, total budget, seed, and checkpoint loading/resume behavior. |
 | `evaluation` | Parallel evaluation, evaluation-success early exit, videos, evaluation data/heatmaps, and checkpoint saving. |

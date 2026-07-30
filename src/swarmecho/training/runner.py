@@ -54,7 +54,6 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -206,7 +205,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
     Wrap env_step to auto-reset on episode termination.
 
     Done conditions (either triggers reset):
-      * time_up        : new_state.step >= max_steps
+      * time_up        : new_state.physics.step >= max_steps
       * fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
       * target_found   : target is found/delivered (if terminate_on_target_found is True)
 
@@ -222,7 +221,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
     def step(state, actions):
         new_state = env_step_fn(state, actions)
 
-        time_up = new_state.step >= max_steps_jnp
+        time_up = new_state.physics.step >= max_steps_jnp
 
         # Call reward_fn with is_done=False so success bonus is not prematurely added
         reward, info = reward_fn(state, new_state, jnp.bool_(False))
@@ -232,10 +231,14 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
         # Track steps held
         new_chain_held_steps = jnp.where(
             fully_connected,
-            state.chain_held_steps + jnp.int32(1),
+            state.relay.chain_held_steps + jnp.int32(1),
             jnp.int32(0)
         )
-        new_state = dataclasses.replace(new_state, chain_held_steps=new_chain_held_steps)
+        new_state = new_state.replace(
+            relay=new_state.relay.replace(
+                chain_held_steps=new_chain_held_steps,
+            ),
+        )
 
         success_achieved = new_chain_held_steps >= (hold_chain_for_jnp + jnp.int32(1))
         
@@ -251,7 +254,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
         )
         reward = reward + extra_bonus
 
-        reset_state = reset_fn(new_state.key)
+        reset_state = reset_fn(new_state.physics.key)
         next_state = jax.tree_util.tree_map(
             lambda r, c: jnp.where(done, r, c),
             reset_state, new_state,
@@ -261,9 +264,12 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
         info = {
             **info,
             "fully_connected": success_achieved.astype(jnp.float32),
-            "terminal_target_pos": new_state.target_pos,
-            "terminal_delivered": new_state.base_target_known,
-            "terminal_visually_found": jnp.any(new_state.target_known, axis=-1)
+            "terminal_target_pos": new_state.physics.target_pos,
+            "terminal_delivered": new_state.communication.base_target_known,
+            "terminal_visually_found": jnp.any(
+                new_state.communication.target_known,
+                axis=-1,
+            ),
         }
 
         return next_state, reward, done, info
@@ -450,7 +456,10 @@ def _collect_rollout_mappo(
         obs_batch = obs_fn_v(states)          # (E, N, D)
         E_, N_, D_ = obs_batch.shape
         act_keys = jax.random.split(act_key, E_ * N_).reshape(E_, N_, 2)
-        reset_agents_b = jnp.asarray(last_dones)[:, None] | jnp.logical_not(states.active)
+        reset_agents_b = (
+            jnp.asarray(last_dones)[:, None]
+            | jnp.logical_not(states.physics.active)
+        )
 
         if recurrent:
             if model.actor_memory and actor_h is None:
@@ -479,9 +488,9 @@ def _collect_rollout_mappo(
                     critic_h_in,
                     reset_agents_b,
                     max_force,
-                    states.adj_matrix,
-                    states.active,
-                    states.target_known,
+                    states.communication.adj_matrix,
+                    states.physics.active,
+                    states.communication.target_known,
                     base_signature,
                     base_value,
                     base_memory_valid,
@@ -601,7 +610,10 @@ def _collect_rollout_mappo(
     # Bootstrap value for last state
     last_obs    = obs_fn_v(states)
     if recurrent and model.critic_memory:
-        reset_agents_b = jnp.asarray(last_dones)[:, None] | jnp.logical_not(states.active)
+        reset_agents_b = (
+            jnp.asarray(last_dones)[:, None]
+            | jnp.logical_not(states.physics.active)
+        )
 
         def _value_one_env(obs_n, h_n, resets_n):
             _, value = model.get_value_recurrent(obs_n, h_n, resets_n)
@@ -1043,7 +1055,7 @@ def train(cfg: DictConfig):
                 )
 
                 if not window_full:
-                    current_steps = np.array(states.step)
+                    current_steps = np.array(states.physics.step)
                     min_step = int(current_steps.min())
                     max_step = int(current_steps.max())
                     mean_step = float(current_steps.mean())
@@ -1114,7 +1126,9 @@ def train(cfg: DictConfig):
                         eval_success = float(jnp.mean(eval_result.successes))
                         eval_found = float(jnp.mean(eval_result.target_found))
                         eval_cov = float(jnp.mean(
-                            eval_result.final_state.coverage_grid.astype(jnp.float32)
+                            eval_result.final_state.exploration.coverage_grid.astype(
+                                jnp.float32
+                            )
                         ))
 
                         eval_prefix = "[EVAL]" + " " * 50

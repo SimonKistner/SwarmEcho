@@ -80,7 +80,7 @@ def load_cfg_dict(run_dir: str) -> dict:
     cfg_path = Path(run_dir) / "config.yaml"
     if cfg_path.exists():
         return OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=True)
-    return {"training": {"num_envs": 1024, "num_steps": 128}, "env": {}}
+    return {"training": {"num_envs": 4000, "num_steps": 100}, "env": {}}
 
 
 @st.cache_data(ttl=30)

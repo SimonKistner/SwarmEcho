@@ -8,9 +8,9 @@ before/after verification.
 
 | Data or consumer | Maintained source |
 |---|---|
-| Direct drone/drone and drone/base edges | Physics range, activity, and DDA wall checks; stored as `EnvState.adj_matrix` in `[drones..., base]` order. |
-| Direct drone/target visibility | The same physics pass; stored as the compact `EnvState.directly_sees_target` vector. |
-| Multi-hop base/target flags | Temporary physics reachability; final vectors stored as `is_conn_base` and `is_conn_target`. |
+| Direct drone/drone and drone/base edges | Physics range, activity, and DDA wall checks; stored as `EnvState.communication.adj_matrix` in `[drones..., base]` order. |
+| Direct drone/target visibility | The same physics pass; stored as the compact `EnvState.communication.directly_sees_target` vector. |
+| Multi-hop base/target flags | Temporary physics reachability; final vectors stored in `EnvState.communication`. |
 | Target-knowledge propagation | Reuses the temporary full physics reachability result. |
 | Finder-path memory propagation | Uses physics-owned direct drone edges while preserving the task-specific rule that the base is not a path-memory relay; its drone-only closure is temporary. |
 | Actor observations and TarMAC | Consume stored flags and adjacency. |
@@ -40,7 +40,7 @@ The original consumers operated in different execution domains:
   not only reachability flags.
 
 Those were real interface differences, but they did not justify competing
-decisions. Evaluation already transferred `EnvState.adj_matrix` to the CPU
+decisions. Evaluation already transferred `EnvState.communication.adj_matrix` to the CPU
 renderer, and only direct target visibility was missing. Retaining that compact
 vector allowed all consumers to share the physics result.
 

@@ -108,9 +108,12 @@ def evaluate_checkpoint(
         def eval_reset(key):
             state = environment.reset(key)
             return state.replace(
-                target_pos=jnp.array(
-                    [target_x, target_y], dtype=jnp.float32
-                )
+                physics=state.physics.replace(
+                    target_pos=jnp.array(
+                        [target_x, target_y],
+                        dtype=jnp.float32,
+                    ),
+                ),
             )
 
     key = jax.random.PRNGKey(0)
@@ -147,8 +150,8 @@ def evaluate_checkpoint(
     if bool(cfg.evaluation.get("save_eval_info_as_csv", False)):
         info_path = save_eval_info_csv(
             artifact_root / "data" / f"eval_info_{artifact_tag}.csv",
-            target_positions=np.asarray(result.final_state.target_pos),
-            base_positions=np.asarray(result.final_state.base_pos),
+            target_positions=np.asarray(result.final_state.physics.target_pos),
+            base_positions=np.asarray(result.final_state.physics.base_pos),
             successes=np.asarray(result.final_successes),
         )
         print(f"  eval_csv:     {info_path}")

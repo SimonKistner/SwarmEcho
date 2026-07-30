@@ -1,4 +1,11 @@
-# Multi-Agent Reinforcement Learning (MARL) Experimental Setup & System Architecture
+# ARCHIVAL — Multi-Agent Reinforcement Learning (MARL) Experimental Setup
+
+> This document describes an older experimental specification. It is retained
+> for historical context only and is not the current source of configuration or
+> architecture truth. See the current configuration, environment, and training
+> guides for the maintained workflow.
+
+## Historical specification
 
 This specification sheet documents the system design, neural architecture, and optimization framework for **SwarmEcho**, focusing on the Multi-Agent Proximal Policy Optimization (MAPPO) setup. This document acts as an independent specification to evaluate the eligibility of reinforcement learning techniques for this multi-robot coordination problem.
 

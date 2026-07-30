@@ -12,22 +12,19 @@ Agents are trained using **MAPPO** (Multi-Agent PPO with a Centralised Critic).
 
 ## Architecture
 
-The project uses a clean `src/` layout with logical modules and a centralized `curriculum_config` package.
+The project uses a `src/swarmecho/` package with separate environment, model, training, analysis, visualization, and map-configuration modules.
 
 ```
 SwarmEcho/
 ├── docs/                     ← Technical reports & documentation
 ├── src/
-│   ├── core/                 ← Configuration & global utilities
-│   ├── curriculum_config/    ← Semantic curriculum settings
-│   │   ├── base_params.yaml  ← Global base hyperparameters
-│   │   ├── levels/           ← level_00..02 yaml overrides
-│   │   └── maps/             ← Map YAML geometry definitions
-│   │       └── scripts/      ← Map tools (Builder, Baker, Prepper)
-│   ├── env/                  ← JAX physics, rewards, and observations
-│   ├── models/               ← MARL network architectures (MAPPO, IPPO)
-│   ├── training/             ← PPO trainers, rollout buffers, and runners
-│   └── visualize/            ← OpenCV video rendering
+│   └── swarmecho/
+│       ├── core/             ← Structured configuration & utilities
+│       ├── curriculum_config/← Retained levels, maps, and maze builder
+│       ├── env/               ← JAX physics, state, rewards, observations
+│       ├── models/             ← MAPPO actor, critic, and recurrent modules
+│       ├── training/           ← Rollouts, PPO, evaluation, and analysis jobs
+│       └── visualize/          ← OpenCV rendering and preview tooling
 └── README.md
 ```
 
@@ -45,9 +42,7 @@ cd SwarmEcho
 # Install all dependencies (including JAX CUDA wheels)
 uv sync
 
-# Verify GPU is detected
-uv run python -c "import jax; print(jax.devices())"
-# → [CudaDevice(id=0)]
+# The training banner reports the devices selected by JAX.
 ```
 
 ---
@@ -75,23 +70,35 @@ uv run swarmecho-train level=M01_small_maze
 uv run swarmecho-train level=M01_small_maze training.num_envs=512 logging.wandb_mode=online
 ```
 
-### 4. 2D Grid Maze Builder
+### 4. Multi-seed Training
+
+Run sequential, reproducible training runs. The command appends `_seed_N` to
+the supplied run name:
+
+```bash
+uv run swarmecho-multi-train level=M01_small_maze \
+  logging.run_name=small_maze_v1 seeds=3 base_seed=42
+```
+
+### 5. 2D Grid Maze Builder
 Launch the browser-based grid editor to draw maze walls and target no-spawn cells.
 ```bash
 uv run swarmecho-maze-builder
 ```
 
 
-### 5. Consolidated Map Preview & Renderer
+### 6. Consolidated Map Preview & Renderer
 Render static blueprint images or simulated video/GIF rollouts of any map blueprint.
 ```bash
 uv run swarmecho-render M03_big_maze
 ```
 
-### 6. Discovery & Analysis Dashboard
+### 7. Discovery & Analysis Dashboards
 Inspect training parameters, curriculum evolution, and evaluation videos across all runs.
 ```bash
 uv run swarmecho-dashboard
+# Checkpoint-oriented evaluation artifacts:
+uv run swarmecho-eval-dashboard
 ```
 
 ---
@@ -102,7 +109,7 @@ To maintain a clean separation of concerns, all deep-dive technical details have
 
 1. **[01_system_overview.md](docs/01_system_overview.md)**: High-level CTDE architectural layout and JAX `vmap` logic.
 2. **[02_configuration_guide.md](docs/02_configuration_guide.md)**: The single source of truth for global parameters, curriculum scale up, and map geometry.
-3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Deep dive into the 57-dimensional observation space, Euler physics, and continuous action clipping.
+3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Current 37-dimensional default observation space, optional transitional observation aids, Euler physics, and continuous action clipping.
 4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
 5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.
 6. **[06_connectivity_investigation.md](docs/06_connectivity_investigation.md)**: Raw connectivity ownership findings and the deterministic before/after verification workflow.
@@ -115,13 +122,16 @@ To maintain a clean separation of concerns, all deep-dive technical details have
 Each training run creates its own directory:
 ```
 outputs/
-└── {run_name}_{timestamp}/
+└── {run_name}/
     ├── checkpoints/
     │   └── ckpt_001000/    ← Orbax checkpoint (Flax NNX state dict)
     └── artifacts/
         ├── train/          ← scheduled training-evaluation artifacts
         └── eval/           ← checkpoint-scoped evaluation artifacts
 ```
+
+Timestamp suffixes are used only when `logging.use_timestamp_postfix` is
+enabled. Curriculum runs use `outputs/curriculum/<curriculum_name>/`.
 
 ---
 

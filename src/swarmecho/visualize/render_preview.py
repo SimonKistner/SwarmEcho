@@ -6,7 +6,7 @@ videos/GIFs of any map.
 
 Usage:
 ------
-# 1. Render default simulated video rollout (MP4, 100 frames, 3 drones, 1 target, 1 base):
+# 1. Render default simulated video rollout (MP4, 10 frames, 3 drones, 1 target, 1 base):
 uv run swarmecho-render M03_big_maze
 
 # 2. Render a static PNG blueprint image (showing spawn zones and real spawn positions):
@@ -187,7 +187,10 @@ def render_svg(
     # TODO: Support random base spawns when show_spawns is False (do not rely on zone average)
     base_pos = None
     if state is not None and getattr(state, "base_pos", None) is not None:
-        base_pos = (float(state.base_pos[0]), float(state.base_pos[1]))
+        base_pos = (
+            float(state.physics.base_pos[0]),
+            float(state.physics.base_pos[1]),
+        )
     elif "spawn_zones" in data and "base" in data["spawn_zones"]:
         x1, y1, x2, y2 = data["spawn_zones"]["base"]
         base_pos = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
@@ -204,7 +207,7 @@ def render_svg(
 
         # Target
         if getattr(state, "target_pos", None) is not None:
-            target_pos = np.asarray(state.target_pos)
+            target_pos = np.asarray(state.physics.target_pos)
             tx, ty = float(target_pos[0]), float(target_pos[1])
             px = tx * scale
             py = (height - ty) * scale
@@ -214,8 +217,11 @@ def render_svg(
 
         # Drones
         dr = max(4.0, 4.0 * scale / 4.0)
-        for i in range(len(state.pos)):
-            dx, dy = float(state.pos[i, 0]), float(state.pos[i, 1])
+        for i in range(len(state.physics.pos)):
+            dx, dy = (
+                float(state.physics.pos[i, 0]),
+                float(state.physics.pos[i, 1]),
+            )
             px = dx * scale
             py = (height - dy) * scale
             svg.append(f'<circle cx="{px:.3f}" cy="{py:.3f}" r="{dr:.3f}" fill="#6b7280" stroke="#ffffff" stroke-width="1.5"/>')
@@ -325,7 +331,10 @@ def render_png(
     # TODO: Support random base spawns when show_spawns is False (do not rely on zone average)
     base_pos = None
     if state is not None and getattr(state, "base_pos", None) is not None:
-        base_pos = (float(state.base_pos[0]), float(state.base_pos[1]))
+        base_pos = (
+            float(state.physics.base_pos[0]),
+            float(state.physics.base_pos[1]),
+        )
     elif "spawn_zones" in data and "base" in data["spawn_zones"]:
         x1, y1, x2, y2 = data["spawn_zones"]["base"]
         base_pos = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
@@ -343,7 +352,7 @@ def render_png(
 
         # Target
         if getattr(state, "target_pos", None) is not None:
-            target_pos = np.asarray(state.target_pos)
+            target_pos = np.asarray(state.physics.target_pos)
             tx, ty = float(target_pos[0]), float(target_pos[1])
             px = int(tx * scale)
             py = int((height - ty) * scale)
@@ -354,8 +363,11 @@ def render_png(
 
         # Drones
         dr = max(4, int(4 * scale / 4))
-        for i in range(len(state.pos)):
-            dx, dy = float(state.pos[i, 0]), float(state.pos[i, 1])
+        for i in range(len(state.physics.pos)):
+            dx, dy = (
+                float(state.physics.pos[i, 0]),
+                float(state.physics.pos[i, 1]),
+            )
             px = int(dx * scale)
             py = int((height - dy) * scale)
             cv2.circle(img, (px, py), dr, (128, 114, 107), -1, cv2.LINE_AA)
@@ -567,7 +579,7 @@ def main() -> None:
         # Rollout generation (Always simulated using random actions)
         states = [state]
         for step_idx in range(args.num_frames - 1):
-            key, subkey = jax.random.split(state.key)
+            key, subkey = jax.random.split(state.physics.key)
             actions = jax.random.uniform(subkey, (cfg.env.num_agents, 2), minval=-1.0, maxval=1.0)
             state = env_step(state, actions)
             states.append(state)

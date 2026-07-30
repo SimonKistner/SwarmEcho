@@ -219,8 +219,8 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
                     try:
                         updates = int(latest_ckpt.split("_")[1])
                         t_cfg = raw_cfg.get("training", {})
-                        envs = int(t_cfg.get("num_envs", 1024))
-                        rollout_steps = int(t_cfg.get("num_steps", 128))
+                        envs = int(t_cfg.get("num_envs", 4000))
+                        rollout_steps = int(t_cfg.get("num_steps", 100))
                         total_steps = updates * envs * rollout_steps
                         if total_steps >= 1_000_000:
                             actual_steps = f"{total_steps / 1_000_000:.1f}M"
@@ -293,8 +293,8 @@ def get_run_history_chain(run_data) -> str:
             # Also get steps from the checkpoint name
             try:
                 updates = int(parent_ckpt_name.split("_")[1]) if "_" in parent_ckpt_name else 0
-                envs = int(t_cfg.get("num_envs", 1024))
-                rollout_steps = int(t_cfg.get("num_steps", 128))
+                envs = int(t_cfg.get("num_envs", 4000))
+                rollout_steps = int(t_cfg.get("num_steps", 100))
                 parent_steps = updates * envs * rollout_steps
                 parent_steps_str = f"{parent_steps / 1_000_000:.1f}M" if parent_steps >= 1_000_000 else f"{parent_steps:,}"
             except:

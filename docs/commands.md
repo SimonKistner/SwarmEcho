@@ -59,7 +59,7 @@ uv run swarmecho-train level=M01_small_maze logging.run_name=maze01_v1 logging.w
 ### Multi-Seed Sequential Training
 Run multiple training iterations with the same configuration, utilizing different random seeds. The run name will automatically receive a `_seed_N` suffix:
 ```bash
-uv run swarmecho-multi-train level=M01 logging.run_name=maze01_v2 seeds=5 base_seed=99
+uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5 base_seed=99
 ```
 
 ### General Grid Search
@@ -79,7 +79,7 @@ Train through sequential levels (inheriting checkpoint weights from the previous
 uv run swarmecho-curriculum
 
 # Run a custom sequence of levels
-uv run swarmecho-curriculum levels=M00,M03,M02,M01
+uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_maze,M01_small_maze
 ```
 
 ---

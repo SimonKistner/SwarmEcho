@@ -70,7 +70,7 @@ def load_cfg(run_dir: Path) -> dict:
     cfg_path = run_dir / "config.yaml"
     if cfg_path.exists():
         return OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=True)  # type: ignore[return-value]
-    return {"training": {"num_envs": 1024, "num_steps": 128}, "env": {}}
+    return {"training": {"num_envs": 4000, "num_steps": 100}, "env": {}}
 
 
 def cfg_get(cfg: dict, section: str, key: str, default: Any = None) -> Any:

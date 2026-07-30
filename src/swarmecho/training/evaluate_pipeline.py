@@ -100,8 +100,8 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
     print(f"         Successes:      {num_success}/{num_envs} ({success_rate:.2f}%)")
 
     # Extract compact per-episode data once, after the parallel simulation.
-    target_positions = np.array(result.final_state.target_pos)
-    base_positions = np.array(result.final_state.base_pos)
+    target_positions = np.array(result.final_state.physics.target_pos)
+    base_positions = np.array(result.final_state.physics.base_pos)
     success_mask = np.array(result.final_successes, dtype=bool)
 
     failed_mask = ~success_mask
