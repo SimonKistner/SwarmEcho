@@ -26,7 +26,6 @@ SwarmEcho/
 │   │       └── scripts/      ← Map tools (Builder, Baker, Prepper)
 │   ├── env/                  ← JAX physics, rewards, and observations
 │   ├── models/               ← MARL network architectures (MAPPO, IPPO)
-│   ├── tests/                ← Environment smoke tests
 │   ├── training/             ← PPO trainers, rollout buffers, and runners
 │   └── visualize/            ← OpenCV video rendering
 └── README.md
@@ -55,44 +54,44 @@ uv run python -c "import jax; print(jax.devices())"
 
 ## Quick Start
 
-### 1. Run the Environment Smoke Test
-Verify the JAX physics and reward functions are working correctly.
+### 1. Run the Core Workflow Validation
+Run the minimal train-update-evaluate-checkpoint-render workflow.
 ```bash
-uv run python src/tests/smoke_test_env.py
+uv run swarmecho-validate
 ```
 
 ### 2. Start Curriculum Training
-Train through stages: L0 (Open Field) → L1 (Warehouse) → L2 (Complex Maze).
+Train the maintained default small-maze stage.
 ```bash
-uv run python src/training/curriculum.py
+uv run swarmecho-curriculum
 ```
 
 ### 3. Training a Single Level
 ```bash
-# Start Level 0 training with default settings
-uv run python src/training/train.py level=00
+# Start small-maze training with its level settings
+uv run swarmecho-train level=M01_small_maze
 
 # Overriding parameters via CLI
-uv run python src/training/train.py level=01 training.num_envs=512 logging.wandb_mode=online
+uv run swarmecho-train level=M01_small_maze training.num_envs=512 logging.wandb_mode=online
 ```
 
 ### 4. 2D Grid Maze Builder
 Launch the browser-based grid editor to draw maze walls and target no-spawn cells.
 ```bash
-uv run python src/curriculum_config/maps/scripts/maze_builder/maze_builder_server.py
+uv run swarmecho-maze-builder
 ```
 
 
 ### 5. Consolidated Map Preview & Renderer
 Render static blueprint images or simulated video/GIF rollouts of any map blueprint.
 ```bash
-uv run python src/visualize/render_preview.py M01_grid_maze
+uv run swarmecho-render M03_big_maze
 ```
 
 ### 6. Discovery & Analysis Dashboard
 Inspect training parameters, curriculum evolution, and evaluation videos across all runs.
 ```bash
-uv run streamlit run src/analysis/dashboard.py
+uv run swarmecho-dashboard
 ```
 
 ---
@@ -106,7 +105,8 @@ To maintain a clean separation of concerns, all deep-dive technical details have
 3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Deep dive into the 57-dimensional observation space, Euler physics, and continuous action clipping.
 4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
 5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.
-6. **[07_mappo_acc_architecture_defense.md](docs/07_mappo_acc_architecture_defense.md)**: Argument for the current MAPPO + Agent-Centric Critic architecture over privileged world-state alternatives.
+6. **[06_connectivity_investigation.md](docs/06_connectivity_investigation.md)**: Raw connectivity ownership findings and the deterministic before/after verification workflow.
+7. **[07_mappo_acc_architecture_defense.md](docs/07_mappo_acc_architecture_defense.md)**: Argument for the current MAPPO + Agent-Centric Critic architecture over privileged world-state alternatives.
 
 ---
 
@@ -118,24 +118,15 @@ outputs/
 └── {run_name}_{timestamp}/
     ├── checkpoints/
     │   └── ckpt_001000/    ← Orbax checkpoint (Flax NNX state dict)
-    └── videos/
-        └── eval_update_001000.mp4
+    └── artifacts/
+        ├── train/          ← scheduled training-evaluation artifacts
+        └── eval/           ← checkpoint-scoped evaluation artifacts
 ```
 
 ---
 
-## Core Self-Tests
+## Core Workflow Validation
 
 ```bash
-# Environment Smoke Test (RECOMMENDED)
-uv run python src/tests/smoke_test_env.py
-
-# Physics Engine Standalone
-uv run python src/env/physics.py
-
-# Observation Space Standalone
-uv run python src/env/observations.py
-
-# Neural Network Architecture
-uv run python src/models/mappo.py
+uv run swarmecho-validate
 ```

@@ -1,20 +1,20 @@
 # Multi-Agent RL & Training
 
-SwarmEcho uses a Multi-Agent Proximal Policy Optimization (MAPPO) framework. The architecture resides in `src/models/` and the training orchestrator in `src/training/`.
+SwarmEcho uses a Multi-Agent Proximal Policy Optimization (MAPPO) framework. Models reside in `src/swarmecho/models/` and training orchestration in `src/swarmecho/training/`.
 
 ## Neural Architecture
-*(Found in `src/models/mappo.py`, `src/models/actor.py`, and `src/models/critic.py`)*
+*(Found in `src/swarmecho/models/mappo.py`, `src/swarmecho/models/actor.py`, and `src/swarmecho/models/critic.py`)*
 
 The model framework is built using Flax (`nnx` API).
 
 ### 1. Decentralized Actor
-- Located in `src/models/actor.py`.
+- Located in `src/swarmecho/models/actor.py`.
 - **Local Policy**: The actor is represented by a shared MLP (typically 2-3 layers with LayerNorm and Tanh activations).
 - **Execution**: Each drone passes its own local observation (e.g., 57-dimensional vector) through the shared actor to sample a continuous force vector.
 - **Continuous Action Sampling**: Uses a diagonal Gaussian distribution to sample action vectors. These samples are squashed using a Tanh activation to lie cleanly within $(-1, 1)$ boundaries. The buffer stores the pre-squash sample $u_i$ directly, and standard Gaussian log-probabilities are computed over $u_i$. This avoids hard clipping gradient anomalies, and does not require explicit Tanh Jacobian correction because the correction terms cancel out in the PPO ratio.
 
 ### 2. Centralized Critic
-- Located in `src/models/critic.py`.
+- Located in `src/swarmecho/models/critic.py`.
 - During training, the critic views the concatenated observations of all $N$ agents to estimate state values.
 - The **Agent-Centric Critic (`AgentCentricCritic`)** estimates a unique value $V_i$ for each agent. It uses an MLP encoder followed by a masked multi-head cross-agent attention block (where agent $i$ attends to all other agents but not itself) and an MLP head to output a tensor of shape `(..., N)`.
 
@@ -43,7 +43,7 @@ The model framework is built using Flax (`nnx` API).
 - Recurrent PPO updates preserve rollout time order, replay actor/critic sequences from stored initial hidden states, and use clipped value loss on the recurrent path.
 
 ## Cooperative Team Reward And Local Credit
-*(Found in `src/env/rewards.py`)*
+*(Found in `src/swarmecho/env/rewards.py`)*
 
 SwarmEcho returns one reward value per agent. Some terms are shared team signals divided by `N`; others stay local for precise credit assignment:
 

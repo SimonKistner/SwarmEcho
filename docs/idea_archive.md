@@ -11,8 +11,10 @@ robustly when the area around the base no longer produced new-coverage
 information.
 
 The feature was removed because enabling it did not make agents learn to spread
-faster. Coverage observations were later removed altogether, which also removed
-the main reason for keeping this special reset behavior.
+faster. The coverage probe was later disabled in the maintained 2D levels,
+which removed the main reason for keeping this special reset behavior. The
+probe implementation itself remains temporarily available as a learning
+scaffold for early 3D development.
 
 ## Memory T-maze diagnostic suite
 
@@ -84,6 +86,42 @@ checkpoint-loading, evaluation, and renderer behavior.
 These aliases were removed because they duplicated current parameters, obscured
 which settings actually controlled a run, and were no longer used by maintained
 level configurations.
+
+## Per-frame observation CSV logging
+
+Evaluation videos could save every agent observation at every rendered step to
+a companion CSV. The writer assigned semantic column names using the former
+57-dimensional observation layout, including a fixed coverage block and radar
+offset.
+
+The feature was removed because the maintained observation layout is
+configurable and currently 37-dimensional, so the exported labels were
+structurally wrong. Raw per-frame observations were also unnecessary for the
+maintained evaluation workflow. Compact evaluation outcome CSVs remain the
+supported data export.
+
+## User-controlled adjacency storage
+
+The environment exposed a configuration switch that requested storage of the
+direct communication adjacency matrix in every state. It was useful for early
+diagnostics and connection-matrix video overlays.
+
+The switch was removed because adjacency availability is an internal runtime
+requirement, not a training choice. The maintained communication and
+wall-aware reward-routing workflow now retains one direct matrix in the
+current state. Reachability remains temporary, and evaluation reuses the
+transferred matrix rather than storing or reconstructing another graph.
+
+## Legacy A- and B-series levels
+
+The A-series provided early open-field, warehouse, and complex-maze tasks. The
+B-series provided two square relay curricula using the same map with slightly
+different training seeds.
+
+They were removed after the M-series became the maintained map and level
+family. Their geometry files, generated visibility caches, snapshot, default
+curriculum references, and documentation examples were removed with them so
+the active repository no longer presents two competing curriculum systems.
 
 ## Global mean critic
 
@@ -161,8 +199,8 @@ training-rollout collection and rendering path.
 Evaluation could either run episodes sequentially or as one parallel JAX batch.
 The sequential path also supported a first-come selective renderer: it simulated
 up to a configured maximum and filled fixed success and failure video buckets,
-including a special closest-to-corners success selection. A CSV loader and the
-failure-clustering pipeline could replay selected failed target coordinates.
+including a special closest-to-corners success selection. A CSV loader could
+replay selected failed target coordinates.
 
 These paths were removed because they duplicated evaluation semantics, coupled
 metric calculation to video selection, and selected coarse first-arriving
@@ -180,3 +218,41 @@ They were consolidated because multiple stopping authorities could disagree
 about when the same run or curriculum level was complete. The maintained rule
 is one optional early exit based on parallel evaluation success. Reaching it
 saves a handoff checkpoint and returns from training.
+
+## Spatial failure clustering
+
+Evaluation tooling could group failed target positions with either a
+distance-based breadth-first connected-components algorithm or HDBSCAN. It
+rendered colored failure clusters, outliers, and one representative target
+position per cluster.
+
+The feature was removed because it duplicated substantial analysis code and
+was not useful enough to justify maintaining it during the 3D transition.
+Evaluation CSVs and ordinary failure heatmaps remain. Spatial clustering may
+be reconsidered after the 3D workflow is working, using the maintained CSV as
+its input rather than coupling clustering to simulation.
+
+## Legacy M-series map alternatives
+
+The 2D curriculum accumulated overlapping maze and open-arena variants with
+inconsistent names. This included a 216 m grid maze without maze-cell metadata,
+an unused alternative tiny-maze topology, and an experimental open arena that
+used the coverage-observation scaffold.
+
+They were removed to leave one explicit progression from open space through
+large, medium, and small mazes. The modern cell-aware mazes were retained
+because the maintained discrete finder-path task depends on their cell
+metadata; the normal core-validation level remains as a separate run profile.
+
+## Heuristic VRAM safeguard
+
+Configuration loading could estimate a supposedly safe minibatch count, warn,
+or terminate the process based on fixed transitions-per-GiB constants. The
+training banner used a similar constant to print an estimated allocation.
+
+These checks were removed because memory use also depends on agent and
+observation dimensions, network architecture, recurrent state, optimizer
+state, and compiled execution details. The constants described one historical
+setup rather than a generally valid 2D or future 3D limit. Minibatch count is
+now explicit; real peak-memory measurements and CUDA out-of-memory errors are
+the authority when tuning a new workload.

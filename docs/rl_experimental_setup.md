@@ -57,7 +57,7 @@ Each agent $i$ receives a local observation vector of dimension $D = 9 + 16 + 4B
 The graph connectivity flags (`is_connected_to_base` and `is_connected_to_target`) are computed using JAX-parallelized matrix squaring of the adjacency matrix. The target position is masked until the target has been physically discovered by at least one connected drone; once discovered, this knowledge propagates along the communication chain and is persistently memorized by individual agents.
 
 ### 2.2 Neural Architecture
-The decentralized actor model is implemented in [actor.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/models/actor.py) as `DecentralizedActor`.
+The decentralized actor model is implemented in `src/swarmecho/models/actor.py` as `DecentralizedActor`.
 * **Trunk**: A Multi-Layer Perceptron (MLP) consisting of hidden layers of width $256$ with **Layer Normalization** and **Tanh activations** applied to each layer.
 * **Heads**: Two separate linear heads outputting:
   1. Mean vector: $\mu_i \in \mathbb{R}^2$
@@ -80,7 +80,7 @@ To ensure consistent policy evaluation during the training update step, the expe
 
 ## 3. Agent-Centric Centralized Critic (AAC)
 
-To resolve multi-agent credit assignment and eliminate self-loop bias, SwarmEcho uses an **Agent-Centric Centralized Critic** (`AgentCentricCritic` in [critic.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/models/critic.py)).
+To resolve multi-agent credit assignment and eliminate self-loop bias, SwarmEcho uses an **Agent-Centric Centralized Critic** (`AgentCentricCritic` in `src/swarmecho/models/critic.py`).
 
 ### 3.1 Network Architecture
 The critic processes the joint observation stack of all active agents $(o_1, \dots, o_N) \in \mathbb{R}^{N \times D}$ and outputs an individual value estimate $V_i \in \mathbb{R}$ for each agent $i$:
@@ -129,7 +129,7 @@ The critic processes the joint observation stack of all active agents $(o_1, \do
 
 ## 4. Cooperative Shortest-Path Reward Structure
 
-The reward function ([rewards.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/env/rewards.py)) generates a reward vector $R = [r_1, \dots, r_N]$ allocating specific dense and sparse signals.
+The reward function (`src/swarmecho/env/rewards.py`) generates a reward vector $R = [r_1, \dots, r_N]$ allocating specific dense and sparse signals.
 
 ### 4.1 Reward Components
 
@@ -177,14 +177,14 @@ This formulation guarantees that agents not actively participating in the commun
 
 ## 5. PPO Setup & Training Orchestration
 
-The training loop (coordinated by [runner.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/training/runner.py)) is JAX-native, scaling across parallelized environments.
+The training loop (coordinated by `src/swarmecho/training/runner.py`) is JAX-native, scaling across parallelized environments.
 
 ### 5.1 Rollout & Buffer Storage
 During the rollout phase:
 1. The policy interacts with $E = 4096$ parallel environments for a horizon of $T = 64$ steps.
 2. At step $t$, the actor maps current observations $O^t \in \mathbb{R}^{E \times N \times D}$ to pre-squash actions $U^t \in \mathbb{R}^{E \times N \times A}$ and log-probabilities $\log \pi(A^t | O^t) \in \mathbb{R}^{E \times N}$.
 3. The centralized critic computes the values $V^t \in \mathbb{R}^{E \times N}$ based on joint observations.
-4. Experience transitions are collected in a NumPy-backed rollout buffer ([mappo_buffer.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/training/mappo_buffer.py)).
+4. Experience transitions are collected in a NumPy-backed rollout buffer (`src/swarmecho/training/mappo_buffer.py`).
 
 ### 5.2 Generalized Advantage Estimation (GAE)
 At the end of a rollout, GAE is computed per-agent on the CPU. The TD-error $\delta_{i, e}^t$ and advantage $A_{i, e}^t$ for agent $i$ in environment $e$ at step $t$ are calculated as:
@@ -219,7 +219,7 @@ $$L_{\text{ENT}}(\theta) = \mathbb{E}_{\text{MB}}\left[ \frac{1}{N} \sum_{i=1}^N
 where $\mathcal{H}$ represents the entropy of the Tanh-squashed diagonal Gaussian policy.
 
 #### 4. Joint Loss Function
-The total loss minimized by the trainer ([mappo_trainer.py](file:///q:/_0_Projects/000_SwarmEcho/SwarmEcho/src/training/mappo_trainer.py)) is:
+The total loss minimized by the trainer (`src/swarmecho/training/mappo_trainer.py`) is:
 $$L_{\text{total}}(\theta, \phi) = L_{\text{CLIP}}(\theta) + c_1 L_{\text{VF}}(\phi) - c_2 L_{\text{ENT}}(\theta)$$
 where $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.01$ (entropy coefficient).
 

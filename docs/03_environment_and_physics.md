@@ -1,9 +1,9 @@
 # Environment & Physics
 
-The simulated geometric world of SwarmEcho relies on native JAX tensor operations optimized for rapid batching. Code relating to physical constraints resides in `src/env/`.
+The simulated geometric world of SwarmEcho relies on native JAX tensor operations optimized for rapid batching. Environment code resides in `src/swarmecho/env/`.
 
 ## Action Space
-*(Found in `src/env/physics.py`)*
+*(Found in `src/swarmecho/env/physics.py`)*
 
 Agents (drones) operate in a continuous 2D plane:
 $$a_t \in [-\text{max\_force}, \text{max\_force}]^2$$
@@ -13,7 +13,7 @@ $$a_t \in [-\text{max\_force}, \text{max\_force}]^2$$
 - The environment halts forward momentum completely (inelastic "bounce") if a drone cell hits an occupancy matrix wall.
 
 ## Permutation-Invariant Observation Space (57 Dimensions)
-*(Found in `src/env/observations.py`)*
+*(Found in `src/swarmecho/env/observations.py`)*
 
 Each drone receives an ego-centric overview combining geometric awareness with spatial radar mapping, preventing ordering bias.
 
@@ -28,7 +28,7 @@ Each drone receives an ego-centric overview combining geometric awareness with s
 Queries 16 radial points in a circle at `visual_radius + 1.0` (meter offset dynamically calculated from the visual range). If the coordinate in the occupancy grid has been "mapped" by the swarm historically, it returns `1.0` (else `0.0`). Acts as a navigational push toward undiscovered grid cells.
 
 ### C. Unified Radar (32 Dims)
-*(Powered by `src/env/raycast.py`)*
+*(Powered by `src/swarmecho/env/raycast.py`)*
 The continuous 360° vision is binned into 8 angular slices. For each slice, the closest signals degrade linearly via $\max(0, 1 - d / \text{radius})$ for 4 active channels (each normalized by its respective range limit):
 1. **Physical Walls**: Inverse distance to closest wall obstacle (normalized by `visual_radius`).
 2. **Nearest Teammate**: Inverse distance to any active teammate drone (normalized by `comm_radius`).

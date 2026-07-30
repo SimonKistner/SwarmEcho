@@ -26,6 +26,16 @@ assumption, add it at the most appropriate level.
 - Removed experiments are preserved as ideas and rationale, not as dormant
   implementation branches.
 
+### Transitional learning scaffolds
+
+- Base-vector, target-vector, and local coverage-probe observations are
+  temporary aids, comparable to training wheels. They are disabled in the
+  maintained 2D levels but retained for the beginning of the 3D transition,
+  where they may make early learning and diagnosis easier.
+- These observation aids are not part of the intended final product. Once 3D
+  training works without them, all three switches and their implementation
+  should be removed rather than becoming permanent optional features.
+
 ## Environment assumptions
 
 ### World and entities
@@ -50,6 +60,14 @@ assumption, add it at the most appropriate level.
   permanent base broadcast.
 - Communication connectivity is evaluated through the current multi-hop
   network, including the base and target endpoints.
+- Physics is the sole authority for direct wall-aware communication edges,
+  direct target visibility, and multi-hop base/target connectivity. Actor
+  observations, TarMAC, reward routing, and evaluation rendering consume that
+  result rather than rebuilding competing graphs.
+- Direct adjacency is retained in the current state because maintained reward
+  routing and communication consume it. Direct target visibility and the two
+  final connectivity flags are compact per-drone vectors. Full reachability
+  is temporary and is not stored across steps or in the rollout buffer.
 
 ## Reward assumptions
 
@@ -62,8 +80,8 @@ assumption, add it at the most appropriate level.
   computed.
 - Chain progress counts both the base-connected and target-connected fronts.
 - The dynamic chain-gap reward is assigned to one deterministically selected
-  shortest communication route. Equally short alternative routes do not all
-  receive that dynamic reward.
+  shortest wall-aware communication route from the physics graph. Equally
+  short alternative routes do not all receive that dynamic reward.
 - Non-contributing agents receive the configured maximum chain-gap penalty,
   divided by swarm size.
 
@@ -103,6 +121,10 @@ assumption, add it at the most appropriate level.
   `training`.
 - Checkpoints are tied to the maintained observation, model, and reward
   semantics; compatibility with removed experimental branches is not assumed.
+- The maintained 2D map progression is `M00_no_maze_open_square`,
+  `M03_big_maze`, `M02_mid_maze`, then `M01_small_maze`.
+- `M04_tiny_grid_maze_CORE_ONLY_TEST` is a validation run profile that uses
+  the maintained `M01_small_maze` map; its historic filename is not a fifth map.
 
 ## Technical assumptions
 

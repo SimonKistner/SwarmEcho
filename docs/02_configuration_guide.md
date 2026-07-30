@@ -3,7 +3,7 @@
 SwarmEcho uses a modular, layered configuration ecosystem. Default values are defined directly in Python dataclasses, and custom settings or difficulty levels are layered on top via YAML files.
 
 ## 1. Parameters & Where to Find Them
-Rather than a global YAML file, the baseline configurations are declared inside the structured JAX/Flax-compatible dataclasses in `src/core/config.py` (specifically `SwarmEchoConfig`). The configuration structure is separated into semantic domains:
+Rather than a global YAML file, baseline configurations are declared in the structured dataclasses in `src/swarmecho/core/config.py` (specifically `SwarmEchoConfig`). The configuration structure is separated into semantic domains:
 
 | Domain | Description / Usage |
 |---|---|
@@ -81,16 +81,14 @@ target groups into one found-and-delivered heatmap by default. Setting
 
 ## 2. Curriculum Overrides & Level Structure
 The training system scales difficulty sequentially via the `levels/` directory.
-- The structured defaults in `src/core/config.py` act as the overarching default configuration.
-- Level override files are located in `src/curriculum_config/levels/` and act as "patches". When a run scales to a new level, the configuration parameters from the level YAML overwrite the base definitions.
-- **Level Naming Conventions**:
-  - **A-Series (Hand-designed Levels)**: E.g., `A00_open_field.yaml` and `A01_warehouse.yaml` define manually curated maps and agent counts.
-  - **B-Series (Square relay levels)**: These pair explicit level configurations with square map definitions.
+- The structured defaults in `src/swarmecho/core/config.py` act as the overarching default configuration.
+- Level override files are located in `src/swarmecho/curriculum_config/levels/` and act as patches. The selected level YAML overrides the base definitions.
+- Maintained levels are the M-series maze/open-square configurations.
 
-## 3. Map Geometry (`src/curriculum_config/maps/`)
+## 3. Map Geometry (`src/swarmecho/curriculum_config/maps/`)
 Maps are fundamentally defined via YAML layouts (rooms, hallways, walls) which are then rasterized into boolean occupancy grids for simulation.
-- **The Grid Maze Builder:** A browser-based cell editor for drawing maze walls and target no-spawn cells. It creates matching map and level YAML files and remains a useful reference for future 3D map tooling. (`src/curriculum_config/maps/scripts/maze_builder/`)
-- **Validation Tools:** Scripts inside `src/curriculum_config/maps/scripts/` check generated and hand-authored maps for compatibility with the maintained environment rules.
+- **The Grid Maze Builder:** A browser-based cell editor for drawing maze walls and target no-spawn cells. It creates matching map and level YAML files and remains a useful reference for future 3D map tooling. (`src/swarmecho/curriculum_config/maps/scripts/maze_builder/`)
+- **Validation Tools:** Scripts inside `src/swarmecho/curriculum_config/maps/scripts/` check generated and hand-authored maps for compatibility with the maintained environment rules.
 
 Each map defines `spawn_zones.base`, `spawn_zones.drone`, and
 `spawn_zones.target` as `[x_min, y_min, x_max, y_max]`. Base, drone, and target
@@ -111,10 +109,12 @@ target positions. A single-point target zone remains valid when its point is
 free and outside all exclusions.
 
 ### Map Gallery Preview
-The curriculum dynamically scales by transitioning through these layouts:
+The retained level and map sequence is:
 
-| Level | Map Layout | N Agents | Description |
-| :---: | :---: | :---: | :---: |
-| **A00** | `open_field` | 8 | Open space, target and base are placed. |
-| **A01** | `warehouse` | 15 | Bulky obstacles (crates), requires coverage exploration. |
-| **B05a/B05b** | `square_B04_10m_comm_20m_base` | 8 | Square relay task with a map-defined circular target exclusion around the base. |
+1. `M00_no_maze_open_square`
+2. `M03_big_maze` (9×9 cells)
+3. `M02_mid_maze` (7×7 cells)
+4. `M01_small_maze` (5×5 cells)
+
+`M04_tiny_grid_maze_CORE_ONLY_TEST` remains a dedicated core validation
+profile and uses the retained `M01_small_maze` map.

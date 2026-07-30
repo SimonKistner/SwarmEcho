@@ -1,9 +1,9 @@
 # Analysis Tools & Dashboard
 
-Monitoring SwarmEcho requires visualizing multi-agent behaviors dynamically. We employ specialized scripts embedded inside `src/analysis/` and `src/visualize/`.
+Monitoring SwarmEcho requires visualizing multi-agent behaviors dynamically. The packaged tools live under `src/swarmecho/analysis/` and `src/swarmecho/visualize/`.
 
 ## Local Intelligence Dashboard
-*(Run via: `uv run streamlit run src/analysis/dashboard.py`)*
+*(Run via: `uv run swarmecho-dashboard`)*
 
 The `dashboard.py` script boots a robust Streamlit UI designed for auditing curricula directly targeting the `outputs/` folder. It provides:
 - **Core Intelligence Profiles:** Detailed metric extraction.
@@ -11,14 +11,14 @@ The `dashboard.py` script boots a robust Streamlit UI designed for auditing curr
 - **Video Inspection:** Watch baked JAX rollouts at specific curriculum levels.
 
 ## Visual Rendering 
-*(Powered by `src/visualize/`)*
+*(Powered by `src/swarmecho/visualize/`)*
 
 Video exports use the OpenCV rasterizer in `renderer_cv2.py`.
 `renderer.py` coordinates the interface that turns numerical JAX environment
 trajectories into MP4 evaluation files.
 
 ## Spatial Failure Analysis Pipeline
-*(Run via: `uv run python src/training/evaluate_pipeline.py checkpoint=<path>`)*
+*(Run via: `uv run swarmecho-evaluate-pipeline checkpoint=<path>`)*
 
 The high-throughput evaluation pipeline runs the configured parallel JAX evaluation batch to isolate spatial behavior. It follows the `evaluation` CSV and heatmap settings (which can also be overridden by its CLI flags) and writes enabled artifacts inside the run's evaluation folder:
 
@@ -29,10 +29,6 @@ The high-throughput evaluation pipeline runs the configured parallel JAX evaluat
   - **Visually Found, Not Delivered (Dark Blue BGR `(6, 119, 217)`):** Target coordinates that were successfully seen by a drone (and updated in `target_known`), but never successfully routed back to the base.
 - **Top Padded Legend Layout:** All heatmaps utilize a 60px top margin to print title stats and visual color legends, ensuring the blueprint remains un-cluttered.
 - **Validation Check:** During execution, a verification warning is printed to the console if the number of targets not visually found exceeds those not delivered.
-
-### Spatial Failure Clustering
-To isolate geographical patterns, `evaluate_pipeline.py` supports clustering spatial failures using **HDBSCAN** or **Breadth-First Search (BFS)** connected components:
-- **Clustered Failures Overlay (`[timestamp]_failed_targets_clustered.png`):** Automatically maps failed coordinates to identified density clusters (color-coded). Outliers / noise are marked in light gray. The geometric center / representative of each cluster is highlighted with a larger, black-bordered circle.
 
 ## W&B Dictionary Reference
 When training on Weights and Biases (`wandb`), the key metrics include:

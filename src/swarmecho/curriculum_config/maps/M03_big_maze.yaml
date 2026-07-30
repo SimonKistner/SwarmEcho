@@ -1,0 +1,116 @@
+# M03 Big Maze – 9×9 cell grid, 10 m per cell (= visual_radius × 2), 90×90 m total.
+# Base room: cell (4,4), centre at (45, 45).  Four open exits: N, S, E, W.
+# Cell size matches visual_radius * 2 so agents can see exactly to the next corridor wall.
+
+name: M03_big_maze
+width: 90.0
+height: 90.0
+
+# Coarse logical cells used to construct this maze. Finder-path tracking,
+# discrete chain rewards, path visualization, and preview grid lines all use
+# this grid, not the 1 m physics/coverage grid.
+maze_cell_grid:
+  cols: 9
+  rows: 9
+
+spawn_zones:
+  base:   [45.0,   45.0,   45.0,   45.0]
+  drone:  [45.0,   45.0,   45.0,   45.0]
+  target: [0.833,   0.833,  89.167,  89.167]
+
+# Target must be at least 1.25 m away from every wall (including world border) (scaled from 3.0 m).
+target_wall_clearance: 1.25
+
+# Target must NOT spawn inside the centre spawn room (the 10x10 m cell at
+# columns 4-5, rows 4-5, i.e. world coords 40-50, 40-50).
+target_exclude_zones:
+  - [30.417, 30.417, 60.0, 60.0]   # centre room + 10 m margin all sides (scaled from 16m margin / 24m cell)
+# Excludes the 2nd grid cell in each of the 4 corridors to prevent direct 1-drone connections
+  - [ 40.0, 60.0, 50.0, 70.0 ]       # North corridor extension (cell [4, 6])
+  - [ 40.0, 20.0, 50.0, 30.417 ]     # South corridor extension (cell [4, 2])
+  - [ 60.0, 40.0, 70.0, 50.0 ]       # East corridor extension  (cell [6, 4])
+  - [ 20.0, 40.0, 30.417, 50.0 ]     # West corridor extension  (cell [2, 4])
+
+rooms: []
+hallways: []
+walls:
+  # ── World border (fully closed, no exits) ──────────────────────────────────
+  - [0.0,   0.0,  90.0,   0.0]    # south border
+  - [90.0,  0.0,  90.0,  90.0]    # east border
+  - [90.0, 90.0,   0.0,  90.0]    # north border
+  - [0.0,  90.0,   0.0,   0.0]    # west border
+
+  # ── Horizontal walls  (y = (9-r)×10,  from JSON horizontal[r][c]) ─────────
+  # r=1  y=80
+  - [10.0,  80.0,  40.0,  80.0]  # c=1,2,3 merged
+  - [50.0,  80.0,  60.0,  80.0]  # c=5
+  - [70.0,  80.0,  80.0,  80.0]  # c=7
+
+  # r=2  y=70
+  - [0.0,   70.0,  10.0,  70.0]  # c=0
+  - [20.0,  70.0,  30.0,  70.0]  # c=2
+  - [40.0,  70.0,  50.0,  70.0]  # c=4
+  - [60.0,  70.0,  80.0,  70.0]  # c=6,7 merged
+
+  # r=3  y=60
+  - [10.0,  60.0,  20.0,  60.0]  # c=1
+  - [30.0,  60.0,  40.0,  60.0]  # c=3
+  - [50.0,  60.0,  60.0,  60.0]  # c=5
+  - [70.0,  60.0,  80.0,  60.0]  # c=7
+
+  # r=4  y=50  →  no interior walls (all open – base room row)
+
+  # r=5  y=40
+  - [0.0,   40.0,  30.0,  40.0]  # c=0,1,2 merged
+  - [80.0,  40.0,  90.0,  40.0]  # c=8
+
+  # r=6  y=30
+  - [10.0,  30.0,  20.0,  30.0]  # c=1
+  - [30.0,  30.0,  40.0,  30.0]  # c=3
+  - [50.0,  30.0,  60.0,  30.0]  # c=5
+  - [70.0,  30.0,  80.0,  30.0]  # c=7
+
+  # r=7  y=20
+  - [20.0,  20.0,  40.0,  20.0]  # c=2,3 merged
+  - [50.0,  20.0,  80.0,  20.0]  # c=5,6,7 merged
+
+  # r=8  y=10
+  - [10.0,  10.0,  60.0,  10.0]  # c=1,2,3,4,5 merged
+  - [70.0,  10.0,  80.0,  10.0]  # c=7
+
+  # ── Vertical walls  (x = c×10,  y from (8-r)×10 to (9-r)×10) ─────────────
+  # c=1  x=10
+  - [10.0, 70.0, 10.0, 80.0]   # r=1
+  - [10.0, 50.0, 10.0, 60.0]   # r=3
+  - [10.0, 30.0, 10.0, 40.0]   # r=5
+  - [10.0, 10.0, 10.0, 20.0]   # r=7
+
+  # c=2  x=20
+  - [20.0, 60.0, 20.0, 70.0]   # r=2
+  - [20.0, 40.0, 20.0, 50.0]   # r=4
+  - [20.0, 20.0, 20.0, 30.0]   # r=6
+
+  # c=3  x=30
+  - [30.0, 50.0, 30.0, 60.0]   # r=3
+  - [30.0, 30.0, 30.0, 40.0]   # r=5
+  - [30.0,  0.0, 30.0, 10.0]   # r=8
+
+  # c=4  x=40  (r=1,2 merged)
+  - [40.0, 60.0, 40.0, 80.0]   # r=1,2 merged
+
+  # c=5  x=50
+  - [50.0, 80.0, 50.0, 90.0]  # r=0
+  - [50.0, 20.0, 50.0, 30.0]  # r=6
+
+  # c=6  x=60  (r=1,2,3 merged)
+  - [60.0, 50.0, 60.0, 80.0]  # r=1,2,3 merged
+  - [60.0, 30.0, 60.0, 40.0]  # r=5
+
+  # c=7  x=70  (r=4,5 merged)
+  - [70.0, 30.0, 70.0, 50.0]  # r=4,5 merged
+  - [70.0, 10.0, 70.0, 20.0]  # r=7
+
+  # c=8  x=80
+  - [80.0, 70.0, 80.0, 80.0]  # r=1
+  - [80.0, 50.0, 80.0, 60.0]  # r=3
+  - [80.0, 20.0, 80.0, 30.0]  # r=6

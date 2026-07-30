@@ -1,7 +1,7 @@
 # `simpler_curr` Compared with `main`
 
 The remaining branch-specific changes concern finder-path state preservation
-and M04 evaluation settings.
+and small-maze evaluation settings.
 
 ## Finder-Path Fix
 
@@ -13,9 +13,9 @@ The branch now falls back to any preserved target-known path after the base
 already knows the target. This keeps the discrete finder-path reward state and
 evaluation highlighting available in resumed or delayed-render trajectories.
 
-## M04-Specific Configuration Changes
+## Small-Maze Configuration Changes
 
-In `src/curriculum_config/levels/M04_tiny_grid_maze.yaml`:
+In `src/swarmecho/curriculum_config/levels/M01_small_maze.yaml`:
 
 - The evaluation early-exit success threshold is `0.99`.
 - Evaluation video frequency is `9,999,999`, effectively suppressing periodic

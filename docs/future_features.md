@@ -4,8 +4,8 @@
 
 Add a renderer that selects evaluation episodes from the comprehensive
 evaluation CSV according to useful spatial or outcome criteria instead of
-the removed first-come success/failure buckets, corner special case, CSV target
-loader, or cluster-representative replay path. Candidate selections include:
+the removed first-come success/failure buckets, corner special case, or CSV
+target loader. Candidate selections include:
 
 - nearest failure to the base;
 - furthest successful target from the base;
