@@ -43,6 +43,7 @@ def mappo_loss(
     old_values:    jax.Array,   # (MB, N)
     advantages:    jax.Array,   # (MB, N)
     returns:       jax.Array,   # (MB, N)
+    critic_obs:    jax.Array,   # (MB, N, P), equals obs for legacy critic
     clip_eps:      float,
     vf_coef:       float,
     ent_coef:      float,
@@ -75,7 +76,7 @@ def mappo_loss(
     policy_loss = jnp.mean(jnp.maximum(pg_loss1, pg_loss2))
 
     # ── Critic path ─────────────────────────────────────────────────────────
-    new_values = model.critic(obs, deterministic=False)
+    new_values = model.critic(critic_obs, deterministic=False)
     value_loss = jnp.mean((new_values - returns) ** 2)
 
     # ── Entropy ─────────────────────────────────────────────────────────────
@@ -107,6 +108,7 @@ def recurrent_mappo_loss(
     old_values:      jax.Array,   # (T, B, N)
     advantages:      jax.Array,   # (T, B, N)
     returns:         jax.Array,   # (T, B, N)
+    critic_obs:      jax.Array,   # (T, B, N, P)
     rnn_resets:      jax.Array,   # (T, B, N)
     initial_actor_h: jax.Array,   # (B, N, H)
     initial_actor_signature: jax.Array | None,
@@ -190,13 +192,15 @@ def recurrent_mappo_loss(
 
     if model.critic_memory:
         _, new_values = model.critic.values_sequence(
-            obs,
+            critic_obs,
             initial_critic_h,
             rnn_resets,
             deterministic=False,
         )
     else:
-        flat_values = model.critic(obs.reshape(T * B, N, D), deterministic=False)
+        flat_values = model.critic(
+            critic_obs.reshape(T * B, N, critic_obs.shape[-1]), deterministic=False
+        )
         new_values = flat_values.reshape(old_values.shape)
 
     clipped_values = old_values + jnp.clip(new_values - old_values, -clip_eps, clip_eps)
@@ -233,6 +237,7 @@ def _mappo_step(
     old_values:    jax.Array,
     advantages:    jax.Array,
     returns:       jax.Array,
+    critic_obs:    jax.Array,
     *,
     clip_eps:  float,
     vf_coef:   float,
@@ -241,7 +246,7 @@ def _mappo_step(
     def loss_fn(m):
         return mappo_loss(
             m, obs, actions, old_log_probs, old_values,
-            advantages, returns, clip_eps, vf_coef, ent_coef,
+            advantages, returns, critic_obs, clip_eps, vf_coef, ent_coef,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, grads)
@@ -257,6 +262,7 @@ def _recurrent_mappo_step(
     old_values:      jax.Array,
     advantages:      jax.Array,
     returns:         jax.Array,
+    critic_obs:      jax.Array,
     rnn_resets:      jax.Array,
     initial_actor_h: jax.Array,
     initial_actor_signature: jax.Array | None,
@@ -275,7 +281,7 @@ def _recurrent_mappo_step(
     def loss_fn(m):
         return recurrent_mappo_loss(
             m, obs, actions, old_log_probs, old_values,
-            advantages, returns, rnn_resets,
+            advantages, returns, critic_obs, rnn_resets,
             initial_actor_h, initial_actor_signature, initial_actor_value, initial_critic_h,
             comm_masks, active_masks, base_signatures, base_values, base_memory_masks,
             clip_eps, vf_coef, ent_coef,
@@ -364,6 +370,7 @@ class MAPPOTrainer:
                     mb["old_values"],
                     mb["advantages"],
                     mb["returns"],
+                    mb["critic_obs"],
                     *((
                         mb["rnn_resets"],
                         mb["initial_actor_h"],
