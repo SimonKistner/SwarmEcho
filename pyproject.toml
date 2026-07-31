@@ -10,31 +10,48 @@ dependencies = [
     "flax>=0.10.0", # NNX API (modern Flax)
     "optax>=0.2.4", # Gradient transformations / optimizers
     "chex>=0.1.86", # Shape/dtype assertions + dataclass utils
+    "numpy>=1.26.0",
     # Config
     "omegaconf>=2.3.0", # Hierarchical YAML config with dot-notation + CLI overrides
+    "pyyaml>=6.0.0",
+    # Map loading and preprocessing
+    "pillow>=10.3.0",
+    "scipy>=1.13.0",
     # Logging & visualization
     "wandb>=0.18.0",
-    "matplotlib>=3.9.0",
     "opencv-python-headless>=4.9.0", # Fast OpenCV renderer
     "imageio[ffmpeg]>=2.35.0", # Video writing (no system ffmpeg dep needed)
+    "pandas>=2.2.0",
     # Checkpointing
     "orbax-checkpoint>=0.10.0", # Modern JAX checkpoint standard (DeepMind)
     "tqdm>=4.66.0",
     "streamlit>=1.56.0",
-    "scikit-learn>=1.3.0",
     "plotly>=6.0.0",
     "python-fasthtml>=0.14.3",
 ]
+
+[project.scripts]
+swarmecho-train = "swarmecho.training.train:main"
+swarmecho-multi-train = "swarmecho.training.multi_train:main"
+swarmecho-curriculum = "swarmecho.training.curriculum:run_curriculum"
+swarmecho-evaluate = "swarmecho.training.evaluate:main"
+swarmecho-evaluate-pipeline = "swarmecho.training.evaluate_pipeline:main"
+swarmecho-grid-search = "swarmecho.training.grid_search:main"
+swarmecho-render = "swarmecho.visualize.render_preview:main"
+swarmecho-validate = "swarmecho.training.validate_core_workflow:main"
+swarmecho-verify-connectivity = "swarmecho.training.verify_connectivity:main"
+swarmecho-maze-builder = "swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_server:main"
+swarmecho-verify-maze = "swarmecho.curriculum_config.maps.scripts.verify_chain_maze:main"
+swarmecho-dashboard = "swarmecho.analysis.launch:dashboard_main"
+swarmecho-eval-dashboard = "swarmecho.analysis.launch:eval_dashboard_main"
+swarmecho-artefacts = "swarmecho.analysis.artefacts.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/core", "src/env", "src/models", "src/training", "src/visualize", "src/curriculum_config", "src/tests"]
-
-[tool.hatch.build.targets.wheel.sources]
-"src" = ""
+packages = ["src/swarmecho"]
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
@@ -42,18 +59,10 @@ required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_6
 [tool.uv.pip]
 system = false  # always use the project's venv
 
-[dependency-groups]
-dev = [
-    "pytest>=9.0.3",
-]
-
 # ---------------------------------------------------------------------------
 # Development / linting extras (optional, not required for training)
 # ---------------------------------------------------------------------------
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.4.0",    # fast linter + formatter
-    "pytest>=8.2.0",
-    "streamlit>=1.35.0",
-    "pillow>=10.3.0",
+    "ruff>=0.4.0", # fast linter + formatter
 ]

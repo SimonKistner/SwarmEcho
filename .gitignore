@@ -15,6 +15,7 @@ build/
 .eggs/
 .agents/
 .codex/
+.aiassistant/
 
 # Virtual environments — these live inside WSL2 filesystem, NOT in this dir.
 # Included here for safety in case someone creates one locally.
