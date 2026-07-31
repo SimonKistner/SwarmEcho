@@ -200,7 +200,15 @@ def _broadcast_eval_metrics_to_remaining_wandb_steps(
 # Auto-reset step factory
 # ---------------------------------------------------------------------------
 
-def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_chain_for: int = 0, terminate_on_target_found: bool = False):
+def _make_autoreset_step(
+    env_step_fn,
+    reset_fn,
+    reward_fn,
+    max_steps: int,
+    hold_chain_for: int = 0,
+    terminate_on_target_found: bool = False,
+    success_bonus: float = 0.0,
+):
     """
     Wrap env_step to auto-reset on episode termination.
 
@@ -217,6 +225,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
     max_steps_jnp = jnp.int32(max_steps)
     hold_chain_for_jnp = jnp.int32(hold_chain_for)
     terminate_on_target_found_jnp = jnp.bool_(terminate_on_target_found)
+    success_bonus_jnp = jnp.float32(success_bonus)
 
     def step(state, actions):
         new_state = env_step_fn(state, actions)
@@ -245,8 +254,7 @@ def _make_autoreset_step(env_step_fn, reset_fn, reward_fn, max_steps: int, hold_
         target_found = info["global_target_found"] > jnp.float32(0.5)
         done = time_up | success_achieved | (terminate_on_target_found_jnp & target_found)
 
-        _, info_terminal = reward_fn(state, new_state, jnp.bool_(True))
-        reward_terminal  = info_terminal["r_success"] / reward.shape[0]  # Get per-agent bonus
+        reward_terminal = success_bonus_jnp / reward.shape[0]
         extra_bonus = jnp.where(
             success_achieved,
             reward_terminal,
@@ -786,7 +794,15 @@ def train(cfg: DictConfig):
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
-    autoreset_step   = _make_autoreset_step(env_step, reset, compute_reward, max_steps, hold_chain_for, terminate_on_target_found)
+    autoreset_step = _make_autoreset_step(
+        env_step,
+        reset,
+        compute_reward,
+        max_steps,
+        hold_chain_for,
+        terminate_on_target_found,
+        float(cfg.reward.success_bonus),
+    )
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
     reset_v          = jax.jit(jax.vmap(reset))

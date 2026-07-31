@@ -176,9 +176,8 @@ def collect_video_episode(
         success_achieved = held_steps >= (hold_chain_for + 1)
 
         if bool(success_achieved):
-            _, terminal_info = reward_fn(old_state, state, jnp.bool_(True))
             success_bonus_per_agent = (
-                np.array(terminal_info["r_success"]) / rewards.shape[0]
+                float(cfg.reward.success_bonus) / rewards.shape[0]
             )
             rewards = rewards + success_bonus_per_agent
 
@@ -387,9 +386,8 @@ def _run_parallel_evaluation_jit(
             )
             success_achieved = held_steps >= (hold_chain_for + 1)
 
-            _, terminal_info = reward_fn(old_state, state, jnp.bool_(True))
             success_bonus_per_agent = (
-                terminal_info["r_success"] / rewards.shape[0]
+                jnp.float32(cfg.reward.success_bonus) / rewards.shape[0]
             )
             rewards = jnp.where(
                 success_achieved & ~has_succeeded,
