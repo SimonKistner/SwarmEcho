@@ -1,7 +1,7 @@
 # SwarmEcho
 
 <p align="center">
-  <img src="docs/Preview_vid/demo_2x.gif" width="600" alt="SwarmEcho Behaviour Preview" />
+  <img src="docs/05_assets/Preview_vid/demo_2x.gif" width="600" alt="SwarmEcho Behaviour Preview" />
 </p>
 
 A **GPU-accelerated Multi-Agent Reinforcement Learning** environment built in JAX, training a drone swarm to explore a 2D environment and form a **delay-tolerant communication relay chain** between a base station and a discovered target.
@@ -105,15 +105,12 @@ uv run swarmecho-eval-dashboard
 
 ## Documentation Directory
 
-To maintain a clean separation of concerns, all deep-dive technical details have been modularized and moved into the `docs/` folder, directly mirroring the `src/` codebase structure:
+The deep-dive technical documentation is organized by topic in [`docs/`](docs/README.md):
 
-1. **[01_system_overview.md](docs/01_system_overview.md)**: High-level CTDE architectural layout and JAX `vmap` logic.
-2. **[02_configuration_guide.md](docs/02_configuration_guide.md)**: The single source of truth for global parameters, curriculum scale up, and map geometry.
-3. **[03_environment_and_physics.md](docs/03_environment_and_physics.md)**: Current 37-dimensional default observation space, optional transitional observation aids, Euler physics, and continuous action clipping.
-4. **[04_marl_and_training.md](docs/04_marl_and_training.md)**: Details the MAPPO execution loop, the Centralized Critic Self-Attention, and the exact team reward formulation.
-5. **[05_analysis_and_tools.md](docs/05_analysis_and_tools.md)**: Guide to using the local dashboard, exporting OpenCV render videos, and a reference for W&B logging dictionaries.
-6. **[06_connectivity_investigation.md](docs/06_connectivity_investigation.md)**: Raw connectivity ownership findings and the deterministic before/after verification workflow.
-7. **[07_mappo_acc_architecture_defense.md](docs/07_mappo_acc_architecture_defense.md)**: Argument for the current MAPPO + Agent-Centric Critic architecture over privileged world-state alternatives.
+- [Reference](docs/01_reference/): current system architecture, environment, training, and assumptions.
+- [Guides](docs/02_guide/): configuration, commands, and analysis tooling.
+- [Roadmap](docs/03_roadmap/): cleanup work and future features.
+- [Archive](docs/04_archive/): historical and experimental context.
 
 ---
 

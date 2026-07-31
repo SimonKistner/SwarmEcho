@@ -61,4 +61,4 @@ connectivity summaries, and persistent target knowledge. `ExplorationState`
 owns the 2D coverage grid. `RelayTaskState` owns chain progress and the
 discrete 2D finder-path arrays. Collision and coverage deltas are retained as
 per-step diagnostic signals because rewards consume them. See
-`docs/assumptions.md` for the architectural contract.
+`docs/01_reference/05_assumptions.md` for the architectural contract.

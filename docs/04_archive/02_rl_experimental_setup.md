@@ -4,6 +4,8 @@
 > for historical context only and is not the current source of configuration or
 > architecture truth. See the current configuration, environment, and training
 > guides for the maintained workflow.
+> 
+> It has REMARKABLY nice formatting though!
 
 ## Historical specification
 

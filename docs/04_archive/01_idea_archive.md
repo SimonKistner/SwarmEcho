@@ -206,7 +206,7 @@ These paths were removed because they duplicated evaluation semantics, coupled
 metric calculation to video selection, and selected coarse first-arriving
 examples rather than the most informative episodes. Parallel evaluation is now
 the only metric path, while an evaluation video is one independently collected
-episode. A future CSV-ranked renderer is recorded in `future_features.md`.
+episode. A future CSV-ranked renderer is recorded in `../03_roadmap/02_future_features.md`.
 
 ## Duplicate early-stopping controls
 

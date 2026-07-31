@@ -8,11 +8,11 @@ The project heavily utilizes functional separation. The core logic lives in `src
 
 ### Directory Mapping
 * **`src/swarmecho/core/`**: Core utilities and base configuration loading (`config.py`).
-* **`src/swarmecho/curriculum_config/`**: Contains the curriculum progression `levels/` and map geometry in `maps/`. Defaults are defined by structured dataclasses in `src/swarmecho/core/config.py`. See **[02_configuration_guide](02_configuration_guide.md)**.
-* **`src/swarmecho/env/`**: Houses the JAX physics simulator, raycasting, map rasterization, and agent-centric observations. See **[03_environment_and_physics](03_environment_and_physics.md)**.
-* **`src/swarmecho/models/`** and **`src/swarmecho/training/`**: MAPPO models, centralized critics, rollout buffers, and training/evaluation orchestration. See **[04_marl_and_training](04_marl_and_training.md)**.
-* **`src/swarmecho/analysis/`** and **`src/swarmecho/visualize/`**: Streamlit dashboards and OpenCV rendering used to inspect training and evaluation runs. See **[05_analysis_and_tools](05_analysis_and_tools.md)**.
-* **Architecture Defense**: Rationale for the current MAPPO + Agent-Centric Critic design over privileged world-state critics. See **[07_mappo_acc_architecture_defense](07_mappo_acc_architecture_defense.md)**.
+* **`src/swarmecho/curriculum_config/`**: Contains the curriculum progression `levels/` and map geometry in `maps/`. Defaults are defined by structured dataclasses in `src/swarmecho/core/config.py`. See **[01_configuration_guide](../02_guide/01_configuration_guide.md)**.
+* **`src/swarmecho/env/`**: Houses the JAX physics simulator, raycasting, map rasterization, and agent-centric observations. See **[02_environment_and_physics](02_environment_and_physics.md)**.
+* **`src/swarmecho/models/`** and **`src/swarmecho/training/`**: MAPPO models, centralized critics, rollout buffers, and training/evaluation orchestration. See **[03_marl_and_training](03_marl_and_training.md)**.
+* **`src/swarmecho/analysis/`** and **`src/swarmecho/visualize/`**: Streamlit dashboards and OpenCV rendering used to inspect training and evaluation runs. See **[02_analysis_and_tools](../02_guide/02_analysis_and_tools.md)**.
+* **Architecture Defense**: Rationale for the current MAPPO + Agent-Centric Critic design over privileged world-state critics. See **[04_mappo_acc_architecture_defense](04_mappo_acc_architecture_defense.md)**.
 
 ## Core Concepts
 ### Centralized Training, Decentralized Execution (CTDE)
