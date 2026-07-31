@@ -244,9 +244,13 @@ def ensure_map_preview_job(eval_root: Path, run_dir: Path, cfg: dict) -> None:
     )
 
 
-def point_tables(eval_root: Path) -> list[Path]:
+def evaluation_info_tables(eval_root: Path) -> list[Path]:
     data_dir = eval_root / "data"
-    return sorted(data_dir.glob("*.points.csv"), key=lambda p: p.name) if data_dir.exists() else []
+    return (
+        sorted(data_dir.glob("eval_info_*.csv"), key=lambda p: p.name)
+        if data_dir.exists()
+        else []
+    )
 
 
 def write_job(job_dir: Path, payload: dict) -> Path:
@@ -404,15 +408,19 @@ def render_target_picker(eval_root: Path, run_dir: Path, cfg: dict) -> None:
         customdata=list(zip(xs, ys)), hovertemplate="free target<br>x=%{x:.2f}<br>y=%{y:.2f}<extra></extra>",
     ))
 
-    table_paths = point_tables(eval_root)
+    table_paths = evaluation_info_tables(eval_root)
     wanted = []
     if mode == "Found overlay":
-        wanted = [p for p in table_paths if "found" in p.name or "delivered" in p.name]
+        wanted = [(p, "stage != 'not_found'") for p in table_paths]
     elif mode == "Chain overlay":
-        wanted = [p for p in table_paths if "chain" in p.name or "failed" in p.name]
-    for points_path in wanted:
+        wanted = [(p, "stage != 'chain_success'") for p in table_paths]
+    for points_path, condition in wanted:
         df = pd.read_csv(points_path)
-        if {"x", "y"}.issubset(df.columns):
+        if {"x", "y", "stage"}.issubset(df.columns):
+            if condition == "stage != 'not_found'":
+                df = df[df["stage"] != "not_found"]
+            else:
+                df = df[df["stage"] != "chain_success"]
             color = "#2563eb" if mode == "Found overlay" else "#f97316"
             fig.add_trace(go.Scattergl(
                 x=df["x"], y=df["y"], mode="markers", name=points_path.stem,

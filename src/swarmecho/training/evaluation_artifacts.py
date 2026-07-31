@@ -6,7 +6,6 @@ model construction, checkpoint loading, or simulation.
 
 from __future__ import annotations
 
-import csv
 import sys
 from pathlib import Path
 
@@ -15,7 +14,12 @@ import numpy as np
 import yaml
 
 from swarmecho.env.maps import MapDefinition
-from swarmecho.training.artifacts import artifact_suffix, save_eval_info_csv, write_manifest
+from swarmecho.training.artifacts import (
+    artifact_suffix,
+    load_eval_info_csv,
+    save_eval_info_csv,
+    write_manifest,
+)
 from swarmecho.training.evaluation import ParallelEvaluationResult
 from swarmecho.visualize.render_preview import _resolve_map_path, render_png
 
@@ -53,19 +57,6 @@ def load_map_data(cfg):
     return map_name, map_data, map_def
 
 
-def save_point_csv(path, positions, category, **extra_columns):
-    """Persist heatmap source points for dashboard overlays."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    extras = list(extra_columns.keys())
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["x", "y", "category", *extras])
-        for pos in positions:
-            writer.writerow([f"{pos[0]:.6f}", f"{pos[1]:.6f}", category, *[extra_columns[k] for k in extras]])
-    print(f"Saved heatmap point data to: {path.name}")
-
-
 def render_and_save_failed_chain_heatmap(
     failed_positions,
     map_data,
@@ -79,6 +70,7 @@ def render_and_save_failed_chain_heatmap(
     total_episodes=4096,
     manifest_dir=None,
     artifact_stem=None,
+    source_csv=None,
 ):
     """
     Render the failed-chain heatmap from in-memory evaluation results.
@@ -132,20 +124,18 @@ def render_and_save_failed_chain_heatmap(
             "total_episodes": int(total_episodes),
             "num_points": int(num_fail),
             "success_rate": None if success_rate is None else float(success_rate),
+            "data_path": None if source_csv is None else str(source_csv),
         })
 
     return heatmap_path
 
-def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096, data_dir=None, manifest_dir=None, artifact_stem=None):
+def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, found_rate, num_not_found, run_dir, video_dir, run_timestamp, filename_prefix, label, total_episodes=4096, manifest_dir=None, artifact_stem=None, source_csv=None):
     """
     Generates a secondary heatmap plotting target coordinates that were not found/delivered.
     Uses blue dots on the map, with a 60px top padding containing title stats and a color legend.
     """
     artifact_stem = artifact_stem or f"{run_timestamp}_{filename_prefix}"
-    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
-    points_path = data_dir / f"{artifact_stem}.points.csv"
     heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
-    save_point_csv(points_path, not_found_positions, filename_prefix, total_episodes=int(total_episodes), rate=float(found_rate))
 
     # Generate heatmap background
     background_img = render_png(
@@ -232,7 +222,7 @@ def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, fo
                 "kind": filename_prefix,
                 "label": label,
                 "image_path": str(heatmap_path),
-                "points_path": str(points_path),
+                "data_path": None if source_csv is None else str(source_csv),
                 "total_episodes": int(total_episodes),
                 "num_points": int(num_not_found),
                 "rate": float(found_rate),
@@ -241,7 +231,7 @@ def render_and_save_not_found_heatmap(not_found_positions, map_data, map_def, fo
 
 
 def render_and_save_found_and_delivered_heatmap(
-    not_delivered_positions,
+    visually_found_not_delivered_positions,
     not_visually_found_positions,
     map_data,
     map_def,
@@ -253,14 +243,12 @@ def render_and_save_found_and_delivered_heatmap(
     video_dir,
     run_timestamp,
     total_episodes=4096,
-    data_dir=None,
     manifest_dir=None,
     artifact_stem=None,
+    source_csv=None,
 ):
     """Render combined not-found and not-delivered target positions."""
     artifact_stem = artifact_stem or f"{run_timestamp}_found_and_delivered"
-    data_dir = Path(data_dir) if data_dir is not None else Path(video_dir)
-    points_path = data_dir / f"{artifact_stem}.points.csv"
     heatmap_path = Path(video_dir) / f"{artifact_stem}.png"
 
     if num_not_visually_found > num_not_delivered:
@@ -280,45 +268,21 @@ def render_and_save_found_and_delivered_heatmap(
     )
     overlay = background_img.copy()
     height = float(map_data["height"])
-    not_visually_found_set = {
-        tuple(pos) for pos in not_visually_found_positions
-    }
-
-    points_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(points_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "x",
-                "y",
-                "category",
-                "total_episodes",
-                "delivered_rate",
-                "visually_found_rate",
-            ]
-        )
-        for pos in not_delivered_positions:
-            category = (
-                "not_visually_found"
-                if tuple(pos) in not_visually_found_set
-                else "visually_found_not_delivered"
-            )
-            writer.writerow([f"{pos[0]:.6f}", f"{pos[1]:.6f}", category, int(total_episodes), float(delivered_rate), float(visually_found_rate)])
-    print(f"Saved heatmap point data to: {points_path.name}")
-
-    for pos in not_delivered_positions:
+    for pos in visually_found_not_delivered_positions:
         px = int(pos[0] * SCALE)
         py = int((height - pos[1]) * SCALE)
-        
-        # Check matching
-        if tuple(pos) in not_visually_found_set:
-            # Blue color in BGR is (235, 99, 37) (Harmonious Blue)
-            color = (235, 99, 37)
-        else:
-            # Orange color in BGR is (6, 119, 217) (Harmonious Orange)
-            color = (6, 119, 217)
-            
-        cv2.circle(overlay, (px, py), HEATMAP_DOT_RADIUS, color, -1, cv2.LINE_AA)
+        cv2.circle(
+            overlay, (px, py), HEATMAP_DOT_RADIUS, (6, 119, 217), -1,
+            cv2.LINE_AA,
+        )
+
+    for pos in not_visually_found_positions:
+        px = int(pos[0] * SCALE)
+        py = int((height - pos[1]) * SCALE)
+        cv2.circle(
+            overlay, (px, py), HEATMAP_DOT_RADIUS, (235, 99, 37), -1,
+            cv2.LINE_AA,
+        )
 
     heatmap_img = cv2.addWeighted(overlay, HEATMAP_ALPHA, background_img, 1.0 - HEATMAP_ALPHA, 0)
     
@@ -346,7 +310,7 @@ def render_and_save_found_and_delivered_heatmap(
             "type": "heatmap",
             "kind": "found_and_delivered",
             "image_path": str(heatmap_path),
-            "points_path": str(points_path),
+            "data_path": None if source_csv is None else str(source_csv),
             "total_episodes": int(total_episodes),
             "num_not_delivered": int(num_not_delivered),
             "num_not_visually_found": int(num_not_visually_found),
@@ -366,18 +330,13 @@ def write_training_evaluation_artifacts(
     update: int,
     steps_done: int,
 ) -> None:
-    """Write configured training-evaluation CSV and heatmaps from one result."""
-    save_eval_info = bool(
-        cfg.evaluation.get("save_eval_info_as_csv", False)
-    )
+    """Write canonical evaluation data and any configured heatmaps."""
     generate_any_heatmap = bool(
         cfg.evaluation.get("eval_failed_chain_heatmap", False)
         or cfg.evaluation.get(
             "eval_not_delivered_or_visually_found_heatmap", False
         )
     )
-    if not (save_eval_info or generate_any_heatmap):
-        return
 
     target_positions = np.asarray(result.final_state.physics.target_pos)
     base_positions = np.asarray(result.final_state.physics.base_pos)
@@ -387,28 +346,40 @@ def write_training_evaluation_artifacts(
     total_episodes = len(successes)
     suffix = artifact_suffix(update, steps_done)
 
-    if save_eval_info:
-        try:
-            info_path = save_eval_info_csv(
-                data_dir / f"eval_info_{suffix}.csv",
-                target_positions=target_positions,
-                base_positions=base_positions,
-                successes=successes,
-            )
-            print(
-                f"  [eval-csv] Saved {total_episodes} episodes to: "
-                f"{info_path.name}"
-            )
-        except Exception as exc:
-            print(
-                "  [eval-csv-error] Failed to save evaluation information: "
-                f"{exc}"
-            )
+    try:
+        info_path = save_eval_info_csv(
+            data_dir / f"eval_info_{suffix}.csv",
+            target_positions=target_positions,
+            base_positions=base_positions,
+            successes=successes,
+            delivered=delivered,
+            visually_found=visually_found,
+        )
+        print(
+            f"  [eval-csv] Saved {total_episodes} episodes to: "
+            f"{info_path.name}"
+        )
+    except Exception as exc:
+        print(
+            "  [eval-csv-error] Failed to save evaluation information: "
+            f"{exc}"
+        )
+        return
 
     if not generate_any_heatmap:
         return
 
     try:
+        records = load_eval_info_csv(info_path)
+        target_positions = records["positions"]
+        stages = records["stages"]
+        successes = stages == "chain_success"
+        delivered = np.isin(
+            stages,
+            ("found_and_delivered", "chain_success"),
+        )
+        visually_found = stages != "not_found"
+        total_episodes = len(stages)
         _, map_data, map_def = load_map_data(cfg)
         chain_dir = artifact_root / "chain_heatmaps"
         found_dir = artifact_root / "found_heatmaps"
@@ -429,6 +400,7 @@ def write_training_evaluation_artifacts(
                 total_episodes=total_episodes,
                 manifest_dir=manifest_dir,
                 artifact_stem=f"failed_chain_{suffix}",
+                source_csv=info_path,
             )
 
         if not cfg.evaluation.get(
@@ -447,8 +419,13 @@ def write_training_evaluation_artifacts(
         visually_found_rate = float(np.mean(visually_found) * 100.0)
 
         if not split_in_two:
+            visually_found_not_delivered = target_positions[
+                (~delivered) & visually_found
+            ]
             render_and_save_found_and_delivered_heatmap(
-                not_delivered_positions=not_delivered,
+                visually_found_not_delivered_positions=(
+                    visually_found_not_delivered
+                ),
                 not_visually_found_positions=not_visually_found,
                 map_data=map_data,
                 map_def=map_def,
@@ -460,9 +437,9 @@ def write_training_evaluation_artifacts(
                 video_dir=found_dir,
                 run_timestamp=suffix,
                 total_episodes=total_episodes,
-                data_dir=data_dir,
                 manifest_dir=manifest_dir,
                 artifact_stem=f"found_and_delivered_{suffix}",
+                source_csv=info_path,
             )
             return
 
@@ -478,9 +455,9 @@ def write_training_evaluation_artifacts(
             filename_prefix="delivered",
             label="Not Delivered",
             total_episodes=total_episodes,
-            data_dir=data_dir,
             manifest_dir=manifest_dir,
             artifact_stem=f"delivered_{suffix}",
+            source_csv=info_path,
         )
         render_and_save_not_found_heatmap(
             not_found_positions=not_visually_found,
@@ -494,9 +471,9 @@ def write_training_evaluation_artifacts(
             filename_prefix="found",
             label="Not Visually Found",
             total_episodes=total_episodes,
-            data_dir=data_dir,
             manifest_dir=manifest_dir,
             artifact_stem=f"found_{suffix}",
+            source_csv=info_path,
         )
     except Exception as exc:
         print(

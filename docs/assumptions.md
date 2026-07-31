@@ -114,8 +114,10 @@ assumption, add it at the most appropriate level.
 - An evaluation video contains exactly one independently collected episode. It
   is not selected from, and need not reproduce an episode in, the parallel
   metric batch.
-- Saved evaluation CSV rows describe realized episode positions and outcomes,
-  not a separate target-generation policy.
+- Saved evaluation CSV rows always describe realized episode positions and
+  terminal stages (`not_found`, `visually_found`, `found_and_delivered`, or
+  `chain_success`), not a separate target-generation policy. Their
+  target-to-base distance is computed from the realized base position.
 - Evaluation, video, heatmap, and checkpoint-saving schedules are configured
   under `evaluation`. Checkpoint loading and branch/resume behavior remain under
   `training`.

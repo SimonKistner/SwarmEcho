@@ -256,3 +256,16 @@ state, and compiled execution details. The constants described one historical
 setup rather than a generally valid 2D or future 3D limit. Minibatch count is
 now explicit; real peak-memory measurements and CUDA out-of-memory errors are
 the authority when tuning a new workload.
+
+## Heatmap point-table CSVs
+
+Heatmap generation previously wrote separate `*.points.csv` files containing
+repeated aggregate rates for each plotted coordinate. They were a partial,
+ambiguous view of the same evaluation batch and could drift from the heatmap
+that generated them.
+
+They were replaced with one always-written per-episode evaluation CSV. Each
+row records target coordinates, realized target-to-base distance, and one
+terminal stage: `not_found`, `visually_found`, `found_and_delivered`, or
+`chain_success`. Heatmaps and the analysis dashboard now filter that canonical
+record, leaving one inspectable source of truth for spatial outcomes.

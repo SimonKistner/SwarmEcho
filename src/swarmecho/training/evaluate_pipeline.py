@@ -19,7 +19,6 @@ Usage:
 """
 
 import sys
-import csv
 import time
 from pathlib import Path
 import numpy as np
@@ -30,8 +29,8 @@ from swarmecho.core.config import load_config, validate_config
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
     eval_checkpoint_artifact_root,
+    load_eval_info_csv,
     save_eval_info_csv,
-    write_manifest,
 )
 from swarmecho.training.evaluation import evaluate_parallel
 from swarmecho.training.evaluation_artifacts import (
@@ -45,7 +44,6 @@ from swarmecho.training.runtime import build_evaluation_runtime
 # ==============================================================================
 # Pipeline Artifact Output Toggles
 # ==============================================================================
-CREATE_CSV = None                    # None = use evaluation.save_eval_info_as_csv
 CREATE_FAILED_CHAIN_HEATMAP = None   # None = use evaluation.eval_failed_chain_heatmap
 CREATE_NOT_DELIVERED_HEATMAP = None  # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
 CREATE_NOT_VISUALLY_FOUND_HEATMAP = None # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
@@ -53,10 +51,8 @@ CREATE_NOT_VISUALLY_FOUND_HEATMAP = None # None = use evaluation.eval_not_delive
 # ==============================================================================
 # Pipeline Configuration Constants
 # ==============================================================================
-# 1. Parallel simulation parameters
+# Parallel simulation parameters
 SEED = 42                   # Random seed for env reset and model initialization
-SCALE = 8.0                 # Resolution scale (pixels per world-meter) for map image
-SHOW_SPAWN_ZONES = False    # Set to False to disable target/base spawn zones overlay
 
 # Resolved from evaluation.eval_not_deliv_not_visual_splitt_in_two in main().
 COMBINE_FOUND_AND_DELIVERED_HEATMAPS = True
@@ -79,7 +75,7 @@ def setup_model_and_env(cfg, checkpoint_path):
     )
 
 
-def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, track_delivered=True, track_visual=True):
+def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward):
     """Run the public parallel evaluator and extract analysis arrays."""
     num_envs = int(cfg.evaluation.eval_parallel_envs)
     eval_key = jax.random.PRNGKey(SEED)
@@ -95,7 +91,6 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
 
     # Calculate Stats
     num_success = int(jnp.sum(result.final_successes))
-    num_fail = num_envs - num_success
     success_rate = (num_success / num_envs) * 100.0
     print(f"         Successes:      {num_success}/{num_envs} ({success_rate:.2f}%)")
 
@@ -104,74 +99,30 @@ def run_parallel_eval(model, cfg, env_step, reset, compute_obs, compute_reward, 
     base_positions = np.array(result.final_state.physics.base_pos)
     success_mask = np.array(result.final_successes, dtype=bool)
 
-    failed_mask = ~success_mask
-    failed_positions = target_positions[failed_mask]
+    delivered_mask = np.array(result.final_delivered, dtype=bool)
+    num_delivered = int(np.sum(delivered_mask))
+    delivered_rate = (num_delivered / num_envs) * 100.0
+    print(f"         Delivered:      {num_delivered}/{num_envs} ({delivered_rate:.2f}%)")
 
-    if track_delivered:
-        num_delivered = int(jnp.sum(result.final_delivered))
-        num_not_delivered = num_envs - num_delivered
-        delivered_rate = (num_delivered / num_envs) * 100.0
-        print(f"         Delivered:      {num_delivered}/{num_envs} ({delivered_rate:.2f}%)")
-        not_delivered_mask = np.array(~result.final_delivered)
-        not_delivered_positions = target_positions[not_delivered_mask]
-    else:
-        num_delivered = 0
-        num_not_delivered = 0
-        delivered_rate = 0.0
-        not_delivered_positions = np.zeros((0, 2))
-
-    if track_visual:
-        num_visually_found = int(jnp.sum(result.final_visually_found))
-        num_not_visually_found = num_envs - num_visually_found
-        visually_found_rate = (num_visually_found / num_envs) * 100.0
-        print(f"Results: Visually Found: {num_visually_found}/{num_envs} ({visually_found_rate:.2f}%)")
-        not_visually_found_mask = np.array(~result.final_visually_found)
-        not_visually_found_positions = target_positions[not_visually_found_mask]
-    else:
-        num_visually_found = 0
-        num_not_visually_found = 0
-        visually_found_rate = 0.0
-        not_visually_found_positions = np.zeros((0, 2))
+    visually_found_mask = np.array(result.final_visually_found, dtype=bool)
+    num_visually_found = int(np.sum(visually_found_mask))
+    visually_found_rate = (num_visually_found / num_envs) * 100.0
+    print(f"Results: Visually Found: {num_visually_found}/{num_envs} ({visually_found_rate:.2f}%)")
 
     return (
-        failed_positions, not_delivered_positions, not_visually_found_positions,
-        success_rate, delivered_rate, visually_found_rate,
-        num_fail, num_not_delivered, num_not_visually_found,
-        target_positions, base_positions, success_mask,
+        target_positions,
+        base_positions,
+        success_mask,
+        delivered_mask,
+        visually_found_mask,
     )
-
-
-def load_failures_from_csv(csv_path):
-    """Load failed target coordinates from a comprehensive evaluation CSV."""
-    failed_positions = []
-    with open(csv_path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        required_columns = {"x", "y", "success"}
-        if not required_columns.issubset(set(reader.fieldnames or [])):
-            raise ValueError(
-                f"Evaluation CSV must contain columns {sorted(required_columns)}: {csv_path}"
-            )
-        for row in reader:
-            try:
-                succeeded = row["success"].strip().lower() in {"1", "true", "yes"}
-                if not succeeded:
-                    failed_positions.append((float(row["x"]), float(row["y"])))
-            except (AttributeError, TypeError, ValueError):
-                continue
-    return failed_positions
-
-
-def find_eval_csvs(data_dir):
-    """Return comprehensive evaluation CSVs."""
-    data_dir = Path(data_dir)
-    return list(data_dir.glob("eval_info_*.csv"))
 
 
 def main():
     # Generate Run-Start Timestamp for consistent output file labeling
     run_timestamp = time.strftime("%Y_%m_%d_%H_%M")
 
-    global CREATE_CSV, CREATE_FAILED_CHAIN_HEATMAP, CREATE_NOT_DELIVERED_HEATMAP, CREATE_NOT_VISUALLY_FOUND_HEATMAP, COMBINE_FOUND_AND_DELIVERED_HEATMAPS
+    global CREATE_FAILED_CHAIN_HEATMAP, CREATE_NOT_DELIVERED_HEATMAP, CREATE_NOT_VISUALLY_FOUND_HEATMAP, COMBINE_FOUND_AND_DELIVERED_HEATMAPS
 
     # Parse CLI Arguments
     args = sys.argv[1:]
@@ -185,10 +136,6 @@ def main():
             overrides.append("visualize.render_conn_matrix=true")
         elif arg.lower() in ["connectivity=false", "conn_matrix=false", "--no-connectivity", "--no-conn-matrix"]:
             overrides.append("visualize.render_conn_matrix=false")
-        elif arg.lower() in ["csv=true", "--csv"]:
-            CREATE_CSV = True
-        elif arg.lower() in ["csv=false", "--no-csv"]:
-            CREATE_CSV = False
         elif arg.lower() in ["heatmap=true", "--heatmap"]:
             CREATE_FAILED_CHAIN_HEATMAP = True
             CREATE_NOT_DELIVERED_HEATMAP = True
@@ -220,9 +167,6 @@ def main():
         overrides = overrides,
     )
     validate_config(cfg)
-    num_envs = int(cfg.evaluation.eval_parallel_envs)
-    if CREATE_CSV is None:
-        CREATE_CSV = bool(cfg.evaluation.get("save_eval_info_as_csv", False))
     if CREATE_FAILED_CHAIN_HEATMAP is None:
         CREATE_FAILED_CHAIN_HEATMAP = bool(cfg.evaluation.get("eval_failed_chain_heatmap", False))
     if CREATE_NOT_DELIVERED_HEATMAP is None:
@@ -246,128 +190,103 @@ def main():
     manifest_dir = artifact_root / "manifests"
 
     # Map blueprint files
-    map_name, map_data, map_def = load_map_data(cfg)
+    _, map_data, map_def = load_map_data(cfg)
 
     # Initialize environment, model, and load checkpoint weights
     model, env_step, reset, compute_obs, compute_reward = setup_model_and_env(cfg, checkpoint_path)
 
     # ── Dependency Resolution & Execution Plan ────────────────────────────
-    # Resolve CSV candidates early
-    csv_candidates = find_eval_csvs(data_dir)
+    (
+        target_positions,
+        base_positions,
+        success_mask,
+        delivered_mask,
+        visually_found_mask,
+    ) = run_parallel_eval(
+        model, cfg, env_step, reset, compute_obs, compute_reward,
+    )
 
-    # We need to run parallel JAX simulation sweep if:
-    #   CREATE_CSV is requested (to get fresh evaluation data) OR we want to render either of the target-not-found heatmaps
-    run_sweep = CREATE_CSV or CREATE_NOT_DELIVERED_HEATMAP or CREATE_NOT_VISUALLY_FOUND_HEATMAP
+    eval_info_path = save_eval_info_csv(
+        data_dir / f"eval_info_{artifact_tag}.csv",
+        target_positions=target_positions,
+        base_positions=base_positions,
+        successes=success_mask,
+        delivered=delivered_mask,
+        visually_found=visually_found_mask,
+    )
+    print(f"Saved {len(target_positions)} evaluation episode(s) to: {eval_info_path.name}")
 
-    # PREREQUISITE FALLBACK CHECK:
-    # If the user wants to load from CSV (run_sweep = False), but no CSV actually exists:
-    # We must force the simulation sweep to run to generate evaluation data.
-    if not run_sweep:
-        if not csv_candidates:
-            print("\n[Prerequisite Warning] CREATE_CSV is False but no pre-existing CSV was found in output directory.")
-            print("                       Forcing JAX parallel simulation sweep to generate coordinates.")
-            run_sweep = True
+    # Heatmaps intentionally consume the just-written canonical record rather
+    # than parallel in-memory tables, so their inputs remain inspectable.
+    records = load_eval_info_csv(eval_info_path)
+    target_positions = records["positions"]
+    stages = records["stages"]
+    total_episodes = len(stages)
+    success_mask = stages == "chain_success"
+    delivered_mask = np.isin(stages, ("found_and_delivered", "chain_success"))
+    visually_found_mask = stages != "not_found"
+    failed_positions = target_positions[~success_mask]
+    not_delivered_positions = target_positions[~delivered_mask]
+    not_visually_found_positions = target_positions[~visually_found_mask]
+    visually_found_not_delivered_positions = target_positions[
+        (~delivered_mask) & visually_found_mask
+    ]
+    success_rate = float(np.mean(success_mask) * 100.0)
+    delivered_rate = float(np.mean(delivered_mask) * 100.0)
+    visually_found_rate = float(np.mean(visually_found_mask) * 100.0)
 
-    # Load or simulate coordinates
-    failed_positions = None
-    not_delivered_positions = None
-    not_visually_found_positions = None
-    success_rate = None
-    delivered_rate = None
-    visually_found_rate = None
-    num_fail = None
-    num_not_delivered = None
-    num_not_visually_found = None
-
-    if run_sweep:
-        (failed_positions, not_delivered_positions, not_visually_found_positions,
-         success_rate, delivered_rate, visually_found_rate,
-         num_fail, num_not_delivered, num_not_visually_found,
-         target_positions, base_positions, success_mask) = run_parallel_eval(
-            model, cfg, env_step, reset, compute_obs, compute_reward,
-            track_delivered=CREATE_NOT_DELIVERED_HEATMAP,
-            track_visual=CREATE_NOT_VISUALLY_FOUND_HEATMAP
-        )
-        
-        print("\n--- Phase 2: Processing Swept Coordinates ---")
-
-        if CREATE_CSV:
-            eval_info_path = save_eval_info_csv(
-                data_dir / f"eval_info_{artifact_tag}.csv",
-                target_positions=target_positions,
-                base_positions=base_positions,
-                successes=success_mask,
-            )
-            print(f"Saved {len(target_positions)} evaluation episode(s) to: {eval_info_path.name}")
-
-        # Check if we should combine visually not found and not delivered heatmaps
-        if COMBINE_FOUND_AND_DELIVERED_HEATMAPS:
-            if CREATE_NOT_DELIVERED_HEATMAP or CREATE_NOT_VISUALLY_FOUND_HEATMAP:
-                print("\n--- Phase 2a/b: Generating Found-and-Delivered Heatmap overlay ---")
-                render_and_save_found_and_delivered_heatmap(
-                    not_delivered_positions=not_delivered_positions,
-                    not_visually_found_positions=not_visually_found_positions,
-                    map_data=map_data,
-                    map_def=map_def,
-                    delivered_rate=delivered_rate,
-                    visually_found_rate=visually_found_rate,
-                    num_not_delivered=num_not_delivered,
-                    num_not_visually_found=num_not_visually_found,
-                    run_dir=run_dir,
-                    video_dir=found_heatmaps_dir,
-                    run_timestamp=run_timestamp,
-                    total_episodes=num_envs,
-                    data_dir=data_dir,
-                    manifest_dir=manifest_dir,
-                    artifact_stem=f"found_and_delivered_{artifact_tag}"
-                )
-        else:
-            # 1. Visually Found Heatmap (Phase 2a)
-            if CREATE_NOT_VISUALLY_FOUND_HEATMAP:
-                print("\n--- Phase 2a: Generating Visually-Found Heatmap overlay ---")
-                render_and_save_not_found_heatmap(
-                    not_visually_found_positions, map_data, map_def, visually_found_rate, num_not_visually_found, 
-                    run_dir, found_heatmaps_dir, run_timestamp, "found", "Not Visually Found",
-                    total_episodes=num_envs, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"found_{artifact_tag}"
-                )
-
-            # 2. Delivered Heatmap (Phase 2b)
-            if CREATE_NOT_DELIVERED_HEATMAP:
-                print("\n--- Phase 2b: Generating Delivered-To-Base Heatmap overlay ---")
-                render_and_save_not_found_heatmap(
-                    not_delivered_positions, map_data, map_def, delivered_rate, num_not_delivered, 
-                    run_dir, found_heatmaps_dir, run_timestamp, "delivered", "Not Delivered",
-                    total_episodes=num_envs, data_dir=data_dir, manifest_dir=manifest_dir, artifact_stem=f"delivered_{artifact_tag}"
-                )
-
-        # 3. Failed Chain Heatmap (Phase 2c)
-        if CREATE_FAILED_CHAIN_HEATMAP:
-            print("\n--- Phase 2c: Generating Failed Chain Heatmap overlay ---")
-            _ = render_and_save_failed_chain_heatmap(
-                failed_positions, map_data, map_def, success_rate, num_fail, run_dir, chain_heatmaps_dir, run_timestamp,
-                save_png=True, total_episodes=num_envs,
-                manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
+    if COMBINE_FOUND_AND_DELIVERED_HEATMAPS:
+        if CREATE_NOT_DELIVERED_HEATMAP or CREATE_NOT_VISUALLY_FOUND_HEATMAP:
+            print("\n--- Generating Found-and-Delivered Heatmap overlay ---")
+            render_and_save_found_and_delivered_heatmap(
+                visually_found_not_delivered_positions=(
+                    visually_found_not_delivered_positions
+                ),
+                not_visually_found_positions=not_visually_found_positions,
+                map_data=map_data,
+                map_def=map_def,
+                delivered_rate=delivered_rate,
+                visually_found_rate=visually_found_rate,
+                num_not_delivered=len(not_delivered_positions),
+                num_not_visually_found=len(not_visually_found_positions),
+                run_dir=run_dir,
+                video_dir=found_heatmaps_dir,
+                run_timestamp=run_timestamp,
+                total_episodes=total_episodes,
+                manifest_dir=manifest_dir,
+                artifact_stem=f"found_and_delivered_{artifact_tag}",
+                source_csv=eval_info_path,
             )
     else:
-        # Load from the latest CSV
-        csv_path = max(csv_candidates, key=lambda p: p.stat().st_mtime)
-        print(f"\nLoading failed target positions from CSV: {csv_path.name}")
-        failed_positions = np.array(load_failures_from_csv(csv_path))
-        num_fail = len(failed_positions)
-
-        if CREATE_FAILED_CHAIN_HEATMAP:
-            print("\n--- Phase 2: Generating failed chain heatmap overlay from loaded CSV ---")
-            _ = render_and_save_failed_chain_heatmap(
-                failed_positions, map_data, map_def, success_rate=None, num_fail=num_fail, 
-                run_dir=run_dir, video_dir=chain_heatmaps_dir, run_timestamp=run_timestamp,
-                save_png=True, total_episodes=num_envs,
-                manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}"
+        if CREATE_NOT_VISUALLY_FOUND_HEATMAP:
+            print("\n--- Generating Visually-Found Heatmap overlay ---")
+            render_and_save_not_found_heatmap(
+                not_visually_found_positions, map_data, map_def,
+                visually_found_rate, len(not_visually_found_positions),
+                run_dir, found_heatmaps_dir, run_timestamp, "found",
+                "Not Visually Found", total_episodes=total_episodes,
+                manifest_dir=manifest_dir, artifact_stem=f"found_{artifact_tag}",
+                source_csv=eval_info_path,
+            )
+        if CREATE_NOT_DELIVERED_HEATMAP:
+            print("\n--- Generating Delivered-To-Base Heatmap overlay ---")
+            render_and_save_not_found_heatmap(
+                not_delivered_positions, map_data, map_def,
+                delivered_rate, len(not_delivered_positions), run_dir,
+                found_heatmaps_dir, run_timestamp, "delivered", "Not Delivered",
+                total_episodes=total_episodes, manifest_dir=manifest_dir,
+                artifact_stem=f"delivered_{artifact_tag}", source_csv=eval_info_path,
             )
 
-        if CREATE_NOT_DELIVERED_HEATMAP:
-            print("\n[Prerequisite Warning] Delivered-to-base heatmap cannot be generated when loading from static CSV.")
-        if CREATE_NOT_VISUALLY_FOUND_HEATMAP:
-            print("\n[Prerequisite Warning] Visually-found heatmap cannot be generated when loading from static CSV.")
+    if CREATE_FAILED_CHAIN_HEATMAP:
+        print("\n--- Generating Failed Chain Heatmap overlay ---")
+        render_and_save_failed_chain_heatmap(
+            failed_positions, map_data, map_def, success_rate,
+            len(failed_positions), run_dir, chain_heatmaps_dir, run_timestamp,
+            save_png=True, total_episodes=total_episodes,
+            manifest_dir=manifest_dir, artifact_stem=f"failed_chain_{artifact_tag}",
+            source_csv=eval_info_path,
+        )
 
     print("\nEvaluation pipeline complete.")
 

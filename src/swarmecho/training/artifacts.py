@@ -11,6 +11,14 @@ from typing import Any
 import numpy as np
 
 
+EVAL_STAGES = (
+    "not_found",
+    "visually_found",
+    "found_and_delivered",
+    "chain_success",
+)
+
+
 def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
     """Return the update encoded in checkpoint-like names such as ckpt_000700."""
     name = Path(name_or_path).name
@@ -75,34 +83,79 @@ def save_eval_info_csv(
     target_positions: Any,
     base_positions: Any,
     successes: Any,
+    delivered: Any,
+    visually_found: Any,
 ) -> Path:
-    """Save compact, per-episode information from a parallel evaluation."""
+    """Save the canonical per-episode result of a parallel evaluation."""
     targets = np.asarray(target_positions, dtype=np.float32).reshape((-1, 2))
     bases = np.asarray(base_positions, dtype=np.float32)
     if bases.shape == (2,):
         bases = np.broadcast_to(bases, targets.shape)
     else:
         bases = bases.reshape((-1, 2))
-    outcomes = np.asarray(successes, dtype=bool).reshape((-1,))
+    successes = np.asarray(successes, dtype=bool).reshape((-1,))
+    delivered = np.asarray(delivered, dtype=bool).reshape((-1,))
+    visually_found = np.asarray(visually_found, dtype=bool).reshape((-1,))
 
-    if len(targets) != len(bases) or len(targets) != len(outcomes):
+    if not (
+        len(targets)
+        == len(bases)
+        == len(successes)
+        == len(delivered)
+        == len(visually_found)
+    ):
         raise ValueError(
-            "Evaluation CSV arrays must contain the same number of targets, bases, and outcomes."
+            "Evaluation CSV arrays must contain one target, base, and outcome "
+            "for every evaluated episode."
         )
 
+    stages = np.full(len(successes), "not_found", dtype="<U21")
+    stages[visually_found] = "visually_found"
+    stages[delivered] = "found_and_delivered"
+    stages[successes] = "chain_success"
     distances = np.linalg.norm(targets - bases, axis=-1)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["x", "y", "success", "distance_to_base"])
+        writer.writerow(["x", "y", "stage", "distance_to_base"])
         writer.writerows(
             (
                 f"{target[0]:.6f}",
                 f"{target[1]:.6f}",
-                "true" if success else "false",
+                stage,
                 f"{distance:.6f}",
             )
-            for target, success, distance in zip(targets, outcomes, distances)
+            for target, stage, distance in zip(targets, stages, distances)
         )
     return path
+
+
+def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
+    """Load one canonical evaluation CSV for artifact filtering or analysis."""
+    path = Path(path)
+    positions: list[tuple[float, float]] = []
+    stages: list[str] = []
+    distances: list[float] = []
+    with path.open("r", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        required = {"x", "y", "stage", "distance_to_base"}
+        if not required.issubset(set(reader.fieldnames or [])):
+            raise ValueError(
+                f"Evaluation CSV must contain {sorted(required)}: {path}"
+            )
+        for row in reader:
+            stage = str(row["stage"])
+            if stage not in EVAL_STAGES:
+                raise ValueError(
+                    f"Unknown evaluation stage {stage!r} in {path}"
+                )
+            positions.append((float(row["x"]), float(row["y"])))
+            stages.append(stage)
+            distances.append(float(row["distance_to_base"]))
+
+    return {
+        "positions": np.asarray(positions, dtype=np.float32).reshape((-1, 2)),
+        "stages": np.asarray(stages, dtype="<U21"),
+        "distance_to_base": np.asarray(distances, dtype=np.float32),
+    }

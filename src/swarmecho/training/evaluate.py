@@ -147,14 +147,15 @@ def evaluate_checkpoint(
     artifact_tag = checkpoint_artifact_suffix(checkpoint_path, cfg)
     manifest_dir = artifact_root / "manifests"
 
-    if bool(cfg.evaluation.get("save_eval_info_as_csv", False)):
-        info_path = save_eval_info_csv(
-            artifact_root / "data" / f"eval_info_{artifact_tag}.csv",
-            target_positions=np.asarray(result.final_state.physics.target_pos),
-            base_positions=np.asarray(result.final_state.physics.base_pos),
-            successes=np.asarray(result.final_successes),
-        )
-        print(f"  eval_csv:     {info_path}")
+    info_path = save_eval_info_csv(
+        artifact_root / "data" / f"eval_info_{artifact_tag}.csv",
+        target_positions=np.asarray(result.final_state.physics.target_pos),
+        base_positions=np.asarray(result.final_state.physics.base_pos),
+        successes=np.asarray(result.final_successes),
+        delivered=np.asarray(result.final_delivered),
+        visually_found=np.asarray(result.final_visually_found),
+    )
+    print(f"  eval_csv:     {info_path}")
 
     del result
     gc.collect()

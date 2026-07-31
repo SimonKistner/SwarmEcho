@@ -24,11 +24,16 @@ It does NOT validate:
 A successful run therefore proves only that this one maintained vertical slice
 completed without an exception.  Any omitted surface may still be broken by a
 past or future change.
+
+Pass `keep_outputs=true` (or `--keep-outputs`) to retain the timestamped run
+directory and inspect its checkpoint, CSV, heatmap, and video artifacts. Without
+that flag, the validator removes its own run directory after a successful pass.
 """
 
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 from swarmecho.core.config import load_config, validate_config
@@ -57,7 +62,16 @@ def remove_validation_run(run_dir: Path, cfg) -> None:
     shutil.rmtree(resolved_run_dir)
 
 
+def keep_validation_outputs() -> bool:
+    """Return whether the caller explicitly requested retained artifacts."""
+    return any(
+        argument.lower() in {"keep_outputs=true", "--keep-outputs"}
+        for argument in sys.argv[1:]
+    )
+
+
 def main() -> None:
+    keep_outputs = keep_validation_outputs()
     cfg = load_config(
         cli_overrides=True,
         overrides=["level=VALIDATION_core_workflow"],
@@ -95,8 +109,11 @@ def main() -> None:
             "Validation passed, but its run directory could not be resolved "
             "safely for cleanup."
         )
-    remove_validation_run(run_dir, cfg)
-    print(f"  cleaned validation run: {run_dir}")
+    if keep_outputs:
+        print(f"  kept validation run: {run_dir}")
+    else:
+        remove_validation_run(run_dir, cfg)
+        print(f"  cleaned validation run: {run_dir}")
 
 
 if __name__ == "__main__":

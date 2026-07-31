@@ -133,7 +133,6 @@ class EvalConfig:
     eval_video_offset: int = 1
 
     # --- Evaluation data and heatmaps ---
-    save_eval_info_as_csv: bool = False
     eval_failed_chain_heatmap: bool = True
     eval_not_delivered_or_visually_found_heatmap: bool = True
     eval_not_deliv_not_visual_splitt_in_two: bool = False

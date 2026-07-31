@@ -13,8 +13,8 @@ target loader. Candidate selections include:
 - spatial outliers or representatives of dense failure regions.
 
 The evaluation CSV already provides the initial data needed for these
-selections: target coordinates, success/failure outcome, and Euclidean
-target-to-base distance. A future implementation should finish the full
+selections: target coordinates, one of four terminal outcome stages, and
+Euclidean target-to-base distance. A future implementation should finish the full
 parallel evaluation first, rank its rows, and only then collect videos for the
 chosen targets. This keeps metric collection independent of rendering.
 

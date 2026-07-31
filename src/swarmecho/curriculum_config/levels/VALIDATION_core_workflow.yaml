@@ -44,7 +44,6 @@ evaluation:
   eval_video_freq: 1
   eval_video_offset: 0
 
-  save_eval_info_as_csv: true
   eval_failed_chain_heatmap: true
   eval_not_delivered_or_visually_found_heatmap: true
 

@@ -89,6 +89,6 @@ uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_
 ### Run Evaluation Sweep & Generate Heatmaps
 Simulate the configured parallel evaluation batch, save comprehensive target/outcome/distance data, and generate heatmaps (failed chain targets, and found-and-delivered or split target-not-found heatmaps):
 ```bash
-uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_001000 evaluation.save_eval_info_as_csv=true
+uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_001000
 ```
 

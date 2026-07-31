@@ -27,7 +27,7 @@ trajectories into MP4 evaluation files.
 The high-throughput evaluation pipeline runs the configured parallel JAX evaluation batch to isolate spatial behavior. It follows the `evaluation` CSV and heatmap settings (which can also be overridden by its CLI flags) and writes enabled artifacts inside the run's evaluation folder:
 
 - **Failed Chain Targets Heatmap (`failed_chain_<update>_<steps>.png`):** Plots red dots for target positions where the shortest-chain relay to the base station could not be completed and held.
-- **Evaluation Information CSV (`eval_info_<update>_<steps>.csv`):** Records every evaluated target position, success/failure outcome, and Euclidean target-to-base distance.
+- **Evaluation Information CSV (`eval_info_<update>_<steps>.csv`):** Records every evaluated target position, its terminal stage (`not_found`, `visually_found`, `found_and_delivered`, or `chain_success`), and Euclidean target-to-base distance. Heatmaps are filtered from this CSV rather than saving separate point tables.
 - **Found-and-Delivered Heatmap (`found_and_delivered_<update>_<steps>.png`):** Combines two key target-spawner failure metrics onto a single blueprint by default:
   - **Not Visually Found (Sky Blue BGR `(235, 99, 37)`):** Target coordinates that were never visually seen by any drone in the swarm.
   - **Visually Found, Not Delivered (Dark Blue BGR `(6, 119, 217)`):** Target coordinates that were successfully seen by a drone (and updated in `target_known`), but never successfully routed back to the base.

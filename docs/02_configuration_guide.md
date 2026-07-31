@@ -46,7 +46,6 @@ settings live under `evaluation`:
 | `eval_video` | `true` | Enables evaluation video rendering. Each video event collects and renders exactly one episode. |
 | `eval_video_freq` | `20` | Evaluation-video frequency in training updates. |
 | `eval_video_offset` | `1` | Update offset applied to the video schedule. |
-| `save_eval_info_as_csv` | `false` | After each parallel evaluation, saves every target position, its success outcome, and its Euclidean distance to the episode's actual base position. |
 | `eval_failed_chain_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where the shortest chain was not successfully completed/held. |
 | `eval_not_delivered_or_visually_found_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not successfully delivered or not visually found. |
 | `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one found-and-delivered heatmap. |
@@ -58,10 +57,12 @@ settings live under `evaluation`:
 During training, the evaluation CSV is written under `artifacts/train/data`;
 manual checkpoint evaluation writes it under that checkpoint's
 `artifacts/eval/.../data` folder. A filename such as
-`eval_info_u000700_s00070M.csv` contains `x`, `y`, `success`, and
-`distance_to_base`. Collection is performed once after the parallel evaluation
-batch; it does not add work to the simulation loop. Evaluation heatmap and
-video filenames use synchronized update/step suffixes such as
+`eval_info_u000700_s00070M.csv` contains `x`, `y`, `stage`, and
+`distance_to_base`. `stage` is one of `not_found`, `visually_found`,
+`found_and_delivered`, or `chain_success`. Collection is performed once after
+the parallel evaluation batch; it does not add work to the simulation loop.
+Heatmaps are filtered from this canonical CSV. Evaluation heatmap and video
+filenames use synchronized update/step suffixes such as
 `u000700_s00070M`.
 
 When `early_exit` is reached, training always saves a handoff checkpoint and
