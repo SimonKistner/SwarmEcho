@@ -412,7 +412,7 @@ def _collect_rollout_mappo(
     if last_dones is None:
         last_dones = np.zeros(buf.E, dtype=bool)
     buf.reset(actor_h, critic_h, actor_signature, actor_value)
-    E, N = buf.E, buf.N
+    E = buf.E
     if model.actor_memory and model.memory_comm_enabled:
         if actor_signature is None:
             actor_signature = model.initial_actor_signature((E,))
@@ -450,6 +450,38 @@ def _collect_rollout_mappo(
     completed_r_found    = []
     completed_r_succ     = []
     completed_coverage   = []
+
+    # Keep the complete rollout device-resident while its kernels are queued.
+    # Converting individual step results to NumPy here would synchronize the
+    # host with the accelerator once (or several times) per environment step.
+    rollout_device = {
+        "obs": [],
+        "actions": [],
+        "log_probs": [],
+        "values": [],
+        "rewards": [],
+        "dones": [],
+        "rnn_resets": [],
+        "comm_masks": [],
+        "active_masks": [],
+        "base_signatures": [],
+        "base_values": [],
+        "base_memory_masks": [],
+    }
+    info_device = {
+        name: [] for name in (
+            "fully_connected",
+            "global_target_found",
+            "chain_gap_dist",
+            "chain_progress_pct",
+            "r_coverage",
+            "r_chain_gap",
+            "r_collision",
+            "r_target_found",
+            "r_success",
+            "global_coverage",
+        )
+    }
     for t in range(T):
         key, act_key = jax.random.split(key)
 
@@ -536,27 +568,60 @@ def _collect_rollout_mappo(
         # Scale to physical space ONLY for the env step
         states, rewards_b, dones_b, info = autoreset_step_v(states, squashed_b * max_force)
 
-        rewards_np = np.array(rewards_b)
-        dones_np   = np.array(dones_b).astype(bool)
+        rollout_device["obs"].append(obs_batch)
+        rollout_device["actions"].append(actions_b)
+        rollout_device["log_probs"].append(log_probs_b)
+        rollout_device["values"].append(values_b)
+        rollout_device["rewards"].append(rewards_b)
+        rollout_device["dones"].append(dones_b)
+        if recurrent:
+            rollout_device["rnn_resets"].append(reset_agents_b)
+        if recurrent and model.actor_memory and model.memory_comm_enabled:
+            rollout_device["comm_masks"].append(comm_mask_b)
+            rollout_device["active_masks"].append(active_mask_b)
+            rollout_device["base_signatures"].append(base_signature_b)
+            rollout_device["base_values"].append(base_value_b)
+            rollout_device["base_memory_masks"].append(base_receiver_mask_b)
+        for name in info_device:
+            info_device[name].append(info[name])
 
-        ep_ret_accum     += rewards_np
-        ep_len_accum     += 1
-        ep_success_accum  = np.maximum(ep_success_accum, np.array(info["fully_connected"]))
-        found_metric = np.array(info["global_target_found"])
-        ep_found_accum    = np.maximum(ep_found_accum, found_metric)
-        ep_gap_accum      = np.array(info["chain_gap_dist"])
-        ep_prog_pct_accum  = np.array(info["chain_progress_pct"])
+        if recurrent and model.actor_memory and model.memory_comm_enabled:
+            done_j = dones_b.astype(bool)
+            base_signature = jnp.where(done_j[:, None], jnp.zeros_like(base_signature), base_signature)
+            base_value = jnp.where(done_j[:, None], jnp.zeros_like(base_value), base_value)
+            base_memory_valid = jnp.where(done_j, False, base_memory_valid)
+        last_dones = dones_b
 
-        # Track reward components
-        r_coverage_accum += np.array(info["r_coverage"])
-        r_gap_accum      += np.array(info["r_chain_gap"])
-        r_coll_accum     += np.array(info["r_collision"])
-        r_found_accum    += np.array(info["r_target_found"])
-        r_succ_accum     += np.array(info["r_success"])
-        cov_accum         = np.array(info["global_coverage"])
+    # One bulk transfer replaces the per-array, per-step NumPy conversions.
+    # Episode accounting and the existing CPU rollout buffer retain exactly the
+    # same values and ordering as before.
+    rollout_host, info_host = jax.device_get((
+        {
+            name: jnp.stack(values)
+            for name, values in rollout_device.items()
+            if values
+        },
+        {name: jnp.stack(values) for name, values in info_device.items()},
+    ))
 
-        done_envs = np.where(dones_np)[0]
-        for e in done_envs:
+    for t in range(T):
+        rewards_np = rollout_host["rewards"][t]
+        dones_np = rollout_host["dones"][t].astype(bool)
+
+        ep_ret_accum += rewards_np
+        ep_len_accum += 1
+        ep_success_accum = np.maximum(ep_success_accum, info_host["fully_connected"][t])
+        ep_found_accum = np.maximum(ep_found_accum, info_host["global_target_found"][t])
+        ep_gap_accum = info_host["chain_gap_dist"][t]
+        ep_prog_pct_accum = info_host["chain_progress_pct"][t]
+        r_coverage_accum += info_host["r_coverage"][t]
+        r_gap_accum += info_host["r_chain_gap"][t]
+        r_coll_accum += info_host["r_collision"][t]
+        r_found_accum += info_host["r_target_found"][t]
+        r_succ_accum += info_host["r_success"][t]
+        cov_accum = info_host["global_coverage"][t]
+
+        for e in np.where(dones_np)[0]:
             completed_returns.append(float(ep_ret_accum[e].sum()))
             completed_lengths.append(int(ep_len_accum[e]))
             completed_success.append(float(ep_success_accum[e]))
@@ -570,42 +635,33 @@ def _collect_rollout_mappo(
             completed_r_succ.append(float(r_succ_accum[e]))
             completed_coverage.append(float(cov_accum[e]))
 
-        ep_ret_accum     = np.where(dones_np[:, None], 0.0, ep_ret_accum)
-        ep_len_accum     = np.where(dones_np, 0,   ep_len_accum)
+        ep_ret_accum = np.where(dones_np[:, None], 0.0, ep_ret_accum)
+        ep_len_accum = np.where(dones_np, 0, ep_len_accum)
         ep_success_accum = np.where(dones_np, 0.0, ep_success_accum)
-        ep_found_accum   = np.where(dones_np, 0.0, ep_found_accum)
-        ep_gap_accum     = np.where(dones_np, 0.0, ep_gap_accum)  # reset so next ep starts clean
+        ep_found_accum = np.where(dones_np, 0.0, ep_found_accum)
+        ep_gap_accum = np.where(dones_np, 0.0, ep_gap_accum)
         ep_prog_pct_accum = np.where(dones_np, 0.0, ep_prog_pct_accum)
-
         r_coverage_accum = np.where(dones_np, 0.0, r_coverage_accum)
-        r_gap_accum      = np.where(dones_np, 0.0, r_gap_accum)
-        r_coll_accum     = np.where(dones_np, 0.0, r_coll_accum)
-        r_found_accum    = np.where(dones_np, 0.0, r_found_accum)
-        r_succ_accum     = np.where(dones_np, 0.0, r_succ_accum)
-        cov_accum        = np.where(dones_np, 0.0, cov_accum)
+        r_gap_accum = np.where(dones_np, 0.0, r_gap_accum)
+        r_coll_accum = np.where(dones_np, 0.0, r_coll_accum)
+        r_found_accum = np.where(dones_np, 0.0, r_found_accum)
+        r_succ_accum = np.where(dones_np, 0.0, r_succ_accum)
+        cov_accum = np.where(dones_np, 0.0, cov_accum)
 
-
-        # Store normalised actions in the buffer
         buf.add(MAPPOTransition(
-            obs       = np.array(obs_batch),
-            actions   = np.array(actions_b),   # [-1, 1]
-            log_probs = np.array(log_probs_b),
-            values    = np.array(values_b),
-            rewards   = rewards_np,
-            dones     = dones_np.astype(np.float32),
-            rnn_resets = np.array(reset_agents_b) if recurrent else None,
-            comm_masks = np.array(comm_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
-            active_masks = np.array(active_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
-            base_signatures = np.array(base_signature_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
-            base_values = np.array(base_value_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
-            base_memory_masks = np.array(base_receiver_mask_b) if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            obs=rollout_host["obs"][t],
+            actions=rollout_host["actions"][t],
+            log_probs=rollout_host["log_probs"][t],
+            values=rollout_host["values"][t],
+            rewards=rewards_np,
+            dones=dones_np.astype(np.float32),
+            rnn_resets=rollout_host["rnn_resets"][t] if recurrent else None,
+            comm_masks=rollout_host["comm_masks"][t] if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            active_masks=rollout_host["active_masks"][t] if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_signatures=rollout_host["base_signatures"][t] if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_values=rollout_host["base_values"][t] if recurrent and model.actor_memory and model.memory_comm_enabled else None,
+            base_memory_masks=rollout_host["base_memory_masks"][t] if recurrent and model.actor_memory and model.memory_comm_enabled else None,
         ))
-        if recurrent and model.actor_memory and model.memory_comm_enabled:
-            done_j = jnp.asarray(dones_np, dtype=bool)
-            base_signature = jnp.where(done_j[:, None], jnp.zeros_like(base_signature), base_signature)
-            base_value = jnp.where(done_j[:, None], jnp.zeros_like(base_value), base_value)
-            base_memory_valid = jnp.where(done_j, False, base_memory_valid)
-        last_dones = dones_np
 
     # Bootstrap value for last state
     last_obs    = obs_fn_v(states)
@@ -1304,4 +1360,3 @@ def train(cfg: DictConfig):
         if wandb_run:
             import wandb
             wandb.finish()
-

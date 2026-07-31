@@ -158,28 +158,32 @@ class MAPPORolloutBuffer:
         returns    : (T, E, N)
         """
         last_value_np = np.asarray(last_value)   # (E, N)
-        last_done_np  = np.asarray(last_done)    # (E,)
+        # ``last_done`` is retained for API compatibility.  This buffer stores
+        # done *after* each transition, so the authoritative bootstrap mask for
+        # every timestep (including the final one) is self._dones[t].
+        _ = last_done
 
         advantages = np.zeros_like(self._values)
 
         gae = np.zeros((self.E, self.N), dtype=np.float32)
-        last_nonterminal = (1.0 - last_done_np)[:, None]
-
         for t in reversed(range(self.T)):
             if t == self.T - 1:
                 next_values      = last_value_np
-                next_nonterminal = last_nonterminal
             else:
                 next_values      = self._values[t + 1]
-                next_nonterminal = (1.0 - self._dones[t + 1])[:, None]
+
+            # dones[t] describes the transition from state_t to state_{t+1}.
+            # Masking with dones[t + 1] leaks values and advantages across an
+            # auto-reset boundary and suppresses the valid bootstrap one step
+            # before that boundary.
+            next_nonterminal = (1.0 - self._dones[t])[:, None]
 
             delta = (
                 self._rewards[t]
                 + self.gamma * next_values * next_nonterminal
                 - self._values[t]
             )
-            done_mask = (1.0 - self._dones[t])[:, None]
-            gae = delta + self.gamma * self.gae_lambda * next_nonterminal * gae * done_mask
+            gae = delta + self.gamma * self.gae_lambda * next_nonterminal * gae
             advantages[t] = gae
 
         returns = advantages + self._values
