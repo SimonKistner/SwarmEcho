@@ -31,7 +31,7 @@ training:
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 6302026950
+  seed: 994300728
 
   #checkpoint_path: "outputs/previous_run/checkpoints/ckpt_001000"  # if set, resumes training from this path
   #ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
@@ -41,6 +41,7 @@ network:
   actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
   critic_memory: true
+  critic_type: "privileged" #      str = "observation"  # "observation" (legacy) or "privileged"
   memory_comm_enabled: true
   memory_comm_every_k_steps: 5
   tarmac_sig_dim: 16
