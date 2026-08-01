@@ -152,6 +152,8 @@ class NetworkConfig:
     actor_num_layers: int = 3    # actor depth (lighter, separate)
     actor_memory:     bool = True  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = True  # if True, agent-centric critic uses per-agent GRU memory
+    critic_type:      str = "observation"  # "observation" (legacy) or "privileged"
+    critic_map_resolution: int = 64  # max semantic-map side for privileged CNN
 
     # --- Recurrent communication ---
     memory_comm_enabled: bool = True
@@ -446,6 +448,10 @@ def validate_config(cfg: DictConfig) -> None:
 
     if bool(cfg.network.memory_comm_enabled) and not bool(cfg.network.actor_memory):
         raise ValueError("network.memory_comm_enabled=true requires network.actor_memory=true.")
+    if str(cfg.network.get("critic_type", "observation")) not in {"observation", "privileged"}:
+        raise ValueError("network.critic_type must be 'observation' or 'privileged'.")
+    if int(cfg.network.get("critic_map_resolution", 64)) < 16:
+        raise ValueError("network.critic_map_resolution must be >= 16.")
     if int(cfg.network.memory_comm_every_k_steps) < 1:
         raise ValueError("network.memory_comm_every_k_steps must be >= 1.")
     if int(cfg.network.tarmac_sig_dim) < 1:

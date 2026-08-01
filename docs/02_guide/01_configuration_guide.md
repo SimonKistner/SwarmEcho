@@ -21,11 +21,35 @@ The recurrent MAPPO extension is controlled from `network`:
 |---|---:|---|
 | `actor_memory` | `true` | Uses the maintained per-agent GRU actor. |
 | `critic_memory` | `true` | Uses the maintained per-agent GRU critic before cross-agent attention. |
+| `critic_type` | `observation` | `observation` preserves the original joint-observation critic exactly; `privileged` adds exact simulator tokens and a semantic-map CNN during training only. |
+| `critic_map_resolution` | `64` | Maximum side length of the privileged semantic map; smaller native maps keep their full resolution. |
 | `memory_comm_enabled` | `true` | Enables TarMAC communication for the recurrent actor. Requires `actor_memory: true`. |
 | `memory_comm_every_k_steps` | `5` | Defines the static agent-agent communication slots; base replay also uses this cadence. |
 | `tarmac_sig_dim` | `16` | Query/signature dimension used for TarMAC sender addressing. |
 | `tarmac_val_dim` | `32` | Value/message dimension used for TarMAC communicated payloads. |
 | `tarmac_include_self` | `false` | If enabled by a level override, adds the receiver's own previous signature/value as an attention candidate when it is already receiving an external message. |
+
+The privileged critic remains training-only and does not change actor inputs or
+evaluation actions. A feature-pyramid CNN receives explicit wall, coverage,
+active-agent-density, base, and target channels. Local CNN
+features are bilinearly sampled at every exact agent position and combined with
+a global CNN embedding, exact kinematics, task flags, adjacency rows, and
+previous-step collision/coverage diagnostics. Cross-agent attention is
+unrestricted: adjacency is information for the centralized critic, not a limit
+on what it may evaluate. The critic retains its own GRU and does not receive
+actor hidden states.
+
+Only changing coverage planes are stored in the rollout buffer, packed to one
+bit per semantic cell. The static wall map is prepared once at startup, while
+active-agent, base, and target channels are reconstructed from the exact tokens.
+Inactive agents remain represented by their exact token active flags but are
+omitted from the spatial density plane. This avoids storing five full
+floating-point images per transition.
+
+Training logs `ppo/explained_variance` from the rollout value predictions and
+`ppo/advantage_std` before advantage normalization. Compare both with SPS,
+value loss, success, and target-found rate when tuning `critic_map_resolution`;
+a larger map is useful only while critic fit and wall-clock learning improve.
 
 When recurrent actor communication is enabled, SwarmEcho uses a single-round TarMAC-style mechanism rather than the older configurable hidden-state attention path. Agents carry GRU hidden state plus previous `(signature, value)` communication state; the base relay stores the first target-knowing reporter's emitted TarMAC signature/value and replays that token to eligible non-knowing agents in base range.
 

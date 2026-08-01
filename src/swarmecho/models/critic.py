@@ -224,3 +224,188 @@ class RecurrentAgentCentricCritic(nnx.Module):
             (obs, resets),
         )
         return final_hidden, values
+
+
+class SemanticMapEncoder(nnx.Module):
+    """Small feature-pyramid CNN for five-channel top-down state maps."""
+
+    def __init__(self, rngs: nnx.Rngs) -> None:
+        self.conv1 = nnx.Conv(5, 16, (5, 5), strides=(2, 2), padding="SAME", rngs=rngs)
+        self.conv2 = nnx.Conv(16, 32, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
+        self.conv3 = nnx.Conv(32, 32, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
+        self.conv4 = nnx.Conv(32, 32, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
+        self.conv5 = nnx.Conv(32, 32, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
+
+    def __call__(self, image: jax.Array) -> tuple[jax.Array, jax.Array]:
+        x = jax.nn.silu(self.conv1(image))
+        local_map = jax.nn.silu(self.conv2(x))
+        x = jax.nn.silu(self.conv3(local_map))
+        x = jax.nn.silu(self.conv4(x))
+        x = jax.nn.silu(self.conv5(x))
+        return local_map, jnp.mean(x, axis=(-3, -2))
+
+
+class PrivilegedAgentCentricCritic(nnx.Module):
+    """CNN-backed centralized critic with unrestricted agent attention."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        rngs: nnx.Rngs,
+        wall_map: jax.Array,
+    ) -> None:
+        self.hidden_dim = hidden_dim
+        self.wall_map = nnx.Variable(jnp.asarray(wall_map, dtype=jnp.float32))
+        self.map_encoder = SemanticMapEncoder(rngs)
+        self.encoder = MLP(obs_dim + 64, hidden_dim, 1, hidden_dim, rngs)
+        self.attention = nnx.MultiHeadAttention(
+            num_heads=4, in_features=hidden_dim, rngs=rngs
+        )
+        self.value_head = MLP(hidden_dim * 2, hidden_dim, num_layers, 1, rngs)
+
+    def _semantic_image(
+        self, tokens: jax.Array, coverage_map: jax.Array
+    ) -> jax.Array:
+        leading = tokens.shape[:-2]
+        n = tokens.shape[-2]
+        h, w = coverage_map.shape[-2:]
+        flat_tokens = tokens.reshape((-1, n, tokens.shape[-1]))
+
+        def rasterize(team):
+            cells = jnp.rint(
+                team[:, :2] * jnp.array([h - 1, w - 1])
+            ).astype(jnp.int32)
+            active_agents = jnp.zeros((h, w), dtype=jnp.float32).at[
+                cells[:, 0], cells[:, 1]
+            ].add(team[:, 9])
+            base = jnp.rint(
+                (team[0, :2] + team[0, 4:6]) * jnp.array([h - 1, w - 1])
+            ).astype(jnp.int32)
+            target = jnp.rint(
+                (team[0, :2] + team[0, 6:8]) * jnp.array([h - 1, w - 1])
+            ).astype(jnp.int32)
+            base_map = jnp.zeros((h, w), dtype=jnp.float32).at[base[0], base[1]].set(1.0)
+            target_map = jnp.zeros((h, w), dtype=jnp.float32).at[
+                target[0], target[1]
+            ].set(1.0)
+            return jnp.stack([active_agents, base_map, target_map], axis=-1)
+
+        dynamic = jax.vmap(rasterize)(flat_tokens).reshape((*leading, h, w, 3))
+        wall = jnp.broadcast_to(self.wall_map.get_value(), (*leading, h, w))
+        return jnp.concatenate(
+            [wall[..., None], coverage_map[..., None], dynamic], axis=-1
+        )
+
+    @staticmethod
+    def _sample(local_map: jax.Array, positions: jax.Array) -> jax.Array:
+        leading = positions.shape[:-2]
+        n = positions.shape[-2]
+        h, w = local_map.shape[-3:-1]
+        flat_map = local_map.reshape((-1, h, w, local_map.shape[-1]))
+        flat_pos = positions.reshape((-1, n, 2))
+
+        def sample_one(feature_map, pos):
+            coord = pos * jnp.array([h - 1, w - 1])
+            lo = jnp.floor(coord).astype(jnp.int32)
+            hi = jnp.minimum(lo + 1, jnp.array([h - 1, w - 1]))
+            frac = coord - lo
+            f00 = feature_map[lo[:, 0], lo[:, 1]]
+            f10 = feature_map[hi[:, 0], lo[:, 1]]
+            f01 = feature_map[lo[:, 0], hi[:, 1]]
+            f11 = feature_map[hi[:, 0], hi[:, 1]]
+            fx0 = f00 * (1 - frac[:, :1]) + f10 * frac[:, :1]
+            fx1 = f01 * (1 - frac[:, :1]) + f11 * frac[:, :1]
+            return fx0 * (1 - frac[:, 1:]) + fx1 * frac[:, 1:]
+
+        sampled = jax.vmap(sample_one)(flat_map, flat_pos)
+        return sampled.reshape((*leading, n, local_map.shape[-1]))
+
+    def encode(self, tokens: jax.Array, coverage_map: jax.Array) -> jax.Array:
+        semantic = self._semantic_image(tokens, coverage_map)
+        local_map, global_features = self.map_encoder(semantic)
+        local_features = self._sample(local_map, tokens[..., :2])
+        global_features = jnp.broadcast_to(
+            global_features[..., None, :], local_features.shape
+        )
+        return self.encoder(
+            jnp.concatenate([tokens, local_features, global_features], axis=-1)
+        )
+
+    def __call__(
+        self,
+        tokens: jax.Array,
+        coverage_map: jax.Array,
+        deterministic: bool = True,
+    ) -> jax.Array:
+        encoded = self.encode(tokens, coverage_map)
+        context = self.attention(
+            encoded, encoded, decode=False, deterministic=deterministic
+        )
+        return self.value_head(
+            jnp.concatenate([encoded, context], axis=-1)
+        ).squeeze(-1)
+
+
+class RecurrentPrivilegedAgentCentricCritic(PrivilegedAgentCentricCritic):
+    """Semantic-map critic with per-agent memory before global attention."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        rngs: nnx.Rngs,
+        wall_map: jax.Array,
+    ) -> None:
+        super().__init__(obs_dim, hidden_dim, num_layers, rngs, wall_map)
+        self.gru = GRUCell(hidden_dim, hidden_dim, rngs)
+        self.attention = nnx.MultiHeadAttention(
+            num_heads=4, in_features=hidden_dim * 2, rngs=rngs
+        )
+        self.value_head = MLP(
+            hidden_dim * 4,
+            hidden_dim,
+            num_layers,
+            1,
+            rngs,
+        )
+
+    def __call__(
+        self,
+        tokens: jax.Array,
+        coverage_map: jax.Array,
+        hidden: jax.Array,
+        resets: jax.Array | None = None,
+        deterministic: bool = True,
+    ) -> tuple[jax.Array, jax.Array]:
+        if resets is not None:
+            hidden = jnp.where(resets[..., None], jnp.zeros_like(hidden), hidden)
+        encoded = self.encode(tokens, coverage_map)
+        hidden = self.gru(hidden, encoded)
+        recurrent_tokens = jnp.concatenate([encoded, hidden], axis=-1)
+        context = self.attention(
+            recurrent_tokens,
+            recurrent_tokens,
+            decode=False,
+            deterministic=deterministic,
+        )
+        values = self.value_head(
+            jnp.concatenate([recurrent_tokens, context], axis=-1)
+        ).squeeze(-1)
+        return hidden, values
+
+    def values_sequence(
+        self,
+        tokens: jax.Array,
+        coverage_maps: jax.Array,
+        init_hidden: jax.Array,
+        resets: jax.Array,
+        deterministic: bool = True,
+    ) -> tuple[jax.Array, jax.Array]:
+        def step(hidden, inputs):
+            token_t, map_t, reset_t = inputs
+            return self(token_t, map_t, hidden, reset_t, deterministic)
+
+        return jax.lax.scan(step, init_hidden, (tokens, coverage_maps, resets))

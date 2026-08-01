@@ -25,7 +25,12 @@ import jax.numpy as jnp
 from flax import nnx
 
 from swarmecho.models.actor import DecentralizedActor, RecurrentDecentralizedActor
-from swarmecho.models.critic import AgentCentricCritic, RecurrentAgentCentricCritic
+from swarmecho.models.critic import (
+    AgentCentricCritic,
+    PrivilegedAgentCentricCritic,
+    RecurrentAgentCentricCritic,
+    RecurrentPrivilegedAgentCentricCritic,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +65,9 @@ class MAPPOModel(nnx.Module):
         rngs:             nnx.Rngs,
         actor_memory:     bool = False,
         critic_memory:    bool = False,
+        critic_type:      str = "observation",
+        critic_input_dim: int | None = None,
+        critic_wall_map:  jax.Array | None = None,
         memory_comm_enabled: bool = False,
         memory_comm_every_k_steps: int = 5,
         tarmac_sig_dim: int = 64,
@@ -72,6 +80,8 @@ class MAPPOModel(nnx.Module):
         self.hidden_dim  = hidden_dim
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
+        self.critic_type = critic_type
+        self.critic_input_dim = obs_dim if critic_input_dim is None else critic_input_dim
         self.memory_comm_enabled = memory_comm_enabled
         self.memory_comm_every_k_steps = memory_comm_every_k_steps
         self.tarmac_sig_dim = tarmac_sig_dim
@@ -101,23 +111,35 @@ class MAPPOModel(nnx.Module):
             )
 
         if critic_memory:
-            self.critic = RecurrentAgentCentricCritic(
-                obs_dim    = obs_dim,
+            critic_cls = (
+                RecurrentPrivilegedAgentCentricCritic
+                if critic_type == "privileged"
+                else RecurrentAgentCentricCritic
+            )
+            self.critic = critic_cls(
+                obs_dim    = self.critic_input_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
                 rngs       = rngs,
+                **({"wall_map": critic_wall_map} if critic_type == "privileged" else {}),
             )
         else:
-            self.critic = AgentCentricCritic(
-                obs_dim    = obs_dim,
+            critic_cls = (
+                PrivilegedAgentCentricCritic
+                if critic_type == "privileged"
+                else AgentCentricCritic
+            )
+            self.critic = critic_cls(
+                obs_dim    = self.critic_input_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
                 rngs       = rngs,
+                **({"wall_map": critic_wall_map} if critic_type == "privileged" else {}),
             )
 
     # ── Convenience wrappers ────────────────────────────────────────────────
 
-    def get_value(self, all_obs: jax.Array, deterministic: bool = True) -> jax.Array:
+    def get_value(self, all_obs: jax.Array, deterministic: bool = True, critic_obs: jax.Array | None = None, critic_map: jax.Array | None = None) -> jax.Array:
         """
         Centralised value estimate.
 
@@ -129,11 +151,19 @@ class MAPPOModel(nnx.Module):
         -------
         (..., N) — one value per agent
         """
+        critic_input = all_obs if critic_obs is None else critic_obs
         if self.critic_memory:
-            hidden = self.initial_critic_hidden(all_obs.shape[:-2])
-            _, values = self.critic(all_obs, hidden, deterministic=deterministic)
+            hidden = self.initial_critic_hidden(critic_input.shape[:-2])
+            if self.critic_type == "privileged":
+                _, values = self.critic(
+                    critic_input, critic_map, hidden, deterministic=deterministic
+                )
+            else:
+                _, values = self.critic(critic_input, hidden, deterministic=deterministic)
             return values
-        return self.critic(all_obs, deterministic=deterministic)
+        if self.critic_type == "privileged":
+            return self.critic(critic_input, critic_map, deterministic=deterministic)
+        return self.critic(critic_input, deterministic=deterministic)
 
     def initial_actor_hidden(self, batch_shape=()) -> jax.Array:
         """Return zero actor memory with shape batch_shape + (N, H)."""
@@ -157,19 +187,33 @@ class MAPPOModel(nnx.Module):
         critic_hidden:  jax.Array | None,
         resets:         jax.Array | None,
         deterministic:  bool = True,
+        critic_obs:      jax.Array | None = None,
+        critic_map:      jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array]:
         """Centralised value call that carries critic memory when enabled."""
+        critic_input = all_obs if critic_obs is None else critic_obs
         if self.critic_memory:
             if critic_hidden is None:
-                critic_hidden = self.initial_critic_hidden(all_obs.shape[:-2])
-            return self.critic(all_obs, critic_hidden, resets, deterministic=deterministic)
-        return critic_hidden, self.critic(all_obs, deterministic=deterministic)
+                critic_hidden = self.initial_critic_hidden(critic_input.shape[:-2])
+            if self.critic_type == "privileged":
+                return self.critic(
+                    critic_input, critic_map, critic_hidden, resets,
+                    deterministic=deterministic,
+                )
+            return self.critic(critic_input, critic_hidden, resets, deterministic=deterministic)
+        if self.critic_type == "privileged":
+            return critic_hidden, self.critic(
+                critic_input, critic_map, deterministic=deterministic
+            )
+        return critic_hidden, self.critic(critic_input, deterministic=deterministic)
 
     def rollout_step(
         self,
         all_obs:   jax.Array,   # (N, obs_dim)
         keys:      jax.Array,   # (N, 2) — per-agent PRNGKeys
         max_force: float = 50.0,
+        critic_obs: jax.Array | None = None,
+        critic_map: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """
         Full CTDE forward pass for ONE environment during rollout.
@@ -192,7 +236,10 @@ class MAPPOModel(nnx.Module):
             return a, lp
 
         actions, log_probs = jax.vmap(_act_one)(all_obs, keys)
-        value = self.get_value(all_obs, deterministic=False)
+        value = self.get_value(
+            all_obs, deterministic=False, critic_obs=critic_obs,
+            critic_map=critic_map,
+        )
         return actions, log_probs, value
 
     def rollout_step_recurrent(
@@ -210,6 +257,8 @@ class MAPPOModel(nnx.Module):
         base_signature: jax.Array | None = None,
         base_value:     jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
+        critic_obs:     jax.Array | None = None,
+        critic_map:     jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
         """
         Rollout step that carries optional actor and critic recurrent states.
@@ -260,6 +309,8 @@ class MAPPOModel(nnx.Module):
             critic_hidden,
             resets,
             deterministic=False,
+            critic_obs=critic_obs,
+            critic_map=critic_map,
         )
         return actor_hidden, actor_signature, actor_value, critic_hidden, actions, log_probs, value
 

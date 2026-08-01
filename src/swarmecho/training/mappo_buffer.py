@@ -32,6 +32,8 @@ class MAPPOTransition(NamedTuple):
     base_signatures: Optional[np.ndarray] = None  # (E, S), saved base TarMAC signature
     base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
+    critic_obs: Optional[np.ndarray] = None  # (E, N, P), privileged critic only
+    critic_map: Optional[np.ndarray] = None  # (E, ceil(H*W/8)), packed coverage
 
 
 class MAPPORolloutBuffer:
@@ -65,6 +67,8 @@ class MAPPORolloutBuffer:
         tarmac_val_dim: int = 128,
         actor_memory:  bool = False,
         critic_memory: bool = False,
+        critic_obs_dim: int = 0,
+        critic_map_shape: tuple[int, int] | None = None,
     ) -> None:
         self.T          = num_steps
         self.E          = num_envs
@@ -79,8 +83,21 @@ class MAPPORolloutBuffer:
         self.tarmac_val_dim = tarmac_val_dim
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
+        self.critic_obs_dim = critic_obs_dim
+        self.critic_map_shape = critic_map_shape
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
+        self._critic_obs = (
+            np.zeros((self.T, self.E, self.N, critic_obs_dim), dtype=np.float32)
+            if critic_obs_dim else None
+        )
+        self._critic_maps = (
+            np.zeros(
+                (self.T, self.E, (critic_map_shape[0] * critic_map_shape[1] + 7) // 8),
+                dtype=np.uint8,
+            )
+            if critic_map_shape else None
+        )
         self._actions   = np.zeros((self.T, self.E, self.N, self.A), dtype=np.float32)
         self._log_probs = np.zeros((self.T, self.E, self.N),          dtype=np.float32)
         self._dones     = np.zeros((self.T, self.E),                   dtype=np.float32)
@@ -116,6 +133,11 @@ class MAPPORolloutBuffer:
     def add(self, tr: MAPPOTransition) -> None:
         assert self._ptr < self.T, "Buffer full — call reset() first."
         self._obs[self._ptr]       = np.asarray(tr.obs)
+        if self._critic_obs is not None:
+            assert tr.critic_obs is not None
+            self._critic_obs[self._ptr] = np.asarray(tr.critic_obs)
+            assert tr.critic_map is not None
+            self._critic_maps[self._ptr] = np.asarray(tr.critic_map, dtype=np.uint8)
         self._actions[self._ptr]   = np.asarray(tr.actions)
         self._log_probs[self._ptr] = np.asarray(tr.log_probs)
         self._values[self._ptr]    = np.asarray(tr.values)
@@ -217,11 +239,21 @@ class MAPPORolloutBuffer:
 
         total = self.T * self.E
 
+        def _unpack_maps(packed):
+            if packed is None:
+                return None
+            size = self.critic_map_shape[0] * self.critic_map_shape[1]
+            return np.unpackbits(packed, axis=-1, count=size).reshape(
+                *packed.shape[:-1], *self.critic_map_shape
+            ).astype(np.float32)
+
         def _flat(arr):
             # (T, E, ...) → (T*E, ...)
             return arr.reshape(total, *arr.shape[2:])
 
         obs_f       = _flat(self._obs)        # (B, N, D)
+        critic_obs_f = _flat(self._critic_obs) if self._critic_obs is not None else obs_f
+        critic_maps_f = _flat(self._critic_maps) if self._critic_maps is not None else None
         actions_f   = _flat(self._actions)    # (B, N, A)
         lp_f        = _flat(self._log_probs)  # (B, N)
         values_f    = _flat(self._values)     # (B, N)
@@ -239,6 +271,11 @@ class MAPPORolloutBuffer:
             idx = perm[i * mb_size : (i + 1) * mb_size]
             minibatches.append({
                 "obs":           jnp.array(obs_f[idx]),
+                "critic_obs":    jnp.array(critic_obs_f[idx]),
+                "critic_map":    (
+                    jnp.array(_unpack_maps(critic_maps_f[idx]))
+                    if critic_maps_f is not None else None
+                ),
                 "actions":       jnp.array(actions_f[idx]),
                 "old_log_probs": jnp.array(lp_f[idx]),
                 "old_values":    jnp.array(values_f[idx]),
@@ -280,8 +317,20 @@ class MAPPORolloutBuffer:
         minibatches = []
         for i in range(n_minibatches):
             idx = perm[i * mb_envs : (i + 1) * mb_envs]
+            critic_maps = None
+            if self._critic_maps is not None:
+                size = self.critic_map_shape[0] * self.critic_map_shape[1]
+                critic_maps = np.unpackbits(
+                    self._critic_maps[:, idx], axis=-1, count=size
+                ).reshape(self.T, len(idx), *self.critic_map_shape).astype(np.float32)
             minibatches.append({
                 "obs":             jnp.array(self._obs[:, idx]),
+                "critic_obs":      jnp.array(
+                    self._critic_obs[:, idx] if self._critic_obs is not None else self._obs[:, idx]
+                ),
+                "critic_map":      (
+                    jnp.array(critic_maps) if critic_maps is not None else None
+                ),
                 "actions":         jnp.array(self._actions[:, idx]),
                 "old_log_probs":   jnp.array(self._log_probs[:, idx]),
                 "old_values":      jnp.array(self._values[:, idx]),

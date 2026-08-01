@@ -43,6 +43,8 @@ def mappo_loss(
     old_values:    jax.Array,   # (MB, N)
     advantages:    jax.Array,   # (MB, N)
     returns:       jax.Array,   # (MB, N)
+    critic_obs:    jax.Array,   # (MB, N, P), equals obs for legacy critic
+    critic_map:    jax.Array | None,
     clip_eps:      float,
     vf_coef:       float,
     ent_coef:      float,
@@ -75,7 +77,10 @@ def mappo_loss(
     policy_loss = jnp.mean(jnp.maximum(pg_loss1, pg_loss2))
 
     # ── Critic path ─────────────────────────────────────────────────────────
-    new_values = model.critic(obs, deterministic=False)
+    if model.critic_type == "privileged":
+        new_values = model.critic(critic_obs, critic_map, deterministic=False)
+    else:
+        new_values = model.critic(critic_obs, deterministic=False)
     value_loss = jnp.mean((new_values - returns) ** 2)
 
     # ── Entropy ─────────────────────────────────────────────────────────────
@@ -107,6 +112,8 @@ def recurrent_mappo_loss(
     old_values:      jax.Array,   # (T, B, N)
     advantages:      jax.Array,   # (T, B, N)
     returns:         jax.Array,   # (T, B, N)
+    critic_obs:      jax.Array,   # (T, B, N, P)
+    critic_map:      jax.Array | None,
     rnn_resets:      jax.Array,   # (T, B, N)
     initial_actor_h: jax.Array,   # (B, N, H)
     initial_actor_signature: jax.Array | None,
@@ -188,15 +195,31 @@ def recurrent_mappo_loss(
     pg_loss2 = -adv * jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
     policy_loss = jnp.mean(jnp.maximum(pg_loss1, pg_loss2))
 
-    if model.critic_memory:
+    if model.critic_memory and model.critic_type == "privileged":
         _, new_values = model.critic.values_sequence(
-            obs,
+            critic_obs,
+            critic_map,
+            initial_critic_h,
+            rnn_resets,
+            deterministic=False,
+        )
+    elif model.critic_memory:
+        _, new_values = model.critic.values_sequence(
+            critic_obs,
             initial_critic_h,
             rnn_resets,
             deterministic=False,
         )
     else:
-        flat_values = model.critic(obs.reshape(T * B, N, D), deterministic=False)
+        flat_critic_obs = critic_obs.reshape(T * B, N, critic_obs.shape[-1])
+        if model.critic_type == "privileged":
+            flat_values = model.critic(
+                flat_critic_obs,
+                critic_map.reshape(T * B, *critic_map.shape[-2:]),
+                deterministic=False,
+            )
+        else:
+            flat_values = model.critic(flat_critic_obs, deterministic=False)
         new_values = flat_values.reshape(old_values.shape)
 
     clipped_values = old_values + jnp.clip(new_values - old_values, -clip_eps, clip_eps)
@@ -233,6 +256,8 @@ def _mappo_step(
     old_values:    jax.Array,
     advantages:    jax.Array,
     returns:       jax.Array,
+    critic_obs:    jax.Array,
+    critic_map:    jax.Array | None,
     *,
     clip_eps:  float,
     vf_coef:   float,
@@ -241,7 +266,8 @@ def _mappo_step(
     def loss_fn(m):
         return mappo_loss(
             m, obs, actions, old_log_probs, old_values,
-            advantages, returns, clip_eps, vf_coef, ent_coef,
+            advantages, returns, critic_obs, critic_map,
+            clip_eps, vf_coef, ent_coef,
         )
     (loss, stats), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, grads)
@@ -257,6 +283,8 @@ def _recurrent_mappo_step(
     old_values:      jax.Array,
     advantages:      jax.Array,
     returns:         jax.Array,
+    critic_obs:      jax.Array,
+    critic_map:      jax.Array | None,
     rnn_resets:      jax.Array,
     initial_actor_h: jax.Array,
     initial_actor_signature: jax.Array | None,
@@ -275,7 +303,7 @@ def _recurrent_mappo_step(
     def loss_fn(m):
         return recurrent_mappo_loss(
             m, obs, actions, old_log_probs, old_values,
-            advantages, returns, rnn_resets,
+            advantages, returns, critic_obs, critic_map, rnn_resets,
             initial_actor_h, initial_actor_signature, initial_actor_value, initial_critic_h,
             comm_masks, active_masks, base_signatures, base_values, base_memory_masks,
             clip_eps, vf_coef, ent_coef,
@@ -364,6 +392,8 @@ class MAPPOTrainer:
                     mb["old_values"],
                     mb["advantages"],
                     mb["returns"],
+                    mb["critic_obs"],
+                    mb["critic_map"],
                     *((
                         mb["rnn_resets"],
                         mb["initial_actor_h"],

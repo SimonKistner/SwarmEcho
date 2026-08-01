@@ -62,6 +62,7 @@ from flax import nnx
 from omegaconf import DictConfig, OmegaConf
 
 from swarmecho.core.config import compute_action_dim, compute_obs_dim
+from swarmecho.env.critic_state import make_privileged_critic_state_fn
 from swarmecho.env.grid_utils import has_inner_obstacles
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.artifacts import artifact_suffix, train_artifact_root
@@ -292,6 +293,8 @@ def _make_autoreset_step(
 def _batched_rollout_and_memory_step_impl(
     model: MAPPOModel,
     obs_batch,
+    critic_obs_batch,
+    critic_map_batch,
     act_keys,
     actor_h_in,
     actor_signature_in,
@@ -334,7 +337,7 @@ def _batched_rollout_and_memory_step_impl(
                 & step_share
             )
 
-            def _rollout_one_env(obs_n, keys_n, actor_h_n, actor_sig_n, actor_val_n, critic_h_n, resets_n, comm_mask_n, active_n, base_sig_n, base_val_n, base_memory_mask_n):
+            def _rollout_one_env(obs_n, critic_obs_n, critic_map_n, keys_n, actor_h_n, actor_sig_n, actor_val_n, critic_h_n, resets_n, comm_mask_n, active_n, base_sig_n, base_val_n, base_memory_mask_n):
                 actor_h_out, actor_sig_out, actor_val_out, critic_h_out, actions_n, log_probs_n, values_n = model.rollout_step_recurrent(
                     obs_n, keys_n, actor_h_n, critic_h_n, resets_n, max_force,
                     actor_signature=actor_sig_n,
@@ -344,11 +347,13 @@ def _batched_rollout_and_memory_step_impl(
                     base_signature=base_sig_n,
                     base_value=base_val_n,
                     base_memory_mask=base_memory_mask_n,
+                    critic_obs=critic_obs_n,
+                    critic_map=critic_map_n,
                 )
                 return actor_h_out, actor_sig_out, actor_val_out, critic_h_out, actions_n, log_probs_n, values_n
 
             actor_h, actor_signature, actor_value, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                obs_batch, act_keys, actor_h_in, actor_signature_in, actor_value_in, critic_h_in, reset_agents_b,
+                obs_batch, critic_obs_batch, critic_map_batch, act_keys, actor_h_in, actor_signature_in, actor_value_in, critic_h_in, reset_agents_b,
                 comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b,
             )
             
@@ -370,21 +375,28 @@ def _batched_rollout_and_memory_step_impl(
             )
             
         else:
-            def _rollout_one_env(obs_n, keys_n, actor_h_n, critic_h_n, resets_n):
+            def _rollout_one_env(obs_n, critic_obs_n, critic_map_n, keys_n, actor_h_n, critic_h_n, resets_n):
                 return model.rollout_step_recurrent(
                     obs_n, keys_n, actor_h_n, critic_h_n, resets=resets_n, max_force=max_force,
+                    critic_obs=critic_obs_n,
+                    critic_map=critic_map_n,
                 )
 
             actor_h, _, _, critic_h, actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
-                obs_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
+                obs_batch, critic_obs_batch, critic_map_batch, act_keys, actor_h_in, critic_h_in, reset_agents_b,
             )
             return actor_h, None, None, critic_h, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None
     else:
-        def _rollout_one_env(obs_n, keys_n):
-            actions, log_probs, value = model.rollout_step(obs_n, keys_n, max_force)
+        def _rollout_one_env(obs_n, critic_obs_n, critic_map_n, keys_n):
+            actions, log_probs, value = model.rollout_step(
+                obs_n, keys_n, max_force, critic_obs=critic_obs_n,
+                critic_map=critic_map_n,
+            )
             return actions, log_probs, value
 
-        actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(obs_batch, act_keys)
+        actions_b, log_probs_b, values_b = jax.vmap(_rollout_one_env)(
+            obs_batch, critic_obs_batch, critic_map_batch, act_keys
+        )
         return None, None, None, None, actions_b, log_probs_b, values_b, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
@@ -398,6 +410,7 @@ def _collect_rollout_mappo(
     buf:              MAPPORolloutBuffer,
     autoreset_step_v,
     obs_fn_v,
+    critic_state_fn_v,
     batched_rollout_step_jit,
     key:              jax.Array,
     max_force:        float,
@@ -464,6 +477,8 @@ def _collect_rollout_mappo(
     # host with the accelerator once (or several times) per environment step.
     rollout_device = {
         "obs": [],
+        "critic_obs": [],
+        "critic_map": [],
         "actions": [],
         "log_probs": [],
         "values": [],
@@ -494,7 +509,12 @@ def _collect_rollout_mappo(
         key, act_key = jax.random.split(key)
 
         obs_batch = obs_fn_v(states)          # (E, N, D)
-        E_, N_, D_ = obs_batch.shape
+        E_, N_, _ = obs_batch.shape
+        if critic_state_fn_v is not None:
+            critic_obs_batch, critic_map_batch = critic_state_fn_v(states)
+        else:
+            critic_obs_batch = obs_batch
+            critic_map_batch = jnp.zeros((E_, 1, 1), dtype=jnp.float32)
         act_keys = jax.random.split(act_key, E_ * N_).reshape(E_, N_, 2)
         reset_agents_b = (
             jnp.asarray(last_dones)[:, None]
@@ -521,6 +541,8 @@ def _collect_rollout_mappo(
                  comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
+                    critic_obs_batch,
+                    critic_map_batch,
                     act_keys,
                     actor_h_in,
                     actor_signature_in,
@@ -541,6 +563,8 @@ def _collect_rollout_mappo(
                  comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                     model,
                     obs_batch,
+                    critic_obs_batch,
+                    critic_map_batch,
                     act_keys,
                     actor_h_in,
                     actor_signature_in,
@@ -559,6 +583,8 @@ def _collect_rollout_mappo(
              comm_mask_b, active_mask_b, base_signature_b, base_value_b, base_receiver_mask_b) = batched_rollout_step_jit(
                 model,
                 obs_batch,
+                critic_obs_batch,
+                critic_map_batch,
                 act_keys,
                 None,
                 None,
@@ -577,6 +603,11 @@ def _collect_rollout_mappo(
         states, rewards_b, dones_b, info = autoreset_step_v(states, squashed_b * max_force)
 
         rollout_device["obs"].append(obs_batch)
+        if critic_state_fn_v is not None:
+            rollout_device["critic_obs"].append(critic_obs_batch)
+            rollout_device["critic_map"].append(
+                jnp.packbits(critic_map_batch.reshape(E_, -1).astype(jnp.uint8), axis=-1)
+            )
         rollout_device["actions"].append(actions_b)
         rollout_device["log_probs"].append(log_probs_b)
         rollout_device["values"].append(values_b)
@@ -658,6 +689,12 @@ def _collect_rollout_mappo(
 
         buf.add(MAPPOTransition(
             obs=rollout_host["obs"][t],
+            critic_obs=(
+                rollout_host["critic_obs"][t] if critic_state_fn_v is not None else None
+            ),
+            critic_map=(
+                rollout_host["critic_map"][t] if critic_state_fn_v is not None else None
+            ),
             actions=rollout_host["actions"][t],
             log_probs=rollout_host["log_probs"][t],
             values=rollout_host["values"][t],
@@ -673,19 +710,31 @@ def _collect_rollout_mappo(
 
     # Bootstrap value for last state
     last_obs    = obs_fn_v(states)
+    if critic_state_fn_v is not None:
+        last_critic_obs, last_critic_map = critic_state_fn_v(states)
+    else:
+        last_critic_obs = last_obs
+        last_critic_map = jnp.zeros((E, 1, 1), dtype=jnp.float32)
     if recurrent and model.critic_memory:
         reset_agents_b = (
             jnp.asarray(last_dones)[:, None]
             | jnp.logical_not(states.physics.active)
         )
 
-        def _value_one_env(obs_n, h_n, resets_n):
-            _, value = model.get_value_recurrent(obs_n, h_n, resets_n)
+        def _value_one_env(obs_n, critic_obs_n, critic_map_n, h_n, resets_n):
+            _, value = model.get_value_recurrent(
+                obs_n, h_n, resets_n, critic_obs=critic_obs_n,
+                critic_map=critic_map_n,
+            )
             return value
 
-        last_values = jax.vmap(_value_one_env)(last_obs, critic_h, reset_agents_b)
+        last_values = jax.vmap(_value_one_env)(
+            last_obs, last_critic_obs, last_critic_map, critic_h, reset_agents_b
+        )
     else:
-        last_values = model.get_value(last_obs)    # (E,) or (E, N)
+        last_values = model.get_value(
+            last_obs, critic_obs=last_critic_obs, critic_map=last_critic_map
+        )
     bootstrap_dones = jnp.zeros(E, dtype=jnp.float32)
 
     # Save persistent accumulators back
@@ -741,7 +790,8 @@ def train(cfg: DictConfig):
     recurrent   = actor_memory or critic_memory
 
     print("\n══════════════════════════════════════════════════════")
-    print("  SwarmEcho — MAPPO  [agent-centric critic]")
+    critic_type = str(cfg.network.get("critic_type", "observation"))
+    print(f"  SwarmEcho — MAPPO  [{critic_type} agent-centric critic]")
     print("══════════════════════════════════════════════════════")
 
     N         = int(cfg.env.num_agents)
@@ -773,6 +823,7 @@ def train(cfg: DictConfig):
     print(f"  actor_memory     : {actor_memory}")
     print(f"  critic_layers    : {cfg.network.num_layers}")
     print(f"  critic_memory    : {critic_memory}")
+    print(f"  critic_type      : {critic_type}")
     print()
     print(f"  ppo updates      : {n_updates:,}  ({total_ts:,} total timesteps)")
     print()
@@ -805,6 +856,14 @@ def train(cfg: DictConfig):
     )
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
+    critic_state_fn_v = None
+    critic_input_dim = None
+    critic_wall_map = None
+    if critic_type == "privileged":
+        critic_state_fn, critic_input_dim, critic_wall_map = make_privileged_critic_state_fn(
+            cfg, resolved_W, resolved_H, occ_grid
+        )
+        critic_state_fn_v = jax.jit(jax.vmap(critic_state_fn))
     reset_v          = jax.jit(jax.vmap(reset))
     reset_s          = jax.jit(reset)
     env_step_jit       = jax.jit(env_step)
@@ -813,7 +872,10 @@ def train(cfg: DictConfig):
     # ── Model ─────────────────────────────────────────────────────────────
     master_key = jax.random.PRNGKey(int(cfg.training.seed))
     model_key, env_key, master_key = jax.random.split(master_key, 3)
-    model = build_model(cfg, rng_seed=int(model_key[0]))
+    model = build_model(
+        cfg, rng_seed=int(model_key[0]), critic_input_dim=critic_input_dim,
+        critic_wall_map=critic_wall_map,
+    )
     trainer = MAPPOTrainer(
         model         = model,
         lr            = float(cfg.training.lr),
@@ -839,6 +901,8 @@ def train(cfg: DictConfig):
         tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
         actor_memory  = actor_memory,
         critic_memory = critic_memory,
+        critic_obs_dim = critic_input_dim or 0,
+        critic_map_shape=(tuple(critic_wall_map.shape) if critic_wall_map is not None else None),
     )
 
     _, params = nnx.split(model)
@@ -1060,7 +1124,8 @@ def train(cfg: DictConfig):
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_found, raw_r_succ,
              raw_cov) = _collect_rollout_mappo(
-                states, model, buf, autoreset_step_v, obs_fn_v, batched_rollout_step_jit,
+                states, model, buf, autoreset_step_v, obs_fn_v, critic_state_fn_v,
+                batched_rollout_step_jit,
                 collect_key, max_force, T, ep_trackers,
                 actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
             )
@@ -1085,6 +1150,12 @@ def train(cfg: DictConfig):
 
             # ── GAE + minibatches ─────────────────────────────────────────────
             advs, rets = buf.compute_gae(last_values, last_dones)
+            advantage_std = float(np.std(advs))
+            returns_var = float(np.var(rets))
+            explained_variance = (
+                1.0 - float(np.var(advs)) / returns_var
+                if returns_var > 1e-8 else 0.0
+            )
             mbs        = buf.get_minibatches(advs, rets, int(cfg.training.num_minibatches), collect_key)
 
             # ── PPO update ────────────────────────────────────────────────────
@@ -1145,6 +1216,8 @@ def train(cfg: DictConfig):
                     "ppo/entropy":              ppo_stats["entropy"],
                     "ppo/approx_kl":            ppo_stats["approx_kl"],
                     "ppo/clip_fraction":        ppo_stats["clip_fraction"],
+                    "ppo/explained_variance":   explained_variance,
+                    "ppo/advantage_std":        advantage_std,
                     "perf/sps":                 sps,
                     "perf/ppo_updates":         update,
                     "perf/global_step":         steps_done,
