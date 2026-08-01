@@ -383,28 +383,32 @@ class MAPPOTrainer:
 
         for _epoch in range(self.num_epochs):
             for mb in minibatches:
+                device_mb = {
+                    name: (jax.device_put(value) if value is not None else None)
+                    for name, value in mb.items()
+                }
                 _loss, stats = self._jit_step(
                     self.model,
                     self.optimizer,
-                    mb["obs"],
-                    mb["actions"],
-                    mb["old_log_probs"],
-                    mb["old_values"],
-                    mb["advantages"],
-                    mb["returns"],
-                    mb["critic_obs"],
-                    mb["critic_map"],
+                    device_mb["obs"],
+                    device_mb["actions"],
+                    device_mb["old_log_probs"],
+                    device_mb["old_values"],
+                    device_mb["advantages"],
+                    device_mb["returns"],
+                    device_mb["critic_obs"],
+                    device_mb["critic_map"],
                     *((
-                        mb["rnn_resets"],
-                        mb["initial_actor_h"],
-                        mb["initial_actor_signature"],
-                        mb["initial_actor_value"],
-                        mb["initial_critic_h"],
-                        mb["comm_masks"],
-                        mb["active_masks"],
-                        mb["base_signatures"],
-                        mb["base_values"],
-                        mb["base_memory_masks"],
+                        device_mb["rnn_resets"],
+                        device_mb["initial_actor_h"],
+                        device_mb["initial_actor_signature"],
+                        device_mb["initial_actor_value"],
+                        device_mb["initial_critic_h"],
+                        device_mb["comm_masks"],
+                        device_mb["active_masks"],
+                        device_mb["base_signatures"],
+                        device_mb["base_values"],
+                        device_mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )
                 # Materialise the scalar diagnostics immediately instead of
@@ -422,7 +426,7 @@ class MAPPOTrainer:
                 stats_sums["approx_kl"] += float(stats_host.approx_kl)
                 stats_sums["clip_fraction"] += float(stats_host.clip_fraction)
                 num_stat_steps += 1
-                del _loss, stats, stats_host
+                del _loss, stats, stats_host, device_mb
 
         denom = max(1, num_stat_steps)
         return {

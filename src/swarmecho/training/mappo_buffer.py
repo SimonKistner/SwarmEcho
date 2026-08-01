@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import NamedTuple, Optional
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 
@@ -270,17 +269,20 @@ class MAPPORolloutBuffer:
         for i in range(n_minibatches):
             idx = perm[i * mb_size : (i + 1) * mb_size]
             minibatches.append({
-                "obs":           jnp.array(obs_f[idx]),
-                "critic_obs":    jnp.array(critic_obs_f[idx]),
+                # Keep minibatches host-resident. The trainer stages only the
+                # minibatch currently being updated, which is essential for
+                # semantic maps that are much larger than vector observations.
+                "obs":           obs_f[idx],
+                "critic_obs":    critic_obs_f[idx],
                 "critic_map":    (
-                    jnp.array(_unpack_maps(critic_maps_f[idx]))
+                    _unpack_maps(critic_maps_f[idx])
                     if critic_maps_f is not None else None
                 ),
-                "actions":       jnp.array(actions_f[idx]),
-                "old_log_probs": jnp.array(lp_f[idx]),
-                "old_values":    jnp.array(values_f[idx]),
-                "advantages":    jnp.array(adv_f[idx]),
-                "returns":       jnp.array(returns_f[idx]),
+                "actions":       actions_f[idx],
+                "old_log_probs": lp_f[idx],
+                "old_values":    values_f[idx],
+                "advantages":    adv_f[idx],
+                "returns":       returns_f[idx],
             })
         return minibatches
 
@@ -324,27 +326,25 @@ class MAPPORolloutBuffer:
                     self._critic_maps[:, idx], axis=-1, count=size
                 ).reshape(self.T, len(idx), *self.critic_map_shape).astype(np.float32)
             minibatches.append({
-                "obs":             jnp.array(self._obs[:, idx]),
-                "critic_obs":      jnp.array(
+                "obs":             self._obs[:, idx],
+                "critic_obs":      (
                     self._critic_obs[:, idx] if self._critic_obs is not None else self._obs[:, idx]
                 ),
-                "critic_map":      (
-                    jnp.array(critic_maps) if critic_maps is not None else None
-                ),
-                "actions":         jnp.array(self._actions[:, idx]),
-                "old_log_probs":   jnp.array(self._log_probs[:, idx]),
-                "old_values":      jnp.array(self._values[:, idx]),
-                "advantages":      jnp.array(adv[:, idx]),
-                "returns":         jnp.array(returns[:, idx]),
-                "rnn_resets":      jnp.array(self._rnn_resets[:, idx]),
-                "initial_actor_h":  jnp.array(actor_h[idx]),
-                "initial_actor_signature": jnp.array(actor_signature[idx]),
-                "initial_actor_value": jnp.array(actor_value[idx]),
-                "initial_critic_h": jnp.array(critic_h[idx]),
-                "comm_masks":       jnp.array(self._comm_masks[:, idx]),
-                "active_masks":     jnp.array(self._active_masks[:, idx]),
-                "base_signatures":  jnp.array(self._base_signatures[:, idx]),
-                "base_values":      jnp.array(self._base_values[:, idx]),
-                "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
+                "critic_map":       critic_maps,
+                "actions":          self._actions[:, idx],
+                "old_log_probs":    self._log_probs[:, idx],
+                "old_values":       self._values[:, idx],
+                "advantages":       adv[:, idx],
+                "returns":          returns[:, idx],
+                "rnn_resets":       self._rnn_resets[:, idx],
+                "initial_actor_h":   actor_h[idx],
+                "initial_actor_signature": actor_signature[idx],
+                "initial_actor_value": actor_value[idx],
+                "initial_critic_h":  critic_h[idx],
+                "comm_masks":        self._comm_masks[:, idx],
+                "active_masks":      self._active_masks[:, idx],
+                "base_signatures":   self._base_signatures[:, idx],
+                "base_values":       self._base_values[:, idx],
+                "base_memory_masks": self._base_memory_masks[:, idx],
             })
         return minibatches

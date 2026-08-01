@@ -3,6 +3,7 @@ import inspect
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from flax import nnx
 from omegaconf import OmegaConf
@@ -24,6 +25,7 @@ from swarmecho.models.critic import (
     RecurrentPrivilegedAgentCentricCritic,
 )
 from swarmecho.models.mappo import MAPPOModel
+from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +89,32 @@ def test_legacy_critic_remains_the_default():
     parameter = inspect.signature(MAPPOModel.__init__).parameters["critic_type"]
     assert parameter.default == "observation"
     assert RecurrentAgentCentricCritic is not RecurrentPrivilegedAgentCentricCritic
+
+
+def test_semantic_minibatches_remain_host_resident():
+    buffer = MAPPORolloutBuffer(
+        1, 2, 2, 3, 1, critic_obs_dim=22, critic_map_shape=(4, 4)
+    )
+    zeros = np.zeros
+    buffer.add(MAPPOTransition(
+        obs=zeros((2, 2, 3), dtype=np.float32),
+        actions=zeros((2, 2, 1), dtype=np.float32),
+        log_probs=zeros((2, 2), dtype=np.float32),
+        values=zeros((2, 2), dtype=np.float32),
+        rewards=zeros((2,), dtype=np.float32),
+        dones=zeros((2,), dtype=np.float32),
+        critic_obs=zeros((2, 2, 22), dtype=np.float32),
+        critic_map=zeros((2, 2), dtype=np.uint8),
+    ))
+    advantages, returns = buffer.compute_gae(
+        zeros((2, 2), dtype=np.float32), zeros((2,), dtype=np.float32)
+    )
+    minibatch = buffer.get_minibatches(
+        advantages, returns, 1, jax.random.PRNGKey(0)
+    )[0]
+
+    assert isinstance(minibatch["obs"], np.ndarray)
+    assert isinstance(minibatch["critic_map"], np.ndarray)
 
 
 def test_privileged_cnn_outputs_per_agent_values():

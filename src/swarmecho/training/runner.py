@@ -1160,6 +1160,7 @@ def train(cfg: DictConfig):
 
             # ── PPO update ────────────────────────────────────────────────────
             ppo_stats = trainer.update(mbs)
+            del mbs, advs, rets
 
             elapsed = time.perf_counter() - t_start
             sps     = ((update - start_update) * E * T) / max(1e-6, elapsed)

@@ -45,6 +45,9 @@ active-agent, base, and target channels are reconstructed from the exact tokens.
 Inactive agents remain represented by their exact token active flags but are
 omitted from the spatial density plane. This avoids storing five full
 floating-point images per transition.
+Minibatches remain in host memory and are transferred to the accelerator one
+at a time, preventing all unpacked semantic maps from occupying device memory
+throughout every PPO epoch.
 
 Training logs `ppo/explained_variance` from the rollout value predictions and
 `ppo/advantage_std` before advantage normalization. Compare both with SPS,
