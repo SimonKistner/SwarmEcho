@@ -21,6 +21,7 @@ def write_replay(
     map_name: str,
     dt: float,
     reward_terms: np.ndarray | None = None,
+    metadata: dict | None = None,
 ) -> tuple[Path, Path]:
     """Atomically write one replay NPZ and its small JSON manifest.
 
@@ -80,6 +81,11 @@ def write_replay(
         "coverage_shape": list(arrays["coverage"].shape[1:]),
         "fields": sorted(arrays),
     }
+    if metadata:
+        protected = {"format", "data_file", "frames", "agents", "fields"}
+        if protected & set(metadata):
+            raise ValueError(f"Replay metadata cannot replace protected keys: {sorted(protected & set(metadata))}")
+        manifest.update(metadata)
     manifest_temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_temporary.replace(manifest_path)
     return data_path, manifest_path

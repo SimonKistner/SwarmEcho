@@ -45,17 +45,25 @@ def _strict_dataclass(cls, values: object, label: str):
 
 @dataclass(frozen=True)
 class Training3DConfig:
-    updates: int = 10
-    num_envs: int = 32
+    updates: int = 1000
+    num_envs: int = 256
     num_steps: int = 64
     num_epochs: int = 2
-    num_minibatches: int = 2
-    hidden_dim: int = 128
+    num_minibatches: int = 8
+    hidden_dim: int = 256
     learning_rate: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
     seed: int = 42
     output_dir: str = "outputs/3d_baseline"
+    run_name: str = "B00_3d_baseline"
+    log_every: int = 1
+    checkpoint_every: int = 50
+    eval_every: int = 50
+    eval_episodes: int = 8
+    wandb_mode: str = "disabled"
+    wandb_project: str = "SwarmEcho-3D"
+    checkpoint_path: str | None = None
 
 
 def load_level_3d(name_or_path: str | Path = "B00_3d_baseline") -> Level3D:
@@ -88,4 +96,20 @@ def load_level_3d(name_or_path: str | Path = "B00_3d_baseline") -> Level3D:
         )
     if level.training.num_envs % level.training.num_minibatches:
         raise ValueError("3D recurrent training requires num_envs divisible by num_minibatches.")
+    for field_name in (
+        "updates",
+        "num_envs",
+        "num_steps",
+        "num_epochs",
+        "num_minibatches",
+        "hidden_dim",
+        "log_every",
+        "checkpoint_every",
+        "eval_every",
+        "eval_episodes",
+    ):
+        if getattr(level.training, field_name) < 1:
+            raise ValueError(f"3D training {field_name} must be at least 1.")
+    if level.training.wandb_mode not in {"disabled", "offline", "online"}:
+        raise ValueError("3D training wandb_mode must be disabled, offline, or online.")
     return level

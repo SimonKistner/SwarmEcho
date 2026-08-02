@@ -25,14 +25,22 @@ reward:
   success_bonus: 500.0
 
 training:
-  updates: 10
-  num_envs: 32
+  updates: 1000
+  num_envs: 256
   num_steps: 64
   num_epochs: 2
-  num_minibatches: 2
-  hidden_dim: 128
+  num_minibatches: 8
+  hidden_dim: 256
   learning_rate: 0.0003
   gamma: 0.99
   gae_lambda: 0.95
   seed: 42
   output_dir: outputs/3d_baseline
+  run_name: B00_3d_baseline
+  log_every: 1
+  checkpoint_every: 50
+  eval_every: 50
+  eval_episodes: 8
+  wandb_mode: disabled
+  wandb_project: SwarmEcho-3D
+  checkpoint_path: null

@@ -3,19 +3,32 @@
 from __future__ import annotations
 
 import argparse
+import os
+
+# XLA/absl verbosity must be configured before importing JAX. Doing this in the
+# training function is too late because plugin discovery happens at import time.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "0")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
 import json
+import time
+from collections import deque
+from dataclasses import asdict
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import yaml
 from flax import nnx
 
 from swarmecho.core.config3d import Level3D, load_level_3d
 from swarmecho.env.baseline3d import make_autoreset_3d_fns, make_baseline_3d_fns, rewards_3d
 from swarmecho.models.mappo import MAPPOModel
-from swarmecho.training.checkpoints import save_model_checkpoint
+from swarmecho.training.checkpoints import restore_model_checkpoint, save_model_checkpoint
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
 from swarmecho.visualize.replay3d import write_replay
@@ -91,6 +104,7 @@ def train_3d(
     *,
     updates: int | None = None,
     output_dir: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
 ) -> tuple[Path, dict[str, float]]:
     """Train the strict 3D level and return its final checkpoint and metrics."""
     training = level.training
@@ -104,6 +118,10 @@ def train_3d(
     sig_dim = 16
     val_dim = 32
     model = build_model_3d(level, training.hidden_dim)
+    resume_from = checkpoint_path or training.checkpoint_path
+    if resume_from:
+        restored = restore_model_checkpoint(model, resume_from)
+        print(f"  Restored weights  ✓  {restored}")
     trainer = MAPPOTrainer(
         model,
         lr=training.learning_rate,
@@ -139,9 +157,65 @@ def train_3d(
     latest_stats: dict[str, float] = {}
     episode_successes = 0
     episode_count = 0
+    episode_returns = np.zeros(training.num_envs, dtype=np.float64)
+    episode_lengths = np.zeros(training.num_envs, dtype=np.int32)
+    recent_returns: deque[float] = deque(maxlen=100)
+    recent_lengths: deque[int] = deque(maxlen=100)
+    recent_success: deque[float] = deque(maxlen=100)
+    recent_coverage: deque[float] = deque(maxlen=100)
+    history_path = destination / "training_history.jsonl"
+    config_snapshot = {
+        "name": level.name,
+        "building": level.building_name,
+        "env": asdict(level.env),
+        "reward": asdict(level.reward),
+        "training": asdict(training),
+    }
+    (destination / "config.yaml").write_text(
+        yaml.safe_dump(config_snapshot, sort_keys=False), encoding="utf-8"
+    )
+    wandb_run = None
+    if training.wandb_mode != "disabled":
+        import wandb
+
+        wandb_run = wandb.init(
+            project=training.wandb_project,
+            name=training.run_name,
+            mode=training.wandb_mode,
+            config=config_snapshot,
+            dir=str(destination),
+        )
+
+    _, params = nnx.split(model)
+    parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
+    total_steps = training.updates * training.num_envs * training.num_steps
+    print("\n══════════════════════════════════════════════════════")
+    print("  SwarmEcho 3D — Recurrent MAPPO + TarMAC")
+    print("══════════════════════════════════════════════════════")
+    print(f"  level / building : {level.name} / {level.building_name}")
+    print(f"  devices          : {jax.devices()}")
+    print(f"  agents           : {cfg.num_agents}")
+    print(f"  observation      : {obs_dim}  (radar bins: {cfg.radar_bins})")
+    print("  action           : 3D continuous force")
+    print(f"  model parameters : {parameter_count:,}")
+    print(f"  environments     : {training.num_envs:,}")
+    print(f"  rollout / updates: {training.num_steps} / {training.updates}")
+    print(f"  total env steps  : {total_steps:,}")
+    print(f"  output           : {destination.resolve()}")
+    if wandb_run is not None:
+        print(f"  W&B              : {wandb_run.url}")
+    print("──────────────────────────────────────────────────────")
+    start_time = time.perf_counter()
 
     for update in range(1, training.updates + 1):
         buffer.reset(actor_hidden, critic_hidden, actor_signature, actor_value)
+        reward_totals = {
+            "coverage": 0.0,
+            "collision": 0.0,
+            "finder": 0.0,
+            "target_found": 0.0,
+            "success": 0.0,
+        }
         for _ in range(training.num_steps):
             obs = jax.vmap(observations)(states)
             split = jax.vmap(lambda key: jax.random.split(key))(keys)
@@ -190,6 +264,12 @@ def train_3d(
                 resets,
             )
             next_states, rewards, dones, info = jax.vmap(env_step)(states, jnp.tanh(actions))
+            rewards_host = np.asarray(rewards)
+            dones_host = np.asarray(dones)
+            for reward_name in reward_totals:
+                reward_totals[reward_name] += float(np.asarray(info[reward_name]).sum())
+            episode_returns += rewards_host.sum(axis=-1)
+            episode_lengths += 1
             buffer.add(
                 MAPPOTransition(
                     obs=np.asarray(obs),
@@ -219,7 +299,15 @@ def train_3d(
             )
             actor_signature, actor_value = emitted_signature, emitted_value
             episode_successes += int(np.asarray(info["success"]).sum())
-            episode_count += int(np.asarray(dones).sum())
+            completed_indices = np.flatnonzero(dones_host)
+            for index in completed_indices:
+                recent_returns.append(float(episode_returns[index]))
+                recent_lengths.append(int(episode_lengths[index]))
+                recent_success.append(float(np.asarray(info["success"])[index]))
+                recent_coverage.append(float(np.asarray(info["terminal_coverage_fraction"])[index]))
+            episode_count += len(completed_indices)
+            episode_returns[completed_indices] = 0.0
+            episode_lengths[completed_indices] = 0
             states = next_states
             resets = jnp.broadcast_to(dones[:, None], resets.shape)
 
@@ -239,11 +327,127 @@ def train_3d(
         latest_stats = trainer.update(minibatches)
         latest_stats["episode_success_rate"] = episode_successes / max(episode_count, 1)
         latest_stats["completed_episodes"] = float(episode_count)
-        print(
-            f"3D update {update}/{training.updates}: "
-            f"loss={latest_stats['total_loss']:.4f} "
-            f"success={latest_stats['episode_success_rate']:.3f}"
+        elapsed = time.perf_counter() - start_time
+        steps_done = update * training.num_envs * training.num_steps
+        sps = steps_done / max(elapsed, 1e-6)
+        eta_seconds = (training.updates - update) * elapsed / update
+        latest_stats.update(
+            {
+                "global_step": float(steps_done),
+                "sps": float(sps),
+                "mean_episode_return": float(np.mean(recent_returns)) if recent_returns else 0.0,
+                "mean_episode_length": float(np.mean(recent_lengths)) if recent_lengths else 0.0,
+                "rolling_success_rate": float(np.mean(recent_success)) if recent_success else 0.0,
+                "mean_terminal_coverage": float(np.mean(recent_coverage)) if recent_coverage else 0.0,
+                "live_episode_return": float(np.mean(episode_returns)),
+                "live_coverage": float(np.asarray(states.coverage).mean()),
+                "live_target_known_rate": float(np.asarray(states.target_known).mean()),
+                "live_chain_rate": float(np.asarray(states.fully_connected).mean()),
+                "live_episode_step": float(np.asarray(states.step).mean()),
+            }
         )
+        reward_denominator = training.num_envs * training.num_steps * cfg.num_agents
+        latest_stats.update(
+            {
+                f"reward_{name}": total / reward_denominator
+                for name, total in reward_totals.items()
+            }
+        )
+        with history_path.open("a", encoding="utf-8") as history_file:
+            history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
+        if update % training.log_every == 0 or update == 1 or update == training.updates:
+            eta_m, eta_s = divmod(int(eta_seconds), 60)
+            eta_h, eta_m = divmod(eta_m, 60)
+            eta = f"{eta_h}h{eta_m:02d}m" if eta_h else f"{eta_m}m{eta_s:02d}s"
+            warmup = "warmup" if not recent_returns else f"ep={len(recent_returns):3d}"
+            display_return = (
+                latest_stats["mean_episode_return"]
+                if recent_returns
+                else latest_stats["live_episode_return"]
+            )
+            display_coverage = (
+                latest_stats["mean_terminal_coverage"]
+                if recent_coverage
+                else latest_stats["live_coverage"]
+            )
+            display_length = (
+                latest_stats["mean_episode_length"]
+                if recent_lengths
+                else latest_stats["live_episode_step"]
+            )
+            print(
+                f"[{datetime.now():%H:%M:%S}] [{update:>4}/{training.updates}] "
+                f"steps={steps_done:>10,} sps={sps:>9,.0f} "
+                f"return={display_return:>8.2f} "
+                f"len={display_length:>6.1f} "
+                f"cov={display_coverage:>6.1%} "
+                f"known={latest_stats['live_target_known_rate']:>6.1%} "
+                f"chain={latest_stats['live_chain_rate']:>6.1%} "
+                f"succ={latest_stats['rolling_success_rate']:>6.1%} "
+                f"loss={latest_stats['total_loss']:>8.3f} {warmup} eta={eta}"
+            )
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "ppo/policy_loss": latest_stats["policy_loss"],
+                    "ppo/value_loss": latest_stats["value_loss"],
+                    "ppo/entropy": latest_stats["entropy"],
+                    "ppo/approx_kl": latest_stats["approx_kl"],
+                    "ppo/clip_fraction": latest_stats["clip_fraction"],
+                    "train/episode_return": latest_stats["mean_episode_return"],
+                    "train/episode_length": latest_stats["mean_episode_length"],
+                    "train/success_rate": latest_stats["rolling_success_rate"],
+                    "train/coverage": latest_stats["mean_terminal_coverage"],
+                    "train/live_coverage": latest_stats["live_coverage"],
+                    "train/live_target_known_rate": latest_stats["live_target_known_rate"],
+                    "train/live_chain_rate": latest_stats["live_chain_rate"],
+                    "perf/sps": sps,
+                    **{
+                        f"rewards/{name}": latest_stats[f"reward_{name}"]
+                        for name in reward_totals
+                    },
+                },
+                step=steps_done,
+            )
+        if update % training.checkpoint_every == 0 and update < training.updates:
+            (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
+            save_model_checkpoint(
+                model,
+                destination / "checkpoints" / f"ckpt_{update:06d}",
+                run_name=training.run_name,
+                update=update,
+                num_envs=training.num_envs,
+                num_steps=training.num_steps,
+                prior_history=[],
+            )
+        if update % training.eval_every == 0 and update < training.updates:
+            eval_metrics, eval_states, eval_rewards = evaluate_suite_3d(
+                model,
+                level,
+                episodes=training.eval_episodes,
+                max_steps=min(128, cfg.max_steps),
+            )
+            latest_stats.update(eval_metrics)
+            write_replay(
+                destination / "replays" / f"update_{update:06d}",
+                eval_states,
+                map_name=level.building_name,
+                dt=cfg.dt,
+                reward_terms=eval_rewards,
+                metadata={
+                    "world_size_m": level.building.world_size_m.tolist(),
+                    "cell_size_m": level.building.cell_size_m,
+                    "comm_radius_m": cfg.comm_radius,
+                    "base_comm_radius_m": cfg.base_comm_radius,
+                    "visual_radius_m": cfg.visual_radius,
+                    "training_update": update,
+                },
+            )
+            print(
+                f"         evaluation: return={latest_stats['eval_return']:.2f} "
+                f"coverage={latest_stats['eval_coverage']:.1%} "
+                f"success={latest_stats['eval_success']:.0%}"
+            )
 
     (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
     checkpoint = save_model_checkpoint(
@@ -269,7 +473,19 @@ def train_3d(
         map_name=level.building_name,
         dt=cfg.dt,
         reward_terms=replay_rewards,
+        metadata={
+            "world_size_m": level.building.world_size_m.tolist(),
+            "cell_size_m": level.building.cell_size_m,
+            "comm_radius_m": cfg.comm_radius,
+            "base_comm_radius_m": cfg.base_comm_radius,
+            "visual_radius_m": cfg.visual_radius,
+        },
     )
+    if wandb_run is not None:
+        wandb_run.finish()
+    print("──────────────────────────────────────────────────────")
+    print(f"  Training complete ✓  checkpoint: {checkpoint}")
+    print(f"  Replay ready      ✓  {destination / 'replays' / 'latest.json'}")
     return checkpoint, latest_stats
 
 
@@ -278,11 +494,12 @@ def evaluate_model_3d(
     level: Level3D,
     *,
     max_steps: int | None = None,
+    seed: int | None = None,
 ) -> tuple[list, np.ndarray]:
     """Run one deterministic trained-policy episode for replay/inspection."""
     cfg = level.env
     reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
-    state = reset(jax.random.PRNGKey(level.training.seed + 10_000))
+    state = reset(jax.random.PRNGKey(seed if seed is not None else level.training.seed + 10_000))
     hidden = model.initial_actor_hidden(())
     signature = model.initial_actor_signature(())
     value = model.initial_actor_value(())
@@ -337,16 +554,51 @@ def evaluate_model_3d(
     return states, np.stack(reward_frames)
 
 
+def evaluate_suite_3d(
+    model: MAPPOModel,
+    level: Level3D,
+    *,
+    episodes: int,
+    max_steps: int | None = None,
+) -> tuple[dict[str, float], list, np.ndarray]:
+    """Evaluate several reproducible targets and retain the first replay."""
+    returns, successes, coverages, lengths = [], [], [], []
+    first_states = None
+    first_rewards = None
+    for episode in range(episodes):
+        states, rewards = evaluate_model_3d(
+            model,
+            level,
+            max_steps=max_steps,
+            seed=level.training.seed + 10_000 + episode,
+        )
+        if first_states is None:
+            first_states, first_rewards = states, rewards
+        returns.append(float(rewards.sum()))
+        successes.append(float(states[-1].success))
+        coverages.append(float(jnp.mean(states[-1].coverage)))
+        lengths.append(len(states) - 1)
+    metrics = {
+        "eval_return": float(np.mean(returns)),
+        "eval_success": float(np.mean(successes)),
+        "eval_coverage": float(np.mean(coverages)),
+        "eval_episode_length": float(np.mean(lengths)),
+    }
+    return metrics, first_states, first_rewards
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--level", default="B00_3d_baseline")
     parser.add_argument("--updates", type=int)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()
     checkpoint, _ = train_3d(
         load_level_3d(args.level),
         updates=args.updates,
         output_dir=args.output,
+        checkpoint_path=args.checkpoint,
     )
     print(f"3D training complete: {checkpoint}")
 

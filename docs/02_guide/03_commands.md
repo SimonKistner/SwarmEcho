@@ -103,16 +103,27 @@ directory:
 ```bash
 uv run swarmecho-train-3d \
   --level B00_3d_baseline \
-  --updates 10 \
+  --updates 1000 \
   --output outputs/3d_baseline
 ```
+
+Branch a new run from existing weights with
+`--checkpoint outputs/3d_baseline/checkpoints/ckpt_000500`.
 
 Evaluate a saved checkpoint deterministically and write a standalone replay:
 
 ```bash
 uv run swarmecho-evaluate-3d \
-  outputs/3d_baseline/checkpoints/ckpt_000010 \
+  outputs/3d_baseline/checkpoints/ckpt_001000 \
   --output outputs/3d_evaluation/latest
+```
+
+Inspect any completed replay from a separate terminal. The inspector is a
+standalone browser process with orbit/zoom/pan, playback and scrubbing, coverage
+and communication toggles, reward/status readouts, and transparent shell:
+
+```bash
+uv run swarmecho-inspect-3d outputs/3d_baseline/replays/latest.json
 ```
 
 Validate the complete 3D environment → recurrent TarMAC actor/critic → rollout

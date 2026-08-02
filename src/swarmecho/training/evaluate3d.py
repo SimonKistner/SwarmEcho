@@ -28,6 +28,13 @@ def main() -> None:
         map_name=level.building_name,
         dt=level.env.dt,
         reward_terms=rewards,
+        metadata={
+            "world_size_m": level.building.world_size_m.tolist(),
+            "cell_size_m": level.building.cell_size_m,
+            "comm_radius_m": level.env.comm_radius,
+            "base_comm_radius_m": level.env.base_comm_radius,
+            "visual_radius_m": level.env.visual_radius,
+        },
     )
     print(f"3D evaluation replay: {manifest}")
 
