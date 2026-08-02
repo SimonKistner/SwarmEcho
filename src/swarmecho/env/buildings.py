@@ -183,3 +183,49 @@ def load_building(path: str | Path) -> BuildingArrays:
 def distance_comment(building: BuildingArrays) -> str:
     """Return the diagnostic comment the map builder writes above a YAML map."""
     return f"{DISTANCE_COMMENT_PREFIX} {building.max_base_to_top_corner_m:.3f} m"
+
+
+def make_cuboid_building(
+    grid: tuple[int, int, int],
+    *,
+    cell_size_m: float = 5.0,
+    tile_thickness_m: float = 0.25,
+    wall_thickness_m: float = 0.25,
+) -> BuildingArrays:
+    """Construct a sealed empty cuboid without materializing verbose YAML.
+
+    This is primarily useful for benchmarks and generated templates. The base
+    is centred horizontally in a bottom-layer cell and that cell is the only
+    explicit target exclusion.
+    """
+    size_x, size_y, size_z = grid
+    if min(grid) < 1:
+        raise BuildingValidationError("Cuboid grid dimensions must be positive.")
+    tiles = np.zeros((size_x, size_y, size_z + 1), dtype=np.bool_)
+    tiles[:, :, (0, size_z)] = True
+    x_walls = np.zeros((size_x + 1, size_y, size_z), dtype=np.bool_)
+    x_walls[(0, size_x), :, :] = True
+    y_walls = np.zeros((size_x, size_y + 1, size_z), dtype=np.bool_)
+    y_walls[:, (0, size_y), :] = True
+    base_cell = np.asarray([size_x // 2, size_y // 2, 0])
+    target_exclusion = np.zeros(grid, dtype=np.bool_)
+    target_exclusion[tuple(base_cell)] = True
+    base_position = (base_cell.astype(np.float32) + 0.5) * cell_size_m
+    world_size = np.asarray(grid, dtype=np.float32) * cell_size_m
+    top_corners = [
+        np.asarray([x, y, world_size[2]], dtype=np.float32)
+        for x in (0.0, world_size[0])
+        for y in (0.0, world_size[1])
+    ]
+    return BuildingArrays(
+        tiles=tiles,
+        x_walls=x_walls,
+        y_walls=y_walls,
+        target_exclusion=target_exclusion,
+        base_position_m=base_position,
+        world_size_m=world_size,
+        cell_size_m=float(cell_size_m),
+        tile_thickness_m=float(tile_thickness_m),
+        wall_thickness_m=float(wall_thickness_m),
+        max_base_to_top_corner_m=max(dist(base_position, corner) for corner in top_corners),
+    )

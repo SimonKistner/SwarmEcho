@@ -10,6 +10,7 @@ from swarmecho.env.buildings import (
     compile_building,
     distance_comment,
     load_building,
+    make_cuboid_building,
 )
 
 
@@ -63,3 +64,13 @@ def test_out_of_bounds_target_exclusion_is_rejected():
 
     with pytest.raises(BuildingValidationError, match="outside valid bounds"):
         compile_building(data)
+
+
+def test_generated_cuboid_has_closed_shell_and_central_base():
+    building = make_cuboid_building((6, 4, 3))
+    assert building.tiles[:, :, 0].all()
+    assert building.tiles[:, :, -1].all()
+    assert building.x_walls[0].all() and building.x_walls[-1].all()
+    assert building.y_walls[:, 0].all() and building.y_walls[:, -1].all()
+    np.testing.assert_allclose(building.base_position_m, [17.5, 12.5, 2.5])
+    assert building.target_exclusion.sum() == 1

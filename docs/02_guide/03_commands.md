@@ -103,10 +103,15 @@ values produce the CPU/CUDA comparison matrix:
 uv run swarmecho-benchmark-3d \
   --num-envs 256,1024,4000 \
   --radar-bins 8,16,32 \
+  --grid 4x4x4,12x12x8 \
   --steps 200 \
   --output benchmark_3d_cuda.json
 ```
 
-The JSON report records the selected JAX backend and devices, compilation and
-run times, environment steps per second, state/observation shapes, and device
-memory statistics when the backend exposes them.
+The harness uses random actions and one compiled `lax.scan` that calculates
+observations on every step, matching rollout structure more closely than a
+Python loop around a step-only kernel. The JSON report records the selected JAX
+backend and devices, compilation and run times, environment steps per second,
+state/observation shapes, ideal chain margin, and device memory statistics when
+the backend exposes them. The `--grid` matrix is important: `4x4x4` is only a
+correctness case, while larger entries expose volumetric-coverage scaling.

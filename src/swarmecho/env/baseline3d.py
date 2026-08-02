@@ -33,6 +33,8 @@ class Baseline3DState(NamedTuple):
     is_conn_target: jax.Array
     target_known: jax.Array
     success: jax.Array
+    collided: jax.Array
+    coverage_credit: jax.Array
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,15 @@ class Baseline3DConfig:
     target_spawn_buffer: float = 0.5
     radar_bins: int = 8
     spawn_delay: int = 0
+
+
+@dataclass(frozen=True)
+class Baseline3DRewardConfig:
+    exploration_bonus: float = 0.25
+    collision_penalty: float = 0.5
+    finder_bonus: float = 50.0
+    target_found_bonus: float = 100.0
+    success_bonus: float = 500.0
 
 
 def spherical_directions(count: int) -> np.ndarray:
@@ -76,7 +87,43 @@ def minimum_target_distance(cfg: Baseline3DConfig) -> float:
 
 def maximum_five_drone_chain_distance(cfg: Baseline3DConfig) -> float:
     """Unobstructed base→D1→…→D5→target reach for five mobile drones."""
-    return cfg.base_comm_radius + 4.0 * cfg.comm_radius + cfg.visual_radius
+    if cfg.num_agents != 5:
+        raise ValueError("maximum_five_drone_chain_distance requires num_agents=5.")
+    return maximum_chain_distance(cfg)
+
+
+def maximum_chain_distance(cfg: Baseline3DConfig) -> float:
+    """Ideal straight-line reach for the configured number of mobile drones."""
+    return (
+        cfg.base_comm_radius
+        + max(0, cfg.num_agents - 1) * cfg.comm_radius
+        + cfg.visual_radius
+    )
+
+
+def rewards_3d(
+    previous: Baseline3DState,
+    current: Baseline3DState,
+    cfg: Baseline3DRewardConfig = Baseline3DRewardConfig(),
+) -> tuple[jax.Array, dict[str, jax.Array]]:
+    """Compute per-agent rewards while preserving local coverage credit."""
+    n = current.pos.shape[0]
+    newly_knows = current.target_known & ~previous.target_known
+    target_found_event = jnp.any(current.target_known) & ~jnp.any(previous.target_known)
+    success_event = current.success & ~previous.success
+    terms = {
+        "coverage": cfg.exploration_bonus * current.coverage_credit,
+        "collision": -cfg.collision_penalty * current.collided.astype(jnp.float32),
+        "finder": cfg.finder_bonus
+        * (current.directly_sees_target & ~previous.directly_sees_target).astype(jnp.float32),
+        "target_found": jnp.full(n, cfg.target_found_bonus / n) * target_found_event,
+        "success": jnp.full(n, cfg.success_bonus / n) * success_event,
+    }
+    # Agents learning through relayed information still receive the shared event;
+    # ``newly_knows`` is exposed for diagnostics without double-paying finders.
+    terms["newly_knows"] = newly_knows.astype(jnp.float32)
+    total = sum(value for name, value in terms.items() if name != "newly_knows")
+    return total, terms
 
 
 def _target_candidates(building: BuildingArrays, cfg: Baseline3DConfig) -> jax.Array:
@@ -150,7 +197,11 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         delta = coverage_centres[None, ...] - pos[:, None, None, None, :]
         visible = jnp.linalg.norm(delta, axis=-1) <= cfg.visual_radius
         visible &= active[:, None, None, None]
-        return coverage | jnp.any(visible, axis=0)
+        newly_covered = ~coverage & jnp.any(visible, axis=0)
+        viewers = jnp.sum(visible, axis=0)
+        credit_per_voxel = newly_covered / jnp.maximum(viewers, 1)
+        credit = jnp.sum(visible * credit_per_voxel[None, ...], axis=(1, 2, 3))
+        return coverage | newly_covered, credit
 
     def reset(key):
         target_key, next_key = jax.random.split(key)
@@ -159,7 +210,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         pos = jnp.broadcast_to(base_pos, (n, 3))
         active = jnp.arange(n) * cfg.spawn_delay <= 0
         coverage = jnp.zeros(building.target_exclusion.shape, dtype=jnp.bool_)
-        coverage = update_coverage(coverage, pos, active)
+        coverage, _ = update_coverage(coverage, pos, active)
         sees, conn_base, conn_target, _ = connectivity(pos, active, base_pos, candidates[target_idx])
         return Baseline3DState(
             pos=pos,
@@ -175,6 +226,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             is_conn_target=conn_target,
             target_known=conn_target,
             success=jnp.any(conn_base & conn_target),
+            collided=jnp.zeros(n, dtype=jnp.bool_),
+            coverage_credit=jnp.zeros(n, dtype=jnp.float32),
         )
 
     def step(state: Baseline3DState, action: jax.Array):
@@ -191,7 +244,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         velocity = jnp.where(collided, 0.0, velocity)
         pos = jnp.where(active[:, None], pos, state.base_pos)
         velocity = jnp.where(active[:, None], velocity, 0.0)
-        coverage = update_coverage(state.coverage, pos, active)
+        coverage, coverage_credit = update_coverage(state.coverage, pos, active)
         sees, conn_base, conn_target, _ = connectivity(pos, active, state.base_pos, state.target_pos)
         known = state.target_known | conn_target
         return Baseline3DState(
@@ -208,6 +261,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             is_conn_target=conn_target,
             target_known=known,
             success=jnp.any(conn_base & conn_target),
+            collided=jnp.any(collided, axis=-1) & active,
+            coverage_credit=coverage_credit,
         )
 
     def observations(state: Baseline3DState):

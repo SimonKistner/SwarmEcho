@@ -48,6 +48,8 @@ def write_replay(
         "connected_to_target": stack("is_conn_target"),
         "target_known": stack("target_known"),
         "success": stack("success"),
+        "collided": stack("collided"),
+        "coverage_credit": stack("coverage_credit"),
         "coverage": stack("coverage"),
         "step": stack("step"),
     }

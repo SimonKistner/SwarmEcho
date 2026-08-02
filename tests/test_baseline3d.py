@@ -8,10 +8,13 @@ import pytest
 
 from swarmecho.env.baseline3d import (
     Baseline3DConfig,
+    Baseline3DRewardConfig,
     Baseline3DState,
     make_baseline_3d_fns,
+    maximum_chain_distance,
     maximum_five_drone_chain_distance,
     minimum_target_distance,
+    rewards_3d,
     spherical_directions,
 )
 from swarmecho.env.buildings import load_building
@@ -36,6 +39,7 @@ def test_octant_radar_and_configured_distance_contracts():
     cfg = Baseline3DConfig()
     assert minimum_target_distance(cfg) == 9.0
     assert maximum_five_drone_chain_distance(cfg) == 30.0
+    assert maximum_chain_distance(replace(cfg, num_agents=6)) == 35.0
 
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
@@ -100,6 +104,8 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
         is_conn_target=jnp.zeros(5, dtype=jnp.bool_),
         target_known=jnp.zeros(5, dtype=jnp.bool_),
         success=jnp.bool_(False),
+        collided=jnp.zeros(5, dtype=jnp.bool_),
+        coverage_credit=jnp.zeros(5),
     )
     connected = step(state, jnp.zeros((5, 3)))
     assert connected.success
@@ -124,8 +130,24 @@ def test_coverage_changes_across_height_layers():
         is_conn_target=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         target_known=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         success=jnp.bool_(False),
+        collided=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
+        coverage_credit=jnp.zeros(cfg.num_agents),
     )
     low = step(state, jnp.zeros((cfg.num_agents, 3)))
     high = step(low._replace(pos=low.pos.at[0, 2].set(12.5)), jnp.zeros((cfg.num_agents, 3)))
     assert high.coverage[0, 0, 0]
     assert high.coverage[0, 0, 2]
+
+
+def test_reward_terms_preserve_local_credit_and_shared_events():
+    cfg, (reset, step, _, _) = _functions()
+    previous = reset(jax.random.PRNGKey(7))
+    current = step(previous, jnp.ones((cfg.num_agents, 3)))
+    reward, terms = rewards_3d(previous, current, Baseline3DRewardConfig())
+    assert reward.shape == (cfg.num_agents,)
+    assert terms["coverage"].shape == (cfg.num_agents,)
+    assert terms["collision"].shape == (cfg.num_agents,)
+    assert jnp.isfinite(reward).all()
+    assert jnp.sum(current.coverage_credit) == pytest.approx(
+        jnp.sum(current.coverage & ~previous.coverage), abs=1e-5
+    )
