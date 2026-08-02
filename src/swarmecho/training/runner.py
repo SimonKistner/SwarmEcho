@@ -503,7 +503,9 @@ def _collect_rollout_mappo(
 
         obs_batch = obs_fn_v(states)          # (E, N, D)
         critic_obs_batch = (
-            critic_state_fn_v(states) if critic_state_fn_v is not None else obs_batch
+            critic_state_fn_v(states, obs_batch)
+            if critic_state_fn_v is not None
+            else obs_batch
         )
         E_, N_, D_ = obs_batch.shape
         act_keys = jax.random.split(act_key, E_ * N_).reshape(E_, N_, 2)
@@ -693,7 +695,9 @@ def _collect_rollout_mappo(
     # Bootstrap value for last state
     last_obs    = obs_fn_v(states)
     last_critic_obs = (
-        critic_state_fn_v(states) if critic_state_fn_v is not None else last_obs
+        critic_state_fn_v(states, last_obs)
+        if critic_state_fn_v is not None
+        else last_obs
     )
     if recurrent and model.critic_memory:
         reset_agents_b = (

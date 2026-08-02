@@ -55,16 +55,33 @@ def _state() -> EnvState:
 def test_privileged_state_is_compact_and_contains_graph_rows():
     cfg = OmegaConf.create({"env": {
         "num_agents": 2, "max_steps": 10, "hold_chain_for": 4,
-        "max_speed": 2.0, "cell_size": 1.0,
+        "max_speed": 2.0, "radar_bins": 2,
     }})
     fn, width = make_privileged_critic_state_fn(
         cfg, 4.0, 4.0, jnp.zeros((4, 4), dtype=bool)
     )
-    features = fn(_state())
+    actor_obs = jnp.arange(20, dtype=jnp.float32).reshape(2, 10)
+    features = fn(_state(), actor_obs)
 
-    assert features.shape == (2, privileged_critic_dim(2)) == (2, width)
+    assert features.shape == (2, privileged_critic_dim(2, 2)) == (2, width)
     assert jnp.all(jnp.isfinite(features))
     assert jnp.array_equal(features[:, 17:19], jnp.array([[0, 1], [1, 0]]))
+    assert jnp.allclose(features[:, 22], 0.25)
+    assert jnp.array_equal(features[:, -8:], actor_obs[:, -8:])
+
+
+def test_logical_coverage_excludes_walls_from_cell_normalization():
+    cfg = OmegaConf.create({"env": {
+        "num_agents": 2, "max_steps": 10, "hold_chain_for": 4,
+        "max_speed": 2.0, "radar_bins": 1,
+    }})
+    occupancy = jnp.zeros((4, 4), dtype=bool).at[0, 0].set(True)
+    fn, _ = make_privileged_critic_state_fn(cfg, 4.0, 4.0, occupancy)
+    features = fn(_state(), jnp.zeros((2, 4)))
+
+    # The only logical cell has three covered free pixels: eye(4)'s [0,0]
+    # pixel is a wall, so its coverage is 3 / 15 rather than 4 / 16.
+    assert jnp.allclose(features[:, 22], 3.0 / 15.0)
 
 
 def test_critic_selection_leaves_legacy_class_unchanged():

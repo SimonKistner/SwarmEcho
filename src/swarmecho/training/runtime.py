@@ -83,7 +83,7 @@ def build_evaluation_runtime(
     """Build evaluation dependencies and restore one checkpoint."""
     environment = build_environment_runtime(cfg)
     critic_input_dim = (
-        privileged_critic_dim(int(cfg.env.num_agents))
+        privileged_critic_dim(int(cfg.env.num_agents), int(cfg.env.radar_bins))
         if str(cfg.network.get("critic_type", "observation")) == "privileged"
         else None
     )
