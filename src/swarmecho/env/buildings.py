@@ -15,7 +15,7 @@ import numpy as np
 import yaml
 
 
-BUILDING_FORMAT = "swarmecho-building/v1"
+BUILDING_FORMAT = "swarmecho-map/v1"
 DISTANCE_COMMENT_PREFIX = "# Maximum base-to-top-corner distance:"
 
 
@@ -80,7 +80,7 @@ def _set_coords(array: np.ndarray, coords: Iterable[tuple[int, int, int]], label
 
 
 def compile_building(data: dict[str, Any]) -> BuildingArrays:
-    """Validate and compile one ``swarmecho-building/v1`` mapping.
+    """Validate and compile one ``swarmecho-map/v1`` mapping.
 
     Coordinate conventions:
 
@@ -105,13 +105,28 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
     if tile_thickness >= cell_size or wall_thickness >= cell_size:
         raise BuildingValidationError("Tile and wall thickness must be smaller than cell_size_m.")
 
-    grid = data.get("grid")
+    grid = data.get("building_cell_grid")
     if not isinstance(grid, dict):
-        raise BuildingValidationError("grid must contain positive integer x, y, and z sizes.")
-    dimensions = tuple(grid.get(axis) for axis in "xyz")
+        raise BuildingValidationError(
+            "building_cell_grid must contain positive integer cols, rows, and layers."
+        )
+    dimensions = tuple(grid.get(axis) for axis in ("cols", "rows", "layers"))
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in dimensions):
-        raise BuildingValidationError("grid must contain positive integer x, y, and z sizes.")
+        raise BuildingValidationError(
+            "building_cell_grid must contain positive integer cols, rows, and layers."
+        )
     size_x, size_y, size_z = dimensions
+    declared_world = tuple(data.get(axis) for axis in ("width", "height", "depth"))
+    expected_world = tuple(size * cell_size for size in dimensions)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not np.isclose(float(value), expected)
+        for value, expected in zip(declared_world, expected_world)
+    ):
+        raise BuildingValidationError(
+            "width, height, and depth must equal their cell counts times cell_size_m."
+        )
 
     geometry = data.get("geometry")
     if not isinstance(geometry, dict):

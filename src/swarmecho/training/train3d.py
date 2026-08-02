@@ -15,7 +15,6 @@ import json
 import time
 from collections import deque
 from dataclasses import asdict
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -41,16 +40,17 @@ def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
         obs_dim=6 + cfg.radar_bins * 4,
         act_dim=3,
         num_agents=cfg.num_agents,
-        hidden_dim=hidden_dim or level.training.hidden_dim,
-        num_layers=3,
-        actor_num_layers=3,
-        actor_memory=True,
-        critic_memory=True,
-        memory_comm_enabled=True,
-        memory_comm_every_k_steps=1,
-        tarmac_sig_dim=16,
-        tarmac_val_dim=32,
-        tarmac_include_self=False,
+        hidden_dim=hidden_dim or level.network.hidden_dim,
+        num_layers=level.network.num_layers,
+        actor_num_layers=level.network.actor_num_layers,
+        actor_memory=level.network.actor_memory,
+        critic_memory=level.network.critic_memory,
+        critic_type=level.network.critic_type,
+        memory_comm_enabled=level.network.memory_comm_enabled,
+        memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
+        tarmac_sig_dim=level.network.tarmac_sig_dim,
+        tarmac_val_dim=level.network.tarmac_val_dim,
+        tarmac_include_self=level.network.tarmac_include_self,
         rngs=nnx.Rngs(level.training.seed),
     )
 
@@ -65,7 +65,7 @@ def _communication_inputs(states, cfg, base_valid, base_signature, base_value):
     )
     in_base_range = (
         jnp.linalg.norm(states.pos - states.base_pos[:, None, :], axis=-1)
-        <= cfg.base_comm_radius
+        <= cfg.comm_radius_base
     ) & states.active
     base_memory_masks = base_valid[:, None] & in_base_range & ~states.target_known
     return comm_masks, in_base_range, base_memory_masks, base_signature, base_value
@@ -108,26 +108,34 @@ def train_3d(
 ) -> tuple[Path, dict[str, float]]:
     """Train the strict 3D level and return its final checkpoint and metrics."""
     training = level.training
-    if updates is not None:
-        training = replace(training, updates=updates)
-    destination = Path(output_dir or training.output_dir)
+    network = level.network
+    evaluation = level.evaluation
+    logging = level.logging
+    num_updates = updates if updates is not None else level.num_updates
+    run_name = logging.run_name or level.name
+    default_output = Path(logging.log_dir) / run_name
+    destination = Path(output_dir) if output_dir is not None else default_output
     destination.mkdir(parents=True, exist_ok=True)
     cfg = level.env
     reset, env_step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
     obs_dim = 6 + cfg.radar_bins * 4
-    sig_dim = 16
-    val_dim = 32
-    model = build_model_3d(level, training.hidden_dim)
+    sig_dim = network.tarmac_sig_dim
+    val_dim = network.tarmac_val_dim
+    model = build_model_3d(level)
     resume_from = checkpoint_path or training.checkpoint_path
     if resume_from:
         restored = restore_model_checkpoint(model, resume_from)
         print(f"  Restored weights  ✓  {restored}")
     trainer = MAPPOTrainer(
         model,
-        lr=training.learning_rate,
+        lr=training.lr,
+        max_grad_norm=training.max_grad_norm,
+        clip_eps=training.clip_eps,
+        vf_coef=training.vf_coef,
+        ent_coef=training.ent_coef,
         num_epochs=training.num_epochs,
-        actor_memory=True,
-        critic_memory=True,
+        actor_memory=level.network.actor_memory,
+        critic_memory=level.network.critic_memory,
     )
     buffer = MAPPORolloutBuffer(
         num_steps=training.num_steps,
@@ -138,11 +146,11 @@ def train_3d(
         gamma=training.gamma,
         gae_lambda=training.gae_lambda,
         recurrent=True,
-        hidden_dim=training.hidden_dim,
+        hidden_dim=network.hidden_dim,
         tarmac_sig_dim=sig_dim,
         tarmac_val_dim=val_dim,
-        actor_memory=True,
-        critic_memory=True,
+        actor_memory=level.network.actor_memory,
+        critic_memory=level.network.critic_memory,
     )
     keys = jax.random.split(jax.random.PRNGKey(training.seed + 1), training.num_envs)
     states = jax.vmap(reset)(keys)
@@ -170,25 +178,30 @@ def train_3d(
         "env": asdict(level.env),
         "reward": asdict(level.reward),
         "training": asdict(training),
+        "network": asdict(network),
+        "evaluation": asdict(evaluation),
+        "logging": asdict(logging),
     }
     (destination / "config.yaml").write_text(
         yaml.safe_dump(config_snapshot, sort_keys=False), encoding="utf-8"
     )
     wandb_run = None
-    if training.wandb_mode != "disabled":
+    if logging.wandb_mode != "disabled":
         import wandb
 
         wandb_run = wandb.init(
-            project=training.wandb_project,
-            name=training.run_name,
-            mode=training.wandb_mode,
+            project=logging.wandb_project,
+            entity=logging.wandb_entity,
+            group=logging.wandb_group,
+            name=run_name,
+            mode=logging.wandb_mode,
             config=config_snapshot,
             dir=str(destination),
         )
 
     _, params = nnx.split(model)
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
-    total_steps = training.updates * training.num_envs * training.num_steps
+    total_steps = num_updates * training.num_envs * training.num_steps
     print("\n══════════════════════════════════════════════════════")
     print("  SwarmEcho 3D — Recurrent MAPPO + TarMAC")
     print("══════════════════════════════════════════════════════")
@@ -199,7 +212,7 @@ def train_3d(
     print("  action           : 3D continuous force")
     print(f"  model parameters : {parameter_count:,}")
     print(f"  environments     : {training.num_envs:,}")
-    print(f"  rollout / updates: {training.num_steps} / {training.updates}")
+    print(f"  rollout / updates: {training.num_steps} / {num_updates}")
     print(f"  total env steps  : {total_steps:,}")
     print(f"  output           : {destination.resolve()}")
     if wandb_run is not None:
@@ -207,7 +220,7 @@ def train_3d(
     print("──────────────────────────────────────────────────────")
     start_time = time.perf_counter()
 
-    for update in range(1, training.updates + 1):
+    for update in range(1, num_updates + 1):
         buffer.reset(actor_hidden, critic_hidden, actor_signature, actor_value)
         reward_totals = {
             "coverage": 0.0,
@@ -330,7 +343,7 @@ def train_3d(
         elapsed = time.perf_counter() - start_time
         steps_done = update * training.num_envs * training.num_steps
         sps = steps_done / max(elapsed, 1e-6)
-        eta_seconds = (training.updates - update) * elapsed / update
+        eta_seconds = (num_updates - update) * elapsed / update
         latest_stats.update(
             {
                 "global_step": float(steps_done),
@@ -355,7 +368,7 @@ def train_3d(
         )
         with history_path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
-        if update % training.log_every == 0 or update == 1 or update == training.updates:
+        if update % logging.log_every == 0 or update == 1 or update == num_updates:
             eta_m, eta_s = divmod(int(eta_seconds), 60)
             eta_h, eta_m = divmod(eta_m, 60)
             eta = f"{eta_h}h{eta_m:02d}m" if eta_h else f"{eta_m}m{eta_s:02d}s"
@@ -376,7 +389,7 @@ def train_3d(
                 else latest_stats["live_episode_step"]
             )
             print(
-                f"[{datetime.now():%H:%M:%S}] [{update:>4}/{training.updates}] "
+                f"[{datetime.now():%H:%M:%S}] [{update:>4}/{num_updates}] "
                 f"steps={steps_done:>10,} sps={sps:>9,.0f} "
                 f"return={display_return:>8.2f} "
                 f"len={display_length:>6.1f} "
@@ -409,22 +422,32 @@ def train_3d(
                 },
                 step=steps_done,
             )
-        if update % training.checkpoint_every == 0 and update < training.updates:
+        checkpoint_due = (
+            evaluation.save_model
+            and update > evaluation.checkpoint_offset
+            and (update - evaluation.checkpoint_offset) % evaluation.checkpoint_freq == 0
+        )
+        if checkpoint_due and update < num_updates:
             (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
             save_model_checkpoint(
                 model,
                 destination / "checkpoints" / f"ckpt_{update:06d}",
-                run_name=training.run_name,
+                run_name=run_name,
                 update=update,
                 num_envs=training.num_envs,
                 num_steps=training.num_steps,
                 prior_history=[],
             )
-        if update % training.eval_every == 0 and update < training.updates:
+        eval_due = (
+            update > evaluation.eval_offset
+            and (update - evaluation.eval_offset) % evaluation.eval_freq == 0
+            and latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
+        )
+        if eval_due and update < num_updates:
             eval_metrics, eval_states, eval_rewards = evaluate_suite_3d(
                 model,
                 level,
-                episodes=training.eval_episodes,
+                episodes=evaluation.eval_parallel_envs,
                 max_steps=min(128, cfg.max_steps),
             )
             latest_stats.update(eval_metrics)
@@ -438,7 +461,7 @@ def train_3d(
                     "world_size_m": level.building.world_size_m.tolist(),
                     "cell_size_m": level.building.cell_size_m,
                     "comm_radius_m": cfg.comm_radius,
-                    "base_comm_radius_m": cfg.base_comm_radius,
+                    "comm_radius_base_m": cfg.comm_radius_base,
                     "visual_radius_m": cfg.visual_radius,
                     "training_update": update,
                 },
@@ -452,9 +475,9 @@ def train_3d(
     (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
     checkpoint = save_model_checkpoint(
         model,
-        destination / "checkpoints" / f"ckpt_{training.updates:06d}",
-        run_name=level.name,
-        update=training.updates,
+        destination / "checkpoints" / f"ckpt_{num_updates:06d}",
+        run_name=run_name,
+        update=num_updates,
         num_envs=training.num_envs,
         num_steps=training.num_steps,
         prior_history=[],
@@ -477,7 +500,7 @@ def train_3d(
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "comm_radius_m": cfg.comm_radius,
-            "base_comm_radius_m": cfg.base_comm_radius,
+            "comm_radius_base_m": cfg.comm_radius_base,
             "visual_radius_m": cfg.visual_radius,
         },
     )
@@ -589,7 +612,7 @@ def evaluate_suite_3d(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--level", default="B00_3d_baseline")
+    parser.add_argument("--level", default="M00_no_maze_open_cuboid_3D")
     parser.add_argument("--updates", type=int)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--checkpoint", type=Path)

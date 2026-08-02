@@ -1,0 +1,65 @@
+env:
+  map_names: ["M00_no_maze_open_cuboid"]
+  num_agents: 5
+  max_steps: 700
+  visual_radius: 4.0
+  max_speed: 5.0
+  max_force: 20.0
+  comm_radius: 5.0
+  comm_radius_base: 6.0
+  radar_bins: 8
+  spawn_delay: 0
+  hold_chain_for: 5
+  drone_radius: 0.25
+  target_spawn_buffer: 0.5
+
+reward:
+  target_found_requires_delivery: true
+  chain_reward_system: euclidean
+
+  # --- Local Rewards (Not divided by N) ---
+  exploration_bonus: 0.25
+  finder_bonus: 50.0
+  collision_penalty: 0.5
+
+  # --- Global Rewards (Divided by N) ---
+  target_found_bonus: 100.0
+  success_bonus: 500.0
+
+training:
+  total_timesteps: 16_384_000
+  num_envs: 256
+  num_steps: 64
+  num_epochs: 2
+  num_minibatches: 8
+  seed: 42
+
+  # checkpoint_path: "outputs/previous_run/checkpoints/ckpt_000500"
+  # ckpt_loading_mode: "branch"
+
+network:
+  num_layers: 3
+  actor_num_layers: 3
+  actor_memory: true
+  critic_memory: true
+  critic_type: "observation"
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 1
+  tarmac_sig_dim: 16
+  tarmac_val_dim: 32
+  tarmac_include_self: false
+
+evaluation:
+  eval_parallel_envs: 8
+  early_exit: false
+  early_exit_threshold: 0.99
+
+  save_model: true
+  checkpoint_freq: 50
+  checkpoint_offset: 0
+
+  eval_freq: 50
+  eval_offset: 0
+  eval_video: true
+  eval_video_freq: 50
+  eval_video_offset: 0

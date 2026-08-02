@@ -94,17 +94,19 @@ Save authoring topology in YAML, not meshes or a dense metre-resolution physics
 volume. Compile immutable fixed-shape arrays at load time. A compact sketch:
 
 ```yaml
-format: swarmecho-building/v1
-name: baseline_cuboid
+format: swarmecho-map/v1
+name: M00_no_maze_open_cuboid
+width: 40.0
+height: 40.0
+depth: 30.0
+building_cell_grid: {cols: 8, rows: 8, layers: 6}
 cell_size_m: 5.0
-grid: {x: 8, y: 8, z: 6}
 tile_thickness_m: 0.25
 wall_thickness_m: 0.25
 geometry:
   tiles: []         # [x_cell, y_cell, z_boundary]
   x_walls: []       # [x_boundary, y_cell, z_cell]
   y_walls: []       # [x_cell, y_boundary, z_cell]
-boundary: sealed
 base_cell: [3, 3, 0]
 target_exclusion_cells: [[3, 3, 0]]
 ```
@@ -117,7 +119,7 @@ The syntax is open, but semantics should be fixed early:
    each neighbouring cell;
 4. the base is a static point at its cell centre and all drones spawn there;
 5. only target exclusion is painted as cells; runtime target candidates must
-   additionally satisfy `base_comm_radius + 0.5 * comm_radius + buffer < distance`;
+   additionally satisfy `comm_radius_base + 0.5 * comm_radius + buffer < distance`;
 6. validation checks bounds, shell completeness, support, non-empty spawns,
    exterior sealing, and reachability;
 7. the format is explicitly versioned and never silently reinterpreted.
@@ -173,7 +175,7 @@ and [Raycaster](https://threejs.org/docs/#api/en/core/Raycaster).
 
 ### Sprint 0 — contracts and benchmark harness
 
-Deliver a minimal `building/v1` parser/validator, one hand-written cuboid, and
+Deliver a minimal `map/v1` parser/validator, one hand-written cuboid, and
 shape contracts for state/action/observation/replay. Add a benchmark reporting
 reset/step throughput for representative environment counts on CPU and the
 available accelerator.
@@ -196,7 +198,7 @@ configuration—not the map—chooses enough agents and suitable radii. For five
 drones, the sensing/connectivity chain is `base --(base comm radius)--> D1 -->
 D2 --> D3 --> D4 --> D5 --(visual radius)--> target`; each of the four
 drone-to-drone arrows uses `comm_radius`. Its unobstructed maximum length is
-therefore `base_comm_radius + 4 * comm_radius + visual_radius`.
+therefore `comm_radius_base + 4 * comm_radius + visual_radius`.
 
 **Gate:** a scripted five-drone vertical chain connects and fails when one hop
 exceeds radius; targets never spawn in exclusion; high-speed sphere collision

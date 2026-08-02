@@ -14,7 +14,7 @@ from swarmecho.env.buildings import (
 )
 
 
-BUILDING_PATH = Path("src/swarmecho/curriculum_config/buildings/B00_baseline_cuboid.yaml")
+BUILDING_PATH = Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")
 
 
 def _data():
@@ -22,6 +22,9 @@ def _data():
 
 
 def test_baseline_building_compiles_to_static_arrays():
+    source = _data()
+    assert source["name"].startswith("M00_")
+    assert source["building_cell_grid"] == {"cols": 4, "rows": 4, "layers": 4}
     building = load_building(BUILDING_PATH)
 
     assert building.tiles.shape == (4, 4, 5)

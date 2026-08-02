@@ -12,7 +12,7 @@ from swarmecho.visualize.replay3d import load_replay, write_replay
 
 def test_replay_round_trip_and_atomic_manifest(tmp_path):
     building = load_building(
-        "src/swarmecho/curriculum_config/buildings/B00_baseline_cuboid.yaml"
+        "src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml"
     )
     cfg = Baseline3DConfig()
     reset, step, _, _ = make_baseline_3d_fns(building, cfg)
@@ -25,7 +25,7 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     data_path, manifest_path = write_replay(
         tmp_path / "rollout",
         states,
-        map_name="B00_baseline_cuboid",
+        map_name="M00_no_maze_open_cuboid",
         dt=cfg.dt,
         reward_terms=np.zeros((4, cfg.num_agents, 2), dtype=np.float32),
     )

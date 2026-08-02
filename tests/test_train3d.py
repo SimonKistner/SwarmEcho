@@ -13,13 +13,13 @@ def test_tiny_3d_training_creates_checkpoint_metrics_and_replay(tmp_path):
         level,
         training=replace(
             level.training,
-            updates=1,
+            total_timesteps=4,
             num_envs=2,
             num_steps=2,
             num_epochs=1,
             num_minibatches=1,
-            hidden_dim=16,
         ),
+        network=replace(level.network, hidden_dim=16),
     )
     checkpoint, stats = train_3d(level, output_dir=tmp_path)
     assert checkpoint.exists()

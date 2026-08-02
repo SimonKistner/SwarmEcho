@@ -102,7 +102,7 @@ directory:
 
 ```bash
 uv run swarmecho-train-3d \
-  --level B00_3d_baseline \
+  --level M00_no_maze_open_cuboid_3D \
   --updates 1000 \
   --output outputs/3d_baseline
 ```

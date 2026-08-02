@@ -14,7 +14,7 @@ from swarmecho.visualize.replay3d import write_replay
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--level", default="B00_3d_baseline")
+    parser.add_argument("--level", default="M00_no_maze_open_cuboid_3D")
     parser.add_argument("--output", type=Path, default=Path("outputs/3d_evaluation/latest"))
     parser.add_argument("--max-steps", type=int)
     args = parser.parse_args()
@@ -32,7 +32,7 @@ def main() -> None:
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "comm_radius_m": level.env.comm_radius,
-            "base_comm_radius_m": level.env.base_comm_radius,
+            "comm_radius_base_m": level.env.comm_radius_base,
             "visual_radius_m": level.env.visual_radius,
         },
     )

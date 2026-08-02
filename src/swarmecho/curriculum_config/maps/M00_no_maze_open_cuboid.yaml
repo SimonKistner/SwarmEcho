@@ -1,16 +1,22 @@
 # Maximum base-to-top-corner distance: 24.875 m
 # This geometric diagnostic ignores tiles and walls. Level configuration must
 # choose agent count and radii that make every allowed target location solvable.
-format: swarmecho-building/v1
-name: B00_baseline_cuboid
+format: swarmecho-map/v1
+name: M00_no_maze_open_cuboid
+width: 20.0
+height: 20.0
+depth: 20.0
+building_cell_grid:
+  cols: 4
+  rows: 4
+  layers: 4
 cell_size_m: 5.0
 tile_thickness_m: 0.25
 wall_thickness_m: 0.25
-grid: {x: 4, y: 4, z: 4}
 
 # The base is a static point at the centre of this cell. Drones spawn at the
 # exact base position. Target eligibility will additionally enforce:
-# base_comm_radius + 0.5 * comm_radius + target_spawn_buffer
+# comm_radius_base + 0.5 * comm_radius + target_spawn_buffer
 #     < distance(base, target).
 base_cell: [2, 2, 0]
 target_exclusion_cells:

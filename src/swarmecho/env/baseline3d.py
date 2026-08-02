@@ -48,7 +48,7 @@ class Baseline3DConfig:
     max_speed: float = 5.0
     drag: float = 0.9
     drone_radius: float = 0.25
-    base_comm_radius: float = 6.0
+    comm_radius_base: float = 6.0
     comm_radius: float = 5.0
     visual_radius: float = 4.0
     target_spawn_buffer: float = 0.5
@@ -60,6 +60,8 @@ class Baseline3DConfig:
 
 @dataclass(frozen=True)
 class Baseline3DRewardConfig:
+    target_found_requires_delivery: bool = True
+    chain_reward_system: str = "euclidean"
     exploration_bonus: float = 0.25
     collision_penalty: float = 0.5
     finder_bonus: float = 50.0
@@ -87,7 +89,7 @@ def spherical_directions(count: int) -> np.ndarray:
 
 def minimum_target_distance(cfg: Baseline3DConfig) -> float:
     """Distance that prevents an immediate base/first-drone discovery."""
-    return cfg.base_comm_radius + 0.5 * cfg.comm_radius + cfg.target_spawn_buffer
+    return cfg.comm_radius_base + 0.5 * cfg.comm_radius + cfg.target_spawn_buffer
 
 
 def maximum_five_drone_chain_distance(cfg: Baseline3DConfig) -> float:
@@ -100,7 +102,7 @@ def maximum_five_drone_chain_distance(cfg: Baseline3DConfig) -> float:
 def maximum_chain_distance(cfg: Baseline3DConfig) -> float:
     """Ideal straight-line reach for the configured number of mobile drones."""
     return (
-        cfg.base_comm_radius
+        cfg.comm_radius_base
         + max(0, cfg.num_agents - 1) * cfg.comm_radius
         + cfg.visual_radius
     )
@@ -114,8 +116,11 @@ def rewards_3d(
     """Compute per-agent rewards while preserving local coverage credit."""
     n = current.pos.shape[0]
     newly_knows = current.target_known & ~previous.target_known
-    target_found_event = jnp.any(current.target_known) & ~jnp.any(previous.target_known)
     success_event = current.success & ~previous.success
+    discovery_event = jnp.any(current.target_known) & ~jnp.any(previous.target_known)
+    target_found_event = (
+        success_event if cfg.target_found_requires_delivery else discovery_event
+    )
     terms = {
         "coverage": cfg.exploration_bonus * current.coverage_credit,
         "collision": -cfg.collision_penalty * current.collided.astype(jnp.float32),
@@ -141,7 +146,7 @@ def _target_candidates(building: BuildingArrays, cfg: Baseline3DConfig) -> jax.A
     valid = ~excluded & (distances > minimum_target_distance(cfg))
     if not np.any(valid):
         raise ValueError(
-            "Building has no target cell beyond base_comm_radius + "
+            "Building has no target cell beyond comm_radius_base + "
             "0.5 * comm_radius + target_spawn_buffer."
         )
     return jnp.asarray(positions[valid], dtype=jnp.float32)
@@ -192,7 +197,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             & active[None, :]
             & ~jnp.eye(n, dtype=jnp.bool_)
         )
-        base_edges = (jnp.linalg.norm(pos - base_pos, axis=-1) <= cfg.base_comm_radius) & active
+        base_edges = (jnp.linalg.norm(pos - base_pos, axis=-1) <= cfg.comm_radius_base) & active
         sees = (jnp.linalg.norm(pos - target_pos, axis=-1) <= cfg.visual_radius) & active
 
         reach = agent_adj | jnp.eye(n, dtype=jnp.bool_)

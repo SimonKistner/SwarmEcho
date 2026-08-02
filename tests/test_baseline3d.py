@@ -22,7 +22,7 @@ from swarmecho.env.buildings import load_building
 
 
 BUILDING = load_building(
-    Path("src/swarmecho/curriculum_config/buildings/B00_baseline_cuboid.yaml")
+    Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")
 )
 
 
@@ -82,7 +82,7 @@ def test_vmapped_step_and_high_speed_boundary_collision():
 
 def test_scripted_five_drone_chain_uses_visual_final_hop():
     cfg, (_, step, _, _) = _functions(
-        base_comm_radius=4.0,
+        comm_radius_base=4.0,
         comm_radius=3.0,
         visual_radius=2.0,
     )

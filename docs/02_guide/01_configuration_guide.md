@@ -3,11 +3,11 @@
 SwarmEcho uses a modular, layered configuration ecosystem. Default values are defined directly in Python dataclasses, and custom settings or difficulty levels are layered on top via YAML files.
 
 > **3D migration note:** the executable 3D slice uses strict configs from
-> `curriculum_config/levels_3d/` rather than merging them through the legacy 2D
-> level loader. `B00_3d_baseline.yaml` selects its building and declares its
+> `curriculum_config/levels/` rather than merging them through the legacy 2D
+> level loader. `M00_no_maze_open_cuboid_3D.yaml` selects its map and declares its
 > physics, radar, episode, connectivity, target-distance, and reward parameters.
 > Unknown fields are rejected, and a level is rejected when its ideal straight
-> relay cannot reach the building's farthest top corner. This becomes the main
+> relay cannot reach the map's farthest top corner. This becomes the main
 > configuration path as production training moves to 3D.
 
 ## 1. Parameters & Where to Find Them

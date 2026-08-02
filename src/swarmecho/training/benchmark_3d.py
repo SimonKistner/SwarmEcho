@@ -17,7 +17,7 @@ from swarmecho.env.baseline3d import (
 from swarmecho.env.buildings import load_building, make_cuboid_building
 
 
-DEFAULT_BUILDING = Path(__file__).parents[1] / "curriculum_config/buildings/B00_baseline_cuboid.yaml"
+DEFAULT_BUILDING = Path(__file__).parents[1] / "curriculum_config/maps/M00_no_maze_open_cuboid.yaml"
 
 
 def run_benchmark(
