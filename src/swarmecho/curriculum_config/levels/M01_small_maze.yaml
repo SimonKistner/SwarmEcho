@@ -26,7 +26,7 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 250_000_000
+  total_timesteps: 150_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -50,16 +50,17 @@ network:
 
 evaluation:
   eval_parallel_envs: 4000
-  eval_broadcast_on_curriculum_early_stop: true
-  early_exit: true
+  eval_broadcast_on_curriculum_early_stop: false
+  early_exit: false
   early_exit_threshold: 0.99
 
+  save_model: false
   checkpoint_freq: 50
   checkpoint_offset: 0
 
-  eval_freq: 20
+  eval_freq: 80
   eval_offset: 1
-  eval_not_delivered_or_visually_found_heatmap: true
+  eval_not_delivered_or_visually_found_heatmap: false
 
   eval_video: true
   eval_video_freq: 9999999
