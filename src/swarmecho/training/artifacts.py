@@ -28,8 +28,13 @@ def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
 
 def steps_for_update(update: int, cfg: Any) -> int:
     """Convert a PPO update number to environment steps using the run config."""
-    envs = int(cfg.training.get("num_envs", 4000))
-    rollout_steps = int(cfg.training.get("num_steps", 100))
+    training = cfg.training
+    if hasattr(training, "get"):
+        envs = int(training.get("num_envs", 4000))
+        rollout_steps = int(training.get("num_steps", 100))
+    else:
+        envs = int(getattr(training, "num_envs", 4000))
+        rollout_steps = int(getattr(training, "num_steps", 100))
     return int(update) * envs * rollout_steps
 
 
@@ -68,8 +73,20 @@ def train_artifact_root(run_dir: str | Path) -> Path:
     return Path(run_dir) / "artifacts" / "train"
 
 
+def train_replay_root(run_dir: str | Path) -> Path:
+    """Return the 3D equivalent of the maintained training-video directory."""
+    return train_artifact_root(run_dir) / "replays"
+
+
 def eval_checkpoint_artifact_root(run_dir: str | Path, checkpoint_path: str | Path, cfg: Any) -> Path:
     return Path(run_dir) / "artifacts" / "eval" / f"ckpt_{checkpoint_artifact_suffix(checkpoint_path, cfg)}"
+
+
+def eval_checkpoint_replay_root(
+    run_dir: str | Path, checkpoint_path: str | Path, cfg: Any
+) -> Path:
+    """Return the replay directory for one checkpoint-scoped 3D evaluation."""
+    return eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg) / "replays"
 
 
 def write_manifest(path: str | Path, payload: dict[str, Any]) -> None:

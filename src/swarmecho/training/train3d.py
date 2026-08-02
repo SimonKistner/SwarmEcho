@@ -27,6 +27,7 @@ from flax import nnx
 from swarmecho.core.config3d import Level3D, load_level_3d
 from swarmecho.env.baseline3d import make_autoreset_3d_fns, make_baseline_3d_fns, rewards_3d
 from swarmecho.models.mappo import MAPPOModel
+from swarmecho.training.artifacts import artifact_suffix, train_replay_root
 from swarmecho.training.checkpoints import restore_model_checkpoint, save_model_checkpoint
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
@@ -112,10 +113,26 @@ def train_3d(
     evaluation = level.evaluation
     logging = level.logging
     num_updates = updates if updates is not None else level.num_updates
-    run_name = logging.run_name or level.name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    configured_name = logging.run_name
+    run_name = (
+        f"run_{timestamp}"
+        if not configured_name
+        else (
+            f"{configured_name}_{timestamp}"
+            if logging.use_timestamp_postfix
+            else configured_name
+        )
+    )
     default_output = Path(logging.log_dir) / run_name
     destination = Path(output_dir) if output_dir is not None else default_output
     destination.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = (
+        Path(evaluation.checkpoint_dir).absolute()
+        if evaluation.checkpoint_dir
+        else destination / "checkpoints"
+    )
+    replay_dir = train_replay_root(destination)
     cfg = level.env
     reset, env_step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
     obs_dim = 6 + cfg.radar_bins * 4
@@ -428,22 +445,34 @@ def train_3d(
             and (update - evaluation.checkpoint_offset) % evaluation.checkpoint_freq == 0
         )
         if checkpoint_due and update < num_updates:
-            (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
             save_model_checkpoint(
                 model,
-                destination / "checkpoints" / f"ckpt_{update:06d}",
+                checkpoint_dir / f"ckpt_{update:06d}",
                 run_name=run_name,
                 update=update,
                 num_envs=training.num_envs,
                 num_steps=training.num_steps,
                 prior_history=[],
             )
+        threshold_met = (
+            latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
+        )
         eval_due = (
             update > evaluation.eval_offset
             and (update - evaluation.eval_offset) % evaluation.eval_freq == 0
-            and latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
+            and threshold_met
         )
-        if eval_due and update < num_updates:
+        replay_due = (
+            evaluation.eval_video
+            and update > evaluation.eval_video_offset
+            and (update - evaluation.eval_video_offset) % evaluation.eval_video_freq == 0
+            and threshold_met
+        )
+        if update == num_updates:
+            eval_due = True
+            replay_due = evaluation.eval_video
+        if eval_due or replay_due:
             eval_metrics, eval_states, eval_rewards = evaluate_suite_3d(
                 model,
                 level,
@@ -451,31 +480,35 @@ def train_3d(
                 max_steps=min(128, cfg.max_steps),
             )
             latest_stats.update(eval_metrics)
-            write_replay(
-                destination / "replays" / f"update_{update:06d}",
-                eval_states,
-                map_name=level.building_name,
-                dt=cfg.dt,
-                reward_terms=eval_rewards,
-                metadata={
-                    "world_size_m": level.building.world_size_m.tolist(),
-                    "cell_size_m": level.building.cell_size_m,
-                    "comm_radius_m": cfg.comm_radius,
-                    "comm_radius_base_m": cfg.comm_radius_base,
-                    "visual_radius_m": cfg.visual_radius,
-                    "training_update": update,
-                },
-            )
+            if replay_due:
+                suffix = artifact_suffix(update, steps_done)
+                write_replay(
+                    replay_dir / f"eval_{suffix}",
+                    eval_states,
+                    map_name=level.building_name,
+                    dt=cfg.dt,
+                    reward_terms=eval_rewards,
+                    metadata={
+                        "world_size_m": level.building.world_size_m.tolist(),
+                        "cell_size_m": level.building.cell_size_m,
+                        "comm_radius_m": cfg.comm_radius,
+                        "comm_radius_base_m": cfg.comm_radius_base,
+                        "visual_radius_m": cfg.visual_radius,
+                        "training_update": update,
+                        "environment_steps": steps_done,
+                        "artifact_scope": "train",
+                    },
+                )
             print(
                 f"         evaluation: return={latest_stats['eval_return']:.2f} "
                 f"coverage={latest_stats['eval_coverage']:.1%} "
                 f"success={latest_stats['eval_success']:.0%}"
             )
 
-    (destination / "checkpoints").mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = save_model_checkpoint(
         model,
-        destination / "checkpoints" / f"ckpt_{num_updates:06d}",
+        checkpoint_dir / f"ckpt_{num_updates:06d}",
         run_name=run_name,
         update=num_updates,
         num_envs=training.num_envs,
@@ -485,30 +518,13 @@ def train_3d(
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"
     )
-    replay_states, replay_rewards = evaluate_model_3d(
-        model,
-        level,
-        max_steps=min(128, training.num_steps, cfg.max_steps),
-    )
-    write_replay(
-        destination / "replays" / "latest",
-        replay_states,
-        map_name=level.building_name,
-        dt=cfg.dt,
-        reward_terms=replay_rewards,
-        metadata={
-            "world_size_m": level.building.world_size_m.tolist(),
-            "cell_size_m": level.building.cell_size_m,
-            "comm_radius_m": cfg.comm_radius,
-            "comm_radius_base_m": cfg.comm_radius_base,
-            "visual_radius_m": cfg.visual_radius,
-        },
-    )
     if wandb_run is not None:
         wandb_run.finish()
     print("──────────────────────────────────────────────────────")
     print(f"  Training complete ✓  checkpoint: {checkpoint}")
-    print(f"  Replay ready      ✓  {destination / 'replays' / 'latest.json'}")
+    if evaluation.eval_video:
+        final_suffix = artifact_suffix(num_updates, total_steps)
+        print(f"  Replay ready      ✓  {replay_dir / f'eval_{final_suffix}.json'}")
     return checkpoint, latest_stats
 
 

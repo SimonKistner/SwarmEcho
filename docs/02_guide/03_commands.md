@@ -103,19 +103,25 @@ directory:
 ```bash
 uv run swarmecho-train-3d \
   --level M00_no_maze_open_cuboid_3D \
-  --updates 1000 \
-  --output outputs/3d_baseline
+  --updates 1000
 ```
 
+The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
+`outputs/<run>/checkpoints/`; scheduled training inspection artifacts live in
+`outputs/<run>/artifacts/train/replays/`; and manual checkpoint evaluations live
+in `outputs/<run>/artifacts/eval/ckpt_<update-and-steps>/replays/`. A 3D replay
+occupies the role of a 2D MP4 and uses the same canonical
+`u<update>_s<environment-steps>` suffix. There is intentionally no special
+`replays/latest.json` path that bypasses this artifact contract.
+
 Branch a new run from existing weights with
-`--checkpoint outputs/3d_baseline/checkpoints/ckpt_000500`.
+`--checkpoint outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_000500`.
 
 Evaluate a saved checkpoint deterministically and write a standalone replay:
 
 ```bash
 uv run swarmecho-evaluate-3d \
-  outputs/3d_baseline/checkpoints/ckpt_001000 \
-  --output outputs/3d_evaluation/latest
+  outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_001000
 ```
 
 Inspect any completed replay from a separate terminal. The inspector is a
@@ -123,7 +129,8 @@ standalone browser process with orbit/zoom/pan, playback and scrubbing, coverage
 and communication toggles, reward/status readouts, and transparent shell:
 
 ```bash
-uv run swarmecho-inspect-3d outputs/3d_baseline/replays/latest.json
+uv run swarmecho-inspect-3d \
+  outputs/M00_no_maze_open_cuboid_3D/artifacts/train/replays/eval_u001000_s00016M.json
 ```
 
 Validate the complete 3D environment → recurrent TarMAC actor/critic → rollout

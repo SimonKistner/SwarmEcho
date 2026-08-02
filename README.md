@@ -66,7 +66,8 @@ uv run swarmecho-train-3d --level M00_no_maze_open_cuboid_3D
 Inspect the latest replay independently while training continues:
 
 ```bash
-uv run swarmecho-inspect-3d outputs/M00_no_maze_open_cuboid_3D/replays/latest.json
+uv run swarmecho-inspect-3d \
+  outputs/M00_no_maze_open_cuboid_3D/artifacts/train/replays/eval_u001000_s00016M.json
 ```
 
 ### 2. Start Curriculum Training

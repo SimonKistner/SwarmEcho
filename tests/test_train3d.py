@@ -20,12 +20,17 @@ def test_tiny_3d_training_creates_checkpoint_metrics_and_replay(tmp_path):
             num_minibatches=1,
         ),
         network=replace(level.network, hidden_dim=16),
+        env=replace(level.env, max_steps=2),
+        evaluation=replace(level.evaluation, eval_parallel_envs=1),
     )
     checkpoint, stats = train_3d(level, output_dir=tmp_path)
     assert checkpoint.exists()
     assert stats
     assert json.loads((tmp_path / "metrics.json").read_text())["total_loss"] == stats["total_loss"]
-    metadata, arrays = load_replay(tmp_path / "replays/latest.json")
+    replay = tmp_path / "artifacts/train/replays/eval_u000001_s00004.json"
+    metadata, arrays = load_replay(replay)
+    assert metadata["artifact_scope"] == "train"
+    assert metadata["environment_steps"] == 4
     assert metadata["frames"] > 1
     assert arrays["position"].shape[-1] == 3
 

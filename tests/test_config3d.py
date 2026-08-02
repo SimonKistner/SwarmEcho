@@ -4,6 +4,11 @@ import pytest
 import yaml
 
 from swarmecho.core.config3d import load_level_3d
+from swarmecho.training.artifacts import (
+    checkpoint_artifact_suffix,
+    eval_checkpoint_replay_root,
+    train_replay_root,
+)
 
 
 def test_baseline_level_is_strict_and_solvable():
@@ -27,3 +32,14 @@ def test_unknown_3d_environment_parameter_is_rejected(tmp_path):
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(ValueError, match="Unknown env fields: typo_parameter"):
         load_level_3d(path)
+
+
+def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
+    level = load_level_3d()
+    checkpoint = tmp_path / "checkpoints/ckpt_000050"
+
+    assert train_replay_root(tmp_path) == tmp_path / "artifacts/train/replays"
+    assert checkpoint_artifact_suffix(checkpoint, level) == "u000050_s00819k"
+    assert eval_checkpoint_replay_root(tmp_path, checkpoint, level) == (
+        tmp_path / "artifacts/eval/ckpt_u000050_s00819k/replays"
+    )
