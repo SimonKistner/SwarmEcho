@@ -10,6 +10,7 @@ from swarmecho.env.baseline3d import (
     Baseline3DConfig,
     Baseline3DRewardConfig,
     Baseline3DState,
+    make_autoreset_3d_fns,
     make_baseline_3d_fns,
     maximum_chain_distance,
     maximum_five_drone_chain_distance,
@@ -104,11 +105,16 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
         is_conn_target=jnp.zeros(5, dtype=jnp.bool_),
         target_known=jnp.zeros(5, dtype=jnp.bool_),
         success=jnp.bool_(False),
+        fully_connected=jnp.bool_(False),
+        chain_held_steps=jnp.int32(0),
+        done=jnp.bool_(False),
         collided=jnp.zeros(5, dtype=jnp.bool_),
         coverage_credit=jnp.zeros(5),
     )
-    connected = step(state, jnp.zeros((5, 3)))
-    assert connected.success
+    connected = state
+    for _ in range(cfg.hold_chain_for):
+        connected = step(connected, jnp.zeros((5, 3)))
+    assert connected.success and connected.done
 
     broken = state._replace(pos=positions.at[2, 0].set(10.1))
     assert not step(broken, jnp.zeros((5, 3))).success
@@ -130,6 +136,9 @@ def test_coverage_changes_across_height_layers():
         is_conn_target=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         target_known=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         success=jnp.bool_(False),
+        fully_connected=jnp.bool_(False),
+        chain_held_steps=jnp.int32(0),
+        done=jnp.bool_(False),
         collided=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         coverage_credit=jnp.zeros(cfg.num_agents),
     )
@@ -151,3 +160,19 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
     assert jnp.sum(current.coverage_credit) == pytest.approx(
         jnp.sum(current.coverage & ~previous.coverage), abs=1e-5
     )
+
+
+def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
+    cfg = replace(Baseline3DConfig(), max_steps=1)
+    reset, autoreset_step, _, _ = make_autoreset_3d_fns(BUILDING, cfg)
+    state = reset(jax.random.PRNGKey(99))
+    next_state, reward, done, info = autoreset_step(
+        state,
+        jnp.zeros((cfg.num_agents, 3)),
+    )
+    assert done
+    assert info["done"]
+    assert info["terminal_target_pos"].shape == (3,)
+    assert reward.shape == (cfg.num_agents,)
+    assert next_state.step == 0
+    assert not next_state.done

@@ -33,6 +33,9 @@ class Baseline3DState(NamedTuple):
     is_conn_target: jax.Array
     target_known: jax.Array
     success: jax.Array
+    fully_connected: jax.Array
+    chain_held_steps: jax.Array
+    done: jax.Array
     collided: jax.Array
     coverage_credit: jax.Array
 
@@ -51,6 +54,8 @@ class Baseline3DConfig:
     target_spawn_buffer: float = 0.5
     radar_bins: int = 8
     spawn_delay: int = 0
+    hold_chain_for: int = 5
+    max_steps: int = 700
 
 
 @dataclass(frozen=True)
@@ -148,6 +153,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         raise ValueError("num_agents must be positive.")
     if cfg.spawn_delay < 0:
         raise ValueError("spawn_delay must be non-negative.")
+    if cfg.hold_chain_for < 1:
+        raise ValueError("hold_chain_for must be at least 1.")
+    if cfg.max_steps < 1:
+        raise ValueError("max_steps must be at least 1.")
     if cfg.drone_radius <= 0:
         raise ValueError("drone_radius must be positive.")
     directions = jnp.asarray(spherical_directions(cfg.radar_bins))
@@ -212,6 +221,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         coverage = jnp.zeros(building.target_exclusion.shape, dtype=jnp.bool_)
         coverage, _ = update_coverage(coverage, pos, active)
         sees, conn_base, conn_target, _ = connectivity(pos, active, base_pos, candidates[target_idx])
+        fully_connected = jnp.any(conn_base & conn_target)
         return Baseline3DState(
             pos=pos,
             vel=jnp.zeros((n, 3), dtype=jnp.float32),
@@ -225,7 +235,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             is_conn_base=conn_base,
             is_conn_target=conn_target,
             target_known=conn_target,
-            success=jnp.any(conn_base & conn_target),
+            success=jnp.bool_(False),
+            fully_connected=fully_connected,
+            chain_held_steps=jnp.int32(0),
+            done=jnp.bool_(False),
             collided=jnp.zeros(n, dtype=jnp.bool_),
             coverage_credit=jnp.zeros(n, dtype=jnp.float32),
         )
@@ -247,6 +260,14 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         coverage, coverage_credit = update_coverage(state.coverage, pos, active)
         sees, conn_base, conn_target, _ = connectivity(pos, active, state.base_pos, state.target_pos)
         known = state.target_known | conn_target
+        fully_connected = jnp.any(conn_base & conn_target)
+        chain_held_steps = jnp.where(
+            fully_connected,
+            state.chain_held_steps + jnp.int32(1),
+            jnp.int32(0),
+        )
+        success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
+        done = success | (next_step >= jnp.int32(cfg.max_steps))
         return Baseline3DState(
             pos=pos,
             vel=velocity,
@@ -260,7 +281,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             is_conn_base=conn_base,
             is_conn_target=conn_target,
             target_known=known,
-            success=jnp.any(conn_base & conn_target),
+            success=success,
+            fully_connected=fully_connected,
+            chain_held_steps=chain_held_steps,
+            done=done,
             collided=jnp.any(collided, axis=-1) & active,
             coverage_credit=coverage_credit,
         )
@@ -316,6 +340,38 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             "active_agents": jnp.sum(state.active),
             "target_seen": jnp.any(state.directly_sees_target),
             "success": state.success,
+            "fully_connected": state.fully_connected,
+            "done": state.done,
         }
 
     return reset, step, observations, metrics
+
+
+def make_autoreset_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
+    """Return reset and terminal-aware step functions for batched training.
+
+    Terminal rewards and diagnostic state describe the completed transition;
+    only the returned carry state is replaced by a fresh episode.
+    """
+    reset, step, observations, metrics = make_baseline_3d_fns(building, cfg)
+
+    def autoreset_step(state: Baseline3DState, action: jax.Array):
+        terminal_state = step(state, action)
+        reward, reward_terms = rewards_3d(state, terminal_state)
+        reset_state = reset(terminal_state.key)
+        next_state = jax.tree_util.tree_map(
+            lambda fresh, current: jnp.where(terminal_state.done, fresh, current),
+            reset_state,
+            terminal_state,
+        )
+        info = {
+            **reward_terms,
+            "done": terminal_state.done,
+            "success": terminal_state.success,
+            "fully_connected": terminal_state.fully_connected,
+            "terminal_target_pos": terminal_state.target_pos,
+            "terminal_coverage_fraction": jnp.mean(terminal_state.coverage),
+        }
+        return next_state, reward, terminal_state.done, info
+
+    return reset, autoreset_step, observations, metrics

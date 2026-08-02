@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
+from swarmecho.core.config3d import load_level_3d
 from swarmecho.env.baseline3d import (
-    Baseline3DConfig,
-    make_baseline_3d_fns,
-    rewards_3d,
+    make_autoreset_3d_fns,
 )
-from swarmecho.env.buildings import load_building
 from swarmecho.models.mappo import MAPPOModel
-from swarmecho.training.benchmark_3d import DEFAULT_BUILDING
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
 
@@ -27,9 +26,9 @@ def validate_3d_update(
     recurrent: bool = True,
 ) -> dict[str, float]:
     """Collect a real 3D rollout and complete one PPO update."""
-    building = load_building(DEFAULT_BUILDING)
-    cfg = Baseline3DConfig()
-    reset, step, observations, _ = make_baseline_3d_fns(building, cfg)
+    level = load_level_3d()
+    cfg = replace(level.env, max_steps=max(2, num_steps - 1))
+    reset, step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
     obs_dim = 6 + cfg.radar_bins * 4
     model = MAPPOModel(
         obs_dim=obs_dim,
@@ -80,6 +79,7 @@ def validate_3d_update(
             actor_signature=actor_signature,
             actor_value=actor_value,
         )
+    resets = jnp.zeros((num_envs, cfg.num_agents), dtype=jnp.bool_)
 
     for _ in range(num_steps):
         obs = jax.vmap(observations)(states)
@@ -96,7 +96,6 @@ def validate_3d_update(
             & states.active[:, None, :]
             & ~jnp.eye(cfg.num_agents, dtype=jnp.bool_)[None, :, :]
         )
-        resets = jnp.zeros((num_envs, cfg.num_agents), dtype=jnp.bool_)
         base_signatures = jnp.zeros((num_envs, 8), dtype=jnp.float32)
         base_values = jnp.zeros((num_envs, 8), dtype=jnp.float32)
         base_memory_masks = jnp.zeros((num_envs, cfg.num_agents), dtype=jnp.bool_)
@@ -113,13 +112,14 @@ def validate_3d_update(
                 base_sig_one,
                 base_val_one,
                 base_mask_one,
+                resets_one,
             ):
                 return model.rollout_step_recurrent(
                     obs_one,
                     keys_one,
                     actor_h_one,
                     critic_h_one,
-                    jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
+                    resets_one,
                     actor_signature=actor_sig_one,
                     actor_value=actor_val_one,
                     comm_mask=comm_one,
@@ -149,12 +149,11 @@ def validate_3d_update(
                 base_signatures,
                 base_values,
                 base_memory_masks,
+                resets,
             )
         else:
             actions, log_probs, values = jax.vmap(model.rollout_step)(obs, agent_keys)
-        next_states = jax.vmap(step)(states, jnp.tanh(actions))
-        rewards, _ = jax.vmap(rewards_3d)(states, next_states)
-        dones = next_states.success
+        next_states, rewards, dones, _ = jax.vmap(step)(states, jnp.tanh(actions))
         buffer.add(
             MAPPOTransition(
                 obs=np.asarray(obs),
@@ -173,6 +172,7 @@ def validate_3d_update(
             )
         )
         states = next_states
+        resets = jnp.broadcast_to(dones[:, None], (num_envs, cfg.num_agents))
 
     final_obs = jax.vmap(observations)(states)
     if recurrent:
@@ -187,7 +187,7 @@ def validate_3d_update(
         final_values = jax.vmap(final_value_one)(final_obs, critic_hidden)
     else:
         final_values = jax.vmap(model.get_value)(final_obs)
-    advantages, returns = buffer.compute_gae(final_values, states.success)
+    advantages, returns = buffer.compute_gae(final_values, states.done)
     minibatches = buffer.get_minibatches(
         advantages,
         returns,
