@@ -1,0 +1,122 @@
+# Maximum base-to-top-corner distance: 24.875 m
+# This geometric diagnostic ignores tiles and walls. Level configuration must
+# choose agent count and radii that make every allowed target location solvable.
+format: swarmecho-building/v1
+name: B00_baseline_cuboid
+cell_size_m: 5.0
+tile_thickness_m: 0.25
+wall_thickness_m: 0.25
+grid: {x: 4, y: 4, z: 4}
+
+# The base is a static point at the centre of this cell. Drones spawn at the
+# exact base position. Target eligibility will additionally enforce:
+# base_comm_radius + 0.5 * comm_radius + target_spawn_buffer
+#     < distance(base, target).
+base_cell: [2, 2, 0]
+target_exclusion_cells:
+  - [2, 2, 0]
+
+# Tiles are solid square prisms. Walls are solid rectangular prisms centred on
+# cell boundaries and extend wall_thickness_m / 2 into both neighbouring cells.
+geometry:
+  tiles:
+    # Complete bottom floor.
+    - [0, 0, 0]
+    - [0, 1, 0]
+    - [0, 2, 0]
+    - [0, 3, 0]
+    - [1, 0, 0]
+    - [1, 1, 0]
+    - [1, 2, 0]
+    - [1, 3, 0]
+    - [2, 0, 0]
+    - [2, 1, 0]
+    - [2, 2, 0]
+    - [2, 3, 0]
+    - [3, 0, 0]
+    - [3, 1, 0]
+    - [3, 2, 0]
+    - [3, 3, 0]
+    # Complete top roof. Intermediate boundaries intentionally have no tiles.
+    - [0, 0, 4]
+    - [0, 1, 4]
+    - [0, 2, 4]
+    - [0, 3, 4]
+    - [1, 0, 4]
+    - [1, 1, 4]
+    - [1, 2, 4]
+    - [1, 3, 4]
+    - [2, 0, 4]
+    - [2, 1, 4]
+    - [2, 2, 4]
+    - [2, 3, 4]
+    - [3, 0, 4]
+    - [3, 1, 4]
+    - [3, 2, 4]
+    - [3, 3, 4]
+  x_walls:
+    - [0, 0, 0]
+    - [0, 0, 1]
+    - [0, 0, 2]
+    - [0, 0, 3]
+    - [0, 1, 0]
+    - [0, 1, 1]
+    - [0, 1, 2]
+    - [0, 1, 3]
+    - [0, 2, 0]
+    - [0, 2, 1]
+    - [0, 2, 2]
+    - [0, 2, 3]
+    - [0, 3, 0]
+    - [0, 3, 1]
+    - [0, 3, 2]
+    - [0, 3, 3]
+    - [4, 0, 0]
+    - [4, 0, 1]
+    - [4, 0, 2]
+    - [4, 0, 3]
+    - [4, 1, 0]
+    - [4, 1, 1]
+    - [4, 1, 2]
+    - [4, 1, 3]
+    - [4, 2, 0]
+    - [4, 2, 1]
+    - [4, 2, 2]
+    - [4, 2, 3]
+    - [4, 3, 0]
+    - [4, 3, 1]
+    - [4, 3, 2]
+    - [4, 3, 3]
+  y_walls:
+    - [0, 0, 0]
+    - [0, 0, 1]
+    - [0, 0, 2]
+    - [0, 0, 3]
+    - [1, 0, 0]
+    - [1, 0, 1]
+    - [1, 0, 2]
+    - [1, 0, 3]
+    - [2, 0, 0]
+    - [2, 0, 1]
+    - [2, 0, 2]
+    - [2, 0, 3]
+    - [3, 0, 0]
+    - [3, 0, 1]
+    - [3, 0, 2]
+    - [3, 0, 3]
+    - [0, 4, 0]
+    - [0, 4, 1]
+    - [0, 4, 2]
+    - [0, 4, 3]
+    - [1, 4, 0]
+    - [1, 4, 1]
+    - [1, 4, 2]
+    - [1, 4, 3]
+    - [2, 4, 0]
+    - [2, 4, 1]
+    - [2, 4, 2]
+    - [2, 4, 3]
+    - [3, 4, 0]
+    - [3, 4, 1]
+    - [3, 4, 2]
+    - [3, 4, 3]

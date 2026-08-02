@@ -92,3 +92,52 @@ Simulate the configured parallel evaluation batch, save comprehensive target/out
 uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_001000
 ```
 
+---
+
+## 3D Migration Performance Gate
+
+Run config-driven recurrent 3D training. The command writes a final Orbax
+checkpoint, scalar metrics, and a renderer-independent replay below the output
+directory:
+
+```bash
+uv run swarmecho-train-3d \
+  --level B00_3d_baseline \
+  --updates 10 \
+  --output outputs/3d_baseline
+```
+
+Evaluate a saved checkpoint deterministically and write a standalone replay:
+
+```bash
+uv run swarmecho-evaluate-3d \
+  outputs/3d_baseline/checkpoints/ckpt_000010 \
+  --output outputs/3d_evaluation/latest
+```
+
+Validate the complete 3D environment → recurrent TarMAC actor/critic → rollout
+buffer → GAE → MAPPO gradient-update contract on a deliberately small batch:
+
+```bash
+uv run swarmecho-validate-3d
+```
+
+Run the minimum 3D cuboid environment through JIT and VMAP. Comma-separated
+values produce the CPU/CUDA comparison matrix:
+
+```bash
+uv run swarmecho-benchmark-3d \
+  --num-envs 256,1024,4000 \
+  --radar-bins 8,16,32 \
+  --grid 4x4x4,12x12x8 \
+  --steps 200 \
+  --output benchmark_3d_cuda.json
+```
+
+The harness uses random actions and one compiled `lax.scan` that calculates
+observations on every step, matching rollout structure more closely than a
+Python loop around a step-only kernel. The JSON report records the selected JAX
+backend and devices, compilation and run times, environment steps per second,
+state/observation shapes, ideal chain margin, and device memory statistics when
+the backend exposes them. The `--grid` matrix is important: `4x4x4` is only a
+correctness case, while larger entries expose volumetric-coverage scaling.

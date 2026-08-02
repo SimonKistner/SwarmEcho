@@ -44,7 +44,7 @@ class MAPPOModel(nnx.Module):
     Parameters
     ----------
     obs_dim          : per-agent observation dimension
-    act_dim          : action dimension (2 for SwarmEcho)
+    act_dim          : action dimension (3 for the 3D SwarmEcho runtime)
     num_agents       : N — swarm size (used for shape assertions only)
     hidden_dim       : hidden layer width (shared by actor and critic)
     num_layers       : number of hidden layers in the CRITIC

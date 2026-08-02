@@ -55,6 +55,14 @@ Run the minimal train-update-evaluate-checkpoint-render workflow.
 uv run swarmecho-validate
 ```
 
+### 1b. Run the 3D Baseline
+
+Train the strict 3D baseline with the recurrent MAPPO/TarMAC stack:
+
+```bash
+uv run swarmecho-train-3d --level B00_3d_baseline
+```
+
 ### 2. Start Curriculum Training
 Train the maintained default small-maze stage.
 ```bash
