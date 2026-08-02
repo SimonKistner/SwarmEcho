@@ -25,6 +25,9 @@ documentation map and intentionally sorts before the numbered topic folders.
 
 - [Cleanup plan](03_roadmap/01_cleanup_plan.md)
 - [Future features](03_roadmap/02_future_features.md)
+- [3D transition discovery brief](03_roadmap/03_3d_transition_discovery.md) —
+  coupling audit, architecture recommendation, first executable slice, and
+  owner decision gate.
 
 ### `04_archive/` — historical and experimental context
 

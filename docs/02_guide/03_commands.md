@@ -92,3 +92,21 @@ Simulate the configured parallel evaluation batch, save comprehensive target/out
 uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_001000
 ```
 
+---
+
+## 3D Migration Performance Gate
+
+Run the minimum 3D cuboid environment through JIT and VMAP. Comma-separated
+values produce the CPU/CUDA comparison matrix:
+
+```bash
+uv run swarmecho-benchmark-3d \
+  --num-envs 256,1024,4000 \
+  --radar-bins 8,16,32 \
+  --steps 200 \
+  --output benchmark_3d_cuda.json
+```
+
+The JSON report records the selected JAX backend and devices, compilation and
+run times, environment steps per second, state/observation shapes, and device
+memory statistics when the backend exposes them.

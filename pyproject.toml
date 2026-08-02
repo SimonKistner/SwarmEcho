@@ -45,6 +45,7 @@ swarmecho-verify-maze = "swarmecho.curriculum_config.maps.scripts.verify_chain_m
 swarmecho-dashboard = "swarmecho.analysis.launch:dashboard_main"
 swarmecho-eval-dashboard = "swarmecho.analysis.launch:eval_dashboard_main"
 swarmecho-artefacts = "swarmecho.analysis.artefacts.server:main"
+swarmecho-benchmark-3d = "swarmecho.training.benchmark_3d:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -58,6 +59,11 @@ required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_6
 
 [tool.uv.pip]
 system = false  # always use the project's venv
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
 
 # ---------------------------------------------------------------------------
 # Development / linting extras (optional, not required for training)
