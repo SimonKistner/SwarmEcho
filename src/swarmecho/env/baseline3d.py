@@ -44,9 +44,9 @@ class Baseline3DState(NamedTuple):
 class Baseline3DConfig:
     num_agents: int = 5
     dt: float = 0.1
-    max_force: float = 20.0
+    max_force: float = 15.0
     max_speed: float = 5.0
-    drag: float = 0.9
+    drag: float = 0.85
     drone_radius: float = 0.25
     comm_radius_base: float = 6.0
     comm_radius: float = 5.0
@@ -54,8 +54,11 @@ class Baseline3DConfig:
     target_spawn_buffer: float = 0.5
     radar_bins: int = 8
     spawn_delay: int = 0
-    hold_chain_for: int = 5
+    hold_chain_for: int = 50
     max_steps: int = 700
+    observe_target_vector: bool = False
+    observe_base_vector: bool = False
+    observe_coverage_probe: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class Baseline3DRewardConfig:
     exploration_bonus: float = 0.25
     collision_penalty: float = 0.5
     finder_bonus: float = 50.0
+    max_gap_penalty: float = 5.0
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
 
@@ -90,6 +94,17 @@ def spherical_directions(count: int) -> np.ndarray:
 def minimum_target_distance(cfg: Baseline3DConfig) -> float:
     """Distance that prevents an immediate base/first-drone discovery."""
     return cfg.comm_radius_base + 0.5 * cfg.comm_radius + cfg.target_spawn_buffer
+
+
+def observation_dim_3d(cfg: Baseline3DConfig) -> int:
+    """Return the configured 3D actor observation width."""
+    return (
+        6
+        + 3 * int(cfg.observe_base_vector)
+        + 3 * int(cfg.observe_target_vector)
+        + cfg.radar_bins * 4
+        + cfg.radar_bins * int(cfg.observe_coverage_probe)
+    )
 
 
 def maximum_five_drone_chain_distance(cfg: Baseline3DConfig) -> float:
@@ -121,12 +136,29 @@ def rewards_3d(
     target_found_event = (
         success_event if cfg.target_found_requires_delivery else discovery_event
     )
+    base_distance = jnp.linalg.norm(current.pos - current.base_pos[None], axis=-1)
+    target_distance = jnp.linalg.norm(current.pos - current.target_pos[None], axis=-1)
+    base_tip_index = jnp.argmin(
+        jnp.where(current.is_conn_base & current.active, target_distance, jnp.inf)
+    )
+    target_tip_index = jnp.argmin(
+        jnp.where(current.is_conn_target & current.active, base_distance, jnp.inf)
+    )
+    has_base_chain = jnp.any(current.is_conn_base & current.active)
+    has_target_chain = jnp.any(current.is_conn_target & current.active)
+    base_tip = jnp.where(has_base_chain, current.pos[base_tip_index], current.base_pos)
+    target_tip = jnp.where(has_target_chain, current.pos[target_tip_index], current.target_pos)
+    full_distance = jnp.linalg.norm(current.target_pos - current.base_pos)
+    gap_distance = jnp.where(current.fully_connected, 0.0, jnp.linalg.norm(base_tip - target_tip))
+    active_gap = jnp.where(jnp.any(current.target_known), gap_distance, full_distance)
+    gap_penalty = -cfg.max_gap_penalty * active_gap / jnp.maximum(full_distance, 1e-6)
     terms = {
         "coverage": cfg.exploration_bonus * current.coverage_credit,
         "collision": -cfg.collision_penalty * current.collided.astype(jnp.float32),
         "finder": cfg.finder_bonus
         * (current.directly_sees_target & ~previous.directly_sees_target).astype(jnp.float32),
         "target_found": jnp.full(n, cfg.target_found_bonus / n) * target_found_event,
+        "chain_gap": jnp.full(n, gap_penalty / n),
         "success": jnp.full(n, cfg.success_bonus / n) * success_event,
     }
     # Agents learning through relayed information still receive the shared event;
@@ -334,7 +366,24 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
                     ),
                 ]
             )
-            return jnp.concatenate([self_state, radar])
+            optional = []
+            scale = jnp.maximum(jnp.max(world_size), 1e-6)
+            if cfg.observe_base_vector:
+                optional.append((state.base_pos - origin) / scale)
+            if cfg.observe_target_vector:
+                optional.append(
+                    (state.target_pos - origin)
+                    / scale
+                    * state.target_known[i].astype(jnp.float32)
+                )
+            if cfg.observe_coverage_probe:
+                probe = jnp.clip(
+                    jnp.floor((origin + directions * building.cell_size_m) / building.cell_size_m).astype(jnp.int32),
+                    0,
+                    jnp.asarray(state.coverage.shape) - 1,
+                )
+                optional.append(state.coverage[probe[:, 0], probe[:, 1], probe[:, 2]].astype(jnp.float32))
+            return jnp.concatenate([self_state, *optional, radar])
 
         del agent_adj  # reserved for future LOS-aware radar filtering
         return jax.vmap(one_agent)(jnp.arange(n))

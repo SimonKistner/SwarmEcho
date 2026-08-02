@@ -9,9 +9,10 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from swarmecho.core.config3d import load_level_3d
+from swarmecho.core.config import load_level_3d
 from swarmecho.env.baseline3d import (
     make_autoreset_3d_fns,
+    observation_dim_3d,
 )
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
@@ -29,7 +30,7 @@ def validate_3d_update(
     level = load_level_3d()
     cfg = replace(level.env, max_steps=max(2, num_steps - 1))
     reset, step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
-    obs_dim = 6 + cfg.radar_bins * 4
+    obs_dim = observation_dim_3d(cfg)
     model = MAPPOModel(
         obs_dim=obs_dim,
         act_dim=3,

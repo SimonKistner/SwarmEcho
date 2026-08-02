@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from swarmecho.core.config3d import load_level_3d
+from swarmecho.core.config import load_level_3d
 from swarmecho.env.baseline3d import make_baseline_3d_fns
 from swarmecho.visualize.inspector3d import (
     HTML,

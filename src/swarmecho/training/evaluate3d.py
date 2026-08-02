@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from swarmecho.core.config3d import load_level_3d_cli
+from swarmecho.core.config import load_level_3d_cli
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
     eval_checkpoint_replay_root,

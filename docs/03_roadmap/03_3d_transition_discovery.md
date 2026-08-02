@@ -4,6 +4,35 @@ Status: **discussion draft**, not an implementation specification. This brief
 records what is clear, identifies choices that materially affect architecture,
 and deliberately details only the first executable slice.
 
+## What is actually different in 3D
+
+The training lifecycle is not dimension-specific. Run naming and directories,
+configuration overrides, W&B, checkpoint history and branch/resume behavior,
+evaluation/checkpoint schedules, early exit, artifact suffixes, and finalization
+must remain shared. They now live in the canonical configuration module and the
+dimension-agnostic `training/run_lifecycle.py` helpers used by maintained
+training and the 3D adapter.
+
+Only these adapters fundamentally differ:
+
+1. **Environment state and physics:** positions, velocities, forces, collision
+   bounds, coverage, and actions gain a Z component. A 2D step kernel cannot
+   represent vertical movement or volumetric occupancy.
+2. **Observations and communication inputs:** radar directions cover a sphere,
+   and distance, connectivity, base memory, and target visibility operate in
+   three-dimensional Euclidean space.
+3. **Rollout/evaluation collection:** recurrent MAPPO, the rollout buffer, GAE,
+   and the PPO trainer remain shared, while the environment callback consumes
+   3D state and three-component actions.
+4. **Inspection media:** a fixed-camera MP4 is insufficient for volumetric
+   behavior. Its corresponding artifact is a recorded 3D replay inspected by a
+   rotatable browser viewer; scheduling, naming, and directories remain shared.
+5. **Spatial evaluation artifacts:** positions and coverage are XYZ/voxel data,
+   so 2D heatmap rendering cannot be reused verbatim. Evaluation summaries and
+   manifests stay shared while spatial presentation moves to the inspector.
+
+The map builder is intentionally excluded from this lifecycle refactor.
+
 ## Outcome and non-goals
 
 SwarmEcho will become 3D-only. Positions, forces, collision, communication,

@@ -479,3 +479,173 @@ if __name__ == "__main__":
     print(OmegaConf.to_yaml(cfg))
     print(f"\nObs dim  : {compute_obs_dim(cfg)}")
     print(f"Action dim: {compute_action_dim(cfg)}")
+
+# ---------------------------------------------------------------------------
+# 3D environment adapter configuration
+# ---------------------------------------------------------------------------
+# Training, evaluation, network, logging, and CLI semantics remain owned by
+# this canonical config module. These typed wrappers retain strict validation
+# while the 3D environment adapter is being connected to the common runner.
+
+@dataclass(frozen=True)
+class Network3DConfig:
+    hidden_dim: int = 256
+    num_layers: int = 3
+    actor_num_layers: int = 3
+    actor_memory: bool = True
+    critic_memory: bool = True
+    critic_type: str = "observation"
+    memory_comm_enabled: bool = True
+    memory_comm_every_k_steps: int = 5
+    tarmac_sig_dim: int = 16
+    tarmac_val_dim: int = 32
+    tarmac_include_self: bool = False
+
+
+@dataclass(frozen=True)
+class Training3DConfig:
+    total_timesteps: int = 250_000_000
+    seed: int = 42
+    num_envs: int = 4000
+    num_steps: int = 100
+    num_epochs: int = 4
+    num_minibatches: int = 20
+    lr: float = 3e-4
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_eps: float = 0.2
+    vf_coef: float = 0.5
+    ent_coef: float = 0.01
+    max_grad_norm: float = 0.5
+    checkpoint_path: str | None = None
+    checkpoint_step_offset: int | None = None
+    ckpt_loading_mode: str = "branch"
+
+
+@dataclass(frozen=True)
+class Evaluation3DConfig:
+    eval_freq: int = 20
+    eval_offset: int = 1
+    eval_min_train_success: float = 0.0
+    eval_parallel_envs: int = 4000
+    eval_broadcast_on_curriculum_early_stop: bool = False
+    early_exit: bool = False
+    early_exit_threshold: float = 0.99
+    eval_video: bool = True
+    eval_video_freq: int = 20
+    eval_video_offset: int = 1
+    eval_failed_chain_heatmap: bool = True
+    eval_not_delivered_or_visually_found_heatmap: bool = True
+    eval_not_deliv_not_visual_splitt_in_two: bool = False
+    save_model: bool = True
+    checkpoint_freq: int = 50
+    checkpoint_offset: int = 0
+    checkpoint_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class Logging3DConfig:
+    run_name: str | None = "M00_no_maze_open_cuboid_3D"
+    use_timestamp_postfix: bool = False
+    log_dir: str = "outputs"
+    wandb_mode: str = "online"
+    wandb_project: str = "SwarmEcho"
+    wandb_entity: str | None = None
+    wandb_group: str | None = None
+    suppress_xla_warnings: bool = True
+    log_every: int = 1
+
+
+@dataclass(frozen=True)
+class Level3D:
+    name: str
+    map_names: list[str]
+    building: object
+    env: object
+    reward: object
+    training: Training3DConfig
+    network: Network3DConfig
+    evaluation: Evaluation3DConfig
+    logging: Logging3DConfig
+
+    @property
+    def building_name(self) -> str:
+        return self.map_names[0]
+
+    @property
+    def ideal_chain_margin_m(self) -> float:
+        from swarmecho.env.baseline3d import maximum_chain_distance
+        return maximum_chain_distance(self.env) - self.building.max_base_to_top_corner_m
+
+    @property
+    def num_updates(self) -> int:
+        return self.training.total_timesteps // (self.training.num_envs * self.training.num_steps)
+
+
+def _strict_3d_dataclass(cls, values: object, label: str):
+    if not isinstance(values, dict):
+        raise ValueError(f"{label} must be a mapping.")
+    unknown = set(values) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"Unknown {label} fields: {', '.join(sorted(unknown))}.")
+    return cls(**values)
+
+
+def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overrides: list[str] | None = None) -> Level3D:
+    """Load a strict 3D adapter level through the canonical config module."""
+    from swarmecho.env.baseline3d import Baseline3DConfig, Baseline3DRewardConfig
+    from swarmecho.env.buildings import load_building
+
+    source = Path(name_or_path)
+    if not source.exists():
+        source = LEVEL_DIR / f"{source.stem}.yaml"
+    if not source.exists():
+        raise FileNotFoundError(f"3D level not found: {name_or_path}")
+    data = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
+    if overrides:
+        data = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(data), OmegaConf.from_dotlist(overrides)), resolve=True)
+    allowed = {"env", "reward", "training", "network", "evaluation", "logging"}
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(f"Unknown 3D config sections: {', '.join(sorted(unknown))}.")
+    env_data = dict(data.get("env", {}))
+    map_names = env_data.pop("map_names", None)
+    if not isinstance(map_names, list) or len(map_names) != 1:
+        raise ValueError("3D env.map_names must select exactly one map.")
+    level = Level3D(
+        name=source.stem,
+        map_names=[str(map_names[0])],
+        building=load_building(MAP_DIR / f"{Path(map_names[0]).stem}.yaml"),
+        env=_strict_3d_dataclass(Baseline3DConfig, env_data, "env"),
+        reward=_strict_3d_dataclass(Baseline3DRewardConfig, data.get("reward", {}), "reward"),
+        training=_strict_3d_dataclass(Training3DConfig, data.get("training", {}), "training"),
+        network=_strict_3d_dataclass(Network3DConfig, data.get("network", {}), "network"),
+        evaluation=_strict_3d_dataclass(Evaluation3DConfig, data.get("evaluation", {}), "evaluation"),
+        logging=_strict_3d_dataclass(Logging3DConfig, data.get("logging", {}), "logging"),
+    )
+    if level.ideal_chain_margin_m < 0:
+        raise ValueError(f"3D level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
+    if level.training.num_envs % level.training.num_minibatches:
+        raise ValueError("Recurrent training requires num_envs divisible by num_minibatches.")
+    if level.num_updates < 1:
+        raise ValueError("training.total_timesteps must cover at least one rollout.")
+    if level.logging.wandb_mode not in {"disabled", "offline", "online"}:
+        raise ValueError("logging.wandb_mode must be disabled, offline, or online.")
+    if level.reward.chain_reward_system != "euclidean":
+        raise ValueError("3D reward.chain_reward_system currently supports only euclidean.")
+    return level
+
+
+def load_level_3d_cli(arguments: list[str]) -> Level3D:
+    """Load a 3D level with the same key=value CLI contract as training."""
+    level_name = "M00_no_maze_open_cuboid_3D"
+    overrides = []
+    for argument in arguments:
+        if "=" not in argument:
+            raise ValueError(f"Unexpected argument {argument!r}; use key=value overrides.")
+        key, value = argument.split("=", 1)
+        if key == "level":
+            level_name = value
+        else:
+            overrides.append(argument)
+    return load_level_3d(level_name, overrides)

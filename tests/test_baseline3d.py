@@ -15,6 +15,7 @@ from swarmecho.env.baseline3d import (
     maximum_chain_distance,
     maximum_five_drone_chain_distance,
     minimum_target_distance,
+    observation_dim_3d,
     rewards_3d,
     spherical_directions,
 )
@@ -41,6 +42,17 @@ def test_octant_radar_and_configured_distance_contracts():
     assert minimum_target_distance(cfg) == 9.0
     assert maximum_five_drone_chain_distance(cfg) == 30.0
     assert maximum_chain_distance(replace(cfg, num_agents=6)) == 35.0
+
+
+def test_optional_observation_features_match_the_maintained_config_switches():
+    cfg, (reset, _, observations, _) = _functions(
+        observe_base_vector=True,
+        observe_target_vector=True,
+        observe_coverage_probe=True,
+    )
+    obs = observations(reset(jax.random.PRNGKey(7)))
+
+    assert obs.shape == (cfg.num_agents, observation_dim_3d(cfg))
 
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
@@ -156,6 +168,7 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
     assert reward.shape == (cfg.num_agents,)
     assert terms["coverage"].shape == (cfg.num_agents,)
     assert terms["collision"].shape == (cfg.num_agents,)
+    assert terms["chain_gap"].shape == (cfg.num_agents,)
     assert jnp.isfinite(reward).all()
     assert jnp.sum(current.coverage_credit) == pytest.approx(
         jnp.sum(current.coverage & ~previous.coverage), abs=1e-5

@@ -109,7 +109,7 @@ contract as maintained 2D training. For example, the quickest normal-pipeline
 inspector smoke run is:
 
 ```bash
-uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.total_timesteps=327680 logging.run_name=inspector_smoke
+uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.total_timesteps=400000 logging.run_name=inspector_smoke logging.wandb_mode=disabled
 ```
 
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in

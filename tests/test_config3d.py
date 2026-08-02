@@ -3,7 +3,7 @@ from copy import deepcopy
 import pytest
 import yaml
 
-from swarmecho.core.config3d import load_level_3d, load_level_3d_cli
+from swarmecho.core.config import load_level_3d, load_level_3d_cli
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
     eval_checkpoint_replay_root,
@@ -17,9 +17,14 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.env.radar_bins == 8
     assert level.env.num_agents == 5
     assert level.map_names == ["M00_no_maze_open_cuboid"]
-    assert level.training.total_timesteps == 16_384_000
+    assert level.training.total_timesteps == 250_000_000
+    assert level.training.num_envs == 4000
+    assert level.training.num_steps == 100
+    assert level.training.num_epochs == 4
+    assert level.training.num_minibatches == 20
     assert level.network.actor_memory
-    assert level.evaluation.eval_parallel_envs == 8
+    assert level.evaluation.eval_parallel_envs == 4000
+    assert level.logging.wandb_mode == "online"
     assert level.ideal_chain_margin_m > 0
 
 
@@ -38,16 +43,16 @@ def test_3d_cli_uses_the_same_dotlist_overrides_as_2d():
     level = load_level_3d_cli(
         [
             "level=M00_no_maze_open_cuboid_3D",
-            "training.total_timesteps=327680",
+            "training.total_timesteps=400000",
             "logging.run_name=inspector_smoke",
             "env.radar_bins=16",
         ]
     )
 
-    assert level.training.total_timesteps == 327_680
+    assert level.training.total_timesteps == 400_000
     assert level.logging.run_name == "inspector_smoke"
     assert level.env.radar_bins == 16
-    assert level.num_updates == 20
+    assert level.num_updates == 1
 
 
 def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
@@ -55,7 +60,7 @@ def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
     checkpoint = tmp_path / "checkpoints/ckpt_000050"
 
     assert train_replay_root(tmp_path) == tmp_path / "artifacts/train/replays"
-    assert checkpoint_artifact_suffix(checkpoint, level) == "u000050_s00819k"
+    assert checkpoint_artifact_suffix(checkpoint, level) == "u000050_s00020M"
     assert eval_checkpoint_replay_root(tmp_path, checkpoint, level) == (
-        tmp_path / "artifacts/eval/ckpt_u000050_s00819k/replays"
+        tmp_path / "artifacts/eval/ckpt_u000050_s00020M/replays"
     )

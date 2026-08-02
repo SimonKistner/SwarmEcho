@@ -24,13 +24,25 @@ import numpy as np
 import yaml
 from flax import nnx
 
-from swarmecho.core.config3d import Level3D, load_level_3d_cli
-from swarmecho.env.baseline3d import make_autoreset_3d_fns, make_baseline_3d_fns, rewards_3d
+from swarmecho.core.config import Level3D, load_level_3d_cli
+from swarmecho.env.baseline3d import (
+    make_autoreset_3d_fns,
+    make_baseline_3d_fns,
+    observation_dim_3d,
+    rewards_3d,
+)
 from swarmecho.models.mappo import MAPPOModel
-from swarmecho.training.artifacts import artifact_suffix, train_replay_root
+from swarmecho.training.artifacts import artifact_suffix, train_replay_root, write_manifest
 from swarmecho.training.checkpoints import restore_model_checkpoint, save_model_checkpoint
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
+from swarmecho.training.run_lifecycle import (
+    broadcast_early_stop_metrics,
+    init_wandb,
+    resolve_resume_state,
+    resolve_run_layout,
+    schedule_due,
+)
 from swarmecho.visualize.replay3d import write_replay
 
 
@@ -38,7 +50,7 @@ def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
     """Construct the canonical recurrent 3D MAPPO/TarMAC model."""
     cfg = level.env
     return MAPPOModel(
-        obs_dim=6 + cfg.radar_bins * 4,
+        obs_dim=observation_dim_3d(cfg),
         act_dim=3,
         num_agents=cfg.num_agents,
         hidden_dim=hidden_dim or level.network.hidden_dim,
@@ -105,40 +117,27 @@ def train_3d(
     *,
     output_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
-) -> tuple[Path, dict[str, float]]:
+) -> tuple[Path | None, dict[str, float]]:
     """Train the strict 3D level and return its final checkpoint and metrics."""
     training = level.training
     network = level.network
     evaluation = level.evaluation
     logging = level.logging
     num_updates = level.num_updates
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    configured_name = logging.run_name
-    run_name = (
-        f"run_{timestamp}"
-        if not configured_name
-        else (
-            f"{configured_name}_{timestamp}"
-            if logging.use_timestamp_postfix
-            else configured_name
-        )
-    )
-    default_output = Path(logging.log_dir) / run_name
-    destination = Path(output_dir) if output_dir is not None else default_output
+    layout = resolve_run_layout(logging, evaluation, media_dir="replays")
+    run_name = layout.run_name
+    destination = Path(output_dir).absolute() if output_dir is not None else layout.run_dir
     destination.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = (
-        Path(evaluation.checkpoint_dir).absolute()
-        if evaluation.checkpoint_dir
-        else destination / "checkpoints"
-    )
+    checkpoint_dir = layout.checkpoint_dir if output_dir is None else destination / "checkpoints"
     replay_dir = train_replay_root(destination)
     cfg = level.env
     reset, env_step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
-    obs_dim = 6 + cfg.radar_bins * 4
+    obs_dim = observation_dim_3d(cfg)
     sig_dim = network.tarmac_sig_dim
     val_dim = network.tarmac_val_dim
     model = build_model_3d(level)
     resume_from = checkpoint_path or training.checkpoint_path
+    resume = resolve_resume_state(training, run_name, training.num_envs, training.num_steps)
     if resume_from:
         restored = restore_model_checkpoint(model, resume_from)
         print(f"  Restored weights  ✓  {restored}")
@@ -201,19 +200,7 @@ def train_3d(
     (destination / "config.yaml").write_text(
         yaml.safe_dump(config_snapshot, sort_keys=False), encoding="utf-8"
     )
-    wandb_run = None
-    if logging.wandb_mode != "disabled":
-        import wandb
-
-        wandb_run = wandb.init(
-            project=logging.wandb_project,
-            entity=logging.wandb_entity,
-            group=logging.wandb_group,
-            name=run_name,
-            mode=logging.wandb_mode,
-            config=config_snapshot,
-            dir=str(destination),
-        )
+    wandb_run = init_wandb(logging, training, run_name, destination, config_snapshot)
 
     _, params = nnx.split(model)
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
@@ -236,12 +223,13 @@ def train_3d(
     print("──────────────────────────────────────────────────────")
     start_time = time.perf_counter()
 
-    for update in range(1, num_updates + 1):
+    for update in range(resume.start_update + 1, num_updates + 1):
         buffer.reset(actor_hidden, critic_hidden, actor_signature, actor_value)
         reward_totals = {
             "coverage": 0.0,
             "collision": 0.0,
             "finder": 0.0,
+            "chain_gap": 0.0,
             "target_found": 0.0,
             "success": 0.0,
         }
@@ -357,7 +345,8 @@ def train_3d(
         latest_stats["episode_success_rate"] = episode_successes / max(episode_count, 1)
         latest_stats["completed_episodes"] = float(episode_count)
         elapsed = time.perf_counter() - start_time
-        steps_done = update * training.num_envs * training.num_steps
+        session_steps = update * training.num_envs * training.num_steps
+        steps_done = resume.step_offset + session_steps
         sps = steps_done / max(elapsed, 1e-6)
         eta_seconds = (num_updates - update) * elapsed / update
         latest_stats.update(
@@ -438,10 +427,8 @@ def train_3d(
                 },
                 step=steps_done,
             )
-        checkpoint_due = (
-            evaluation.save_model
-            and update > evaluation.checkpoint_offset
-            and (update - evaluation.checkpoint_offset) % evaluation.checkpoint_freq == 0
+        checkpoint_due = evaluation.save_model and schedule_due(
+            update, evaluation.checkpoint_freq, evaluation.checkpoint_offset
         )
         if checkpoint_due and update < num_updates:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -452,20 +439,15 @@ def train_3d(
                 update=update,
                 num_envs=training.num_envs,
                 num_steps=training.num_steps,
-                prior_history=[],
+                prior_history=resume.prior_history,
             )
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
         )
-        eval_due = (
-            update > evaluation.eval_offset
-            and (update - evaluation.eval_offset) % evaluation.eval_freq == 0
-            and threshold_met
-        )
+        eval_due = schedule_due(update, evaluation.eval_freq, evaluation.eval_offset) and threshold_met
         replay_due = (
             evaluation.eval_video
-            and update > evaluation.eval_video_offset
-            and (update - evaluation.eval_video_offset) % evaluation.eval_video_freq == 0
+            and schedule_due(update, evaluation.eval_video_freq, evaluation.eval_video_offset)
             and threshold_met
         )
         if update == num_updates:
@@ -476,11 +458,21 @@ def train_3d(
                 model,
                 level,
                 episodes=evaluation.eval_parallel_envs,
-                max_steps=min(128, cfg.max_steps),
+                max_steps=cfg.max_steps,
             )
             latest_stats.update(eval_metrics)
+            suffix = artifact_suffix(update, steps_done)
+            write_manifest(
+                destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
+                {
+                    "type": "3d_evaluation",
+                    "update": update,
+                    "steps": steps_done,
+                    "episodes": evaluation.eval_parallel_envs,
+                    **eval_metrics,
+                },
+            )
             if replay_due:
-                suffix = artifact_suffix(update, steps_done)
                 write_replay(
                     replay_dir / f"eval_{suffix}",
                     eval_states,
@@ -503,26 +495,60 @@ def train_3d(
                 f"coverage={latest_stats['eval_coverage']:.1%} "
                 f"success={latest_stats['eval_success']:.0%}"
             )
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "eval/ep_return": latest_stats["eval_return"],
+                        "eval/ep_length": latest_stats["eval_episode_length"],
+                        "eval/success_rate": latest_stats["eval_success"],
+                        "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
+                    },
+                    step=steps_done,
+                )
+            if evaluation.early_exit and latest_stats["eval_success"] >= evaluation.early_exit_threshold:
+                print(
+                    f"  [eval-early-exit] success {latest_stats['eval_success']:.1%} >= "
+                    f"{evaluation.early_exit_threshold:.1%}"
+                )
+                broadcast_early_stop_metrics(
+                    wandb_run,
+                    evaluation,
+                    {
+                        "eval/ep_return": latest_stats["eval_return"],
+                        "eval/ep_length": latest_stats["eval_episode_length"],
+                        "eval/success_rate": latest_stats["eval_success"],
+                        "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
+                    },
+                    update,
+                    num_updates,
+                    training.num_envs * training.num_steps,
+                    training.total_timesteps,
+                )
+                num_updates = update
+                break
 
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = save_model_checkpoint(
-        model,
-        checkpoint_dir / f"ckpt_{num_updates:06d}",
-        run_name=run_name,
-        update=num_updates,
-        num_envs=training.num_envs,
-        num_steps=training.num_steps,
-        prior_history=[],
-    )
+    checkpoint = None
+    if evaluation.save_model:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = save_model_checkpoint(
+            model,
+            checkpoint_dir / f"ckpt_{num_updates:06d}",
+            run_name=run_name,
+            update=num_updates,
+            num_envs=training.num_envs,
+            num_steps=training.num_steps,
+            prior_history=resume.prior_history,
+        )
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"
     )
     if wandb_run is not None:
         wandb_run.finish()
     print("──────────────────────────────────────────────────────")
-    print(f"  Training complete ✓  checkpoint: {checkpoint}")
+    print(f"  Training complete ✓  checkpoint: {checkpoint or 'saving disabled'}")
     if evaluation.eval_video:
-        final_suffix = artifact_suffix(num_updates, total_steps)
+        final_steps = int(latest_stats.get("global_step", total_steps))
+        final_suffix = artifact_suffix(num_updates, final_steps)
         print(f"  Replay ready      ✓  {replay_dir / f'eval_{final_suffix}.json'}")
     return checkpoint, latest_stats
 
@@ -599,35 +625,90 @@ def evaluate_suite_3d(
     episodes: int,
     max_steps: int | None = None,
 ) -> tuple[dict[str, float], list, np.ndarray]:
-    """Evaluate several reproducible targets and retain the first replay."""
-    returns, successes, coverages, lengths = [], [], [], []
-    first_states = None
-    first_rewards = None
-    for episode in range(episodes):
-        states, rewards = evaluate_model_3d(
-            model,
-            level,
-            max_steps=max_steps,
-            seed=level.training.seed + 10_000 + episode,
+    """Evaluate a VMAP batch and retain its first trajectory for inspection."""
+    cfg = level.env
+    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    keys = jax.random.split(jax.random.PRNGKey(level.training.seed + 10_000), episodes)
+    states = jax.vmap(reset)(keys)
+    hidden = model.initial_actor_hidden((episodes,))
+    signature = model.initial_actor_signature((episodes,))
+    value = model.initial_actor_value((episodes,))
+    base_valid = jnp.zeros(episodes, dtype=jnp.bool_)
+    base_signature = jnp.zeros((episodes, model.tarmac_sig_dim), dtype=jnp.float32)
+    base_value = jnp.zeros((episodes, model.tarmac_val_dim), dtype=jnp.float32)
+    completed = jnp.zeros(episodes, dtype=jnp.bool_)
+    returns = jnp.zeros(episodes, dtype=jnp.float32)
+    lengths = jnp.zeros(episodes, dtype=jnp.int32)
+    first_states = [jax.tree_util.tree_map(lambda item: item[0], states)]
+    first_rewards = [np.zeros((cfg.num_agents, 1), dtype=np.float32)]
+    horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
+
+    def policy_one(obs, actor_hidden, actor_signature, actor_value, comm, active, bs, bv, bm):
+        return model.actor.__call_team__(
+            obs,
+            actor_hidden,
+            actor_signature,
+            actor_value,
+            reset=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
+            comm_mask=comm,
+            active=active,
+            base_signature=bs,
+            base_value=bv,
+            base_memory_mask=bm,
+            deterministic=True,
         )
-        if first_states is None:
-            first_states, first_rewards = states, rewards
-        returns.append(float(rewards.sum()))
-        successes.append(float(states[-1].success))
-        coverages.append(float(jnp.mean(states[-1].coverage)))
-        lengths.append(len(states) - 1)
+
+    for _ in range(horizon):
+        obs = jax.vmap(observations)(states)
+        comm, in_base, base_masks, base_sig_in, base_val_in = _communication_inputs(
+            states, cfg, base_valid, base_signature, base_value
+        )
+        hidden, signature, value, means, _ = jax.vmap(policy_one)(
+            obs,
+            hidden,
+            signature,
+            value,
+            comm,
+            states.active,
+            base_sig_in,
+            base_val_in,
+            base_masks,
+        )
+        next_states = jax.vmap(step)(states, jnp.tanh(means))
+        rewards, _ = jax.vmap(lambda old, new: rewards_3d(old, new, level.reward))(
+            states, next_states
+        )
+        live = ~completed
+        returns += jnp.where(live[:, None], rewards, 0.0).sum(axis=-1)
+        lengths += live.astype(jnp.int32)
+        base_valid, base_signature, base_value = _update_base_memory(
+            states,
+            in_base,
+            signature,
+            value,
+            base_valid,
+            base_signature,
+            base_value,
+            next_states.done,
+        )
+        completed |= next_states.done
+        first_states.append(jax.tree_util.tree_map(lambda item: item[0], next_states))
+        first_rewards.append(np.asarray(rewards[0])[:, None])
+        states = next_states
+        if bool(jnp.all(completed)):
+            break
     metrics = {
-        "eval_return": float(np.mean(returns)),
-        "eval_success": float(np.mean(successes)),
-        "eval_coverage": float(np.mean(coverages)),
-        "eval_episode_length": float(np.mean(lengths)),
+        "eval_return": float(jnp.mean(returns)),
+        "eval_success": float(jnp.mean(states.success)),
+        "eval_coverage": float(jnp.mean(states.coverage)),
+        "eval_episode_length": float(jnp.mean(lengths)),
     }
-    return metrics, first_states, first_rewards
+    return metrics, first_states, np.stack(first_rewards)
 
 
 def main() -> None:
     checkpoint, _ = train_3d(load_level_3d_cli(sys.argv[1:]))
-    print(f"3D training complete: {checkpoint}")
+    print(f"3D training complete: {checkpoint or 'checkpoint saving disabled'}")
 
 
 if __name__ == "__main__":

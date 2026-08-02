@@ -64,7 +64,7 @@ uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
 ```
 
 All ordinary overrides use the maintained `key=value` form, for example
-`training.total_timesteps=327680 logging.run_name=inspector_smoke`.
+`training.total_timesteps=400000 logging.run_name=inspector_smoke`.
 
 Cold-start the independent inspector and choose any discovered replay:
 
