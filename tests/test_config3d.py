@@ -3,7 +3,7 @@ from copy import deepcopy
 import pytest
 import yaml
 
-from swarmecho.core.config3d import load_level_3d
+from swarmecho.core.config3d import load_level_3d, load_level_3d_cli
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
     eval_checkpoint_replay_root,
@@ -32,6 +32,22 @@ def test_unknown_3d_environment_parameter_is_rejected(tmp_path):
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(ValueError, match="Unknown env fields: typo_parameter"):
         load_level_3d(path)
+
+
+def test_3d_cli_uses_the_same_dotlist_overrides_as_2d():
+    level = load_level_3d_cli(
+        [
+            "level=M00_no_maze_open_cuboid_3D",
+            "training.total_timesteps=327680",
+            "logging.run_name=inspector_smoke",
+            "env.radar_bins=16",
+        ]
+    )
+
+    assert level.training.total_timesteps == 327_680
+    assert level.logging.run_name == "inspector_smoke"
+    assert level.env.radar_bins == 16
+    assert level.num_updates == 20
 
 
 def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):

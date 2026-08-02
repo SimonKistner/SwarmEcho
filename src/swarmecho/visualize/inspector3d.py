@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import sys
 import threading
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +28,7 @@ button{border:1px solid #325173;background:#15253a;color:var(--text);padding:8px
 input[type=range]{width:100%;accent-color:var(--cyan)}select{width:100%;background:#15253a;color:var(--text);border:1px solid #325173;padding:8px;border-radius:7px}
 .controls{display:flex;gap:8px;margin-bottom:10px}.legend span{display:block;margin:7px 0}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}
 </style></head><body>
-<header><h1><span class="tag">SwarmEcho</span> 3D Inspector</h1><span id="replayName" class="meta"></span><span class="meta">Drag to orbit · wheel to zoom · right-drag to pan</span></header>
+<header><h1><span class="tag">SwarmEcho</span> 3D Inspector</h1><select id="replaySelect" style="width:min(520px,40vw)"></select><span id="replayName" class="meta"></span><span class="meta">Drag to orbit · wheel to zoom · right-drag to pan</span></header>
 <div id="layout"><div id="scene"></div><aside class="panel">
 <div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></div>
 <div class="card"><div class="label">Episode</div><div id="status" class="value">Exploring</div><div class="row"><span>Reward</span><b id="reward">—</b></div><div class="row"><span>Coverage</span><b id="coverage">0%</b></div><div class="row"><span>Known agents</span><b id="known">0</b></div><div class="row"><span>Base connected</span><b id="baseConn">0</b></div></div>
@@ -35,7 +36,8 @@ input[type=range]{width:100%;accent-color:var(--cyan)}select{width:100%;backgrou
 <div class="card legend"><div class="label">Legend</div><span><i class="dot" style="background:#22d3ee"></i>Drone</span><span><i class="dot" style="background:#60a5fa"></i>Base</span><span><i class="dot" style="background:#fb7185"></i>Target</span><span><i class="dot" style="background:#a3e635"></i>Target-knowing drone</span></div>
 </aside></div><script>
 let D,frame=0,playing=false,timer=null;const $=id=>document.getElementById(id);
-fetch('/api/replay').then(r=>r.json()).then(d=>{D=d;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';draw(0)});
+function loadReplay(id){fetch('/api/replay?id='+encodeURIComponent(id)).then(r=>{if(!r.ok)throw Error('Replay failed to load');return r.json()}).then(d=>{D=d;frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';draw(0)})}
+fetch('/api/replays').then(r=>r.json()).then(items=>{let s=$('replaySelect');s.innerHTML=items.map(x=>'<option value="'+x.id+'"'+(x.selected?' selected':'')+'>'+x.label+'</option>').join('');if(items.length)loadReplay(s.value);else $('replayName').textContent='No completed replays found';s.onchange=()=>loadReplay(s.value)});
 function lineTrace(points,color,width=3){return {type:'scatter3d',mode:'lines',x:points.map(p=>p[0]),y:points.map(p=>p[1]),z:points.map(p=>p[2]),line:{color,width},hoverinfo:'skip'}}
 function boxTrace(s){let [x,y,z]=s,p=[[0,0,0],[x,0,0],[x,y,0],[0,y,0],[0,0,0],[0,0,z],[x,0,z],[x,y,z],[0,y,z],[0,0,z],[null,null,null],[x,0,0],[x,0,z],[null,null,null],[x,y,0],[x,y,z],[null,null,null],[0,y,0],[0,y,z]];return lineTrace(p,'rgba(120,155,205,.48)',2)}
 function draw(f){frame=+f;let p=D.position[f],active=D.active[f],known=D.target_known[f],tr=[];if($('showShell').checked)tr.push(boxTrace(D.manifest.world_size_m||[20,20,20]));
@@ -62,15 +64,50 @@ def inspector_html() -> str:
     return HTML.replace(external, f"<script>{get_plotlyjs()}</script>")
 
 
-def make_handler(payload: dict):
-    encoded_payload = json.dumps(payload).encode()
+def discover_replays(root: str | Path = "outputs") -> list[Path]:
+    """Find completed replay manifests, newest first, below an output root."""
+    root = Path(root)
+    manifests: list[Path] = []
+    if not root.exists():
+        return manifests
+    for path in root.rglob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("format") == "swarmecho-replay/v1" and (path.parent / data.get("data_file", "")).exists():
+            manifests.append(path.resolve())
+    return sorted(manifests, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def make_handler(manifests: list[Path], initial: Path | None = None):
+    resolved = [path.resolve() for path in manifests]
+    initial = initial.resolve() if initial is not None else None
     encoded_html = inspector_html().encode()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/api/replay":
-                body, content_type = encoded_payload, "application/json"
-            elif self.path in {"/", "/index.html"}:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/replays":
+                items = [
+                    {
+                        "id": str(index),
+                        "label": str(path),
+                        "selected": path == initial or (initial is None and index == 0),
+                    }
+                    for index, path in enumerate(resolved)
+                ]
+                body, content_type = json.dumps(items).encode(), "application/json"
+            elif parsed.path == "/api/replay":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    path = resolved[int(query.get("id", ["0"])[0])]
+                    body = json.dumps(replay_payload(path)).encode()
+                except (IndexError, ValueError):
+                    self.send_error(404, "Replay not found")
+                    return
+                content_type = "application/json"
+            elif parsed.path in {"/", "/index.html"}:
                 body, content_type = encoded_html, "text/html; charset=utf-8"
             else:
                 self.send_error(404)
@@ -88,17 +125,41 @@ def make_handler(payload: dict):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--no-open", action="store_true")
-    args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(replay_payload(args.manifest)))
-    url = f"http://{args.host}:{args.port}"
+    manifest: Path | None = None
+    root = Path("outputs")
+    host = "127.0.0.1"
+    port = 8765
+    open_browser = True
+    for argument in sys.argv[1:]:
+        if "=" not in argument:
+            raise ValueError("Use replay=<path>, root=<path>, host=<host>, port=<port>, or open=false.")
+        key, value = argument.split("=", 1)
+        if key in {"replay", "manifest"}:
+            manifest = Path(value)
+        elif key == "root":
+            root = Path(value)
+        elif key == "host":
+            host = value
+        elif key == "port":
+            port = int(value)
+        elif key == "open":
+            open_browser = value.lower() not in {"false", "0", "no"}
+        else:
+            raise ValueError(f"Unknown inspector option {key!r}.")
+    manifests = discover_replays(root)
+    if manifest is not None:
+        manifest = manifest.resolve()
+        if manifest not in manifests:
+            manifests.insert(0, manifest)
+    if not manifests:
+        raise FileNotFoundError(f"No completed 3D replays found below {root}.")
+    server = ThreadingHTTPServer(
+        (host, port), make_handler(manifests, manifest)
+    )
+    url = f"http://{host}:{port}"
     print(f"SwarmEcho 3D Inspector: {url}")
     print("Press Ctrl+C to stop. Training is not coupled to this process.")
-    if not args.no_open:
+    if open_browser:
         threading.Timer(0.3, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

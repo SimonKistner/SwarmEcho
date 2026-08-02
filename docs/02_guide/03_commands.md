@@ -101,9 +101,15 @@ checkpoint, scalar metrics, and a renderer-independent replay below the output
 directory:
 
 ```bash
-uv run swarmecho-train-3d \
-  --level M00_no_maze_open_cuboid_3D \
-  --updates 1000
+uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
+```
+
+The 3D entry point deliberately uses the same OmegaConf-style `key=value`
+contract as maintained 2D training. For example, the quickest normal-pipeline
+inspector smoke run is:
+
+```bash
+uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.total_timesteps=327680 logging.run_name=inspector_smoke
 ```
 
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
@@ -115,22 +121,22 @@ occupies the role of a 2D MP4 and uses the same canonical
 `replays/latest.json` path that bypasses this artifact contract.
 
 Branch a new run from existing weights with
-`--checkpoint outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_000500`.
+`training.checkpoint_path=outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_000500`.
 
 Evaluate a saved checkpoint deterministically and write a standalone replay:
 
 ```bash
-uv run swarmecho-evaluate-3d \
-  outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_001000
+uv run swarmecho-evaluate-3d checkpoint=outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_001000
 ```
 
 Inspect any completed replay from a separate terminal. The inspector is a
 standalone browser process with orbit/zoom/pan, playback and scrubbing, coverage
-and communication toggles, reward/status readouts, and transparent shell:
+and communication toggles, reward/status readouts, and transparent shell. It
+discovers completed replays below `outputs/` and presents them in a selector, so
+no artifact path is required:
 
 ```bash
-uv run swarmecho-inspect-3d \
-  outputs/M00_no_maze_open_cuboid_3D/artifacts/train/replays/eval_u001000_s00016M.json
+uv run swarmecho-inspect-3d
 ```
 
 Validate the complete 3D environment → recurrent TarMAC actor/critic → rollout
@@ -144,12 +150,7 @@ Run the minimum 3D cuboid environment through JIT and VMAP. Comma-separated
 values produce the CPU/CUDA comparison matrix:
 
 ```bash
-uv run swarmecho-benchmark-3d \
-  --num-envs 256,1024,4000 \
-  --radar-bins 8,16,32 \
-  --grid 4x4x4,12x12x8 \
-  --steps 200 \
-  --output benchmark_3d_cuda.json
+uv run swarmecho-benchmark-3d num_envs=256,1024,4000 radar_bins=8,16,32 grid=4x4x4,12x12x8 steps=200 output=benchmark_3d_cuda.json
 ```
 
 The harness uses random actions and one compiled `lax.scan` that calculates
@@ -157,5 +158,5 @@ observations on every step, matching rollout structure more closely than a
 Python loop around a step-only kernel. The JSON report records the selected JAX
 backend and devices, compilation and run times, environment steps per second,
 state/observation shapes, ideal chain margin, and device memory statistics when
-the backend exposes them. The `--grid` matrix is important: `4x4x4` is only a
+the backend exposes them. The `grid` matrix is important: `4x4x4` is only a
 correctness case, while larger entries expose volumetric-coverage scaling.

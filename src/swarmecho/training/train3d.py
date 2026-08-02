@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import argparse
 import os
+import sys
 
 # XLA/absl verbosity must be configured before importing JAX. Doing this in the
 # training function is too late because plugin discovery happens at import time.
@@ -24,7 +24,7 @@ import numpy as np
 import yaml
 from flax import nnx
 
-from swarmecho.core.config3d import Level3D, load_level_3d
+from swarmecho.core.config3d import Level3D, load_level_3d_cli
 from swarmecho.env.baseline3d import make_autoreset_3d_fns, make_baseline_3d_fns, rewards_3d
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.artifacts import artifact_suffix, train_replay_root
@@ -103,7 +103,6 @@ def _update_base_memory(
 def train_3d(
     level: Level3D,
     *,
-    updates: int | None = None,
     output_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
 ) -> tuple[Path, dict[str, float]]:
@@ -112,7 +111,7 @@ def train_3d(
     network = level.network
     evaluation = level.evaluation
     logging = level.logging
-    num_updates = updates if updates is not None else level.num_updates
+    num_updates = level.num_updates
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     configured_name = logging.run_name
     run_name = (
@@ -627,18 +626,7 @@ def evaluate_suite_3d(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--level", default="M00_no_maze_open_cuboid_3D")
-    parser.add_argument("--updates", type=int)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--checkpoint", type=Path)
-    args = parser.parse_args()
-    checkpoint, _ = train_3d(
-        load_level_3d(args.level),
-        updates=args.updates,
-        output_dir=args.output,
-        checkpoint_path=args.checkpoint,
-    )
+    checkpoint, _ = train_3d(load_level_3d_cli(sys.argv[1:]))
     print(f"3D training complete: {checkpoint}")
 
 

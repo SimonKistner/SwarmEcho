@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -86,20 +86,26 @@ def run_benchmark(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--num-envs", default="256")
-    parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--radar-bins", default="8")
-    parser.add_argument("--grid", default="4x4x4")
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    environment_counts = [int(value) for value in args.num_envs.split(",")]
-    radar_counts = [int(value) for value in args.radar_bins.split(",")]
-    grids = [tuple(int(axis) for axis in value.split("x")) for value in args.grid.split(",")]
+    options = {"num_envs": "256", "steps": "100", "radar_bins": "8", "grid": "4x4x4"}
+    output: Path | None = None
+    for argument in sys.argv[1:]:
+        if "=" not in argument:
+            raise ValueError("Benchmark options use key=value syntax.")
+        key, value = argument.split("=", 1)
+        if key == "output":
+            output = Path(value)
+        elif key in options:
+            options[key] = value
+        else:
+            raise ValueError(f"Unknown benchmark option {key!r}.")
+    environment_counts = [int(value) for value in options["num_envs"].split(",")]
+    radar_counts = [int(value) for value in options["radar_bins"].split(",")]
+    grids = [tuple(int(axis) for axis in value.split("x")) for value in options["grid"].split(",")]
     if any(len(grid) != 3 for grid in grids):
-        parser.error("--grid entries must use XxYxZ, for example 12x12x8")
+        raise ValueError("grid entries must use XxYxZ, for example 12x12x8")
+    steps = int(options["steps"])
     reports = [
-        run_benchmark(num_envs, args.steps, radar_bins, grid)
+        run_benchmark(num_envs, steps, radar_bins, grid)
         for num_envs in environment_counts
         for radar_bins in radar_counts
         for grid in grids
@@ -107,8 +113,8 @@ def main() -> None:
     report = reports[0] if len(reports) == 1 else {"benchmarks": reports}
     rendered = json.dumps(report, indent=2)
     print(rendered)
-    if args.output:
-        args.output.write_text(rendered + "\n", encoding="utf-8")
+    if output:
+        output.write_text(rendered + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

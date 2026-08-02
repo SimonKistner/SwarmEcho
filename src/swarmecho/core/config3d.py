@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from omegaconf import OmegaConf
 
 from swarmecho.env.baseline3d import (
     Baseline3DConfig,
@@ -121,7 +122,10 @@ def _strict_dataclass(cls, values: object, label: str):
     return cls(**values)
 
 
-def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D") -> Level3D:
+def load_level_3d(
+    name_or_path: str | Path = "M00_no_maze_open_cuboid_3D",
+    overrides: list[str] | None = None,
+) -> Level3D:
     """Load one strict 3D level from the standard level/map directories."""
     source = Path(name_or_path)
     if not source.exists():
@@ -131,6 +135,17 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D") -> Le
     data = yaml.safe_load(source.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("3D level root must be a mapping.")
+    if overrides:
+        data = OmegaConf.to_container(
+            OmegaConf.merge(OmegaConf.create(data), OmegaConf.from_dotlist(overrides)),
+            resolve=True,
+        )
+    allowed_sections = {"env", "reward", "training", "network", "evaluation", "logging"}
+    unknown_sections = set(data) - allowed_sections
+    if unknown_sections:
+        raise ValueError(
+            f"Unknown 3D config sections: {', '.join(sorted(unknown_sections))}."
+        )
     env_data = dict(data.get("env", {}))
     map_names = env_data.pop("map_names", None)
     if not isinstance(map_names, list) or len(map_names) != 1:
@@ -162,3 +177,20 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D") -> Le
     if level.reward.chain_reward_system != "euclidean":
         raise ValueError("3D reward.chain_reward_system currently supports only euclidean.")
     return level
+
+
+def load_level_3d_cli(arguments: list[str]) -> Level3D:
+    """Load a 3D level with the same ``key=value`` CLI contract as 2D."""
+    level_name = "M00_no_maze_open_cuboid_3D"
+    overrides: list[str] = []
+    for argument in arguments:
+        if "=" not in argument:
+            raise ValueError(
+                f"Unexpected argument {argument!r}; use key=value overrides."
+            )
+        key, value = argument.split("=", 1)
+        if key == "level":
+            level_name = value
+        else:
+            overrides.append(argument)
+    return load_level_3d(level_name, overrides=overrides)

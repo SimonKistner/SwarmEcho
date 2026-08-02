@@ -60,14 +60,16 @@ uv run swarmecho-validate
 Train the strict 3D baseline with the recurrent MAPPO/TarMAC stack:
 
 ```bash
-uv run swarmecho-train-3d --level M00_no_maze_open_cuboid_3D
+uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
 ```
 
-Inspect the latest replay independently while training continues:
+All ordinary overrides use the maintained `key=value` form, for example
+`training.total_timesteps=327680 logging.run_name=inspector_smoke`.
+
+Cold-start the independent inspector and choose any discovered replay:
 
 ```bash
-uv run swarmecho-inspect-3d \
-  outputs/M00_no_maze_open_cuboid_3D/artifacts/train/replays/eval_u001000_s00016M.json
+uv run swarmecho-inspect-3d
 ```
 
 ### 2. Start Curriculum Training
