@@ -11,6 +11,7 @@ from omegaconf import DictConfig
 
 from swarmecho.core.config import compute_action_dim, compute_obs_dim
 from swarmecho.env.observations import make_obs_fns
+from swarmecho.env.critic_state import privileged_critic_dim
 from swarmecho.env.physics import make_env_fns
 from swarmecho.env.rewards import make_reward_fn
 from swarmecho.models.mappo import MAPPOModel
@@ -51,7 +52,7 @@ def build_environment_runtime(cfg: DictConfig) -> EnvironmentRuntime:
     )
 
 
-def build_model(cfg: DictConfig, *, rng_seed: int) -> MAPPOModel:
+def build_model(cfg: DictConfig, *, rng_seed: int, critic_input_dim: int | None = None) -> MAPPOModel:
     """Construct the configured MAPPO model through one shared factory."""
     return MAPPOModel(
         obs_dim=compute_obs_dim(cfg),
@@ -62,6 +63,8 @@ def build_model(cfg: DictConfig, *, rng_seed: int) -> MAPPOModel:
         actor_num_layers=int(cfg.network.actor_num_layers),
         actor_memory=bool(cfg.network.get("actor_memory", False)),
         critic_memory=bool(cfg.network.get("critic_memory", False)),
+        critic_type=str(cfg.network.get("critic_type", "observation")),
+        critic_input_dim=critic_input_dim,
         rngs=nnx.Rngs(int(rng_seed)),
         memory_comm_enabled=bool(cfg.network.get("memory_comm_enabled", False)),
         memory_comm_every_k_steps=int(cfg.network.get("memory_comm_every_k_steps", 5)),
@@ -79,7 +82,12 @@ def build_evaluation_runtime(
 ) -> EvaluationRuntime:
     """Build evaluation dependencies and restore one checkpoint."""
     environment = build_environment_runtime(cfg)
-    model = build_model(cfg, rng_seed=rng_seed)
+    critic_input_dim = (
+        privileged_critic_dim(int(cfg.env.num_agents))
+        if str(cfg.network.get("critic_type", "observation")) == "privileged"
+        else None
+    )
+    model = build_model(cfg, rng_seed=rng_seed, critic_input_dim=critic_input_dim)
     resolved_checkpoint = restore_model_checkpoint(model, checkpoint_path)
     return EvaluationRuntime(
         model=model,

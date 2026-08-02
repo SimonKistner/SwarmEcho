@@ -26,12 +26,12 @@ reward:
   success_bonus: 500.0
 
 training:
-  total_timesteps: 250_000_000
+  total_timesteps: 150_000_000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 6302026950
+  seed: 994300728
 
   #checkpoint_path: "outputs/previous_run/checkpoints/ckpt_001000"  # if set, resumes training from this path
   #ckpt_loading_mode: "resume"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
@@ -41,6 +41,7 @@ network:
   actor_num_layers: 3    # actor depth (lighter, separate)
   actor_memory: true
   critic_memory: true
+  critic_type: "privileged" #      str = "observation"  # "observation" (legacy) or "privileged"
   memory_comm_enabled: true
   memory_comm_every_k_steps: 5
   tarmac_sig_dim: 16
@@ -49,16 +50,17 @@ network:
 
 evaluation:
   eval_parallel_envs: 4000
-  eval_broadcast_on_curriculum_early_stop: true
-  early_exit: true
+  eval_broadcast_on_curriculum_early_stop: false
+  early_exit: false
   early_exit_threshold: 0.99
 
+  save_model: false
   checkpoint_freq: 50
   checkpoint_offset: 0
 
-  eval_freq: 20
+  eval_freq: 80
   eval_offset: 1
-  eval_not_delivered_or_visually_found_heatmap: true
+  eval_not_delivered_or_visually_found_heatmap: false
 
   eval_video: true
   eval_video_freq: 9999999
