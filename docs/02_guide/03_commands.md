@@ -96,8 +96,8 @@ uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_00
 
 ## 3D Migration Performance Gate
 
-Validate the complete 3D environment → rollout buffer → MAPPO gradient-update
-contract on a deliberately small feed-forward batch:
+Validate the complete 3D environment → recurrent TarMAC actor/critic → rollout
+buffer → GAE → MAPPO gradient-update contract on a deliberately small batch:
 
 ```bash
 uv run swarmecho-validate-3d
