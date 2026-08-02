@@ -32,9 +32,8 @@ The privileged critic remains training-only and does not change actor inputs or
 evaluation actions. It consumes exact normalized kinematics, base/target
 geometry, task and connectivity flags, the communication adjacency graph,
 previous-step collision/coverage diagnostics, compact global coverage
-summaries, and a local static-occupancy patch. Static map masks and sampling
-offsets are prepared once when training starts; the full map and coverage grid
-are not copied into the rollout buffer. Its attention is masked by the exact
+summaries. The full map and coverage grid are not copied into the rollout
+buffer. Its attention is masked by the exact
 communication graph, so the critic GRU can accumulate multi-hop information
 over time without receiving actor hidden states.
 

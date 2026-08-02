@@ -837,7 +837,7 @@ def train(cfg: DictConfig):
     critic_input_dim = None
     if critic_type == "privileged":
         critic_state_fn, critic_input_dim = make_privileged_critic_state_fn(
-            cfg, resolved_W, resolved_H, occ_grid
+            cfg, resolved_W, resolved_H
         )
         critic_state_fn_v = jax.jit(jax.vmap(critic_state_fn))
     reset_v          = jax.jit(jax.vmap(reset))

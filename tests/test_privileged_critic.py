@@ -55,14 +55,13 @@ def _state() -> EnvState:
 def test_privileged_state_is_compact_and_contains_graph_rows():
     cfg = OmegaConf.create({"env": {
         "num_agents": 2, "max_steps": 10, "hold_chain_for": 4,
-        "max_speed": 2.0, "cell_size": 1.0,
+        "max_speed": 2.0,
     }})
-    fn, width = make_privileged_critic_state_fn(
-        cfg, 4.0, 4.0, jnp.zeros((4, 4), dtype=bool)
-    )
+    fn, width = make_privileged_critic_state_fn(cfg, 4.0, 4.0)
     features = fn(_state())
 
     assert features.shape == (2, privileged_critic_dim(2)) == (2, width)
+    assert width == 27
     assert jnp.all(jnp.isfinite(features))
     assert jnp.array_equal(features[:, 17:19], jnp.array([[0, 1], [1, 0]]))
 
