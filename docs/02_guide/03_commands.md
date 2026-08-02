@@ -96,6 +96,13 @@ uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_00
 
 ## 3D Migration Performance Gate
 
+Validate the complete 3D environment → rollout buffer → MAPPO gradient-update
+contract on a deliberately small feed-forward batch:
+
+```bash
+uv run swarmecho-validate-3d
+```
+
 Run the minimum 3D cuboid environment through JIT and VMAP. Comma-separated
 values produce the CPU/CUDA comparison matrix:
 

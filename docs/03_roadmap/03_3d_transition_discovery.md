@@ -140,6 +140,13 @@ drone signals by maximum dot product and retain the four existing channels.
 Treat 8/16/32/64 as measured ablations. This permits environment complexity to
 increase without forcing observation and policy compute to increase at once.
 
+The first CUDA rollout matrix established **8 bins as the baseline default**.
+At 4,000 environments and 200 steps, retained device memory was approximately
+0.66 GB for 8 bins, 1.17 GB for 16 bins, and 2.19 GB for 32 bins; reported peak
+memory was approximately 1.89/3.42/6.50 GB. All variants were fast enough, so
+the lower-dimensional policy and substantially lower rollout memory decide the
+default. The parameter remains available for controlled 16/32-bin experiments.
+
 ## Visualization direction
 
 Use a browser WebGL client, preferably Three.js, for both editor and replay. It
