@@ -104,12 +104,15 @@ def save_eval_info_csv(
     visually_found: Any,
 ) -> Path:
     """Save the canonical per-episode result of a parallel evaluation."""
-    targets = np.asarray(target_positions, dtype=np.float32).reshape((-1, 2))
+    targets = np.asarray(target_positions, dtype=np.float32)
+    if targets.ndim != 2 or targets.shape[-1] not in {2, 3}:
+        raise ValueError("Evaluation targets must have shape (episodes, 2) or (episodes, 3).")
+    dimensions = targets.shape[-1]
     bases = np.asarray(base_positions, dtype=np.float32)
-    if bases.shape == (2,):
+    if bases.shape == (dimensions,):
         bases = np.broadcast_to(bases, targets.shape)
     else:
-        bases = bases.reshape((-1, 2))
+        bases = bases.reshape((-1, dimensions))
     successes = np.asarray(successes, dtype=bool).reshape((-1,))
     delivered = np.asarray(delivered, dtype=bool).reshape((-1,))
     visually_found = np.asarray(visually_found, dtype=bool).reshape((-1,))
@@ -135,14 +138,11 @@ def save_eval_info_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["x", "y", "stage", "distance_to_base"])
+        coordinates = ["x", "y"] + (["z"] if dimensions == 3 else [])
+        writer.writerow([*coordinates, "stage", "distance_to_base"])
         writer.writerows(
-            (
-                f"{target[0]:.6f}",
-                f"{target[1]:.6f}",
-                stage,
-                f"{distance:.6f}",
-            )
+            tuple(f"{coordinate:.6f}" for coordinate in target)
+            + (stage, f"{distance:.6f}")
             for target, stage, distance in zip(targets, stages, distances)
         )
     return path
@@ -151,7 +151,7 @@ def save_eval_info_csv(
 def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
     """Load one canonical evaluation CSV for artifact filtering or analysis."""
     path = Path(path)
-    positions: list[tuple[float, float]] = []
+    positions: list[tuple[float, ...]] = []
     stages: list[str] = []
     distances: list[float] = []
     with path.open("r", newline="") as csv_file:
@@ -167,12 +167,17 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
                 raise ValueError(
                     f"Unknown evaluation stage {stage!r} in {path}"
                 )
-            positions.append((float(row["x"]), float(row["y"])))
+            point = (float(row["x"]), float(row["y"]))
+            if "z" in (reader.fieldnames or []):
+                point += (float(row["z"]),)
+            positions.append(point)
             stages.append(stage)
             distances.append(float(row["distance_to_base"]))
 
     return {
-        "positions": np.asarray(positions, dtype=np.float32).reshape((-1, 2)),
+        "positions": np.asarray(positions, dtype=np.float32).reshape(
+            (-1, 3 if positions and len(positions[0]) == 3 else 2)
+        ),
         "stages": np.asarray(stages, dtype="<U21"),
         "distance_to_base": np.asarray(distances, dtype=np.float32),
     }

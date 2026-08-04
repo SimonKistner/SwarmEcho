@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -22,6 +23,7 @@ def write_replay(
     dt: float,
     reward_terms: np.ndarray | None = None,
     metadata: dict | None = None,
+    progress: bool = True,
 ) -> tuple[Path, Path]:
     """Atomically write one replay NPZ and its small JSON manifest.
 
@@ -34,6 +36,11 @@ def write_replay(
     state_list = list(states)
     if not state_list:
         raise ValueError("A replay requires at least one state.")
+    if progress:
+        print(
+            f"[REPLAY] materialising {len(state_list)} frames for {destination.name}...",
+            flush=True,
+        )
 
     def stack(name: str):
         return np.stack([np.asarray(getattr(state, name)) for state in state_list])
@@ -67,9 +74,22 @@ def write_replay(
     manifest_path = destination.with_suffix(".json")
     data_temporary = data_path.with_suffix(".npz.tmp")
     manifest_temporary = manifest_path.with_suffix(".json.tmp")
+    payload_started = time.perf_counter()
+    if progress:
+        payload_mb = sum(array.nbytes for array in arrays.values()) / (1024 * 1024)
+        print(
+            f"[REPLAY] writing compressed archive ({payload_mb:.1f} MiB uncompressed)...",
+            flush=True,
+        )
     with data_temporary.open("wb") as stream:
         np.savez_compressed(stream, **arrays)
     data_temporary.replace(data_path)
+    if progress:
+        print(
+            f"[REPLAY] compressed archive written in {time.perf_counter() - payload_started:.1f}s; "
+            "writing manifest...",
+            flush=True,
+        )
 
     manifest = {
         "format": REPLAY_FORMAT,

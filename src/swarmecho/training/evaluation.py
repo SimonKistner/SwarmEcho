@@ -192,9 +192,13 @@ def collect_video_episode(
         terminate_on_target_found = bool(
             cfg.env.get("terminate_on_target_found", False)
         )
+        idle_terminated = (
+            state.physics.stationary_steps
+            >= int(cfg.env.get("no_movement_termination_steps", 50))
+        )
         episode_ended = success_achieved or (
             terminate_on_target_found and target_found
-        )
+        ) or idle_terminated
 
         if bool(episode_ended):
             ep_states.append(jax.device_get(state))
@@ -228,6 +232,9 @@ def _run_parallel_evaluation_jit(
 ) -> tuple:
     max_steps = int(cfg.env.max_steps)
     hold_chain_for = int(cfg.env.get("hold_chain_for", 0))
+    no_movement_termination_steps = int(
+        cfg.env.get("no_movement_termination_steps", 50)
+    )
     actor_memory = bool(cfg.network.get("actor_memory", False))
     memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False))
     memory_comm_every_k_steps = int(
@@ -265,6 +272,7 @@ def _run_parallel_evaluation_jit(
             jnp.bool_(False),
             jnp.bool_(False),
             jnp.bool_(False),
+            jnp.bool_(False),
             jnp.float32(0.0),
             jnp.float32(0.0),
             jnp.int32(0),
@@ -279,6 +287,7 @@ def _run_parallel_evaluation_jit(
                 base_signature,
                 base_value,
                 base_memory_valid,
+                has_ended,
                 has_succeeded,
                 has_found_delivered,
                 has_found_visual,
@@ -390,34 +399,45 @@ def _run_parallel_evaluation_jit(
                 jnp.float32(cfg.reward.success_bonus) / rewards.shape[0]
             )
             rewards = jnp.where(
-                success_achieved & ~has_succeeded,
+                success_achieved & ~has_succeeded & ~has_ended,
                 rewards + success_bonus_per_agent,
                 rewards,
             )
 
-            new_has_succeeded = has_succeeded | success_achieved
+            new_has_succeeded = has_succeeded | (
+                success_achieved & ~has_ended
+            )
             new_has_found_delivered = (
-                has_found_delivered | state.communication.base_target_known
+                has_found_delivered
+                | (state.communication.base_target_known & ~has_ended)
             )
             new_has_found_visual = (
                 has_found_visual
-                | jnp.any(state.communication.target_known, axis=-1)
+                | (jnp.any(state.communication.target_known, axis=-1) & ~has_ended)
             )
-            new_max_found = jnp.maximum(
-                max_found, info["global_target_found"]
+            new_max_found = jnp.where(
+                has_ended,
+                max_found,
+                jnp.maximum(max_found, info["global_target_found"]),
             )
 
             terminate_on_target_found = bool(
                 cfg.env.get("terminate_on_target_found", False)
             )
-            episode_ended_previous = has_succeeded | (
-                jnp.bool_(terminate_on_target_found) & has_found_delivered
+            idle_terminated = (
+                state.physics.stationary_steps
+                >= no_movement_termination_steps
+            )
+            episode_ended = (
+                success_achieved
+                | (jnp.bool_(terminate_on_target_found) & state.communication.base_target_known)
+                | idle_terminated
             )
             new_returns = jnp.where(
-                episode_ended_previous, returns, returns + rewards.sum()
+                has_ended, returns, returns + rewards.sum()
             )
             new_lengths = jnp.where(
-                episode_ended_previous, lengths, lengths + 1
+                has_ended, lengths, lengths + 1
             )
             new_carry = (
                 state,
@@ -427,6 +447,7 @@ def _run_parallel_evaluation_jit(
                 base_signature,
                 base_value,
                 base_memory_valid,
+                has_ended | episode_ended,
                 new_has_succeeded,
                 new_has_found_delivered,
                 new_has_found_visual,
@@ -446,6 +467,7 @@ def _run_parallel_evaluation_jit(
         )
         (
             final_state,
+            _,
             _,
             _,
             _,

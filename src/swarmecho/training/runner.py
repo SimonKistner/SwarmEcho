@@ -104,6 +104,7 @@ def _make_autoreset_step(
     max_steps: int,
     hold_chain_for: int = 0,
     terminate_on_target_found: bool = False,
+    no_movement_termination_steps: int = 50,
     success_bonus: float = 0.0,
 ):
     """
@@ -113,6 +114,7 @@ def _make_autoreset_step(
       * time_up        : new_state.physics.step >= max_steps
       * fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
       * target_found   : target is found/delivered (if terminate_on_target_found is True)
+      * no_movement    : no agent has displaced by movement_epsilon for the configured number of steps
 
     Returns
     -------
@@ -122,6 +124,7 @@ def _make_autoreset_step(
     max_steps_jnp = jnp.int32(max_steps)
     hold_chain_for_jnp = jnp.int32(hold_chain_for)
     terminate_on_target_found_jnp = jnp.bool_(terminate_on_target_found)
+    no_movement_termination_steps_jnp = jnp.int32(no_movement_termination_steps)
     success_bonus_jnp = jnp.float32(success_bonus)
 
     def step(state, actions):
@@ -149,7 +152,16 @@ def _make_autoreset_step(
         success_achieved = new_chain_held_steps >= (hold_chain_for_jnp + jnp.int32(1))
         
         target_found = info["global_target_found"] > jnp.float32(0.5)
-        done = time_up | success_achieved | (terminate_on_target_found_jnp & target_found)
+        idle_terminated = (
+            new_state.physics.stationary_steps
+            >= no_movement_termination_steps_jnp
+        )
+        done = (
+            time_up
+            | success_achieved
+            | (terminate_on_target_found_jnp & target_found)
+            | idle_terminated
+        )
 
         reward_terminal = success_bonus_jnp / reward.shape[0]
         extra_bonus = jnp.where(
@@ -168,6 +180,7 @@ def _make_autoreset_step(
         # Override key fields in info dict to reflect hold status and terminal target data
         info = {
             **info,
+            "idle_terminated": idle_terminated,
             "fully_connected": success_achieved.astype(jnp.float32),
             "terminal_target_pos": new_state.physics.target_pos,
             "terminal_delivered": new_state.communication.base_target_known,
@@ -718,6 +731,9 @@ def train(cfg: DictConfig):
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
+    no_movement_termination_steps = int(
+        cfg.env.get("no_movement_termination_steps", 50)
+    )
     autoreset_step = _make_autoreset_step(
         env_step,
         reset,
@@ -725,6 +741,7 @@ def train(cfg: DictConfig):
         max_steps,
         hold_chain_for,
         terminate_on_target_found,
+        no_movement_termination_steps,
         float(cfg.reward.success_bonus),
     )
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))

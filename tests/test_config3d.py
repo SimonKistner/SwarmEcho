@@ -16,6 +16,7 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.name == "M00_no_maze_open_cuboid_3D"
     assert level.env.radar_bins == 8
     assert level.env.num_agents == 5
+    assert level.env.coverage_voxel_size == 2.5
     assert level.map_names == ["M00_no_maze_open_cuboid"]
     assert level.training.total_timesteps == 250_000_000
     assert level.training.num_envs == 4000
@@ -46,12 +47,14 @@ def test_3d_cli_uses_the_same_dotlist_overrides_as_2d():
             "training.total_timesteps=400000",
             "logging.run_name=inspector_smoke",
             "env.radar_bins=16",
+            "env.coverage_voxel_size=2.5",
         ]
     )
 
     assert level.training.total_timesteps == 400_000
     assert level.logging.run_name == "inspector_smoke"
     assert level.env.radar_bins == 16
+    assert level.env.coverage_voxel_size == 2.5
     assert level.num_updates == 1
 
 

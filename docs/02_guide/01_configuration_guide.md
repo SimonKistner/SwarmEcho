@@ -10,6 +10,19 @@ SwarmEcho uses a modular, layered configuration ecosystem. Default values are de
 > relay cannot reach the map's farthest top corner. This becomes the main
 > configuration path as production training moves to 3D.
 
+For 3D levels, `env.coverage_voxel_size` controls only exploration-coverage
+resolution, in metres. It defaults to the map's `cell_size_m`, preserving the
+legacy one-voxel-per-building-cell behaviour. For example, a 20 m cuboid map
+with `cell_size_m: 5.0` and `coverage_voxel_size: 2.5` keeps its 4 × 4 × 4
+building grid but uses an 8 × 8 × 8 coverage grid. The voxel size must evenly
+divide all three world dimensions.
+
+All environments default to `env.no_movement_termination_steps: 50`: an
+episode ends when no agent displaces by more than `env.movement_epsilon`
+(default `0.001` m) for 50 consecutive transitions. This catches stalled
+rollouts while allowing slow residual motion to settle. It is an ordinary
+failed termination with no additional terminal reward penalty.
+
 ## 1. Parameters & Where to Find Them
 Rather than a global YAML file, baseline configurations are declared in the structured dataclasses in `src/swarmecho/core/config.py` (specifically `SwarmEchoConfig`). The configuration structure is separated into semantic domains:
 

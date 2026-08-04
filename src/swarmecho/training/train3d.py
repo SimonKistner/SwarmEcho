@@ -11,6 +11,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "0")
 os.environ.setdefault("GLOG_minloglevel", "3")
 
+import functools
 import json
 import time
 from collections import deque
@@ -26,13 +27,19 @@ from flax import nnx
 
 from swarmecho.core.config import Level3D, load_level_3d_cli
 from swarmecho.env.baseline3d import (
+    chain_diagnostics_3d,
     make_autoreset_3d_fns,
     make_baseline_3d_fns,
     observation_dim_3d,
     rewards_3d,
 )
 from swarmecho.models.mappo import MAPPOModel
-from swarmecho.training.artifacts import artifact_suffix, train_replay_root, write_manifest
+from swarmecho.training.artifacts import (
+    artifact_suffix,
+    save_eval_info_csv,
+    train_replay_root,
+    write_manifest,
+)
 from swarmecho.training.checkpoints import restore_model_checkpoint, save_model_checkpoint
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
@@ -131,7 +138,9 @@ def train_3d(
     checkpoint_dir = layout.checkpoint_dir if output_dir is None else destination / "checkpoints"
     replay_dir = train_replay_root(destination)
     cfg = level.env
-    reset, env_step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
+    reset, env_step, observations, _ = make_autoreset_3d_fns(
+        level.building, cfg, level.reward
+    )
     obs_dim = observation_dim_3d(cfg)
     sig_dim = network.tarmac_sig_dim
     val_dim = network.tarmac_val_dim
@@ -178,14 +187,29 @@ def train_3d(
     base_value = jnp.zeros((training.num_envs, val_dim), dtype=jnp.float32)
     resets = jnp.zeros((training.num_envs, cfg.num_agents), dtype=jnp.bool_)
     latest_stats: dict[str, float] = {}
-    episode_successes = 0
-    episode_count = 0
     episode_returns = np.zeros(training.num_envs, dtype=np.float64)
     episode_lengths = np.zeros(training.num_envs, dtype=np.int32)
-    recent_returns: deque[float] = deque(maxlen=100)
-    recent_lengths: deque[int] = deque(maxlen=100)
-    recent_success: deque[float] = deque(maxlen=100)
-    recent_coverage: deque[float] = deque(maxlen=100)
+    episode_success = np.zeros(training.num_envs, dtype=np.float32)
+    episode_found = np.zeros(training.num_envs, dtype=np.float32)
+    episode_gap = np.zeros(training.num_envs, dtype=np.float32)
+    episode_progress_pct = np.zeros(training.num_envs, dtype=np.float32)
+    episode_coverage = np.zeros(training.num_envs, dtype=np.float32)
+    episode_rewards = {
+        name: np.zeros(training.num_envs, dtype=np.float64)
+        for name in ("coverage", "collision", "finder", "chain_gap", "target_found", "success")
+    }
+    # Match the 2D runner: one completed episode per parallel environment,
+    # rather than a fixed-size history of partial/live rollouts.
+    window_size = training.num_envs
+    window_ret: deque[float] = deque(maxlen=window_size)
+    window_len: deque[int] = deque(maxlen=window_size)
+    window_succ: deque[float] = deque(maxlen=window_size)
+    window_fnd: deque[float] = deque(maxlen=window_size)
+    window_gap: deque[float] = deque(maxlen=window_size)
+    window_prog_pct: deque[float] = deque(maxlen=window_size)
+    window_cov: deque[float] = deque(maxlen=window_size)
+    window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
+    completed_eps_count = 0
     history_path = destination / "training_history.jsonl"
     config_snapshot = {
         "name": level.name,
@@ -221,26 +245,52 @@ def train_3d(
     if wandb_run is not None:
         print(f"  W&B              : {wandb_run.url}")
     print("──────────────────────────────────────────────────────")
+    log_every = max(1, num_updates // 200)
     start_time = time.perf_counter()
 
-    for update in range(resume.start_update + 1, num_updates + 1):
-        buffer.reset(actor_hidden, critic_hidden, actor_signature, actor_value)
-        reward_totals = {
-            "coverage": 0.0,
-            "collision": 0.0,
-            "finder": 0.0,
-            "chain_gap": 0.0,
-            "target_found": 0.0,
-            "success": 0.0,
-        }
-        for _ in range(training.num_steps):
+    # A complete rollout is one compiled device program.  In particular, do
+    # not materialise any transition inside the scan: the host receives the
+    # stacked rollout once per update for the existing CPU replay buffer.
+    comm_cadence = int(network.memory_comm_every_k_steps)
+
+    def rollout_impl(
+        model,
+        states,
+        keys,
+        actor_hidden,
+        actor_signature,
+        actor_value,
+        critic_hidden,
+        base_valid,
+        base_signature,
+        base_value,
+        resets,
+    ):
+        def rollout_step(carry, step_index):
+            (
+                states,
+                keys,
+                actor_hidden,
+                actor_signature,
+                actor_value,
+                critic_hidden,
+                base_valid,
+                base_signature,
+                base_value,
+                resets,
+            ) = carry
             obs = jax.vmap(observations)(states)
             split = jax.vmap(lambda key: jax.random.split(key))(keys)
-            keys, action_roots = split[:, 0], split[:, 1]
-            agent_keys = jax.vmap(lambda key: jax.random.split(key, cfg.num_agents))(action_roots)
+            next_keys, action_roots = split[:, 0], split[:, 1]
+            agent_keys = jax.vmap(lambda key: jax.random.split(key, cfg.num_agents))(
+                action_roots
+            )
             comm_masks, in_base_range, base_masks, base_sig_in, base_val_in = (
                 _communication_inputs(states, cfg, base_valid, base_signature, base_value)
             )
+            share_step = (step_index % comm_cadence) == 0
+            comm_masks = comm_masks & share_step
+            base_masks = base_masks & share_step
 
             def policy_one(obs_e, keys_e, ah, sig, val, ch, cm, active, bs, bv, bm, rst):
                 return model.rollout_step_recurrent(
@@ -259,10 +309,10 @@ def train_3d(
                 )
 
             (
-                actor_hidden,
+                next_actor_hidden,
                 emitted_signature,
                 emitted_value,
-                critic_hidden,
+                next_critic_hidden,
                 actions,
                 log_probs,
                 values,
@@ -281,30 +331,7 @@ def train_3d(
                 resets,
             )
             next_states, rewards, dones, info = jax.vmap(env_step)(states, jnp.tanh(actions))
-            rewards_host = np.asarray(rewards)
-            dones_host = np.asarray(dones)
-            for reward_name in reward_totals:
-                reward_totals[reward_name] += float(np.asarray(info[reward_name]).sum())
-            episode_returns += rewards_host.sum(axis=-1)
-            episode_lengths += 1
-            buffer.add(
-                MAPPOTransition(
-                    obs=np.asarray(obs),
-                    actions=np.asarray(actions),
-                    log_probs=np.asarray(log_probs),
-                    values=np.asarray(values),
-                    rewards=np.asarray(rewards),
-                    dones=np.asarray(dones),
-                    rnn_resets=np.asarray(resets),
-                    comm_masks=np.asarray(comm_masks),
-                    active_masks=np.asarray(states.active),
-                    base_signatures=np.asarray(base_sig_in),
-                    base_values=np.asarray(base_val_in),
-                    base_memory_masks=np.asarray(base_masks),
-                    critic_obs=np.asarray(obs),
-                )
-            )
-            base_valid, base_signature, base_value = _update_base_memory(
+            next_base_valid, next_base_signature, next_base_value = _update_base_memory(
                 states,
                 in_base_range,
                 emitted_signature,
@@ -314,27 +341,168 @@ def train_3d(
                 base_value,
                 dones,
             )
-            actor_signature, actor_value = emitted_signature, emitted_value
-            episode_successes += int(np.asarray(info["success"]).sum())
-            completed_indices = np.flatnonzero(dones_host)
-            for index in completed_indices:
-                recent_returns.append(float(episode_returns[index]))
-                recent_lengths.append(int(episode_lengths[index]))
-                recent_success.append(float(np.asarray(info["success"])[index]))
-                recent_coverage.append(float(np.asarray(info["terminal_coverage_fraction"])[index]))
-            episode_count += len(completed_indices)
-            episode_returns[completed_indices] = 0.0
-            episode_lengths[completed_indices] = 0
-            states = next_states
-            resets = jnp.broadcast_to(dones[:, None], resets.shape)
+            next_resets = jnp.broadcast_to(dones[:, None], resets.shape)
+            transition = {
+                "obs": obs,
+                "actions": actions,
+                "log_probs": log_probs,
+                "values": values,
+                "rewards": rewards,
+                "dones": dones,
+                "rnn_resets": resets,
+                "comm_masks": comm_masks,
+                "active_masks": states.active,
+                "base_signatures": base_sig_in,
+                "base_values": base_val_in,
+                "base_memory_masks": base_masks,
+                "coverage": info["coverage"],
+                "collision": info["collision"],
+                "finder": info["finder"],
+                "chain_gap": info["chain_gap"],
+                "target_found": info["target_found"],
+                "reward_success": info["reward_success"],
+                "success": info["success"],
+                "global_target_found": info["global_target_found"],
+                "chain_gap_dist": info["chain_gap_dist"],
+                "chain_progress_pct": info["chain_progress_pct"],
+                "global_coverage": info["global_coverage"],
+            }
+            next_carry = (
+                next_states,
+                next_keys,
+                next_actor_hidden,
+                emitted_signature,
+                emitted_value,
+                next_critic_hidden,
+                next_base_valid,
+                next_base_signature,
+                next_base_value,
+                next_resets,
+            )
+            return next_carry, transition
 
-        final_obs = jax.vmap(observations)(states)
+        carry, rollout = jax.lax.scan(
+            rollout_step,
+            (
+                states,
+                keys,
+                actor_hidden,
+                actor_signature,
+                actor_value,
+                critic_hidden,
+                base_valid,
+                base_signature,
+                base_value,
+                resets,
+            ),
+            jnp.arange(training.num_steps, dtype=jnp.int32),
+        )
+        final_states, _, _, _, _, final_critic_hidden, _, _, _, _ = carry
+        final_obs = jax.vmap(observations)(final_states)
 
         def value_one(obs_e, hidden_e):
             return model.get_value_recurrent(obs_e, hidden_e, jnp.zeros(cfg.num_agents))[1]
 
-        final_values = jax.vmap(value_one)(final_obs, critic_hidden)
-        advantages, returns = buffer.compute_gae(final_values, states.done)
+        final_values = jax.vmap(value_one)(final_obs, final_critic_hidden)
+        return (*carry, final_values, rollout)
+
+    rollout_jit = nnx.jit(rollout_impl)
+
+    for update in range(resume.start_update + 1, num_updates + 1):
+        start_actor_hidden = actor_hidden
+        start_actor_signature = actor_signature
+        start_actor_value = actor_value
+        start_critic_hidden = critic_hidden
+        (
+            states,
+            keys,
+            actor_hidden,
+            actor_signature,
+            actor_value,
+            critic_hidden,
+            base_valid,
+            base_signature,
+            base_value,
+            resets,
+            final_values,
+            rollout_device,
+        ) = rollout_jit(
+            model,
+            states,
+            keys,
+            actor_hidden,
+            actor_signature,
+            actor_value,
+            critic_hidden,
+            base_valid,
+            base_signature,
+            base_value,
+            resets,
+        )
+        rollout_host, final_values_host, initial_states = jax.device_get(
+            (
+                rollout_device,
+                final_values,
+                (start_actor_hidden, start_critic_hidden, start_actor_signature, start_actor_value),
+            )
+        )
+        buffer.reset(
+            initial_states[0], initial_states[1], initial_states[2], initial_states[3]
+        )
+        for step_index in range(training.num_steps):
+            rewards_host = rollout_host["rewards"][step_index]
+            dones_host = rollout_host["dones"][step_index].astype(bool)
+            episode_returns += rewards_host.sum(axis=-1)
+            episode_lengths += 1
+            episode_success = np.maximum(episode_success, rollout_host["success"][step_index])
+            episode_found = np.maximum(
+                episode_found, rollout_host["global_target_found"][step_index]
+            )
+            episode_gap = rollout_host["chain_gap_dist"][step_index]
+            episode_progress_pct = rollout_host["chain_progress_pct"][step_index]
+            episode_coverage = rollout_host["global_coverage"][step_index]
+            for reward_name, accumulator in episode_rewards.items():
+                info_name = "reward_success" if reward_name == "success" else reward_name
+                accumulator += rollout_host[info_name][step_index].sum(axis=-1)
+            buffer.add(
+                MAPPOTransition(
+                    obs=rollout_host["obs"][step_index],
+                    actions=rollout_host["actions"][step_index],
+                    log_probs=rollout_host["log_probs"][step_index],
+                    values=rollout_host["values"][step_index],
+                    rewards=rewards_host,
+                    dones=dones_host,
+                    rnn_resets=rollout_host["rnn_resets"][step_index],
+                    comm_masks=rollout_host["comm_masks"][step_index],
+                    active_masks=rollout_host["active_masks"][step_index],
+                    base_signatures=rollout_host["base_signatures"][step_index],
+                    base_values=rollout_host["base_values"][step_index],
+                    base_memory_masks=rollout_host["base_memory_masks"][step_index],
+                    critic_obs=rollout_host["obs"][step_index],
+                )
+            )
+            completed_indices = np.flatnonzero(dones_host)
+            for index in completed_indices:
+                window_ret.append(float(episode_returns[index]))
+                window_len.append(int(episode_lengths[index]))
+                window_succ.append(float(episode_success[index]))
+                window_fnd.append(float(episode_found[index]))
+                window_gap.append(float(episode_gap[index]))
+                window_prog_pct.append(float(episode_progress_pct[index]))
+                window_cov.append(float(episode_coverage[index]))
+                for reward_name, accumulator in episode_rewards.items():
+                    window_rewards[reward_name].append(float(accumulator[index]))
+            completed_eps_count += len(completed_indices)
+            episode_returns[completed_indices] = 0.0
+            episode_lengths[completed_indices] = 0
+            episode_success[completed_indices] = 0.0
+            episode_found[completed_indices] = 0.0
+            # These are read-only host views of per-step rollout data, and
+            # are overwritten on the next step rather than accumulated across
+            # an episode.  They therefore do not need resetting here.
+            for accumulator in episode_rewards.values():
+                accumulator[completed_indices] = 0.0
+        advantages, returns = buffer.compute_gae(final_values_host, None)
         minibatches = buffer.get_minibatches(
             advantages,
             returns,
@@ -342,91 +510,83 @@ def train_3d(
             jax.random.fold_in(jax.random.PRNGKey(training.seed), update),
         )
         latest_stats = trainer.update(minibatches)
-        latest_stats["episode_success_rate"] = episode_successes / max(episode_count, 1)
-        latest_stats["completed_episodes"] = float(episode_count)
         elapsed = time.perf_counter() - start_time
         session_steps = update * training.num_envs * training.num_steps
         steps_done = resume.step_offset + session_steps
-        sps = steps_done / max(elapsed, 1e-6)
-        eta_seconds = (num_updates - update) * elapsed / update
+        completed_session_steps = (update - resume.start_update) * training.num_envs * training.num_steps
+        sps = completed_session_steps / max(elapsed, 1e-6)
+        eta_seconds = (num_updates - update) * elapsed / max(1, update - resume.start_update)
         latest_stats.update(
             {
                 "global_step": float(steps_done),
                 "sps": float(sps),
-                "mean_episode_return": float(np.mean(recent_returns)) if recent_returns else 0.0,
-                "mean_episode_length": float(np.mean(recent_lengths)) if recent_lengths else 0.0,
-                "rolling_success_rate": float(np.mean(recent_success)) if recent_success else 0.0,
-                "mean_terminal_coverage": float(np.mean(recent_coverage)) if recent_coverage else 0.0,
-                "live_episode_return": float(np.mean(episode_returns)),
-                "live_coverage": float(np.asarray(states.coverage).mean()),
-                "live_target_known_rate": float(np.asarray(states.target_known).mean()),
-                "live_chain_rate": float(np.asarray(states.fully_connected).mean()),
-                "live_episode_step": float(np.asarray(states.step).mean()),
+                "completed_episodes": float(completed_eps_count),
+                "mean_episode_return": float(np.mean(window_ret)) if window_ret else 0.0,
+                "mean_episode_length": float(np.mean(window_len)) if window_len else 0.0,
+                "rolling_success_rate": float(np.mean(window_succ)) if window_succ else 0.0,
+                "target_found_rate": float(np.mean(window_fnd)) if window_fnd else 0.0,
+                "chain_gap": float(np.mean(window_gap)) if window_gap else 0.0,
+                "chain_progress_pct": float(np.mean(window_prog_pct)) if window_prog_pct else 0.0,
+                "mean_terminal_coverage": float(np.mean(window_cov)) if window_cov else 0.0,
             }
         )
-        reward_denominator = training.num_envs * training.num_steps * cfg.num_agents
         latest_stats.update(
             {
-                f"reward_{name}": total / reward_denominator
-                for name, total in reward_totals.items()
+                f"reward_{name}": float(np.mean(values)) if values else 0.0
+                for name, values in window_rewards.items()
             }
         )
+        window_full = len(window_ret) == window_ret.maxlen
         with history_path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
-        if update % logging.log_every == 0 or update == 1 or update == num_updates:
+        if update % log_every == 0 or update == resume.start_update + 1:
             eta_m, eta_s = divmod(int(eta_seconds), 60)
             eta_h, eta_m = divmod(eta_m, 60)
             eta = f"{eta_h}h{eta_m:02d}m" if eta_h else f"{eta_m}m{eta_s:02d}s"
-            warmup = "warmup" if not recent_returns else f"ep={len(recent_returns):3d}"
-            display_return = (
-                latest_stats["mean_episode_return"]
-                if recent_returns
-                else latest_stats["live_episode_return"]
-            )
-            display_coverage = (
-                latest_stats["mean_terminal_coverage"]
-                if recent_coverage
-                else latest_stats["live_coverage"]
-            )
-            display_length = (
-                latest_stats["mean_episode_length"]
-                if recent_lengths
-                else latest_stats["live_episode_step"]
-            )
+            display_coverage = f"{np.mean(window_cov):>5.1%}" if window_full else " ----"
+            display_length = f"{np.mean(window_len):>6.0f}" if window_full else "  ----"
+            display_found = f"{np.mean(window_fnd):>5.1%}" if window_full else " ----"
+            display_progress = f"{np.mean(window_prog_pct):>5.1f}%" if window_full else "  ---%"
+            display_success = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
             print(
-                f"[{datetime.now():%H:%M:%S}] [{update:>4}/{num_updates}] "
-                f"steps={steps_done:>10,} sps={sps:>9,.0f} "
-                f"return={display_return:>8.2f} "
-                f"len={display_length:>6.1f} "
-                f"cov={display_coverage:>6.1%} "
-                f"known={latest_stats['live_target_known_rate']:>6.1%} "
-                f"chain={latest_stats['live_chain_rate']:>6.1%} "
-                f"succ={latest_stats['rolling_success_rate']:>6.1%} "
-                f"loss={latest_stats['total_loss']:>8.3f} {warmup} eta={eta}"
+                f"[{datetime.now():%H:%M:%S}]  [{update:>4}/{num_updates}]  "
+                f"steps={steps_done:>12,}  sps={sps:>6,.0f}  "
+                f"ep_len={display_length}  cov={display_coverage}  "
+                f"found={display_found}  chain={display_progress}  "
+                f"succ={display_success}  eta={eta}"
             )
+            if not window_full:
+                current_steps = np.asarray(states.step)
+                print(
+                    f"         [warmup] completed_episodes={len(window_ret)}/{window_ret.maxlen} | "
+                    f"env_steps: min={int(current_steps.min())} "
+                    f"mean={float(current_steps.mean()):.1f} max={int(current_steps.max())}"
+                )
         if wandb_run is not None:
-            wandb_run.log(
-                {
+            import wandb
+            wandb_logs = {
                     "ppo/policy_loss": latest_stats["policy_loss"],
                     "ppo/value_loss": latest_stats["value_loss"],
                     "ppo/entropy": latest_stats["entropy"],
                     "ppo/approx_kl": latest_stats["approx_kl"],
                     "ppo/clip_fraction": latest_stats["clip_fraction"],
-                    "train/episode_return": latest_stats["mean_episode_return"],
-                    "train/episode_length": latest_stats["mean_episode_length"],
-                    "train/success_rate": latest_stats["rolling_success_rate"],
-                    "train/coverage": latest_stats["mean_terminal_coverage"],
-                    "train/live_coverage": latest_stats["live_coverage"],
-                    "train/live_target_known_rate": latest_stats["live_target_known_rate"],
-                    "train/live_chain_rate": latest_stats["live_chain_rate"],
                     "perf/sps": sps,
-                    **{
-                        f"rewards/{name}": latest_stats[f"reward_{name}"]
-                        for name in reward_totals
-                    },
-                },
-                step=steps_done,
-            )
+                    "perf/ppo_updates": update,
+                    "perf/global_step": steps_done,
+            }
+            if window_full:
+                wandb_logs.update({
+                    "train/ep_return": latest_stats["mean_episode_return"],
+                    "train/ep_length": latest_stats["mean_episode_length"],
+                    "train/success_rate": latest_stats["rolling_success_rate"],
+                    "train/target_found_rate": latest_stats["target_found_rate"],
+                    "train/chain_progress_pct": latest_stats["chain_progress_pct"],
+                    "train/ep_length_reduction": (1.0 - latest_stats["mean_episode_length"] / cfg.max_steps) * 100.0,
+                    "train/map_coverage_pct": latest_stats["mean_terminal_coverage"] * 100.0,
+                    "train/episodes_completed": completed_eps_count,
+                    **{f"rewards/{name}": latest_stats[f"reward_{name}"] for name in window_rewards},
+                })
+            wandb.log(wandb_logs, step=steps_done)
         checkpoint_due = evaluation.save_model and schedule_due(
             update, evaluation.checkpoint_freq, evaluation.checkpoint_offset
         )
@@ -441,27 +601,59 @@ def train_3d(
                 num_steps=training.num_steps,
                 prior_history=resume.prior_history,
             )
+        # Keep the 2D schedule semantics exactly: regular evaluations/videos
+        # require the training-success gate, while the final checkpoint always
+        # receives an evaluation and (when enabled) one replay.  In particular,
+        # a very large eval_video_freq suppresses all intermediate videos but
+        # does not suppress the final one.
+        is_final_update = update == num_updates
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
         )
-        eval_due = schedule_due(update, evaluation.eval_freq, evaluation.eval_offset) and threshold_met
-        replay_due = (
-            evaluation.eval_video
-            and schedule_due(update, evaluation.eval_video_freq, evaluation.eval_video_offset)
-            and threshold_met
+        evaluation_enabled = threshold_met or is_final_update
+        eval_due = is_final_update or (
+            schedule_due(update, evaluation.eval_freq, evaluation.eval_offset)
+            and evaluation_enabled
         )
-        if update == num_updates:
-            eval_due = True
-            replay_due = evaluation.eval_video
+        replay_due = bool(evaluation.eval_video) and (
+            is_final_update
+            or (
+                schedule_due(
+                    update, evaluation.eval_video_freq, evaluation.eval_video_offset
+                )
+                and evaluation_enabled
+            )
+        )
         if eval_due or replay_due:
-            eval_metrics, eval_states, eval_rewards = evaluate_suite_3d(
+            eval_metrics, episode_info = evaluate_suite_3d(
                 model,
                 level,
                 episodes=evaluation.eval_parallel_envs,
                 max_steps=cfg.max_steps,
+                return_episode_info=True,
             )
             latest_stats.update(eval_metrics)
             suffix = artifact_suffix(update, steps_done)
+            info_path = save_eval_info_csv(
+                destination / "artifacts" / "train" / "data" / f"eval_info_{suffix}.csv",
+                target_positions=episode_info["target_positions"],
+                base_positions=episode_info["base_positions"],
+                successes=episode_info["successes"],
+                delivered=episode_info["delivered"],
+                visually_found=episode_info["visually_found"],
+            )
+            write_manifest(
+                info_path.with_suffix(".heatmap.json"),
+                {
+                    "format": "swarmecho-3d-eval-heatmap/v1",
+                    "data_file": info_path.name,
+                    "map_name": level.building_name,
+                    "world_size_m": level.building.world_size_m.tolist(),
+                    "training_update": update,
+                    "environment_steps": steps_done,
+                    "artifact_scope": "train",
+                },
+            )
             write_manifest(
                 destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
                 {
@@ -469,10 +661,15 @@ def train_3d(
                     "update": update,
                     "steps": steps_done,
                     "episodes": evaluation.eval_parallel_envs,
+                    "data_path": str(info_path),
                     **eval_metrics,
                 },
             )
             if replay_due:
+                replay_started = time.perf_counter()
+                eval_states, eval_rewards = evaluate_model_3d(
+                    model, level, max_steps=cfg.max_steps
+                )
                 write_replay(
                     replay_dir / f"eval_{suffix}",
                     eval_states,
@@ -482,6 +679,11 @@ def train_3d(
                     metadata={
                         "world_size_m": level.building.world_size_m.tolist(),
                         "cell_size_m": level.building.cell_size_m,
+                        "coverage_voxel_size_m": (
+                            level.building.cell_size_m
+                            if cfg.coverage_voxel_size is None
+                            else cfg.coverage_voxel_size
+                        ),
                         "comm_radius_m": cfg.comm_radius,
                         "comm_radius_base_m": cfg.comm_radius_base,
                         "visual_radius_m": cfg.visual_radius,
@@ -489,22 +691,45 @@ def train_3d(
                         "environment_steps": steps_done,
                         "artifact_scope": "train",
                     },
+                    progress=False,
                 )
+                print(
+                    f"[REPLAY] collected {len(eval_states) - 1} steps and created replay in "
+                    f"{time.perf_counter() - replay_started:.1f}s.",
+                    flush=True,
+                )
+            eval_envs = int(evaluation.eval_parallel_envs)
+            if eval_envs >= 1000:
+                par_envs = (
+                    f"{eval_envs // 1000}k"
+                    if eval_envs % 1000 == 0
+                    else f"{eval_envs / 1000:.1f}k"
+                )
+            else:
+                par_envs = str(eval_envs)
             print(
-                f"         evaluation: return={latest_stats['eval_return']:.2f} "
-                f"coverage={latest_stats['eval_coverage']:.1%} "
-                f"success={latest_stats['eval_success']:.0%}"
+                f"[EVAL] {'':50}"
+                f"ep_len={latest_stats['eval_episode_length']:>6.0f}  "
+                f"cov={latest_stats['eval_coverage']:>5.1%}  "
+                f"found={latest_stats['eval_target_found_rate']:>5.1%}  "
+                f"chain={latest_stats['eval_chain_progress_pct']:>5.1f}%  "
+                f"succ={latest_stats['eval_success']:>5.1%}  "
+                f"par_envs={par_envs}"
             )
+            eval_wandb_logs = {
+                "eval/ep_return": latest_stats["eval_return"],
+                "eval/ep_length": latest_stats["eval_episode_length"],
+                "eval/chain_progress_pct": latest_stats["eval_chain_progress_pct"],
+                "eval/ep_length_reduction": (
+                    1.0 - latest_stats["eval_episode_length"] / cfg.max_steps
+                ) * 100.0,
+                "eval/success_rate": latest_stats["eval_success"],
+                "eval/target_found_rate": latest_stats["eval_target_found_rate"],
+                "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
+            }
             if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "eval/ep_return": latest_stats["eval_return"],
-                        "eval/ep_length": latest_stats["eval_episode_length"],
-                        "eval/success_rate": latest_stats["eval_success"],
-                        "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
-                    },
-                    step=steps_done,
-                )
+                import wandb
+                wandb.log(eval_wandb_logs, step=steps_done)
             if evaluation.early_exit and latest_stats["eval_success"] >= evaluation.early_exit_threshold:
                 print(
                     f"  [eval-early-exit] success {latest_stats['eval_success']:.1%} >= "
@@ -513,12 +738,7 @@ def train_3d(
                 broadcast_early_stop_metrics(
                     wandb_run,
                     evaluation,
-                    {
-                        "eval/ep_return": latest_stats["eval_return"],
-                        "eval/ep_length": latest_stats["eval_episode_length"],
-                        "eval/success_rate": latest_stats["eval_success"],
-                        "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
-                    },
+                    eval_wandb_logs,
                     update,
                     num_updates,
                     training.num_envs * training.num_steps,
@@ -553,69 +773,366 @@ def train_3d(
     return checkpoint, latest_stats
 
 
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "reset",
+        "step",
+        "observations",
+        "reward_cfg",
+        "cfg",
+        "horizon",
+        "target_position",
+    ),
+)
+def _collect_replay_3d_jit(
+    model: MAPPOModel,
+    key: jax.Array,
+    *,
+    reset,
+    step,
+    observations,
+    reward_cfg,
+    cfg,
+    horizon: int,
+    target_position: tuple[float, float, float] | None = None,
+):
+    """Collect one deterministic replay entirely on device.
+
+    The old implementation synchronised the accelerator on every frame to
+    append a Python list.  Keeping the rollout in ``lax.scan`` makes replay
+    collection use the same JAX execution model as training and batched eval.
+    """
+    state = (
+        reset(key)
+        if target_position is None
+        else reset(key, target_pos=jnp.asarray(target_position, dtype=jnp.float32))
+    )
+    actor_hidden = model.initial_actor_hidden(())
+    actor_signature = model.initial_actor_signature(())
+    actor_value = model.initial_actor_value(())
+    base_valid = jnp.bool_(False)
+    base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
+    base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)
+    num_agents = cfg.num_agents
+    comm_cadence = int(model.memory_comm_every_k_steps)
+
+    def replay_step(carry, step_index):
+        (
+            current_state,
+            current_hidden,
+            current_signature,
+            current_value,
+            current_base_valid,
+            current_base_signature,
+            current_base_value,
+            completed,
+            episode_length,
+        ) = carry
+        delta = current_state.pos[:, None, :] - current_state.pos[None, :, :]
+        comm_mask = (
+            (jnp.linalg.norm(delta, axis=-1) <= cfg.comm_radius)
+            & current_state.active[:, None]
+            & current_state.active[None, :]
+            & ~jnp.eye(num_agents, dtype=jnp.bool_)
+        )
+        in_base_range = (
+            jnp.linalg.norm(current_state.pos - current_state.base_pos[None, :], axis=-1)
+            <= cfg.comm_radius_base
+        ) & current_state.active
+        share_now = (step_index % comm_cadence) == 0
+        comm_mask = comm_mask & share_now
+        base_memory_mask = (
+            current_base_valid & in_base_range & ~current_state.target_known & share_now
+        )
+        (
+            next_hidden,
+            emitted_signature,
+            emitted_value,
+            means,
+            _,
+        ) = model.actor.__call_team__(
+            observations(current_state),
+            current_hidden,
+            current_signature,
+            current_value,
+            reset=jnp.zeros(num_agents, dtype=jnp.bool_),
+            comm_mask=comm_mask,
+            active=current_state.active,
+            base_signature=current_base_signature,
+            base_value=current_base_value,
+            base_memory_mask=base_memory_mask,
+            deterministic=True,
+        )
+        candidate_state = step(current_state, jnp.tanh(means))
+        rewards, _ = rewards_3d(current_state, candidate_state, reward_cfg, cfg)
+
+        reporters = current_state.target_known & in_base_range
+        has_reporter = jnp.any(reporters)
+        reporter_index = jnp.argmax(reporters.astype(jnp.int32))
+        should_store = ~current_base_valid & has_reporter
+        next_base_signature = jnp.where(
+            should_store, emitted_signature[reporter_index], current_base_signature
+        )
+        next_base_value = jnp.where(
+            should_store, emitted_value[reporter_index], current_base_value
+        )
+        next_base_valid = current_base_valid | should_store
+        next_base_valid = jnp.where(candidate_state.done, False, next_base_valid)
+        next_base_signature = jnp.where(candidate_state.done, 0.0, next_base_signature)
+        next_base_value = jnp.where(candidate_state.done, 0.0, next_base_value)
+
+        # After the terminal frame, retain the terminal state.  The full scan
+        # remains static-shaped for JAX, while the host trims it to the real
+        # episode length before writing the archive.
+        next_state = jax.lax.cond(
+            completed,
+            lambda _: current_state,
+            lambda _: candidate_state,
+            operand=None,
+        )
+        live = ~completed
+        next_carry = (
+            next_state,
+            next_hidden,
+            emitted_signature,
+            emitted_value,
+            next_base_valid,
+            next_base_signature,
+            next_base_value,
+            completed | candidate_state.done,
+            episode_length + live.astype(jnp.int32),
+        )
+        recorded_rewards = jnp.where(live, rewards, jnp.zeros_like(rewards))
+        return next_carry, (next_state, recorded_rewards)
+
+    final_carry, (rollout_states, rollout_rewards) = jax.lax.scan(
+        replay_step,
+        (
+            state,
+            actor_hidden,
+            actor_signature,
+            actor_value,
+            base_valid,
+            base_signature,
+            base_value,
+            jnp.bool_(False),
+            jnp.int32(0),
+        ),
+        jnp.arange(horizon, dtype=jnp.int32),
+    )
+    states = jax.tree_util.tree_map(
+        lambda initial, rollout: jnp.concatenate((initial[None], rollout), axis=0),
+        state,
+        rollout_states,
+    )
+    rewards = jnp.concatenate(
+        (jnp.zeros((1, num_agents), dtype=jnp.float32), rollout_rewards), axis=0
+    )
+    return states, rewards, final_carry[-1]
+
+
 def evaluate_model_3d(
     model: MAPPOModel,
     level: Level3D,
     *,
     max_steps: int | None = None,
     seed: int | None = None,
+    target_position: np.ndarray | tuple[float, float, float] | None = None,
 ) -> tuple[list, np.ndarray]:
     """Run one deterministic trained-policy episode for replay/inspection."""
     cfg = level.env
     reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
-    state = reset(jax.random.PRNGKey(seed if seed is not None else level.training.seed + 10_000))
-    hidden = model.initial_actor_hidden(())
-    signature = model.initial_actor_signature(())
-    value = model.initial_actor_value(())
-    base_valid = jnp.zeros(1, dtype=jnp.bool_)
-    base_signature = jnp.zeros((1, model.tarmac_sig_dim), dtype=jnp.float32)
-    base_value = jnp.zeros((1, model.tarmac_val_dim), dtype=jnp.float32)
-    states = [state]
-    reward_frames = [np.zeros((cfg.num_agents, 1), dtype=np.float32)]
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
+    timeline, rewards, episode_length = jax.device_get(
+        _collect_replay_3d_jit(
+            model,
+            jax.random.PRNGKey(seed if seed is not None else level.training.seed + 10_000),
+            reset=reset,
+            step=step,
+            observations=observations,
+            reward_cfg=level.reward,
+            cfg=cfg,
+            horizon=horizon,
+            target_position=(
+                None
+                if target_position is None
+                else tuple(float(value) for value in target_position)
+            ),
+        )
+    )
+    frames = int(episode_length) + 1
+    timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)
+    states = [
+        jax.tree_util.tree_map(lambda item, index=index: item[index], timeline)
+        for index in range(frames)
+    ]
+    return states, np.asarray(rewards[:frames])[:, :, None]
 
-    for _ in range(horizon):
-        batched_state = jax.tree_util.tree_map(lambda item: item[None], state)
-        comm, in_base, base_masks, base_sig_in, base_val_in = _communication_inputs(
-            batched_state,
-            cfg,
+
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "reset",
+        "step",
+        "observations",
+        "reward_cfg",
+        "cfg",
+        "num_envs",
+        "horizon",
+    ),
+)
+def _run_parallel_evaluation_3d_jit(
+    model: MAPPOModel,
+    key: jax.Array,
+    *,
+    reset,
+    step,
+    observations,
+    reward_cfg,
+    cfg,
+    num_envs: int,
+    horizon: int,
+):
+    """Run deterministic 3D metrics as one compiled device program."""
+    env_keys = jax.random.split(key, num_envs)
+    num_agents = cfg.num_agents
+    comm_cadence = int(model.memory_comm_every_k_steps)
+
+    def run_single_environment(env_key):
+        state = reset(env_key)
+        actor_hidden = model.initial_actor_hidden(())
+        actor_signature = model.initial_actor_signature(())
+        actor_value = model.initial_actor_value(())
+        base_valid = jnp.bool_(False)
+        base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
+        base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)
+        initial_carry = (
+            state,
+            actor_hidden,
+            actor_signature,
+            actor_value,
             base_valid,
             base_signature,
             base_value,
+            jnp.bool_(False),  # completed
+            jnp.float32(0.0),  # return
+            jnp.int32(0),      # length
+            jnp.bool_(False),  # success
+            jnp.bool_(False),  # delivered target
+            jnp.float32(0.0),  # terminal chain progress
+            jnp.float32(0.0),  # terminal coverage
+            jnp.bool_(False),  # target seen/known by any agent
         )
-        obs = observations(state)
-        hidden, signature, value, mu, _ = model.actor.__call_team__(
-            obs,
-            hidden,
-            signature,
-            value,
-            reset=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
-            comm_mask=comm[0],
-            active=state.active,
-            base_signature=base_sig_in[0],
-            base_value=base_val_in[0],
-            base_memory_mask=base_masks[0],
-            deterministic=True,
+
+        def evaluation_step(carry, step_index):
+            (
+                state,
+                actor_hidden,
+                actor_signature,
+                actor_value,
+                base_valid,
+                base_signature,
+                base_value,
+                completed,
+                returns,
+                lengths,
+                successes,
+                target_found,
+                chain_progress_pct,
+                terminal_coverage,
+                visually_found,
+            ) = carry
+
+            delta = state.pos[:, None, :] - state.pos[None, :, :]
+            comm_mask = (
+                (jnp.linalg.norm(delta, axis=-1) <= cfg.comm_radius)
+                & state.active[:, None]
+                & state.active[None, :]
+                & ~jnp.eye(num_agents, dtype=jnp.bool_)
+            )
+            in_base_range = (
+                jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
+                <= cfg.comm_radius_base
+            ) & state.active
+            base_memory_mask = base_valid & in_base_range & ~state.target_known
+            share_now = (step_index % comm_cadence) == 0
+            comm_mask = comm_mask & share_now
+            base_memory_mask = base_memory_mask & share_now
+
+            observation = observations(state)
+            (
+                next_actor_hidden,
+                emitted_signature,
+                emitted_value,
+                means,
+                _,
+            ) = model.actor.__call_team__(
+                observation,
+                actor_hidden,
+                actor_signature,
+                actor_value,
+                reset=jnp.zeros(num_agents, dtype=jnp.bool_),
+                comm_mask=comm_mask,
+                active=state.active,
+                base_signature=base_signature,
+                base_value=base_value,
+                base_memory_mask=base_memory_mask,
+                deterministic=True,
+            )
+            next_state = step(state, jnp.tanh(means))
+            rewards, _ = rewards_3d(state, next_state, reward_cfg, cfg)
+            live = ~completed
+            _, step_chain_progress = chain_diagnostics_3d(next_state)
+
+            reporters = state.target_known & in_base_range
+            has_reporter = jnp.any(reporters)
+            reporter_index = jnp.argmax(reporters.astype(jnp.int32))
+            should_store = ~base_valid & has_reporter
+            next_base_signature = jnp.where(
+                should_store, emitted_signature[reporter_index], base_signature
+            )
+            next_base_value = jnp.where(
+                should_store, emitted_value[reporter_index], base_value
+            )
+            next_base_valid = base_valid | should_store
+            next_base_valid = jnp.where(next_state.done, False, next_base_valid)
+            next_base_signature = jnp.where(
+                next_state.done, 0.0, next_base_signature
+            )
+            next_base_value = jnp.where(next_state.done, 0.0, next_base_value)
+
+            next_carry = (
+                next_state,
+                next_actor_hidden,
+                emitted_signature,
+                emitted_value,
+                next_base_valid,
+                next_base_signature,
+                next_base_value,
+                completed | (live & next_state.done),
+                jnp.where(live, returns + jnp.sum(rewards), returns),
+                lengths + live.astype(jnp.int32),
+                successes | (live & next_state.success),
+                target_found | (live & next_state.base_target_known),
+                jnp.where(live, step_chain_progress, chain_progress_pct),
+                jnp.where(
+                    live,
+                    jnp.mean(next_state.coverage),
+                    terminal_coverage,
+                ),
+                visually_found | (live & jnp.any(next_state.target_known)),
+            )
+            return next_carry, None
+
+        final_carry, _ = jax.lax.scan(
+            evaluation_step,
+            initial_carry,
+            jnp.arange(horizon, dtype=jnp.int32),
         )
-        next_state = step(state, jnp.tanh(mu))
-        reward, _ = rewards_3d(state, next_state, level.reward)
-        done = next_state.done[None]
-        base_valid, base_signature, base_value = _update_base_memory(
-            batched_state,
-            in_base,
-            signature[None],
-            value[None],
-            base_valid,
-            base_signature,
-            base_value,
-            done,
-        )
-        states.append(next_state)
-        reward_frames.append(np.asarray(reward)[:, None])
-        state = next_state
-        if bool(state.done):
-            break
-    return states, np.stack(reward_frames)
+        return (*final_carry[8:], state.target_pos, state.base_pos)
+
+    return jax.vmap(run_single_environment)(env_keys)
 
 
 def evaluate_suite_3d(
@@ -624,86 +1141,52 @@ def evaluate_suite_3d(
     *,
     episodes: int,
     max_steps: int | None = None,
-) -> tuple[dict[str, float], list, np.ndarray]:
-    """Evaluate a VMAP batch and retain its first trajectory for inspection."""
+    return_episode_info: bool = False,
+) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
+    """Evaluate a deterministic 3D batch without collecting replay frames."""
     cfg = level.env
     reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
-    keys = jax.random.split(jax.random.PRNGKey(level.training.seed + 10_000), episodes)
-    states = jax.vmap(reset)(keys)
-    hidden = model.initial_actor_hidden((episodes,))
-    signature = model.initial_actor_signature((episodes,))
-    value = model.initial_actor_value((episodes,))
-    base_valid = jnp.zeros(episodes, dtype=jnp.bool_)
-    base_signature = jnp.zeros((episodes, model.tarmac_sig_dim), dtype=jnp.float32)
-    base_value = jnp.zeros((episodes, model.tarmac_val_dim), dtype=jnp.float32)
-    completed = jnp.zeros(episodes, dtype=jnp.bool_)
-    returns = jnp.zeros(episodes, dtype=jnp.float32)
-    lengths = jnp.zeros(episodes, dtype=jnp.int32)
-    first_states = [jax.tree_util.tree_map(lambda item: item[0], states)]
-    first_rewards = [np.zeros((cfg.num_agents, 1), dtype=np.float32)]
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
-
-    def policy_one(obs, actor_hidden, actor_signature, actor_value, comm, active, bs, bv, bm):
-        return model.actor.__call_team__(
-            obs,
-            actor_hidden,
-            actor_signature,
-            actor_value,
-            reset=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
-            comm_mask=comm,
-            active=active,
-            base_signature=bs,
-            base_value=bv,
-            base_memory_mask=bm,
-            deterministic=True,
+    (
+        returns,
+        lengths,
+        successes,
+        target_found,
+        chain_progress_pct,
+        terminal_coverage,
+        visually_found,
+        target_positions,
+        base_positions,
+    ) = jax.device_get(
+        _run_parallel_evaluation_3d_jit(
+            model,
+            jax.random.PRNGKey(level.training.seed + 10_000),
+            reset=reset,
+            step=step,
+            observations=observations,
+            reward_cfg=level.reward,
+            cfg=cfg,
+            num_envs=episodes,
+            horizon=horizon,
         )
-
-    for _ in range(horizon):
-        obs = jax.vmap(observations)(states)
-        comm, in_base, base_masks, base_sig_in, base_val_in = _communication_inputs(
-            states, cfg, base_valid, base_signature, base_value
-        )
-        hidden, signature, value, means, _ = jax.vmap(policy_one)(
-            obs,
-            hidden,
-            signature,
-            value,
-            comm,
-            states.active,
-            base_sig_in,
-            base_val_in,
-            base_masks,
-        )
-        next_states = jax.vmap(step)(states, jnp.tanh(means))
-        rewards, _ = jax.vmap(lambda old, new: rewards_3d(old, new, level.reward))(
-            states, next_states
-        )
-        live = ~completed
-        returns += jnp.where(live[:, None], rewards, 0.0).sum(axis=-1)
-        lengths += live.astype(jnp.int32)
-        base_valid, base_signature, base_value = _update_base_memory(
-            states,
-            in_base,
-            signature,
-            value,
-            base_valid,
-            base_signature,
-            base_value,
-            next_states.done,
-        )
-        completed |= next_states.done
-        first_states.append(jax.tree_util.tree_map(lambda item: item[0], next_states))
-        first_rewards.append(np.asarray(rewards[0])[:, None])
-        states = next_states
-        if bool(jnp.all(completed)):
-            break
+    )
     metrics = {
-        "eval_return": float(jnp.mean(returns)),
-        "eval_success": float(jnp.mean(states.success)),
-        "eval_coverage": float(jnp.mean(states.coverage)),
-        "eval_episode_length": float(jnp.mean(lengths)),
+        "eval_return": float(np.mean(returns)),
+        "eval_success": float(np.mean(successes)),
+        "eval_target_found_rate": float(np.mean(target_found)),
+        "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
+        "eval_coverage": float(np.mean(terminal_coverage)),
+        "eval_episode_length": float(np.mean(lengths)),
     }
-    return metrics, first_states, np.stack(first_rewards)
+    if not return_episode_info:
+        return metrics
+    return metrics, {
+        "target_positions": np.asarray(target_positions),
+        "base_positions": np.asarray(base_positions),
+        "successes": np.asarray(successes),
+        "delivered": np.asarray(target_found),
+        "visually_found": np.asarray(visually_found),
+    }
 
 
 def main() -> None:

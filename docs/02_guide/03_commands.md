@@ -129,6 +129,12 @@ Evaluate a saved checkpoint deterministically and write a standalone replay:
 uv run swarmecho-evaluate-3d checkpoint=outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_001000
 ```
 
+The evaluator defaults to `mode=parallel`, which writes the checkpoint-scoped
+parallel evaluation CSV. Use `mode=selective_auto_pick result=success offset=0`
+to replay a target selected from the closest CSV, or
+`mode=selective_manual_pick target_position=x,y,z` for an explicit target.
+The old `parallel_eval=true|false` argument remains accepted for compatibility.
+
 Inspect any completed replay from a separate terminal. The inspector is a
 standalone browser process with orbit/zoom/pan, playback and scrubbing, coverage
 and communication toggles, reward/status readouts, and transparent shell. It

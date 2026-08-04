@@ -20,7 +20,13 @@ wall_thickness_m: 0.25
 #     < distance(base, target).
 base_cell: [2, 2, 0]
 target_exclusion_cells:
-  - [2, 2, 0]
+  - [1, 1, 0]
+  - [1, 2, 0]
+  - [2, 1, 0]
+  - [1, 1, 1]
+  - [1, 2, 1]
+  - [2, 1, 1]
+  - [2, 2, 1]
 
 # Tiles are solid square prisms. Walls are solid rectangular prisms centred on
 # cell boundaries and extend wall_thickness_m / 2 into both neighbouring cells.

@@ -63,6 +63,8 @@ class EnvConfig:
 
     # --- Episode and map ---
     max_steps: int = 700
+    no_movement_termination_steps: int = 50  # end an episode after this many stationary transitions
+    movement_epsilon: float = 1e-3            # minimum per-step displacement (m) that counts as movement
     spawn_delay: int = 5      # steps between drone activations (0 = all at once)
     map_names: list[str] = field(default_factory=lambda: ["M01_small_maze"])
     hold_chain_for: int = 50                       # number of consecutive timesteps the chain must be held before success
@@ -403,6 +405,14 @@ def validate_config(cfg: DictConfig) -> None:
     require(cfg.env.dt > 0, "env.dt must be positive.")
     require(cfg.env.radar_bins >= 4, "env.radar_bins must be at least 4.")
     require(cfg.env.spawn_delay >= 0, "env.spawn_delay must be non-negative.")
+    require(
+        int(cfg.env.no_movement_termination_steps) >= 1,
+        "env.no_movement_termination_steps must be at least 1.",
+    )
+    require(
+        float(cfg.env.movement_epsilon) >= 0.0,
+        "env.movement_epsilon must be non-negative.",
+    )
     require(
         0.0 <= cfg.env.wall_restitution <= 1.0,
         "env.wall_restitution must be in [0, 1].",

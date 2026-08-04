@@ -29,7 +29,9 @@ def validate_3d_update(
     """Collect a real 3D rollout and complete one PPO update."""
     level = load_level_3d()
     cfg = replace(level.env, max_steps=max(2, num_steps - 1))
-    reset, step, observations, _ = make_autoreset_3d_fns(level.building, cfg)
+    reset, step, observations, _ = make_autoreset_3d_fns(
+        level.building, cfg, level.reward
+    )
     obs_dim = observation_dim_3d(cfg)
     model = MAPPOModel(
         obs_dim=obs_dim,
