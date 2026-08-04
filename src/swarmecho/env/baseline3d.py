@@ -60,6 +60,7 @@ class Baseline3DConfig:
     comm_radius: float = 5.0
     visual_radius: float = 4.0
     target_spawn_buffer: float = 0.5
+    target_wall_buffer_fraction: float = 0.1
     radar_bins: int = 8
     spawn_delay: int = 0
     hold_chain_for: int = 50
@@ -358,20 +359,42 @@ def rewards_3d(
     return total, terms
 
 
-def _target_candidates(building: BuildingArrays, cfg: Baseline3DConfig) -> jax.Array:
+def _target_spawn_boxes(
+    building: BuildingArrays, cfg: Baseline3DConfig
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return valid cell boxes and their volumes for continuous target sampling."""
     dims = building.target_exclusion.shape
     cells = np.stack(np.meshgrid(*[np.arange(size) for size in dims], indexing="ij"), axis=-1)
     cells = cells.reshape(-1, 3)
-    positions = (cells.astype(np.float32) + 0.5) * building.cell_size_m
-    distances = np.linalg.norm(positions - building.base_position_m[None, :], axis=-1)
     excluded = building.target_exclusion[tuple(cells.T)]
-    valid = ~excluded & (distances > minimum_target_distance(cfg))
+    clearance = cfg.target_wall_buffer_fraction * building.cell_size_m
+    if not 0 <= cfg.target_wall_buffer_fraction < 0.5:
+        raise ValueError("target_wall_buffer_fraction must be in [0, 0.5).")
+    half_wall = building.wall_thickness_m / 2
+    half_tile = building.tile_thickness_m / 2
+    lower = cells.astype(np.float32) * building.cell_size_m
+    upper = lower + building.cell_size_m
+    for index, (x, y, z) in enumerate(cells):
+        if building.x_walls[x, y, z]:
+            lower[index, 0] += half_wall + clearance
+        if building.x_walls[x + 1, y, z]:
+            upper[index, 0] -= half_wall + clearance
+        if building.y_walls[x, y, z]:
+            lower[index, 1] += half_wall + clearance
+        if building.y_walls[x, y + 1, z]:
+            upper[index, 1] -= half_wall + clearance
+        if building.tiles[x, y, z]:
+            lower[index, 2] += half_tile + clearance
+        if building.tiles[x, y, z + 1]:
+            upper[index, 2] -= half_tile + clearance
+    volumes = np.prod(np.maximum(upper - lower, 0), axis=-1)
+    valid = ~excluded & (volumes > 0)
     if not np.any(valid):
-        raise ValueError(
-            "Building has no target cell beyond comm_radius_base + "
-            "0.5 * comm_radius + target_spawn_buffer."
-        )
-    return jnp.asarray(positions[valid], dtype=jnp.float32)
+        raise ValueError("Building has no non-excluded target spawn volume.")
+    return tuple(
+        jnp.asarray(value[valid], dtype=jnp.float32)
+        for value in (lower, upper, volumes)
+    )
 
 
 def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
@@ -392,7 +415,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         raise ValueError("drone_radius must be positive.")
     coverage_voxel_size, coverage_shape = coverage_grid_geometry(building, cfg)
     directions = jnp.asarray(spherical_directions(cfg.radar_bins))
-    candidates = _target_candidates(building, cfg)
+    spawn_lower, spawn_upper, spawn_volumes = _target_spawn_boxes(building, cfg)
     n = cfg.num_agents
     world_size = jnp.asarray(building.world_size_m)
     lower = jnp.asarray(
@@ -414,6 +437,34 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         axis=-1,
     )
     coverage_centres = (coverage_indices.astype(jnp.float32) + 0.5) * coverage_voxel_size
+
+    def sample_target(key):
+        """Sample uniformly by volume, rejecting the base exclusion sphere."""
+        minimum_distance = jnp.float32(minimum_target_distance(cfg))
+
+        def draw(draw_key):
+            box_key, point_key = jax.random.split(draw_key)
+            box = jax.random.categorical(box_key, jnp.log(spawn_volumes))
+            return jax.random.uniform(
+                point_key, (3,), minval=spawn_lower[box], maxval=spawn_upper[box]
+            )
+
+        key, first_key = jax.random.split(key)
+        first = draw(first_key)
+
+        def condition(carry):
+            iteration, _, point = carry
+            return (iteration < 64) & (
+                jnp.linalg.norm(point - jnp.asarray(building.base_position_m))
+                <= minimum_distance
+            )
+
+        def retry(carry):
+            iteration, retry_key, _ = carry
+            retry_key, draw_key = jax.random.split(retry_key)
+            return iteration + 1, retry_key, draw(draw_key)
+
+        return jax.lax.while_loop(condition, retry, (0, key, first))[2]
 
     def connectivity(pos, active, base_pos, target_pos):
         delta = pos[:, None, :] - pos[None, :, :]
@@ -437,6 +488,15 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
     def update_coverage(coverage, pos, active):
         delta = coverage_centres[None, ...] - pos[:, None, None, None, :]
         visible = jnp.linalg.norm(delta, axis=-1) <= cfg.visual_radius
+        occupied = jnp.clip(
+            jnp.floor(pos / coverage_voxel_size).astype(jnp.int32),
+            0,
+            jnp.asarray(coverage_shape) - 1,
+        )
+        visible |= jnp.all(
+            coverage_indices[None, ...] == occupied[:, None, None, None, :],
+            axis=-1,
+        )
         visible &= active[:, None, None, None]
         newly_covered = ~coverage & jnp.any(visible, axis=0)
         viewers = jnp.sum(visible, axis=0)
@@ -452,10 +512,12 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         changing the normal keyed target sampler used for training.
         """
         target_key, next_key = jax.random.split(key)
-        target_idx = jax.random.randint(target_key, (), 0, candidates.shape[0])
-        target = candidates[target_idx] if target_pos is None else jnp.asarray(target_pos)
+        target = sample_target(target_key) if target_pos is None else jnp.asarray(target_pos)
         base_pos = jnp.asarray(building.base_position_m)
-        pos = jnp.broadcast_to(base_pos, (n, 3))
+        # The station itself sits on the floor; drone centres start one radius
+        # above it so the initial state does not intersect the floor tile.
+        drone_spawn = base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
+        pos = jnp.broadcast_to(drone_spawn, (n, 3))
         active = jnp.arange(n) * cfg.spawn_delay <= 0
         coverage = jnp.zeros(coverage_shape, dtype=jnp.bool_)
         coverage, _ = update_coverage(coverage, pos, active)
@@ -497,7 +559,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         collided = (proposed < lower) | (proposed > upper)
         pos = jnp.clip(proposed, lower, upper)
         velocity = jnp.where(collided, 0.0, velocity)
-        pos = jnp.where(active[:, None], pos, state.base_pos)
+        drone_spawn = state.base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
+        pos = jnp.where(active[:, None], pos, drone_spawn)
         velocity = jnp.where(active[:, None], velocity, 0.0)
         any_agent_moved = jnp.any(
             jnp.linalg.norm(pos - state.pos, axis=-1) > cfg.movement_epsilon

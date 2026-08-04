@@ -72,6 +72,24 @@ def test_reset_observation_and_step_jit_contract(bins):
     assert jnp.linalg.norm(state.target_pos - state.base_pos) > minimum_target_distance(cfg)
 
 
+def test_default_targets_sample_continuously_in_buffered_valid_layers():
+    cfg, (reset, _, _, _) = _functions()
+    targets = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(41), 128)).target_pos
+    targets = np.asarray(targets)
+
+    # Both complete lower layers are excluded, while the 0.5 m buffer plus
+    # half of the 0.25 m wall thickness protects every outer wall surface.
+    assert np.all(targets[:, 2] >= 10.0)
+    assert np.all(targets >= np.asarray([0.625, 0.625, 0.625]))
+    assert np.all(targets <= np.asarray([19.375, 19.375, 19.375]))
+    assert np.unique(targets, axis=0).shape[0] == len(targets)
+    assert np.any(np.mod(targets, BUILDING.cell_size_m) != 2.5)
+    assert np.all(
+        np.linalg.norm(targets - BUILDING.base_position_m, axis=-1)
+        > minimum_target_distance(cfg)
+    )
+
+
 def test_vmapped_step_and_high_speed_boundary_collision():
     cfg, (reset, step, _, _) = _functions(max_force=10_000.0, max_speed=1_000.0)
     reset_batch = jax.jit(jax.vmap(reset))

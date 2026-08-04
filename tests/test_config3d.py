@@ -15,10 +15,11 @@ def test_baseline_level_is_strict_and_solvable():
     level = load_level_3d()
     assert level.name == "M00_no_maze_open_cuboid_3D"
     assert level.env.radar_bins == 8
-    assert level.env.num_agents == 5
+    assert level.env.num_agents == 4
+    assert level.env.max_steps == 700
     assert level.env.coverage_voxel_size == 2.5
     assert level.map_names == ["M00_no_maze_open_cuboid"]
-    assert level.training.total_timesteps == 250_000_000
+    assert level.training.total_timesteps == 500_000_000
     assert level.training.num_envs == 4000
     assert level.training.num_steps == 100
     assert level.training.num_epochs == 4
@@ -26,6 +27,16 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.network.actor_memory
     assert level.evaluation.eval_parallel_envs == 4000
     assert level.logging.wandb_mode == "online"
+    assert level.ideal_chain_margin_m > 0
+
+
+def test_tall_level_adds_two_solvable_spawn_layers():
+    level = load_level_3d("M00_no_maze_open_cuboid_tall_3D")
+    assert level.building.target_exclusion.shape == (4, 4, 6)
+    assert level.building.target_exclusion[:, :, :2].all()
+    assert not level.building.target_exclusion[:, :, 2:].any()
+    assert level.env.num_agents == 4
+    assert level.env.max_steps == 700
     assert level.ideal_chain_margin_m > 0
 
 

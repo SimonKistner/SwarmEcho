@@ -10,13 +10,16 @@ def test_base_stores_first_reporter_replays_and_clears_on_reset():
     level = load_level_3d()
     reset, _, _, _ = make_baseline_3d_fns(level.building, level.env)
     state = reset(jax.random.PRNGKey(0))
-    state = state._replace(target_known=state.target_known.at[2].set(True))
+    state = state._replace(
+        active=jnp.ones_like(state.active),
+        target_known=state.target_known.at[2].set(True),
+    )
     states = jax.tree_util.tree_map(lambda item: item[None], state)
     valid = jnp.asarray([False])
     saved_signature = jnp.zeros((1, 4))
     saved_value = jnp.zeros((1, 3))
-    emitted_signature = jnp.arange(20, dtype=jnp.float32).reshape(1, 5, 4)
-    emitted_value = jnp.arange(15, dtype=jnp.float32).reshape(1, 5, 3)
+    emitted_signature = jnp.arange(16, dtype=jnp.float32).reshape(1, 4, 4)
+    emitted_value = jnp.arange(12, dtype=jnp.float32).reshape(1, 4, 3)
 
     _, in_base, masks, _, _ = _communication_inputs(
         states,

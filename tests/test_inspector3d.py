@@ -31,7 +31,9 @@ def test_inspector_payload_and_controls(tmp_path):
         },
     )
     payload = replay_payload(manifest)
-    assert payload["position"][0][0][2] == level.building.base_position_m[2]
+    assert payload["position"][0][0][2] == (
+        level.building.base_position_m[2] + level.env.drone_radius
+    )
     assert payload["manifest"]["world_size_m"] == [20.0, 20.0, 20.0]
     assert payload["manifest"]["coverage_voxel_size_m"] == 2.5
     assert 'id="timeline"' in HTML
@@ -43,7 +45,7 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="coverageOpacity"' in HTML
     assert 'id="visualOpacity"' in HTML
     assert 'id="commOpacity"' in HTML
-    assert 'value="0.064"' in HTML
+    assert 'value="0.02"' in HTML
     assert 'value="0.045"' in HTML
     assert 'value="0.025"' in HTML
     assert "type:'mesh3d'" in HTML
