@@ -145,14 +145,22 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
     if not (y_walls[:, 0, :].all() and y_walls[:, size_y, :].all()):
         raise BuildingValidationError("Both outer Y walls must be complete.")
 
-    base_cell = data.get("base_cell")
-    base_coords = _triples([base_cell] if base_cell is not None else None, "base_cell")
-    if len(base_coords) != 1:
-        raise BuildingValidationError("base_cell must be one [x, y, z] cell coordinate.")
-    base_cell_coord = base_coords[0]
-    for value, limit in zip(base_cell_coord, dimensions):
-        if value < 0 or value >= limit:
-            raise BuildingValidationError(f"base_cell {list(base_cell_coord)} is outside the building grid.")
+    base_coordinate = data.get("base_position_m")
+    if (
+        not isinstance(base_coordinate, list)
+        or len(base_coordinate) != 3
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in base_coordinate
+        )
+    ):
+        raise BuildingValidationError(
+            "base_position_m must contain exactly three numeric coordinates."
+        )
+    base_position = np.asarray(base_coordinate, dtype=np.float32)
+    world_size = np.asarray(dimensions, dtype=np.float32) * cell_size
+    if np.any(base_position < 0) or np.any(base_position > world_size):
+        raise BuildingValidationError("base_position_m must be inside the building bounds.")
 
     target_exclusion = np.zeros(dimensions, dtype=np.bool_)
     _set_coords(
@@ -161,8 +169,6 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
         "target_exclusion_cells",
     )
 
-    base_position = (np.asarray(base_cell_coord, dtype=np.float32) + 0.5) * cell_size
-    world_size = np.asarray(dimensions, dtype=np.float32) * cell_size
     top_corners = [
         np.asarray([x, y, world_size[2]], dtype=np.float32)
         for x in (0.0, world_size[0])
@@ -225,8 +231,11 @@ def make_cuboid_building(
     base_cell = np.asarray([size_x // 2, size_y // 2, 0])
     target_exclusion = np.zeros(grid, dtype=np.bool_)
     target_exclusion[tuple(base_cell)] = True
-    base_position = (base_cell.astype(np.float32) + 0.5) * cell_size_m
     world_size = np.asarray(grid, dtype=np.float32) * cell_size_m
+    base_position = np.asarray(
+        [world_size[0] / 2, world_size[1] / 2, tile_thickness_m / 2],
+        dtype=np.float32,
+    )
     top_corners = [
         np.asarray([x, y, world_size[2]], dtype=np.float32)
         for x in (0.0, world_size[0])

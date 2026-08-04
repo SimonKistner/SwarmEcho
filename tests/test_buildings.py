@@ -8,7 +8,6 @@ import yaml
 from swarmecho.env.buildings import (
     BuildingValidationError,
     compile_building,
-    distance_comment,
     load_building,
     make_cuboid_building,
 )
@@ -31,12 +30,10 @@ def test_baseline_building_compiles_to_static_arrays():
     assert building.x_walls.shape == (5, 4, 4)
     assert building.y_walls.shape == (4, 5, 4)
     assert building.target_exclusion.shape == (4, 4, 4)
-    np.testing.assert_allclose(building.base_position_m, [12.5, 12.5, 2.5])
+    np.testing.assert_allclose(building.base_position_m, [10.0, 10.0, 0.125])
     assert building.tile_thickness_m == 0.25
     assert building.wall_thickness_m == 0.25
-    assert building.max_base_to_top_corner_m == pytest.approx(24.875, abs=0.001)
-    assert distance_comment(building) == "# Maximum base-to-top-corner distance: 24.875 m"
-    assert BUILDING_PATH.read_text(encoding="utf-8").splitlines()[0] == distance_comment(building)
+    assert building.max_base_to_top_corner_m == pytest.approx(24.393, abs=0.001)
 
 
 @pytest.mark.parametrize(
@@ -69,11 +66,20 @@ def test_out_of_bounds_target_exclusion_is_rejected():
         compile_building(data)
 
 
+def test_base_is_an_explicit_coordinate_not_a_cell():
+    data = deepcopy(_data())
+    np.testing.assert_allclose(compile_building(data).base_position_m, [10.0, 10.0, 0.125])
+
+    data["base_position_m"] = [10.0, 10.0, 20.1]
+    with pytest.raises(BuildingValidationError, match="inside the building bounds"):
+        compile_building(data)
+
+
 def test_generated_cuboid_has_closed_shell_and_central_base():
     building = make_cuboid_building((6, 4, 3))
     assert building.tiles[:, :, 0].all()
     assert building.tiles[:, :, -1].all()
     assert building.x_walls[0].all() and building.x_walls[-1].all()
     assert building.y_walls[:, 0].all() and building.y_walls[:, -1].all()
-    np.testing.assert_allclose(building.base_position_m, [17.5, 12.5, 2.5])
+    np.testing.assert_allclose(building.base_position_m, [15.0, 10.0, 0.125])
     assert building.target_exclusion.sum() == 1

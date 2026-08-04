@@ -136,7 +136,7 @@ geometry:
   tiles: []         # [x_cell, y_cell, z_boundary]
   x_walls: []       # [x_boundary, y_cell, z_cell]
   y_walls: []       # [x_cell, y_boundary, z_cell]
-base_cell: [3, 3, 0]
+base_position_m: [17.5, 17.5, 0.125]
 target_exclusion_cells: [[3, 3, 0]]
 ```
 

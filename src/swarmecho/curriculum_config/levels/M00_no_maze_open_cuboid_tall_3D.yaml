@@ -1,6 +1,6 @@
 env:
   map_names:
-  - M00_no_maze_open_cuboid
+  - M00_no_maze_open_cuboid_tall
   num_agents: 4
   max_steps: 700
   no_movement_termination_steps: 50
