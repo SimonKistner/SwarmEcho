@@ -19,6 +19,19 @@ EVAL_STAGES = (
 )
 
 
+def evaluation_stage(
+    *, success: bool, delivered: bool, visually_found: bool
+) -> str:
+    """Return the canonical CSV stage for one evaluation result."""
+    if success:
+        return "chain_success"
+    if delivered:
+        return "found_and_delivered"
+    if visually_found:
+        return "visually_found"
+    return "not_found"
+
+
 def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
     """Return the update encoded in checkpoint-like names such as ckpt_000700."""
     name = Path(name_or_path).name
@@ -129,10 +142,19 @@ def save_eval_info_csv(
             "for every evaluated episode."
         )
 
-    stages = np.full(len(successes), "not_found", dtype="<U21")
-    stages[visually_found] = "visually_found"
-    stages[delivered] = "found_and_delivered"
-    stages[successes] = "chain_success"
+    stages = np.asarray(
+        [
+            evaluation_stage(
+                success=bool(success),
+                delivered=bool(is_delivered),
+                visually_found=bool(was_visually_found),
+            )
+            for success, is_delivered, was_visually_found in zip(
+                successes, delivered, visually_found, strict=True
+            )
+        ],
+        dtype="<U21",
+    )
     distances = np.linalg.norm(targets - bases, axis=-1)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

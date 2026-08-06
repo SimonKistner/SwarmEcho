@@ -21,6 +21,7 @@ tea_debug.log
 # Included here for safety in case someone creates one locally.
 .venv/
 venv/
+IMPORTANT_AI-AGENT_MUST_READ/
 
 # uv cache
 .uv/

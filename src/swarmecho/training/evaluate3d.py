@@ -13,6 +13,7 @@ import yaml
 from swarmecho.core.config import load_level_3d_cli
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
+    evaluation_stage,
     eval_checkpoint_artifact_root,
     eval_checkpoint_replay_root,
     load_eval_info_csv,
@@ -351,6 +352,13 @@ def main() -> None:
         "preparing archive...",
         flush=True,
     )
+    final_state = states[-1]
+    final_stage = evaluation_stage(
+        success=bool(np.asarray(final_state.success)),
+        delivered=bool(np.asarray(final_state.base_target_known)),
+        visually_found=bool(np.any(np.asarray(final_state.target_known))),
+    )
+    print(f"[REPLAY] final stage: {final_stage}", flush=True)
     _, manifest = write_replay(
         output,
         states,
