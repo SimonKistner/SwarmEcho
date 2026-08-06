@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
 from pathlib import Path
+
+# These must be configured before importing Flax/JAX.  ``checkpoints`` imports
+# Flax below, so relying on train3d.py to set them is too late for this entry
+# point and XLA backend diagnostics leak to stderr during replay compilation.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "0")
+os.environ.setdefault("GLOG_minloglevel", "3")
 
 import numpy as np
 import yaml
