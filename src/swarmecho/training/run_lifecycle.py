@@ -65,13 +65,21 @@ class ResumeState:
 
 
 def resolve_resume_state(training: Any, run_name: str, num_envs: int, num_steps: int) -> ResumeState:
-    """Apply the maintained branch/resume and cumulative-step-history semantics."""
+    """Resolve resume, curriculum-branch, or clean weight-initialization state."""
     checkpoint_value = cfg_value(training, "checkpoint_path")
     if not checkpoint_value:
         manual = cfg_value(training, "checkpoint_step_offset")
         return ResumeState(0, int(manual or 0), [])
     checkpoint = Path(str(checkpoint_value).replace("\\", "/")).absolute()
     mode = str(cfg_value(training, "ckpt_loading_mode", "branch")).lower()
+    if mode not in {"resume", "branch", "init"}:
+        raise ValueError(
+            "training.ckpt_loading_mode must be 'resume', 'branch', or 'init'."
+        )
+    if mode == "init":
+        # A clean weight initialization intentionally does not inherit the
+        # parent run's counters or provenance history.
+        return ResumeState(0, 0, [])
     match = re.search(r"ckpt_(?:early_|final_)?(\d+)", checkpoint.name, re.IGNORECASE)
     encoded_update = int(match.group(1)) if match else 0
     history: list[dict[str, Any]] = []

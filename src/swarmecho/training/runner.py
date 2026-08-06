@@ -908,6 +908,10 @@ def train(cfg: DictConfig):
 
     start_update = 0
     loading_mode = cfg.training.get("ckpt_loading_mode", "branch").lower()
+    if loading_mode not in {"resume", "branch", "init"}:
+        raise ValueError(
+            "training.ckpt_loading_mode must be 'resume', 'branch', or 'init'."
+        )
 
     loaded_history = []
     total_checkpoint_steps = 0
@@ -926,6 +930,8 @@ def train(cfg: DictConfig):
                 if loading_mode == "resume":
                     start_update = int(match.group(1))
                     print(f"  [resumption] Resuming from update {start_update} (step {start_update * E * T:,})")
+                elif loading_mode == "init":
+                    print(f"  [checkpoint-init] Loaded weights from {path_name}; counters and history start at zero")
                 else:
                     print(f"  [checkpoint-load] Loaded weights from {path_name}, but training will start at update 0 (loading_mode=branch)")
         except Exception as e:
@@ -933,7 +939,7 @@ def train(cfg: DictConfig):
 
         # Load history
         history_file = checkpoint_path / "step_history.json"
-        if history_file.exists():
+        if loading_mode != "init" and history_file.exists():
             try:
                 import json
                 with open(history_file, "r") as f:
@@ -944,7 +950,7 @@ def train(cfg: DictConfig):
             except Exception as e:
                 print(f"  [checkpoint-history] Failed to load step_history.json: {e}")
                 
-        if not loaded_history or total_checkpoint_steps == 0:
+        if loading_mode != "init" and (not loaded_history or total_checkpoint_steps == 0):
             # Fallback to name parsing if no history file exists
             try:
                 import re
@@ -977,7 +983,10 @@ def train(cfg: DictConfig):
 
     # Manual offset override
     manual_offset = cfg.training.get("checkpoint_step_offset", None)
-    if manual_offset is not None:
+    if loading_mode == "init":
+        step_offset = 0
+        print("  [ckpt] Init mode: cumulative step offset and checkpoint history reset to zero")
+    elif manual_offset is not None:
         step_offset = int(manual_offset)
         print(f"  [ckpt] Using manual checkpoint_step_offset override: {step_offset:,}")
     else:

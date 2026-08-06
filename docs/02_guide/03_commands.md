@@ -120,8 +120,11 @@ occupies the role of a 2D MP4 and uses the same canonical
 `u<update>_s<environment-steps>` suffix. There is intentionally no special
 `replays/latest.json` path that bypasses this artifact contract.
 
-Branch a new run from existing weights with
+Branch a curriculum run from existing weights with
 `training.checkpoint_path=outputs/M00_no_maze_open_cuboid_3D/checkpoints/ckpt_000500`.
+For a clean new run initialized from existing weights, also set
+`training.ckpt_loading_mode=init`; its update counter, logged steps, and
+checkpoint history all begin at zero.
 
 Evaluate a saved checkpoint deterministically and write a standalone replay:
 

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from swarmecho.core.config import load_level_3d_cli
 from swarmecho.training.artifacts import (
@@ -47,6 +48,20 @@ def _target_artifact_suffix(target: np.ndarray) -> str:
         coordinate = f"{float(value):.6f}".replace("-", "m").replace(".", "p")
         encoded.append(f"{axis}{coordinate}")
     return "TARGET-REPLAY_" + "_".join(encoded)
+
+
+def _checkpoint_level_name(checkpoint: Path) -> str | None:
+    """Read the level name saved alongside a training run's checkpoint."""
+    config_path = checkpoint.parents[1] / "config.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    level_name = config.get("name")
+    if isinstance(level_name, str) and level_name:
+        return level_name
+    return None
 
 
 def _heatmap_manifest(info_path: Path, level, *, checkpoint: Path) -> None:
@@ -122,7 +137,7 @@ def find_nearest_eval_info_csv(run_dir: Path, checkpoint: Path, level) -> Path |
 def select_eval_target(
     info_path: Path, *, result: str, offset: int
 ) -> tuple[np.ndarray, str]:
-    """Select a reproducible success/failure target from canonical eval data."""
+    """Select a reproducible target, prioritising distant successful targets."""
     if offset < 0:
         raise ValueError("offset must be non-negative.")
     records = load_eval_info_csv(info_path)
@@ -137,6 +152,11 @@ def select_eval_target(
     else:
         raise ValueError("result must be success or fail.")
     selected = positions[mask]
+    if label == "SUCCESS":
+        # Keep ties in their original CSV order while making SUCCESS_0 the
+        # successful target furthest from the base.
+        distances = records["distance_to_base"][mask]
+        selected = selected[np.argsort(-distances, kind="stable")]
     if offset >= len(selected):
         raise ValueError(
             f"Requested {label}_{offset}, but {info_path.name} contains only "
@@ -225,8 +245,15 @@ def main() -> None:
     if target_mode not in {"csv", "random"}:
         raise ValueError("target must be csv or random.")
 
-    level = load_level_3d_cli(config_arguments)
     run_dir = checkpoint.parents[1]
+    explicit_level = any(
+        argument.split("=", 1)[0] == "level" for argument in config_arguments
+    )
+    checkpoint_level = None if explicit_level else _checkpoint_level_name(checkpoint)
+    if checkpoint_level is not None:
+        config_arguments.insert(0, f"level={checkpoint_level}")
+        print(f"[EVAL] using checkpoint-trained level: {checkpoint_level}", flush=True)
+    level = load_level_3d_cli(config_arguments)
     model = build_model_3d(level)
     restore_model_checkpoint(model, checkpoint)
     if mode == "parallel":

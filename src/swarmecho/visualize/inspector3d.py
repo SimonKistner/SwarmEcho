@@ -11,7 +11,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from swarmecho.training.artifacts import load_eval_info_csv
+from swarmecho.training.artifacts import load_eval_info_csv, parse_checkpoint_update
 from swarmecho.visualize.replay3d import load_replay
 
 
@@ -37,7 +37,7 @@ input[type=range]{width:100%;accent-color:var(--cyan)}select,input[type=text]{wi
 <div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></div>
 <div class="card"><div class="label">Episode</div><div id="status" class="value">Exploring</div><div class="row"><span>Reward</span><b id="reward">—</b></div><div class="row"><span>Coverage</span><b id="coverage">0%</b></div><div class="row"><span>Known agents</span><b id="known">0</b></div><div class="row"><span>Base connected</span><b id="baseConn">0</b></div><div class="label" style="margin-top:16px">Target known</div><div id="knownList" class="known-list"></div></div>
 <div class="card"><div class="label">Layers</div><label class="layer-control"><span><input id="showCoverage" type="checkbox"> Coverage voxels</span><span id="coverageOpacityValue" class="opacity-value">2%</span></label><input id="coverageOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.02" aria-label="Coverage voxel opacity"><label class="layer-control"><span><input id="showVisualRange" type="checkbox" checked> Visual range</span><span id="visualOpacityValue" class="opacity-value">4.5%</span></label><input id="visualOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.045" aria-label="Visual range opacity"><label class="layer-control"><span><input id="showCommRange" type="checkbox" checked> Communication range</span><span id="commOpacityValue" class="opacity-value">2.5%</span></label><input id="commOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.025" aria-label="Communication range opacity"><label><input id="showLinks" type="checkbox" checked> Communication links</label><br><label><input id="showShell" type="checkbox" checked> Transparent shell</label></div>
-<div id="heatmapControls" class="card hidden"><div class="label">Heatmap rendering</div><label><input id="heatmapSpheres" type="checkbox" checked> Render spheres</label><label class="layer-control" style="margin-top:12px"><span>Sphere opacity</span><span id="heatmapOpacityValue" class="opacity-value">55%</span></label><input id="heatmapOpacity" class="opacity-control" type="range" min="0" max="1" step="0.01" value="0.55"><label class="layer-control"><span>Sphere radius</span><span id="heatmapRadiusValue" class="opacity-value">0.35 m</span></label><input id="heatmapRadius" class="opacity-control" type="range" min="0.05" max="2" step="0.05" value="0.35"><div class="label" style="margin-top:16px">Selected target</div><div id="selectedPoint" class="meta">Click a point to create a replay command.</div><input id="heatmapCommand" type="text" readonly style="margin-top:8px" value=""><button id="copyHeatmapCommand" type="button" style="margin-top:8px">Copy command</button></div>
+<div id="heatmapControls" class="card hidden"><div class="label">Heatmap categories</div><label><input id="heatmapShowChainSuccess" type="checkbox" checked> Chain success</label><br><label><input id="heatmapShowFoundDelivered" type="checkbox" checked> Found and delivered</label><br><label><input id="heatmapShowVisuallyFound" type="checkbox" checked> Visually found</label><br><label><input id="heatmapShowNotFound" type="checkbox" checked> Not found</label><div class="label" style="margin-top:16px">Selected target</div><div id="selectedPoint" class="meta">Click a point to create a replay command.</div><input id="heatmapCommand" type="text" readonly style="margin-top:8px" value=""><button id="copyHeatmapCommand" type="button" style="margin-top:8px">Copy command</button></div>
 <div id="replayLegend" class="card legend"><div class="label">Legend</div><span><i class="dot" style="background:#22d3ee"></i>Drone</span><span><i class="dot" style="background:#60a5fa"></i>Base</span><span><i class="dot" style="background:#fb7185"></i>Target</span><span><i class="dot" style="background:#fb7185"></i>Target-known drone / base</span><span><i class="dot" style="background:#a3e635"></i>Known area highlight</span></div>
 <div id="heatmapLegend" class="card legend hidden"><div class="label">Evaluation result</div><span><i class="dot" style="background:#22c55e"></i>Chain success</span><span><i class="dot" style="background:#3b82f6"></i>Found and delivered</span><span><i class="dot" style="background:#fbbf24"></i>Visually found</span><span><i class="dot" style="background:#ef4444"></i>Not found</span></div>
 </aside></div><script>
@@ -55,8 +55,9 @@ const CUBE_FACES=[[0,1,2],[0,2,3],[4,6,5],[4,7,6],[0,4,5],[0,5,1],[1,5,6],[1,6,2
 function coverageTrace(coverage,cellSize,opacity){let x=[],y=[],z=[],i=[],j=[],k=[];for(let a=0;a<coverage.length;a++)for(let b=0;b<coverage[a].length;b++)for(let c=0;c<coverage[a][b].length;c++)if(coverage[a][b][c]){let o=x.length,px=a*cellSize,py=b*cellSize,pz=c*cellSize;[[px,py,pz],[px+cellSize,py,pz],[px+cellSize,py+cellSize,pz],[px,py+cellSize,pz],[px,py,pz+cellSize],[px+cellSize,py,pz+cellSize],[px+cellSize,py+cellSize,pz+cellSize],[px,py+cellSize,pz+cellSize]].forEach(v=>{x.push(v[0]);y.push(v[1]);z.push(v[2])});CUBE_FACES.forEach(q=>{i.push(o+q[0]);j.push(o+q[1]);k.push(o+q[2])})}return x.length?{type:'mesh3d',x,y,z,i,j,k,color:'#38bdf8',opacity,flatshading:true,hoverinfo:'skip',lighting:{ambient:.8,diffuse:.25,specular:0}}:null}
 function sphereTrace(centres,radius,color,opacity){let x=[],y=[],z=[],i=[],j=[],k=[],lon=12,lat=8;centres.forEach(centre=>{let o=x.length;for(let row=0;row<=lat;row++)for(let col=0;col<=lon;col++){let theta=Math.PI*row/lat,phi=2*Math.PI*col/lon;x.push(centre[0]+radius*Math.sin(theta)*Math.cos(phi));y.push(centre[1]+radius*Math.sin(theta)*Math.sin(phi));z.push(centre[2]+radius*Math.cos(theta))}for(let row=0;row<lat;row++)for(let col=0;col<lon;col++){let a=o+row*(lon+1)+col,b=a+lon+1;i.push(a,b,a+1);j.push(b,b+1,b);k.push(a+1,a+1,b+1)}});return {type:'mesh3d',x,y,z,i,j,k,color,opacity,flatshading:true,hoverinfo:'skip',lighting:{ambient:1,diffuse:0,specular:0}}}
 const HEATMAP_COLORS={chain_success:'#22c55e',found_and_delivered:'#3b82f6',visually_found:'#fbbf24',not_found:'#ef4444'};
-function showHeatmapCommand(point,stage){let checkpoint=H.manifest.checkpoint||'<checkpoint-path>';let coords=point.map(value=>Number(value).toFixed(6)).join(',');let command='uv run swarmecho-evaluate-3d checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords;$('selectedPoint').textContent=stage+' · ('+coords+')';$('heatmapCommand').value=command}
-function drawHeatmap(){let traces=[],groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]},radius=+$('heatmapRadius').value,opacity=+$('heatmapOpacity').value;H.positions.forEach((point,index)=>{let stage=H.stages[index];(groups[stage]||groups.not_found).push({point,stage})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];if($('heatmapSpheres').checked)traces.push(sphereTrace(points,radius,color,opacity));traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage]),marker:{size:$('heatmapSpheres').checked?13:8,color,opacity:$('heatmapSpheres').checked?0.035:opacity,line:{color:'#e5eefc',width:$('heatmapSpheres').checked?0:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra>Click to create replay command</extra>'})});let renderPromise=Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',uirevision:'heatmap-camera',scene:{bgcolor:'#090e18',uirevision:'heatmap-camera',aspectmode:'data',xaxis:{title:'X',gridcolor:'#22304a'},yaxis:{title:'Y',gridcolor:'#22304a'},zaxis:{title:'Z',gridcolor:'#22304a'},camera:camera||DEFAULT_CAMERA},showlegend:false},{responsive:true,displaylogo:false}).then(captureCamera);return renderPromise}
+const HEATMAP_CATEGORY_CONTROLS={chain_success:'heatmapShowChainSuccess',found_and_delivered:'heatmapShowFoundDelivered',visually_found:'heatmapShowVisuallyFound',not_found:'heatmapShowNotFound'};
+function showHeatmapCommand(point,stage){let checkpoint=H.manifest.checkpoint||'<checkpoint-path>';let coords=point.map(value=>Number(value).toPrecision(9)).join(',');let command='uv run swarmecho-evaluate-3d checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords;$('selectedPoint').textContent=stage+' · ('+coords+')';$('heatmapCommand').value=command}
+function drawHeatmap(){let traces=[],groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]};H.positions.forEach((point,index)=>{let stage=H.stages[index];(groups[stage]||groups.not_found).push({point,stage})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length||!$(HEATMAP_CATEGORY_CONTROLS[stage]).checked)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage]),marker:{size:8,color,opacity:.55,line:{color:'#e5eefc',width:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra>Click to create replay command</extra>'})});let renderPromise=Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',uirevision:'heatmap-camera',scene:{bgcolor:'#090e18',uirevision:'heatmap-camera',aspectmode:'data',xaxis:{title:'X',gridcolor:'#22304a'},yaxis:{title:'Y',gridcolor:'#22304a'},zaxis:{title:'Z',gridcolor:'#22304a'},camera:camera||DEFAULT_CAMERA},showlegend:false},{responsive:true,displaylogo:false}).then(captureCamera);return renderPromise}
 function captureCamera(){let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){scene.on('plotly_relayout',event=>{if(event['scene.camera'])camera=event['scene.camera']});scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}}
 function distance3(a,b){return Math.hypot(...a.map((v,k)=>v-b[k]))}
 function baseKnowsTarget(f,base){if(D.base_target_known)return Boolean(D.base_target_known[f]);let radius=D.manifest.comm_radius_base_m||6;for(let q=0;q<=f;q++)for(let i=0;i<D.position[q].length;i++)if(D.active[q][i]&&D.target_known[q][i]&&distance3(D.position[q][i],base)<=radius)return true;return false}
@@ -70,8 +71,7 @@ if($('showCoverage').checked){let coverage=coverageTrace(D.coverage[f],D.manifes
 const renderPromise=Plotly.react('scene',tr,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',uirevision:'replay-camera',scene:{bgcolor:'#090e18',uirevision:'replay-camera',aspectmode:'data',xaxis:{title:'X',gridcolor:'#22304a'},yaxis:{title:'Y',gridcolor:'#22304a'},zaxis:{title:'Z',gridcolor:'#22304a'},camera:camera||DEFAULT_CAMERA},showlegend:false},{responsive:true,displaylogo:false}).then(captureCamera);
 $('timeline').value=f;$('frame').textContent=f+'/'+(D.manifest.frames-1);$('time').textContent=(f*D.manifest.dt).toFixed(1)+' s';let cov=D.coverage[f].flat(2).filter(Boolean).length,total=D.coverage[f].flat(2).length;$('coverage').textContent=(100*cov/total).toFixed(1)+'%';$('known').textContent=known.filter(Boolean).length;$('baseConn').textContent=D.connected_to_base[f].filter(Boolean).length;$('status').textContent=D.success[f]?'SUCCESS':D.fully_connected[f]?'CHAIN HELD':known.some(Boolean)?'TARGET KNOWN':'EXPLORING';$('status').style.color=D.success[f]?'#a3e635':'#e5eefc';$('reward').textContent=D.reward_terms?D.reward_terms[f].flat().reduce((a,b)=>a+b,0).toFixed(2):'—';return renderPromise}
 function updateOpacityValue(input,output){$(output).textContent=(Math.round(1000*+$(input).value)/10)+'%'}
-function updateRadiusValue(){$('heatmapRadiusValue').textContent=(+$('heatmapRadius').value).toFixed(2)+' m'}
-$('timeline').oninput=e=>draw(e.target.value);['showCoverage','showVisualRange','showCommRange','showLinks','showShell'].forEach(id=>$(id).onchange=()=>draw(frame));[['coverageOpacity','coverageOpacityValue'],['visualOpacity','visualOpacityValue'],['commOpacity','commOpacityValue']].forEach(([input,output])=>{updateOpacityValue(input,output);$(input).oninput=()=>{updateOpacityValue(input,output);draw(frame)}});updateOpacityValue('heatmapOpacity','heatmapOpacityValue');updateRadiusValue();['heatmapSpheres','heatmapOpacity','heatmapRadius'].forEach(id=>$(id).oninput=()=>{updateOpacityValue('heatmapOpacity','heatmapOpacityValue');updateRadiusValue();if(mode==='heatmap')drawHeatmap()});$('copyHeatmapCommand').onclick=()=>{let command=$('heatmapCommand').value;if(command)navigator.clipboard.writeText(command).then(()=>{$('copyHeatmapCommand').textContent='Copied';setTimeout(()=>{$('copyHeatmapCommand').textContent='Copy command'},1200)})};$('step').onclick=()=>draw(Math.min(frame+1,D.manifest.frames-1));$('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'❚❚ Pause':'▶ Play';if(playing)tick();else clearTimeout(timer)};function tick(){if(!playing)return;draw(frame>=D.manifest.frames-1?0:frame+1);timer=setTimeout(tick,1000*D.manifest.dt/+$('speed').value)}
+$('timeline').oninput=e=>draw(e.target.value);['showCoverage','showVisualRange','showCommRange','showLinks','showShell'].forEach(id=>$(id).onchange=()=>draw(frame));[['coverageOpacity','coverageOpacityValue'],['visualOpacity','visualOpacityValue'],['commOpacity','commOpacityValue']].forEach(([input,output])=>{updateOpacityValue(input,output);$(input).oninput=()=>{updateOpacityValue(input,output);draw(frame)}});Object.values(HEATMAP_CATEGORY_CONTROLS).forEach(id=>$(id).onchange=()=>{if(mode==='heatmap')drawHeatmap()});$('copyHeatmapCommand').onclick=()=>{let command=$('heatmapCommand').value;if(command)navigator.clipboard.writeText(command).then(()=>{$('copyHeatmapCommand').textContent='Copied';setTimeout(()=>{$('copyHeatmapCommand').textContent='Copy command'},1200)})};$('step').onclick=()=>draw(Math.min(frame+1,D.manifest.frames-1));$('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'❚❚ Pause':'▶ Play';if(playing)tick();else clearTimeout(timer)};function tick(){if(!playing)return;draw(frame>=D.manifest.frames-1?0:frame+1);timer=setTimeout(tick,1000*D.manifest.dt/+$('speed').value)}
 </script></body></html>"""
 
 
@@ -101,6 +101,9 @@ def heatmap_payload(info_path: str | Path) -> dict:
             manifest.update(json.loads(sidecar.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             pass
+    checkpoint = _nearest_heatmap_checkpoint(path, manifest)
+    if checkpoint is not None:
+        manifest["checkpoint"] = str(checkpoint)
     return {
         "kind": "heatmap",
         "manifest": manifest,
@@ -108,6 +111,35 @@ def heatmap_payload(info_path: str | Path) -> dict:
         "stages": records["stages"].tolist(),
         "distance_to_base": records["distance_to_base"].tolist(),
     }
+
+
+def _nearest_heatmap_checkpoint(info_path: Path, manifest: dict) -> Path | None:
+    """Resolve a heatmap to its closest saved checkpoint in the same run."""
+    configured = manifest.get("checkpoint")
+    if configured:
+        return Path(str(configured))
+
+    artifacts_dir = next(
+        (parent for parent in info_path.parents if parent.name == "artifacts"),
+        None,
+    )
+    training_update = manifest.get("training_update")
+    if artifacts_dir is None or training_update is None:
+        return None
+
+    checkpoints_dir = artifacts_dir.parent / "checkpoints"
+    candidates = [
+        path
+        for path in checkpoints_dir.iterdir()
+        if path.is_dir() and parse_checkpoint_update(path) is not None
+    ] if checkpoints_dir.is_dir() else []
+    if not candidates:
+        return None
+    target_update = int(training_update)
+    return min(
+        candidates,
+        key=lambda path: abs(parse_checkpoint_update(path) - target_update),
+    )
 
 
 def inspector_html() -> str:
@@ -205,15 +237,9 @@ def _replay_steps_label(manifest_path: Path) -> str | None:
 def replay_label(manifest_path: str | Path) -> str:
     """Return the run name and compact training steps for the replay picker."""
     path = Path(manifest_path)
-    parts = path.parts
-    try:
-        run_name = parts[parts.index("artifacts") - 1]
-    except ValueError:
-        run_name = path.parent.parent.name if path.parent.name == "replays" else path.stem
-    steps = _replay_steps_label(path)
-    target_replay = _is_target_replay(path)
-    suffix = " TARGET-REPLAY" if target_replay else ""
-    return f"{run_name}-[{steps}]{suffix}" if steps else f"{run_name}{suffix}"
+    run_name = _artifact_run_name(path, fallback=path.stem)
+    kind = "Target-Replay" if _is_target_replay(path) else "Replay"
+    return _artifact_label(run_name, _replay_steps_label(path), kind)
 
 
 def _is_target_replay(manifest_path: str | Path) -> bool:
@@ -231,13 +257,20 @@ def _is_target_replay(manifest_path: str | Path) -> bool:
 def heatmap_label(info_path: str | Path) -> str:
     """Return the matching compact label for a 3D evaluation heatmap CSV."""
     path = Path(info_path)
+    run_name = _artifact_run_name(path, fallback=path.stem)
+    return _artifact_label(run_name, _replay_steps_label(path), "Heatmap")
+
+
+def _artifact_run_name(path: Path, *, fallback: str) -> str:
     parts = path.parts
     try:
-        run_name = parts[parts.index("artifacts") - 1]
+        return parts[parts.index("artifacts") - 1]
     except ValueError:
-        run_name = path.stem
-    steps = _replay_steps_label(path)
-    return f"{run_name}-[{steps}] heatmap" if steps else f"{run_name} heatmap"
+        return path.parent.parent.name if path.parent.name == "replays" else fallback
+
+
+def _artifact_label(run_name: str, steps: str | None, kind: str) -> str:
+    return f"{run_name}_[{steps or 'unknown'}]_[{kind}]"
 
 
 def make_handler(
@@ -284,11 +317,9 @@ def make_handler(
                     {
                         "id": str(index),
                         "kind": kind,
-                        "label": (
-                            f"[Replay] {replay_label(path)}"
-                            if kind == "replay"
-                            else f"[Heatmap] {heatmap_label(path)}"
-                        ),
+                        "label": replay_label(path)
+                        if kind == "replay"
+                        else heatmap_label(path),
                         "selected": kind == "replay" and (
                             path == initial or (initial is None and index == 0)
                         ),

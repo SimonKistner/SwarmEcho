@@ -102,8 +102,11 @@ run. `save_model` controls scheduled and final saves; it does not suppress this
 required handoff checkpoint.
 
 Checkpoint loading remains under `training`: `checkpoint_path`,
-`checkpoint_step_offset`, and `ckpt_loading_mode` control branch/resume input
-semantics. Checkpoint saving belongs to `evaluation` because it follows the
+`checkpoint_step_offset`, and `ckpt_loading_mode` control input semantics.
+`resume` continues the checkpoint's update and cumulative-step timeline;
+`branch` starts updates at zero while preserving that timeline for curriculum
+history; `init` restores weights only and starts a completely new run at zero
+steps with no inherited history. Checkpoint saving belongs to `evaluation` because it follows the
 same update schedule as evaluation and video artifacts.
 
 When `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline

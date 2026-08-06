@@ -110,9 +110,9 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
 
     # --- Checkpoint loading and resume behavior ---
-    checkpoint_path: Optional[str] = None  # if set, resumes training from this path
-    checkpoint_step_offset: Optional[int] = None  # if set, starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
-    ckpt_loading_mode: str = "branch"  # "resume" (continue update count and WandB run) or "branch" (start update 0 and new WandB run)
+    checkpoint_path: Optional[str] = None  # if set, restores model weights from this path
+    checkpoint_step_offset: Optional[int] = None  # starts W&B step reporting at this offset (otherwise auto-detected from checkpoint)
+    ckpt_loading_mode: str = "branch"  # "resume" (continue counters), "branch" (cumulative curriculum handoff), or "init" (weights only, fresh counters/history)
 
 @dataclass
 class EvalConfig:
@@ -529,7 +529,7 @@ class Training3DConfig:
     max_grad_norm: float = 0.5
     checkpoint_path: str | None = None
     checkpoint_step_offset: int | None = None
-    ckpt_loading_mode: str = "branch"
+    ckpt_loading_mode: str = "branch"  # "resume", "branch", or "init"; see TrainingConfig
 
 
 @dataclass(frozen=True)

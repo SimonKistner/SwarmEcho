@@ -141,7 +141,9 @@ def save_eval_info_csv(
         coordinates = ["x", "y"] + (["z"] if dimensions == 3 else [])
         writer.writerow([*coordinates, "stage", "distance_to_base"])
         writer.writerows(
-            tuple(f"{coordinate:.6f}" for coordinate in target)
+            # Nine significant digits round-trip float32 coordinates while
+            # avoiding the precision loss that made manual replays diverge.
+            tuple(f"{float(coordinate):.9g}" for coordinate in target)
             + (stage, f"{distance:.6f}")
             for target, stage, distance in zip(targets, stages, distances)
         )

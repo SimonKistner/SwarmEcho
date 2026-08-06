@@ -43,3 +43,19 @@ def test_resume_history_and_schedules_are_dimension_agnostic(tmp_path):
     assert resume.prior_history == []
     assert schedule_due(21, 20, 1)
     assert not schedule_due(20, 20, 1)
+
+
+def test_init_restores_weights_without_inheriting_parent_timeline(tmp_path):
+    level = load_level_3d()
+    checkpoint = tmp_path / "parent/checkpoints/ckpt_001250"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "step_history.json").write_text(
+        json.dumps({"total_steps": 500_000_000, "history": [{"run_name": "parent", "steps": 500_000_000}]})
+    )
+    training = replace(level.training, checkpoint_path=str(checkpoint), ckpt_loading_mode="init")
+
+    resume = resolve_resume_state(training, "tall", 4000, 100)
+
+    assert resume.start_update == 0
+    assert resume.step_offset == 0
+    assert resume.prior_history == []
