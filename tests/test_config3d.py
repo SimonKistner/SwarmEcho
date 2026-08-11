@@ -19,13 +19,13 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.env.max_steps == 700
     assert level.env.coverage_voxel_size == 2.5
     assert level.map_names == ["M00_no_maze_open_cuboid"]
-    assert level.training.total_timesteps == 500_000_000
+    assert level.training.total_timesteps == 400_000_000
     assert level.training.num_envs == 4000
     assert level.training.num_steps == 100
     assert level.training.num_epochs == 4
     assert level.training.num_minibatches == 20
-    assert not level.training.training_noise
-    assert level.training.noise_level == level.evaluation.eval_action_noise_max
+    assert level.training.training_noise
+    assert level.training.noise_level == 0.015
     assert level.network.actor_memory
     assert level.evaluation.eval_parallel_envs == 4000
     assert level.evaluation.eval_robustness_runs == 5
