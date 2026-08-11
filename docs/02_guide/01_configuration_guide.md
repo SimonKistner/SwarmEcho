@@ -153,3 +153,24 @@ The retained level and map sequence is:
 
 `M04_tiny_grid_maze_CORE_ONLY_TEST` remains a dedicated core validation
 profile and uses the retained `M01_small_maze` map.
+### Randomized 3D obstacle evaluation
+
+Obstacle levels can separate generalization evaluation from spatial heatmap
+inspection:
+
+- `evaluation.eval_obstacle_layout_mode: per_environment` gives every evaluation
+  lane its own deterministic layout. Layouts are reproduced from
+  `eval_obstacle_layout_seed_offset` and remain identical across robustness runs.
+- `evaluation.eval_fixed_layout_heatmap: true` additionally writes a companion
+  `*_fixed_layout.csv` evaluation for obstacle levels.
+- `evaluation.eval_heatmap_layout_mode: fixed` makes all companion-evaluation
+  lanes share the layout selected by `eval_heatmap_layout_seed_offset`, while
+  their targets remain independently sampled. This makes its 3D target heatmap
+  spatially meaningful.
+- `evaluation.eval_fixed_obstacle_bounds` can provide the handcrafted cuboids as
+  `[min_x,min_y,min_z,max_x,max_y,max_z]` entries. When omitted, fixed mode uses
+  the configured seed offset instead.
+
+Evaluation CSVs contain every episode's obstacle bounds and final physical
+base-to-target relay-chain length. Successful replay offsets are ordered by
+descending final chain length rather than straight-line target distance.

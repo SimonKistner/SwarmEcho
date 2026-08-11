@@ -12,6 +12,7 @@ from swarmecho.env.baseline3d import (
     Baseline3DState,
     chain_diagnostics_3d,
     coverage_grid_geometry,
+    final_chain_length_3d,
     make_autoreset_3d_fns,
     make_baseline_3d_fns,
     maximum_chain_distance,
@@ -412,3 +413,5 @@ def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain()
     gap, progress = chain_diagnostics_3d(state)
     assert gap == 0.0
     assert progress == 100.0
+    state = state._replace(directly_sees_target=jnp.asarray([False, True]))
+    assert final_chain_length_3d(state, Baseline3DConfig(num_agents=2)) == pytest.approx(10.0)

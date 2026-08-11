@@ -27,12 +27,16 @@ from flax import nnx
 
 from swarmecho.core.config import Level3D, load_level_3d_cli
 from swarmecho.env.baseline3d import (
+    build_obstacle_roadmap_3d,
     chain_diagnostics_3d,
+    final_chain_length_3d,
     make_autoreset_3d_fns,
     make_baseline_3d_fns,
     observation_dim_3d,
+    obstacle_chain_diagnostics_3d,
     rewards_3d,
 )
+from swarmecho.env.obstacles3d import segments_blocked
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.artifacts import (
     artifact_suffix,
@@ -87,6 +91,17 @@ def _communication_inputs(states, cfg, base_valid, base_signature, base_value):
         jnp.linalg.norm(states.pos - states.base_pos[:, None, :], axis=-1)
         <= cfg.comm_radius_base
     ) & states.active
+    if cfg.num_obstacles:
+        comm_masks &= ~jax.vmap(
+            lambda pos, lower, upper: segments_blocked(
+                pos[:, None, :], pos[None, :, :], lower, upper
+            )
+        )(states.pos, states.obstacle_min, states.obstacle_max)
+        in_base_range &= ~jax.vmap(
+            lambda pos, base, lower, upper: segments_blocked(
+                pos, base, lower, upper
+            )
+        )(states.pos, states.base_pos, states.obstacle_min, states.obstacle_max)
     base_memory_masks = base_valid[:, None] & in_base_range & ~states.target_known
     return comm_masks, in_base_range, base_memory_masks, base_signature, base_value
 
@@ -667,9 +682,9 @@ def train_3d(
             )
         )
         if eval_due or replay_due:
-            # Periodic training evaluation deliberately remains one unperturbed
-            # parallel pass. The five-pass robustness ensemble is exclusive to
-            # the standalone checkpoint evaluator.
+            # Periodic evaluation is one unperturbed generalization pass. M02
+            # may request a second fixed-layout pass solely for spatial heatmaps;
+            # the five-pass robustness ensemble remains standalone-only.
             eval_metrics, episode_info = evaluate_suite_3d(
                 model,
                 level,
@@ -686,6 +701,9 @@ def train_3d(
                 successes=episode_info["successes"],
                 delivered=episode_info["delivered"],
                 visually_found=episode_info["visually_found"],
+                final_chain_lengths=episode_info["final_chain_lengths"],
+                obstacle_min=episode_info["obstacle_min"],
+                obstacle_max=episode_info["obstacle_max"],
             )
             write_manifest(
                 info_path.with_suffix(".heatmap.json"),
@@ -697,8 +715,43 @@ def train_3d(
                     "training_update": update,
                     "environment_steps": steps_done,
                     "artifact_scope": "train",
+                    "obstacle_layout_mode": evaluation.eval_obstacle_layout_mode,
                 },
             )
+            if cfg.num_obstacles and evaluation.eval_fixed_layout_heatmap:
+                _, fixed_episode_info = evaluate_suite_3d(
+                    model,
+                    level,
+                    episodes=evaluation.eval_parallel_envs,
+                    max_steps=cfg.max_steps,
+                    return_episode_info=True,
+                    layout_mode=evaluation.eval_heatmap_layout_mode,
+                    layout_seed_offset=evaluation.eval_heatmap_layout_seed_offset,
+                )
+                fixed_info_path = save_eval_info_csv(
+                    destination / "artifacts" / "train" / "data" / f"eval_info_{suffix}_fixed_layout.csv",
+                    target_positions=fixed_episode_info["target_positions"],
+                    base_positions=fixed_episode_info["base_positions"],
+                    successes=fixed_episode_info["successes"],
+                    delivered=fixed_episode_info["delivered"],
+                    visually_found=fixed_episode_info["visually_found"],
+                    final_chain_lengths=fixed_episode_info["final_chain_lengths"],
+                    obstacle_min=fixed_episode_info["obstacle_min"],
+                    obstacle_max=fixed_episode_info["obstacle_max"],
+                )
+                write_manifest(
+                    fixed_info_path.with_suffix(".heatmap.json"),
+                    {
+                        "format": "swarmecho-3d-eval-heatmap/v1",
+                        "data_file": fixed_info_path.name,
+                        "map_name": level.building_name,
+                        "world_size_m": level.building.world_size_m.tolist(),
+                        "training_update": update,
+                        "environment_steps": steps_done,
+                        "artifact_scope": "train",
+                        "obstacle_layout_mode": evaluation.eval_heatmap_layout_mode,
+                    },
+                )
             write_manifest(
                 destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
                 {
@@ -829,6 +882,8 @@ def _collect_replay_3d_impl(
     cfg,
     horizon: int,
     target_position: tuple[float, float, float] | None = None,
+    obstacle_min: jax.Array | None = None,
+    obstacle_max: jax.Array | None = None,
 ):
     """Collect one deterministic replay entirely on device.
 
@@ -836,11 +891,22 @@ def _collect_replay_3d_impl(
     append a Python list.  Keeping the rollout in ``lax.scan`` makes replay
     collection use the same JAX execution model as training and batched eval.
     """
-    state = (
-        reset(key)
-        if target_position is None
-        else reset(key, target_pos=jnp.asarray(target_position, dtype=jnp.float32))
-    )
+    if obstacle_min is None:
+        state = reset(key) if target_position is None else reset(
+            key, target_pos=jnp.asarray(target_position, dtype=jnp.float32)
+        )
+    else:
+        vertices, distances = build_obstacle_roadmap_3d(
+            obstacle_min, obstacle_max, cfg
+        )
+        state = reset(
+            key,
+            target_pos=None if target_position is None else jnp.asarray(target_position, dtype=jnp.float32),
+            obstacle_min=obstacle_min,
+            obstacle_max=obstacle_max,
+            stored_vertices=vertices,
+            stored_distances=distances,
+        )
     actor_hidden = model.initial_actor_hidden(())
     actor_signature = model.initial_actor_signature(())
     actor_value = model.initial_actor_value(())
@@ -873,6 +939,15 @@ def _collect_replay_3d_impl(
             jnp.linalg.norm(current_state.pos - current_state.base_pos[None, :], axis=-1)
             <= cfg.comm_radius_base
         ) & current_state.active
+        if cfg.num_obstacles:
+            comm_mask &= ~segments_blocked(
+                current_state.pos[:, None, :], current_state.pos[None, :, :],
+                current_state.obstacle_min, current_state.obstacle_max,
+            )
+            in_base_range &= ~segments_blocked(
+                current_state.pos, current_state.base_pos,
+                current_state.obstacle_min, current_state.obstacle_max,
+            )
         share_now = (step_index % comm_cadence) == 0
         comm_mask = comm_mask & share_now
         base_memory_mask = (
@@ -988,12 +1063,15 @@ def _collect_replay_3d_jit(
     cfg,
     horizon: int,
     target_position: tuple[float, float, float] | None = None,
+    obstacle_min: jax.Array | None = None,
+    obstacle_max: jax.Array | None = None,
 ):
     """Compile one scalar replay collector."""
     return _collect_replay_3d_impl(
         model, key, reset=reset, step=step, observations=observations,
         reward_cfg=reward_cfg, cfg=cfg, horizon=horizon,
         target_position=target_position,
+        obstacle_min=obstacle_min, obstacle_max=obstacle_max,
     )
 
 
@@ -1004,6 +1082,8 @@ def evaluate_model_3d(
     max_steps: int | None = None,
     seed: int | None = None,
     target_position: np.ndarray | tuple[float, float, float] | None = None,
+    obstacle_min: np.ndarray | None = None,
+    obstacle_max: np.ndarray | None = None,
 ) -> tuple[list, np.ndarray]:
     """Run one deterministic trained-policy episode for replay/inspection."""
     cfg = level.env
@@ -1024,6 +1104,8 @@ def evaluate_model_3d(
                 if target_position is None
                 else tuple(float(value) for value in target_position)
             ),
+            obstacle_min=None if obstacle_min is None else jnp.asarray(obstacle_min),
+            obstacle_max=None if obstacle_max is None else jnp.asarray(obstacle_max),
         )
     )
     frames = int(episode_length) + 1
@@ -1049,6 +1131,7 @@ def evaluate_model_3d(
         "capture_actions",
         "capture_result",
         "capture_offset",
+        "fixed_layout",
     ),
 )
 def _run_parallel_evaluation_3d_jit(
@@ -1067,6 +1150,11 @@ def _run_parallel_evaluation_3d_jit(
     capture_actions: bool = False,
     capture_result: str = "success",
     capture_offset: int = 0,
+    fixed_layout: bool = False,
+    fixed_obstacle_min: jax.Array | None = None,
+    fixed_obstacle_max: jax.Array | None = None,
+    fixed_roadmap_vertices: jax.Array | None = None,
+    fixed_roadmap_distances: jax.Array | None = None,
 ):
     """Run deterministic 3D metrics and optionally retain one lane's actions."""
     env_keys = jax.random.split(key, num_envs)
@@ -1075,7 +1163,13 @@ def _run_parallel_evaluation_3d_jit(
     comm_cadence = int(model.memory_comm_every_k_steps)
 
     def run_single_environment(env_key, env_action_noise_key):
-        state = reset(env_key)
+        state = reset(
+            env_key,
+            obstacle_min=fixed_obstacle_min,
+            obstacle_max=fixed_obstacle_max,
+            stored_vertices=fixed_roadmap_vertices,
+            stored_distances=fixed_roadmap_distances,
+        ) if fixed_layout else reset(env_key)
         actor_hidden = model.initial_actor_hidden(())
         actor_signature = model.initial_actor_signature(())
         actor_value = model.initial_actor_value(())
@@ -1130,6 +1224,15 @@ def _run_parallel_evaluation_3d_jit(
                 jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
                 <= cfg.comm_radius_base
             ) & state.active
+            if cfg.num_obstacles:
+                comm_mask &= ~segments_blocked(
+                    state.pos[:, None, :], state.pos[None, :, :],
+                    state.obstacle_min, state.obstacle_max,
+                )
+                in_base_range &= ~segments_blocked(
+                    state.pos, state.base_pos,
+                    state.obstacle_min, state.obstacle_max,
+                )
             base_memory_mask = base_valid & in_base_range & ~state.target_known
             share_now = (step_index % comm_cadence) == 0
             comm_mask = comm_mask & share_now
@@ -1172,7 +1275,10 @@ def _run_parallel_evaluation_3d_jit(
             next_state = step(state, executed_actions)
             rewards, _ = rewards_3d(state, next_state, reward_cfg, cfg)
             live = ~completed
-            _, step_chain_progress = chain_diagnostics_3d(next_state)
+            if reward_cfg.chain_reward_system == "obstacle_geodesic" and cfg.num_obstacles:
+                _, step_chain_progress, _, _ = obstacle_chain_diagnostics_3d(next_state)
+            else:
+                _, step_chain_progress = chain_diagnostics_3d(next_state)
 
             reporters = state.target_known & in_base_range
             has_reporter = jnp.any(reporters)
@@ -1219,7 +1325,11 @@ def _run_parallel_evaluation_3d_jit(
             initial_carry,
             jnp.arange(horizon, dtype=jnp.int32),
         )
-        metrics = (*final_carry[8:], state.target_pos, state.base_pos)
+        metrics = (
+            *final_carry[8:], final_chain_length_3d(final_carry[0], cfg),
+            state.target_pos, state.base_pos,
+            state.obstacle_min, state.obstacle_max,
+        )
         return (*metrics, action_history) if capture_actions else metrics
 
     batched = jax.vmap(run_single_environment)(
@@ -1229,19 +1339,17 @@ def _run_parallel_evaluation_3d_jit(
         return batched
 
     successes = batched[2]
-    target_positions = batched[7]
-    base_positions = batched[8]
-    action_histories = batched[9]
+    final_chain_lengths = batched[7]
+    action_histories = batched[12]
     if capture_result == "success":
-        distances = jnp.linalg.norm(target_positions - base_positions, axis=-1)
-        scores = jnp.where(successes, distances, -jnp.inf)
+        scores = jnp.where(successes, final_chain_lengths, -jnp.inf)
         selected_lane = jnp.argsort(-scores, stable=True)[capture_offset]
     else:
         failure_lanes = jnp.nonzero(
             ~successes, size=num_envs, fill_value=-1
         )[0]
         selected_lane = failure_lanes[capture_offset]
-    return batched[:9], selected_lane, action_histories[selected_lane]
+    return batched[:12], selected_lane, action_histories[selected_lane]
 
 
 def evaluate_suite_3d(
@@ -1253,10 +1361,43 @@ def evaluate_suite_3d(
     return_episode_info: bool = False,
     action_noise_max: float = 0.0,
     action_noise_seed: int | None = None,
+    layout_mode: str | None = None,
+    layout_seed_offset: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
     """Evaluate a deterministic 3D batch without collecting replay frames."""
     cfg = level.env
     reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    layout_mode = layout_mode or getattr(
+        level.evaluation, "eval_obstacle_layout_mode", "per_environment"
+    )
+    fixed_layout = bool(cfg.num_obstacles and layout_mode == "fixed")
+    layout_seed_offset = (
+        getattr(level.evaluation, "eval_obstacle_layout_seed_offset", 10_000)
+        if layout_seed_offset is None else layout_seed_offset
+    )
+    reference_state = None
+    fixed_min = fixed_max = fixed_vertices = fixed_distances = None
+    if fixed_layout:
+        configured_bounds = getattr(
+            level.evaluation, "eval_fixed_obstacle_bounds", None
+        )
+        if configured_bounds:
+            bounds = jnp.asarray(configured_bounds, dtype=jnp.float32)
+            if bounds.shape != (cfg.num_obstacles, 6):
+                raise ValueError(
+                    "eval_fixed_obstacle_bounds must contain six values per obstacle."
+                )
+            fixed_min, fixed_max = bounds[:, :3], bounds[:, 3:]
+            fixed_vertices, fixed_distances = build_obstacle_roadmap_3d(
+                fixed_min, fixed_max, cfg
+            )
+        else:
+            reference_state = reset(
+                jax.random.PRNGKey(level.training.seed + layout_seed_offset)
+            )
+            fixed_min, fixed_max = reference_state.obstacle_min, reference_state.obstacle_max
+            fixed_vertices = reference_state.roadmap_vertices
+            fixed_distances = reference_state.roadmap_distances
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     (
         returns,
@@ -1266,8 +1407,11 @@ def evaluate_suite_3d(
         chain_progress_pct,
         terminal_coverage,
         visually_found,
+        final_chain_lengths,
         target_positions,
         base_positions,
+        obstacle_min,
+        obstacle_max,
     ) = jax.device_get(
         _run_parallel_evaluation_3d_jit(
             model,
@@ -1285,6 +1429,11 @@ def evaluate_suite_3d(
             num_envs=episodes,
             horizon=horizon,
             action_noise_max=action_noise_max,
+            fixed_layout=fixed_layout,
+            fixed_obstacle_min=fixed_min,
+            fixed_obstacle_max=fixed_max,
+            fixed_roadmap_vertices=fixed_vertices,
+            fixed_roadmap_distances=fixed_distances,
         )
     )
     metrics = {
@@ -1294,6 +1443,7 @@ def evaluate_suite_3d(
         "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
         "eval_coverage": float(np.mean(terminal_coverage)),
         "eval_episode_length": float(np.mean(lengths)),
+        "eval_success_chain_length": float(np.mean(final_chain_lengths[successes])) if np.any(successes) else 0.0,
     }
     if not return_episode_info:
         return metrics
@@ -1303,6 +1453,9 @@ def evaluate_suite_3d(
         "successes": np.asarray(successes),
         "delivered": np.asarray(target_found),
         "visually_found": np.asarray(visually_found),
+        "final_chain_lengths": np.asarray(final_chain_lengths),
+        "obstacle_min": np.asarray(obstacle_min),
+        "obstacle_max": np.asarray(obstacle_max),
     }
 
 
@@ -1328,6 +1481,15 @@ def evaluate_suite_3d_with_action_capture(
 
     cfg = level.env
     reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    fixed_layout = bool(
+        cfg.num_obstacles
+        and getattr(level.evaluation, "eval_obstacle_layout_mode", "per_environment") == "fixed"
+    )
+    reference_state = (
+        reset(jax.random.PRNGKey(
+            level.training.seed + getattr(level.evaluation, "eval_obstacle_layout_seed_offset", 10_000)
+        )) if fixed_layout else None
+    )
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     batched, selected_lane, selected_actions = jax.device_get(
         _run_parallel_evaluation_3d_jit(
@@ -1344,6 +1506,11 @@ def evaluate_suite_3d_with_action_capture(
             capture_actions=True,
             capture_result=capture_result,
             capture_offset=offset,
+            fixed_layout=fixed_layout,
+            fixed_obstacle_min=None if reference_state is None else reference_state.obstacle_min,
+            fixed_obstacle_max=None if reference_state is None else reference_state.obstacle_max,
+            fixed_roadmap_vertices=None if reference_state is None else reference_state.roadmap_vertices,
+            fixed_roadmap_distances=None if reference_state is None else reference_state.roadmap_distances,
         )
     )
     (
@@ -1354,8 +1521,11 @@ def evaluate_suite_3d_with_action_capture(
         chain_progress_pct,
         terminal_coverage,
         visually_found,
+        final_chain_lengths,
         target_positions,
         base_positions,
+        obstacle_min,
+        obstacle_max,
     ) = batched
     matching_count = int(np.count_nonzero(successes if capture_result == "success" else ~successes))
     if offset >= matching_count:
@@ -1371,6 +1541,7 @@ def evaluate_suite_3d_with_action_capture(
         "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
         "eval_coverage": float(np.mean(terminal_coverage)),
         "eval_episode_length": float(np.mean(lengths)),
+        "eval_success_chain_length": float(np.mean(final_chain_lengths[successes])) if np.any(successes) else 0.0,
     }
     episode_info = {
         "target_positions": np.asarray(target_positions),
@@ -1378,6 +1549,9 @@ def evaluate_suite_3d_with_action_capture(
         "successes": np.asarray(successes),
         "delivered": np.asarray(target_found),
         "visually_found": np.asarray(visually_found),
+        "final_chain_lengths": np.asarray(final_chain_lengths),
+        "obstacle_min": np.asarray(obstacle_min),
+        "obstacle_max": np.asarray(obstacle_max),
     }
     capture = {
         "lane": lane,

@@ -31,6 +31,7 @@ def test_robust_eval_csv_stores_cumulative_rates_and_uses_unanimous_stage(tmp_pa
             "found_and_delivered_rate",
             "chain_success_rate",
             "distance_to_base",
+            "final_chain_length",
         ]
 
     records = load_eval_info_csv(path)
@@ -38,6 +39,24 @@ def test_robust_eval_csv_stores_cumulative_rates_and_uses_unanimous_stage(tmp_pa
     np.testing.assert_allclose(records["chain_success_rate"], [0.8, 1.0])
     np.testing.assert_allclose(records["found_and_delivered_rate"], [0.8, 1.0])
     np.testing.assert_allclose(records["visually_found_rate"], [1.0, 1.0])
+    np.testing.assert_allclose(records["final_chain_length"], [0.0, 0.0])
+
+
+def test_eval_csv_round_trips_chain_length_and_obstacle_layouts(tmp_path):
+    obstacle_min = np.asarray([[[1, 2, 3]], [[4, 5, 6]]], dtype=np.float32)
+    obstacle_max = obstacle_min + 1
+    path = save_eval_info_csv(
+        tmp_path / "obstacles.csv",
+        target_positions=np.asarray([[8, 9, 10], [11, 12, 13]], dtype=np.float32),
+        base_positions=np.zeros((2, 3), dtype=np.float32),
+        successes=[True, True], delivered=[True, True], visually_found=[True, True],
+        final_chain_lengths=[17.5, 19.25],
+        obstacle_min=obstacle_min, obstacle_max=obstacle_max,
+    )
+    records = load_eval_info_csv(path)
+    np.testing.assert_allclose(records["final_chain_length"], [17.5, 19.25])
+    np.testing.assert_allclose(records["obstacle_min"], obstacle_min)
+    np.testing.assert_allclose(records["obstacle_max"], obstacle_max)
 
 
 def test_confidence_selects_highest_cumulative_stage_that_meets_threshold():

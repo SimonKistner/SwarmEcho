@@ -52,6 +52,9 @@ def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
     assert obstacle_level.env.num_obstacles == 3
     assert obstacle_level.reward.chain_reward_system == "obstacle_geodesic"
     assert obstacle_level.env.obstacle_layout_version == "three_aabb_v1"
+    assert obstacle_level.evaluation.eval_obstacle_layout_mode == "per_environment"
+    assert obstacle_level.evaluation.eval_fixed_layout_heatmap
+    assert obstacle_level.evaluation.eval_heatmap_layout_mode == "fixed"
 
 
 def test_unknown_3d_environment_parameter_is_rejected(tmp_path):

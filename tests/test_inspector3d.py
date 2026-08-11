@@ -100,3 +100,5 @@ def test_inspector_discovers_dedicated_roadmap_testresult(tmp_path):
     assert discover_roadmap_tests(tmp_path) == [result.resolve()]
     assert "function drawRoadmap()" in HTML
     assert "showRoute4" in HTML
+    assert "function cuboidMesh" in HTML
+    assert "opacity:.5" in HTML

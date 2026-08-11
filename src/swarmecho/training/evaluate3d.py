@@ -84,6 +84,7 @@ def _heatmap_manifest(
     checkpoint: Path,
     robustness_runs: int | None = None,
     action_noise_max: float | None = None,
+    layout_mode: str | None = None,
 ) -> None:
     """Write the small inspector metadata sidecar for one 3D eval CSV."""
     manifest = {
@@ -98,14 +99,29 @@ def _heatmap_manifest(
         manifest["robustness_runs"] = int(robustness_runs)
     if action_noise_max is not None:
         manifest["action_noise_max"] = float(action_noise_max)
+    if layout_mode is not None:
+        manifest["obstacle_layout_mode"] = layout_mode
     write_manifest(info_path.with_suffix(".heatmap.json"), manifest)
 
 
-def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) -> Path:
+def run_parallel_evaluation_3d(
+    model, level, checkpoint: Path, run_dir: Path, *,
+    layout_mode: str | None = None,
+    artifact_qualifier: str = "",
+    generate_fixed_companion: bool = True,
+) -> Path:
     """Create confidence rates from repeated, identically reset 3D evals."""
     episodes = level.evaluation.eval_parallel_envs
     robustness_runs = level.evaluation.eval_robustness_runs
     action_noise_max = level.evaluation.eval_action_noise_max
+    layout_mode = layout_mode or getattr(
+        level.evaluation, "eval_obstacle_layout_mode", "per_environment"
+    )
+    layout_seed_offset = (
+        getattr(level.evaluation, "eval_heatmap_layout_seed_offset", 30_000)
+        if layout_mode == "fixed"
+        else getattr(level.evaluation, "eval_obstacle_layout_seed_offset", 10_000)
+    )
     print(
         f"[EVAL] evaluating {episodes} targets x {robustness_runs} seeded "
         f"action-noise runs (max |noise|={action_noise_max:g})...",
@@ -118,6 +134,9 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
     visually_found_runs: list[np.ndarray] = []
     reference_targets: np.ndarray | None = None
     reference_bases: np.ndarray | None = None
+    reference_chain_lengths: np.ndarray | None = None
+    reference_obstacle_min: np.ndarray | None = None
+    reference_obstacle_max: np.ndarray | None = None
     for run_index in range(robustness_runs):
         print(
             f"[EVAL] robustness run {run_index + 1}/{robustness_runs}...",
@@ -130,15 +149,25 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
             return_episode_info=True,
             action_noise_max=action_noise_max,
             action_noise_seed=level.training.seed + 20_000 + run_index,
+            layout_mode=layout_mode,
+            layout_seed_offset=layout_seed_offset,
         )
         targets = np.asarray(episode_info["target_positions"])
         bases = np.asarray(episode_info["base_positions"])
+        chain_lengths = np.asarray(episode_info["final_chain_lengths"])
+        obstacle_min = np.asarray(episode_info["obstacle_min"])
+        obstacle_max = np.asarray(episode_info["obstacle_max"])
         if reference_targets is None:
             reference_targets = targets
             reference_bases = bases
+            reference_chain_lengths = chain_lengths
+            reference_obstacle_min = obstacle_min
+            reference_obstacle_max = obstacle_max
         elif not (
             np.array_equal(targets, reference_targets)
             and np.array_equal(bases, reference_bases)
+            and np.array_equal(obstacle_min, reference_obstacle_min)
+            and np.array_equal(obstacle_max, reference_obstacle_max)
         ):
             raise RuntimeError(
                 "Robust evaluation reset provenance changed between runs; "
@@ -158,13 +187,14 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
         visually_found_runs.append(visually_found)
 
     assert reference_targets is not None and reference_bases is not None
+    assert reference_chain_lengths is not None
     chain_success_rate = np.mean(np.stack(success_runs), axis=0)
     found_and_delivered_rate = np.mean(np.stack(delivered_runs), axis=0)
     visually_found_rate = np.mean(np.stack(visually_found_runs), axis=0)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     artifact_root = eval_checkpoint_artifact_root(run_dir, checkpoint, level)
     info_path = save_eval_info_csv(
-        artifact_root / "data" / f"eval_info_{artifact_tag}.csv",
+        artifact_root / "data" / f"eval_info_{artifact_tag}{artifact_qualifier}.csv",
         target_positions=reference_targets,
         base_positions=reference_bases,
         stage_rates={
@@ -172,6 +202,9 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
             "found_and_delivered": found_and_delivered_rate,
             "visually_found": visually_found_rate,
         },
+        final_chain_lengths=reference_chain_lengths,
+        obstacle_min=reference_obstacle_min,
+        obstacle_max=reference_obstacle_max,
     )
     _heatmap_manifest(
         info_path,
@@ -179,6 +212,7 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
         checkpoint=checkpoint,
         robustness_runs=robustness_runs,
         action_noise_max=action_noise_max,
+        layout_mode=layout_mode,
     )
     mean_success = float(
         np.mean([metrics["eval_success"] for metrics in metric_runs])
@@ -190,6 +224,19 @@ def run_parallel_evaluation_3d(model, level, checkpoint: Path, run_dir: Path) ->
         f"{unanimous_success:.1%}; csv={info_path}",
         flush=True,
     )
+    if (
+        generate_fixed_companion
+        and getattr(getattr(level, "env", None), "num_obstacles", 0)
+        and getattr(level.evaluation, "eval_fixed_layout_heatmap", False)
+        and layout_mode != "fixed"
+    ):
+        fixed_path = run_parallel_evaluation_3d(
+            model, level, checkpoint, run_dir,
+            layout_mode=getattr(level.evaluation, "eval_heatmap_layout_mode", "fixed"),
+            artifact_qualifier="_fixed_layout",
+            generate_fixed_companion=False,
+        )
+        print(f"[EVAL] fixed-layout heatmap dataset: {fixed_path}", flush=True)
     return info_path
 
 
@@ -228,8 +275,18 @@ def run_action_capturing_evaluation_3d(
         successes=episode_info["successes"],
         delivered=episode_info["delivered"],
         visually_found=episode_info["visually_found"],
+        final_chain_lengths=episode_info["final_chain_lengths"],
+        obstacle_min=episode_info["obstacle_min"],
+        obstacle_max=episode_info["obstacle_max"],
     )
-    _heatmap_manifest(info_path, level, checkpoint=checkpoint)
+    _heatmap_manifest(
+        info_path,
+        level,
+        checkpoint=checkpoint,
+        layout_mode=getattr(
+            level.evaluation, "eval_obstacle_layout_mode", "per_environment"
+        ),
+    )
     lane = int(capture["lane"])
     selected_target, replay_tag, csv_lane = select_eval_target_with_lane(
         info_path, result=result, offset=offset
@@ -267,6 +324,13 @@ def run_action_capturing_evaluation_3d(
     if not np.array_equal(np.asarray(states[0].target_pos), selected_target):
         raise RuntimeError(
             "The action replay's initial target differs from its captured CSV lane."
+        )
+    selected_records = load_eval_info_csv(info_path)
+    if not np.array_equal(
+        np.asarray(states[0].obstacle_min), selected_records["obstacle_min"][lane]
+    ):
+        raise RuntimeError(
+            "The action replay's obstacle layout differs from its captured CSV lane."
         )
     return info_path, selected_target, replay_tag, lane, states, rewards
 
@@ -314,8 +378,8 @@ def select_eval_target_with_lane(
     else:
         raise ValueError("result must be success or fail.")
     if label == "SUCCESS":
-        distances = records["distance_to_base"][candidate_lanes]
-        candidate_lanes = candidate_lanes[np.argsort(-distances, kind="stable")]
+        chain_lengths = records["final_chain_length"][candidate_lanes]
+        candidate_lanes = candidate_lanes[np.argsort(-chain_lengths, kind="stable")]
     if offset >= len(candidate_lanes):
         raise ValueError(
             f"Requested {label}_{offset}, but {info_path.name} contains only "
@@ -422,6 +486,8 @@ def main() -> None:
             return
 
     selected_target: np.ndarray | None = None
+    selected_obstacle_min: np.ndarray | None = None
+    selected_obstacle_max: np.ndarray | None = None
     selected_lane: int | None = None
     replay_tag = "RANDOM"
     source_csv: Path | None = None
@@ -469,6 +535,9 @@ def main() -> None:
         selected_target, replay_tag, selected_lane = select_eval_target_with_lane(
             source_csv, result=result, offset=offset
         )
+        selected_records = load_eval_info_csv(source_csv)
+        selected_obstacle_min = selected_records["obstacle_min"][selected_lane]
+        selected_obstacle_max = selected_records["obstacle_max"][selected_lane]
         print(
             f"[REPLAY] selected {replay_tag} target from {source_csv.name}: "
             f"({selected_target[0]:.2f}, {selected_target[1]:.2f}, {selected_target[2]:.2f}); "
@@ -516,6 +585,8 @@ def main() -> None:
             level,
             max_steps=max_steps,
             target_position=selected_target,
+            obstacle_min=selected_obstacle_min,
+            obstacle_max=selected_obstacle_max,
         )
     print(
         f"[REPLAY] collected {len(states) - 1} steps in {time.perf_counter() - started:.1f}s; "

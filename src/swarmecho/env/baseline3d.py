@@ -106,6 +106,13 @@ class Baseline3DRewardConfig:
     success_bonus: float = 500.0
 
 
+def build_obstacle_roadmap_3d(obstacle_min, obstacle_max, cfg: Baseline3DConfig):
+    """Build the compact roadmap arrays for persisted/replayed obstacle bounds."""
+    clearance = cfg.drone_radius + cfg.obstacle_planning_clearance_m
+    vertices = roadmap_vertices(obstacle_min, obstacle_max, clearance)
+    return vertices, roadmap_distances(vertices, obstacle_min, obstacle_max, clearance)
+
+
 def spherical_directions(count: int) -> np.ndarray:
     """Return deterministic unit directions, with exact octants for count 8."""
     if count < 4:
@@ -265,6 +272,54 @@ def obstacle_chain_diagnostics_3d(state: Baseline3DState) -> tuple[jax.Array, ja
     gap = jnp.where(state.fully_connected, 0.0, gaps[idx_b, idx_t])
     progress = jnp.where(state.fully_connected, 100.0, jnp.clip(100.0 * (1.0 - gap / jnp.maximum(mission, 1e-6)), 0.0, 100.0))
     return gap, progress, jnp.maximum(excess[idx_b, idx_t], 0.0), jnp.asarray([idx_b - 1, idx_t - 1])
+
+
+def final_chain_length_3d(state: Baseline3DState, cfg: Baseline3DConfig) -> jax.Array:
+    """Length of the shortest physical base-to-target chain in the final graph.
+
+    This is zero when no complete chain exists. Unlike base-target Euclidean
+    distance, it measures the relay route actually available around obstacles.
+    """
+    n = state.pos.shape[0]
+    nodes = jnp.concatenate(
+        [state.pos, state.base_pos[None, :], state.target_pos[None, :]], axis=0
+    )
+    distances = jnp.linalg.norm(nodes[:, None, :] - nodes[None, :, :], axis=-1)
+    active = state.active
+    drone_edges = (
+        (distances[:n, :n] <= cfg.comm_radius)
+        & active[:, None]
+        & active[None, :]
+        & ~jnp.eye(n, dtype=bool)
+    )
+    if state.obstacle_min.shape[0] > 0:
+        drone_edges &= ~segments_blocked(
+            state.pos[:, None, :], state.pos[None, :, :],
+            state.obstacle_min, state.obstacle_max,
+        )
+    base_edges = (
+        jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
+        <= cfg.comm_radius_base
+    ) & active
+    if state.obstacle_min.shape[0] > 0:
+        base_edges &= ~segments_blocked(
+            state.pos, state.base_pos, state.obstacle_min, state.obstacle_max
+        )
+    target_edges = state.directly_sees_target & active
+    vertex_count = n + 2
+    weighted = jnp.full((vertex_count, vertex_count), 1e6, dtype=jnp.float32)
+    weighted = weighted.at[jnp.arange(vertex_count), jnp.arange(vertex_count)].set(0.0)
+    weighted = weighted.at[:n, :n].set(jnp.where(drone_edges, distances[:n, :n], 1e6))
+    weighted = weighted.at[:n, n].set(jnp.where(base_edges, distances[:n, n], 1e6))
+    weighted = weighted.at[n, :n].set(jnp.where(base_edges, distances[n, :n], 1e6))
+    weighted = weighted.at[:n, n + 1].set(jnp.where(target_edges, distances[:n, n + 1], 1e6))
+    weighted = weighted.at[n + 1, :n].set(jnp.where(target_edges, distances[n + 1, :n], 1e6))
+    for pivot in range(vertex_count):
+        weighted = jnp.minimum(
+            weighted, weighted[:, pivot, None] + weighted[pivot, None, :]
+        )
+    length = weighted[n, n + 1]
+    return jnp.where(state.fully_connected & (length < 1e6), length, 0.0)
 
 
 def _contributing_chain_agents_3d(
@@ -529,13 +584,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             boundary_buffer=cfg.obstacle_boundary_buffer_m,
         )
         if cfg.num_obstacles:
-            vertices = roadmap_vertices(
-                obstacle_min, obstacle_max,
-                cfg.drone_radius + cfg.obstacle_planning_clearance_m,
-            )
-            distances = roadmap_distances(
-                vertices, obstacle_min, obstacle_max,
-                cfg.drone_radius + cfg.obstacle_planning_clearance_m,
+            vertices, distances = build_obstacle_roadmap_3d(
+                obstacle_min, obstacle_max, cfg
             )
         else:
             vertices = jnp.zeros((0, 3), dtype=jnp.float32)

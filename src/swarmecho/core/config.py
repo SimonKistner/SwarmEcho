@@ -549,6 +549,15 @@ class Evaluation3DConfig:
     # Standalone heatmap evaluation samples bounded actor-output sensitivity.
     eval_robustness_runs: int = 5
     eval_action_noise_max: float = DEFAULT_3D_ACTION_NOISE_LEVEL
+    # Randomized-obstacle evaluation uses one deterministic layout per lane.
+    # Fixed mode reuses one seeded layout for every target (heatmap-friendly).
+    eval_obstacle_layout_mode: str = "per_environment"
+    eval_obstacle_layout_seed_offset: int = 10_000
+    eval_heatmap_layout_mode: str = "per_environment"
+    eval_heatmap_layout_seed_offset: int = 30_000
+    eval_fixed_layout_heatmap: bool = False
+    # Optional handcrafted [min_x,min_y,min_z,max_x,max_y,max_z] cuboids.
+    eval_fixed_obstacle_bounds: tuple[tuple[float, float, float, float, float, float], ...] | None = None
     eval_broadcast_on_curriculum_early_stop: bool = False
     early_exit: bool = False
     early_exit_threshold: float = 0.99
@@ -656,6 +665,22 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
         raise ValueError("evaluation.eval_robustness_runs must be positive.")
     if level.evaluation.eval_action_noise_max < 0.0:
         raise ValueError("evaluation.eval_action_noise_max must be non-negative.")
+    for option_name in ("eval_obstacle_layout_mode", "eval_heatmap_layout_mode"):
+        if getattr(level.evaluation, option_name) not in {"per_environment", "fixed"}:
+            raise ValueError(
+                f"evaluation.{option_name} must be per_environment or fixed."
+            )
+    fixed_bounds = level.evaluation.eval_fixed_obstacle_bounds
+    if fixed_bounds is not None:
+        if len(fixed_bounds) != level.env.num_obstacles or any(
+            len(bounds) != 6
+            or any(bounds[index] >= bounds[index + 3] for index in range(3))
+            for bounds in fixed_bounds
+        ):
+            raise ValueError(
+                "evaluation.eval_fixed_obstacle_bounds must define ordered min/max "
+                "coordinates for every obstacle."
+            )
     if level.num_updates < 1:
         raise ValueError("training.total_timesteps must cover at least one rollout.")
     if level.logging.wandb_mode not in {"disabled", "offline", "online"}:

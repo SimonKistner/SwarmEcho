@@ -63,6 +63,8 @@ def write_replay(
         "coverage_credit": stack("coverage_credit"),
         "coverage": stack("coverage"),
         "step": stack("step"),
+        "obstacle_min": stack("obstacle_min"),
+        "obstacle_max": stack("obstacle_max"),
     }
     if reward_terms is not None:
         rewards = np.asarray(reward_terms)

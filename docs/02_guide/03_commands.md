@@ -111,6 +111,13 @@ Expected output: the validation completes one rollout/GAE/MAPPO update, prints
 finite training statistics, and exits successfully without a traceback or
 non-finite-value error.
 
+For M02, each evaluation writes a per-environment randomized-layout CSV and a
+fixed-layout companion CSV suitable for a spatial heatmap. Both CSVs contain
+the obstacle bounds and final physical chain length for every lane. Automatic
+successful replay offsets are ordered by descending final chain length, so
+`offset=0` selects the longest successful relay route rather than the target
+with the greatest straight-line base distance.
+
 ---
 
 ## Drone Swarm Training

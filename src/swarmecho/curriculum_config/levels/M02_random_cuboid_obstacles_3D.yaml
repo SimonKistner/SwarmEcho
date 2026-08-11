@@ -25,6 +25,7 @@ env:
   obstacle_target_buffer_m: 0.5
   obstacle_planning_clearance_m: 0.15
   obstacle_layout_version: three_aabb_v1
+
 reward:
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
@@ -34,6 +35,7 @@ reward:
   collision_penalty: 0.5
   target_found_bonus: 100.0
   success_bonus: 500.0
+
 training:
   total_timesteps: 500000000
   num_envs: 4000
@@ -43,6 +45,7 @@ training:
   seed: 6302026950
   training_noise: true
   noise_level: 0.011
+
 network:
   num_layers: 3
   actor_num_layers: 3
@@ -54,17 +57,30 @@ network:
   tarmac_sig_dim: 16
   tarmac_val_dim: 32
   tarmac_include_self: false
+
 evaluation:
   eval_parallel_envs: 4000
+  eval_obstacle_layout_mode: per_environment
+  eval_obstacle_layout_seed_offset: 10000
+  eval_heatmap_layout_mode: fixed
+  eval_heatmap_layout_seed_offset: 30000
+  eval_fixed_layout_heatmap: true
+  eval_fixed_obstacle_bounds:
+  - [2.0, 2.0, 11.0, 6.0, 7.0, 15.0]
+  - [12.0, 3.0, 15.0, 16.0, 8.0, 19.0]
+  - [6.0, 12.0, 19.0, 10.0, 17.0, 23.0]
   eval_broadcast_on_curriculum_early_stop: false
   early_exit: true
   early_exit_threshold: 0.999
+
   save_model: true
   checkpoint_freq: 50
   checkpoint_offset: 1
   eval_freq: 30
   eval_offset: 1
+
   eval_not_delivered_or_visually_found_heatmap: false
+
   eval_video: true
   eval_video_freq: 9999999999
   eval_video_offset: 1
