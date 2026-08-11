@@ -16,9 +16,18 @@ env:
   observe_target_vector: false
   observe_base_vector: false
   observe_coverage_probe: true
+  num_obstacles: 3
+  obstacle_size_min_m: 2.0
+  obstacle_size_max_m: 4.5
+  obstacle_spawn_layer_min: 2
+  obstacle_spawn_layer_max: 5
+  obstacle_boundary_buffer_m: 0.5
+  obstacle_target_buffer_m: 0.5
+  obstacle_planning_clearance_m: 0.15
+  obstacle_layout_version: three_aabb_v1
 reward:
   target_found_requires_delivery: true
-  chain_reward_system: euclidean
+  chain_reward_system: obstacle_geodesic
   exploration_bonus: 0.25
   finder_bonus: 50.0
   max_gap_penalty: 5.0

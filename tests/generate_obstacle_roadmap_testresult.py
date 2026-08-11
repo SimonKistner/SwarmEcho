@@ -31,7 +31,7 @@ def _shortest(adjacency, start, goal, banned):
 
 
 def generate(destination: str | Path = "outputs/testresults/obstacles.roadmap.json") -> Path:
-    level = load_level_3d("M01_no_maze_open_cuboid_tall_3D")
+    level = load_level_3d("M02_random_cuboid_obstacles_3D")
     cfg, building = level.env, level.building
     world = np.asarray(building.world_size_m)
     layouts = []

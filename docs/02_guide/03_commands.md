@@ -48,6 +48,71 @@ uv run swarmecho-render M01_small_maze --mode gif --level M01_small_maze
 
 ---
 
+## Required pre-training checks
+
+Run these commands from the repository root **before the first training
+command**. Do not start `swarmecho-train-3d` until every automated command exits
+with status 0 and the visual inspection looks correct.
+
+### 1. Focused obstacle, configuration, and inspector tests
+
+```bash
+uv run pytest -q \
+  tests/test_obstacles3d.py \
+  tests/test_config3d.py \
+  tests/test_inspector3d.py
+```
+
+Expected output: pytest reaches `[100%]`, reports only passed tests (for example
+`N passed in ...s`), and prints no `FAILED` or `ERROR` section.
+
+### 2. Complete regression suite
+
+```bash
+uv run pytest -q
+```
+
+Expected output: pytest reaches `[100%]` and ends with all tests passed. Tests
+explicitly marked as manual CUDA diagnostics may be reported as skipped; there
+must be no failures or errors.
+
+### 3. Generate the inspectable roadmap fixture
+
+```bash
+uv run python tests/generate_obstacle_roadmap_testresult.py
+```
+
+Expected output:
+
+```text
+outputs/testresults/obstacles.roadmap.json
+```
+
+### 4. Visually inspect the exact generated layouts
+
+```bash
+uv run swarmecho-inspect-3d root=outputs
+```
+
+Expected result: the browser opens without a server error and the artifact
+dropdown contains `TESTRESULT_[Obstacle roadmap]`. Loading it must show five
+selectable layouts, three cuboids per layout, the base and top-layer dummy
+target, roadmap nodes and edges, with shortest path 1 enabled by default and up
+to four additional path toggles. Verify that no displayed path crosses a
+cuboid before continuing.
+
+### 5. Small maintained 3D update validation
+
+```bash
+uv run swarmecho-validate-3d
+```
+
+Expected output: the validation completes one rollout/GAE/MAPPO update, prints
+finite training statistics, and exits successfully without a traceback or
+non-finite-value error.
+
+---
+
 ## Drone Swarm Training
 
 ### Single Run Training
@@ -120,6 +185,13 @@ directory:
 
 ```bash
 uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
+```
+
+After completing the required pre-training checks, train the randomized
+three-cuboid level with its new M02 name:
+
+```bash
+uv run swarmecho-train-3d level=M02_random_cuboid_obstacles_3D
 ```
 
 The 3D entry point deliberately uses the same OmegaConf-style `key=value`
@@ -229,6 +301,6 @@ and up to five alternative shortest routes per layout, then open the ordinary
 3D inspector. The generated artifact appears as `TESTRESULT_[Obstacle roadmap]`.
 
 ```bash
-python tests/generate_obstacle_roadmap_testresult.py
-python -m swarmecho.visualize.inspector3d root=outputs
+uv run python tests/generate_obstacle_roadmap_testresult.py
+uv run swarmecho-inspect-3d root=outputs
 ```

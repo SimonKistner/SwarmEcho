@@ -44,6 +44,16 @@ def test_tall_level_adds_two_solvable_spawn_layers():
     assert level.ideal_chain_margin_m > 0
 
 
+def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
+    open_level = load_level_3d("M01_no_maze_open_cuboid_tall_3D")
+    obstacle_level = load_level_3d("M02_random_cuboid_obstacles_3D")
+    assert open_level.env.num_obstacles == 0
+    assert open_level.reward.chain_reward_system == "euclidean"
+    assert obstacle_level.env.num_obstacles == 3
+    assert obstacle_level.reward.chain_reward_system == "obstacle_geodesic"
+    assert obstacle_level.env.obstacle_layout_version == "three_aabb_v1"
+
+
 def test_unknown_3d_environment_parameter_is_rejected(tmp_path):
     source = "src/swarmecho/curriculum_config/levels/M00_no_maze_open_cuboid_3D.yaml"
     data = yaml.safe_load(open(source, encoding="utf-8"))
