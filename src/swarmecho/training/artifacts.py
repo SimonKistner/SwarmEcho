@@ -374,6 +374,19 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
                 for index in obstacle_indices
             ])
 
+    if obstacle_indices:
+        obstacle_min_array = np.asarray(obstacle_mins, dtype=np.float32).reshape(
+            (len(positions), len(obstacle_indices), 3)
+        )
+        obstacle_max_array = np.asarray(obstacle_maxs, dtype=np.float32).reshape(
+            (len(positions), len(obstacle_indices), 3)
+        )
+    else:
+        # ``reshape((-1, 0, 3))`` cannot infer the leading dimension from an
+        # empty array. Preserve one empty obstacle axis for every CSV episode.
+        obstacle_min_array = np.empty((len(positions), 0, 3), dtype=np.float32)
+        obstacle_max_array = np.empty((len(positions), 0, 3), dtype=np.float32)
+
     return {
         "positions": np.asarray(positions, dtype=np.float32).reshape(
             (-1, 3 if positions and len(positions[0]) == 3 else 2)
@@ -386,6 +399,6 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
         "visually_found_rate": np.asarray(visually_found_rates, dtype=np.float32),
         "distance_to_base": np.asarray(distances, dtype=np.float32),
         "final_chain_length": np.asarray(final_chain_lengths, dtype=np.float32),
-        "obstacle_min": np.asarray(obstacle_mins, dtype=np.float32).reshape((-1, len(obstacle_indices), 3)),
-        "obstacle_max": np.asarray(obstacle_maxs, dtype=np.float32).reshape((-1, len(obstacle_indices), 3)),
+        "obstacle_min": obstacle_min_array,
+        "obstacle_max": obstacle_max_array,
     }

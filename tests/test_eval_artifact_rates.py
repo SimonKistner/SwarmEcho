@@ -35,6 +35,8 @@ def test_robust_eval_csv_stores_cumulative_rates_and_uses_unanimous_stage(tmp_pa
         ]
 
     records = load_eval_info_csv(path)
+    assert records["obstacle_min"].shape == (2, 0, 3)
+    assert records["obstacle_max"].shape == (2, 0, 3)
     assert records["stages"].tolist() == ["visually_found", "chain_success"]
     np.testing.assert_allclose(records["chain_success_rate"], [0.8, 1.0])
     np.testing.assert_allclose(records["found_and_delivered_rate"], [0.8, 1.0])
