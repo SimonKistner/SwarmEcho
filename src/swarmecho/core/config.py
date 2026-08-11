@@ -660,8 +660,12 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
         raise ValueError("training.total_timesteps must cover at least one rollout.")
     if level.logging.wandb_mode not in {"disabled", "offline", "online"}:
         raise ValueError("logging.wandb_mode must be disabled, offline, or online.")
-    if level.reward.chain_reward_system != "euclidean":
-        raise ValueError("3D reward.chain_reward_system currently supports only euclidean.")
+    if level.reward.chain_reward_system not in {"euclidean", "obstacle_geodesic"}:
+        raise ValueError("3D reward.chain_reward_system must be euclidean or obstacle_geodesic.")
+    if level.env.num_obstacles and level.env.obstacle_spawn_layer_max <= level.env.obstacle_spawn_layer_min:
+        raise ValueError("The 3D obstacle spawn layer range must have positive height.")
+    if level.reward.chain_reward_system == "obstacle_geodesic" and not level.env.num_obstacles:
+        raise ValueError("obstacle_geodesic requires at least one configured obstacle.")
     return level
 
 

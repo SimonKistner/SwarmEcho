@@ -208,6 +208,7 @@ def train_3d(
     window_gap: deque[float] = deque(maxlen=window_size)
     window_prog_pct: deque[float] = deque(maxlen=window_size)
     window_cov: deque[float] = deque(maxlen=window_size)
+    window_success_target_distance: deque[float] = deque(maxlen=window_size)
     window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
     completed_eps_count = 0
     history_path = destination / "training_history.jsonl"
@@ -390,6 +391,7 @@ def train_3d(
                 "chain_gap_dist": info["chain_gap_dist"],
                 "chain_progress_pct": info["chain_progress_pct"],
                 "global_coverage": info["global_coverage"],
+                "terminal_target_pos": info["terminal_target_pos"],
             }
             next_carry = (
                 next_states,
@@ -514,6 +516,14 @@ def train_3d(
                 window_gap.append(float(episode_gap[index]))
                 window_prog_pct.append(float(episode_progress_pct[index]))
                 window_cov.append(float(episode_coverage[index]))
+                if episode_success[index] > 0.5:
+                    target_distance = np.linalg.norm(
+                        rollout_host["terminal_target_pos"][step_index, index]
+                        - np.asarray(level.building.base_position_m)
+                    ) / max(level.building.max_base_to_top_corner_m, 1e-6)
+                    window_success_target_distance.append(float(target_distance))
+                else:
+                    window_success_target_distance.append(float("nan"))
                 for reward_name, accumulator in episode_rewards.items():
                     window_rewards[reward_name].append(float(accumulator[index]))
             completed_eps_count += len(completed_indices)
@@ -554,6 +564,12 @@ def train_3d(
                 "mean_terminal_coverage": float(np.mean(window_cov)) if window_cov else 0.0,
             }
         )
+        successful_distances = np.asarray(window_success_target_distance, dtype=np.float64)
+        successful_distances = successful_distances[np.isfinite(successful_distances)]
+        latest_stats.update({
+            "success_target_distance_mean_norm": float(np.mean(successful_distances)) if successful_distances.size else 0.0,
+            "success_target_distance_max_norm": float(np.max(successful_distances)) if successful_distances.size else 0.0,
+        })
         latest_stats.update(
             {
                 f"reward_{name}": float(np.mean(values)) if values else 0.0
@@ -608,6 +624,8 @@ def train_3d(
                     "train/ep_length_reduction": (1.0 - latest_stats["mean_episode_length"] / cfg.max_steps) * 100.0,
                     "train/map_coverage_pct": latest_stats["mean_terminal_coverage"] * 100.0,
                     "train/episodes_completed": completed_eps_count,
+                    "train/success_target_distance_mean_norm": latest_stats["success_target_distance_mean_norm"],
+                    "train/success_target_distance_max_norm": latest_stats["success_target_distance_max_norm"],
                     **{f"rewards/{name}": latest_stats[f"reward_{name}"] for name in window_rewards},
                 })
             wandb.log(wandb_logs, step=steps_done)

@@ -44,8 +44,8 @@ input[type=range]{width:100%;accent-color:var(--cyan)}select,input[type=text]{wi
 </aside></div><script>
 let D,H,mode='replay',frame=0,playing=false,timer=null,camera=null,heatmapAgreement=1;const $=id=>document.getElementById(id);const DEFAULT_CAMERA={projection:{type:'perspective'}};
 function setLoading(active,message){$('loading').classList.toggle('hidden',!active);if(active)$('loadingText').textContent=message}
-function setMode(nextMode){mode=nextMode;playing=false;clearTimeout(timer);$('play').textContent='▶ Play';let replayCards=[$('timeline').closest('.card'),$('status').closest('.card'),$('showCoverage').closest('.card')];replayCards.forEach(card=>card.classList.toggle('hidden',mode==='heatmap'));$('replayLegend').classList.toggle('hidden',mode==='heatmap');$('heatmapControls').classList.toggle('hidden',mode!=='heatmap');$('heatmapLegend').classList.toggle('hidden',mode!=='heatmap');if(mode==='heatmap'){ensureHeatmapUi();$('heatmapStats').classList.remove('hidden');renderHeatmapAgreementButtons();updateHeatmapStats()}else if($('heatmapStats'))$('heatmapStats').classList.add('hidden')}
-function loadReplay(id){setLoading(true,'Loading artifact...');return fetch('/api/replay?id='+encodeURIComponent(id)).then(r=>{if(!r.ok)throw Error('Artifact failed to load');return r.json()}).then(d=>{camera=null;if(d.kind==='heatmap'){H=d;D=null;setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'3D evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);return draw(0)}).finally(()=>setLoading(false))}
+function setMode(nextMode){mode=nextMode;playing=false;clearTimeout(timer);$('play').textContent='▶ Play';let replayCards=[$('timeline').closest('.card'),$('status').closest('.card'),$('showCoverage').closest('.card')];replayCards.forEach(card=>card.classList.toggle('hidden',mode!=='replay'));$('replayLegend').classList.toggle('hidden',mode!=='replay');$('heatmapControls').classList.toggle('hidden',mode!=='heatmap');$('heatmapLegend').classList.toggle('hidden',mode!=='heatmap');if($('roadmapControls'))$('roadmapControls').classList.toggle('hidden',mode!=='roadmap');if(mode==='heatmap'){ensureHeatmapUi();$('heatmapStats').classList.remove('hidden');renderHeatmapAgreementButtons();updateHeatmapStats()}else if($('heatmapStats'))$('heatmapStats').classList.add('hidden')}
+function loadReplay(id){setLoading(true,'Loading artifact...');return fetch('/api/replay?id='+encodeURIComponent(id)).then(r=>{if(!r.ok)throw Error('Artifact failed to load');return r.json()}).then(d=>{camera=null;if(d.kind==='roadmap'){D=d;H=null;setMode('roadmap');$('replayName').textContent='TESTRESULT · '+d.layouts.length+' randomized layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'3D evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);return draw(0)}).finally(()=>setLoading(false))}
 function renderReplayList(items,preferredLabel){let s=$('replaySelect');s.replaceChildren();items.forEach(x=>{let option=document.createElement('option');option.value=x.id;option.textContent=x.label;s.appendChild(option)});let choice=items.find(x=>x.label===preferredLabel)||items.find(x=>x.selected)||items[0];if(choice)s.value=choice.id;return Promise.resolve()}
 function refreshReplays(){let s=$('replaySelect'),preferredLabel=s.options[s.selectedIndex]?.textContent,b=$('refreshReplays');b.disabled=true;setLoading(true,'Finding artifacts...');$('replayDiscovery').textContent='Finding artifacts...';fetch('/api/replays').then(r=>{if(!r.ok)throw Error('Artifact list failed to load');return r.json()}).then(items=>renderReplayList(items,preferredLabel).then(()=>{$('replayDiscovery').textContent=items.length+' artifact'+(items.length===1?'':'s')+' found'})).catch(()=>{$('replayDiscovery').textContent='Unable to find artifacts'}).finally(()=>{b.disabled=false;setLoading(false)})}
 function loadSelectedReplay(){let id=$('replaySelect').value;if(id)loadReplay(id)}
@@ -65,6 +65,9 @@ function heatmapStage(index){if(!H.stage_rates)return H.stages[index];let confid
 function drawHeatmap(){let traces=[],groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]};H.positions.forEach((point,index)=>{let stage=heatmapStage(index),rates=H.stage_rates?{chain:H.stage_rates.chain_success[index],delivered:H.stage_rates.found_and_delivered[index],visual:H.stage_rates.visually_found[index]}:{chain:Number(stage==='chain_success'),delivered:Number(stage==='chain_success'||stage==='found_and_delivered'),visual:Number(stage!=='not_found')};(groups[stage]||groups.not_found).push({point,stage,rates})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length||!$(HEATMAP_CATEGORY_CONTROLS[stage]).checked)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage,entry.rates.chain,entry.rates.delivered,entry.rates.visual]),marker:{size:8,color,opacity:.55,line:{color:'#e5eefc',width:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>chain success=%{customdata[2]:.0%}<br>found and delivered=%{customdata[3]:.0%}<br>visually found=%{customdata[4]:.0%}<extra>Click to create replay command</extra>'})});let renderPromise=Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',uirevision:'heatmap-camera',scene:{bgcolor:'#090e18',uirevision:'heatmap-camera',aspectmode:'data',xaxis:{title:'X',gridcolor:'#22304a'},yaxis:{title:'Y',gridcolor:'#22304a'},zaxis:{title:'Z',gridcolor:'#22304a'},camera:camera||DEFAULT_CAMERA},showlegend:false},{responsive:true,displaylogo:false}).then(captureCamera);return renderPromise}
 function captureCamera(){let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){scene.on('plotly_relayout',event=>{if(event['scene.camera'])camera=event['scene.camera']});scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}}
 function distance3(a,b){return Math.hypot(...a.map((v,k)=>v-b[k]))}
+function ensureRoadmapUi(){if($('roadmapControls'))return;let card=document.createElement('div');card.id='roadmapControls';card.className='card';card.innerHTML='<div class="label">TESTRESULT roadmap</div><label>Layout <select id="roadmapLayout"></select></label><br><label><input id="showRoadmapEdges" type="checkbox" checked> Visibility edges</label><br><label><input id="showRoadmapNodes" type="checkbox" checked> Vertices / nodes</label><br>'+[0,1,2,3,4].map(i=>'<label><input id="showRoute'+i+'" type="checkbox" '+(i===0?'checked':'')+'> Shortest path '+(i+1)+'</label><br>').join('');document.querySelector('.panel').prepend(card);$('roadmapLayout').onchange=drawRoadmap;['showRoadmapEdges','showRoadmapNodes','showRoute0','showRoute1','showRoute2','showRoute3','showRoute4'].forEach(id=>$(id).onchange=drawRoadmap)}
+function cuboidLines(lo,hi,color){let c=[[lo[0],lo[1],lo[2]],[hi[0],lo[1],lo[2]],[hi[0],hi[1],lo[2]],[lo[0],hi[1],lo[2]],[lo[0],lo[1],hi[2]],[hi[0],lo[1],hi[2]],[hi[0],hi[1],hi[2]],[lo[0],hi[1],hi[2]]],e=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]],p=[];e.forEach(q=>p.push(c[q[0]],c[q[1]],null));return {type:'scatter3d',mode:'lines',x:p.map(v=>v&&v[0]),y:p.map(v=>v&&v[1]),z:p.map(v=>v&&v[2]),line:{color,width:7},hoverinfo:'skip'}}
+function drawRoadmap(){ensureRoadmapUi();let index=+$('roadmapLayout').value||0,layout=D.layouts[index],tr=[boxTrace(D.manifest.world_size_m)];if(!$('roadmapLayout').options.length)D.layouts.forEach((_,i)=>$('roadmapLayout').add(new Option('Layout '+i,i)));layout.obstacle_min.forEach((lo,i)=>tr.push(cuboidLines(lo,layout.obstacle_max[i],'#f97316')));if($('showRoadmapEdges').checked)layout.edges.forEach(e=>tr.push(lineTrace([layout.vertices[e[0]],layout.vertices[e[1]]],'rgba(34,211,238,.2)',2)));if($('showRoadmapNodes').checked)tr.push({type:'scatter3d',mode:'markers',x:layout.vertices.map(v=>v[0]),y:layout.vertices.map(v=>v[1]),z:layout.vertices.map(v=>v[2]),marker:{size:4,color:'#22d3ee'}});tr.push({type:'scatter3d',mode:'markers+text',x:[layout.base[0],layout.target[0]],y:[layout.base[1],layout.target[1]],z:[layout.base[2],layout.target[2]],text:['BASE','TARGET'],marker:{size:9,color:['#60a5fa','#fb7185']}});layout.paths.slice(0,5).forEach((p,i)=>{if($('showRoute'+i).checked)tr.push(lineTrace(p,'hsl('+(70+i*55)+' 85% 60%)',7))});return Plotly.react('scene',tr,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',scene:{bgcolor:'#090e18',aspectmode:'data',camera:camera||DEFAULT_CAMERA}},{responsive:true,displaylogo:false})}
 function baseKnowsTarget(f,base){if(D.base_target_known)return Boolean(D.base_target_known[f]);let radius=D.manifest.comm_radius_base_m||6;for(let q=0;q<=f;q++)for(let i=0;i<D.position[q].length;i++)if(D.active[q][i]&&D.target_known[q][i]&&distance3(D.position[q][i],base)<=radius)return true;return false}
 function renderKnownList(agentCount){let list=$('knownList');list.replaceChildren();['BASE',...Array.from({length:agentCount},(_,i)=>'D'+(i+1))].forEach(name=>{let item=document.createElement('button');item.type='button';item.className='known-item';item.textContent=name;list.appendChild(item)})}
 function updateKnownList(agentKnown,baseKnown){let statuses=[baseKnown,...agentKnown];$('knownList').querySelectorAll('.known-item').forEach((item,i)=>item.classList.toggle('known',Boolean(statuses[i])))}
@@ -224,6 +227,21 @@ def discover_heatmaps(root: str | Path = "outputs") -> list[Path]:
     return sorted(set(heatmaps), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
+def discover_roadmap_tests(root: str | Path = "outputs") -> list[Path]:
+    """Discover inspectable obstacle/roadmap integration-test artifacts."""
+    root = Path(root)
+    if not root.exists():
+        return []
+    results = []
+    for path in root.glob("testresults/*.roadmap.json"):
+        try:
+            if json.loads(path.read_text(encoding="utf-8")).get("format") == "swarmecho-roadmap-test/v1":
+                results.append(path.resolve())
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(results, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
 _REPLAY_STEPS = re.compile(r"(?:^|_)s0*(\d+)([Mk])(?:$|[._])", re.IGNORECASE)
 
 
@@ -326,9 +344,10 @@ def make_handler(
         nonlocal cached_sources
         replays = discover_replays(replay_root) if replay_root is not None else list(resolved)
         heatmaps = discover_heatmaps(replay_root) if replay_root is not None else []
+        roadmaps = discover_roadmap_tests(replay_root) if replay_root is not None else []
         sources = [("replay", path) for path in replays] + [
             ("heatmap", path) for path in heatmaps
-        ]
+        ] + [("roadmap", path) for path in roadmaps]
         if initial is not None and initial not in replays:
             sources.append(("replay", initial))
 
@@ -356,9 +375,9 @@ def make_handler(
                     {
                         "id": str(index),
                         "kind": kind,
-                        "label": replay_label(path)
-                        if kind == "replay"
-                        else heatmap_label(path),
+                        "label": replay_label(path) if kind == "replay" else (
+                            heatmap_label(path) if kind == "heatmap" else "TESTRESULT_[Obstacle roadmap]"
+                        ),
                         "selected": kind == "replay" and (
                             path == initial or (initial is None and index == 0)
                         ),
@@ -370,7 +389,12 @@ def make_handler(
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
                     kind, path = available_sources()[int(query.get("id", ["0"])[0])]
-                    payload = replay_payload(path) if kind == "replay" else heatmap_payload(path)
+                    if kind == "replay":
+                        payload = replay_payload(path)
+                    elif kind == "heatmap":
+                        payload = heatmap_payload(path)
+                    else:
+                        payload = {"kind": "roadmap", **json.loads(path.read_text(encoding="utf-8"))}
                     body = json.dumps(payload).encode()
                 except (IndexError, ValueError, OSError):
                     self.send_error(404, "Replay not found")

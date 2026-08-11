@@ -222,3 +222,13 @@ backend and devices, compilation and run times, environment steps per second,
 state/observation shapes, ideal chain margin, and device memory statistics when
 the backend exposes them. The `grid` matrix is important: `4x4x4` is only a
 correctness case, while larger entries expose volumetric-coverage scaling.
+## Inspect randomized 3D obstacle roadmaps
+
+Generate five deterministic training-style layouts, their visibility roadmaps,
+and up to five alternative shortest routes per layout, then open the ordinary
+3D inspector. The generated artifact appears as `TESTRESULT_[Obstacle roadmap]`.
+
+```bash
+python tests/generate_obstacle_roadmap_testresult.py
+python -m swarmecho.visualize.inspector3d root=outputs
+```

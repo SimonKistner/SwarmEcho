@@ -1,3 +1,5 @@
+import json
+
 import jax
 import jax.numpy as jnp
 
@@ -6,6 +8,7 @@ from swarmecho.env.baseline3d import make_baseline_3d_fns
 from swarmecho.visualize.inspector3d import (
     HTML,
     discover_replays,
+    discover_roadmap_tests,
     heatmap_label,
     inspector_html,
     replay_payload,
@@ -88,3 +91,12 @@ def test_heatmap_labels_distinguish_training_and_standalone_evaluation(tmp_path)
     assert heatmap_label(eval_heatmap) == (
         "M00_3d_baseline_[140M]_[EVAL Heatmap]"
     )
+
+
+def test_inspector_discovers_dedicated_roadmap_testresult(tmp_path):
+    result = tmp_path / "testresults" / "obstacles.roadmap.json"
+    result.parent.mkdir()
+    result.write_text(json.dumps({"format": "swarmecho-roadmap-test/v1"}))
+    assert discover_roadmap_tests(tmp_path) == [result.resolve()]
+    assert "function drawRoadmap()" in HTML
+    assert "showRoute4" in HTML
