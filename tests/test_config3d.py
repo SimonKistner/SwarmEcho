@@ -14,7 +14,7 @@ from swarmecho.training.artifacts import (
 def test_baseline_level_is_strict_and_solvable():
     level = load_level_3d()
     assert level.name == "M00_no_maze_open_cuboid_3D"
-    assert level.env.radar_bins == 8
+    assert level.env.radar_bins == 16
     assert level.env.num_agents == 4
     assert level.env.max_steps == 700
     assert level.env.coverage_voxel_size == 2.5
@@ -35,7 +35,7 @@ def test_baseline_level_is_strict_and_solvable():
 
 
 def test_tall_level_adds_two_solvable_spawn_layers():
-    level = load_level_3d("M00_no_maze_open_cuboid_tall_3D")
+    level = load_level_3d("M01_no_maze_open_cuboid_tall_3D")
     assert level.building.target_exclusion.shape == (4, 4, 6)
     assert level.building.target_exclusion[:, :, :2].all()
     assert not level.building.target_exclusion[:, :, 2:].any()

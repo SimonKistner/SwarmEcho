@@ -63,8 +63,8 @@ uv run pytest -q \
   tests/test_inspector3d.py
 ```
 
-Expected output: pytest reaches `[100%]`, reports only passed tests (for example
-`N passed in ...s`), and prints no `FAILED` or `ERROR` section.
+Expected output: pytest reaches `[100%]`, reports `15 passed in ...s`, and
+prints no `FAILED` or `ERROR` section.
 
 ### 2. Complete regression suite
 

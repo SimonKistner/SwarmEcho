@@ -23,7 +23,7 @@ def test_inspector_payload_and_controls(tmp_path):
     state = reset(jax.random.PRNGKey(0))
     states = [state, step(state, jnp.zeros((level.env.num_agents, 3)))]
     _, manifest = write_replay(
-        tmp_path / "inspect",
+        tmp_path / "test_run" / "replays" / "inspect",
         states,
         map_name=level.building_name,
         dt=level.env.dt,
@@ -61,17 +61,17 @@ def test_inspector_payload_and_controls(tmp_path):
     assert "Plotly.react" in HTML
     assert '<script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>' not in inspector_html()
     assert discover_replays(tmp_path) == [manifest.resolve()]
-    assert replay_label(manifest) == "inspect"
+    assert replay_label(manifest) == "test_run_[unknown]_[Replay]"
 
 
 def test_replay_label_uses_run_name_before_artifacts(tmp_path):
     manifest = tmp_path / "M00_3d_baseline" / "artifacts" / "train" / "replays" / "eval.json"
-    assert replay_label(manifest) == "M00_3d_baseline"
+    assert replay_label(manifest) == "M00_3d_baseline_[unknown]_[Replay]"
 
 
 def test_replay_label_adds_unpadded_training_steps(tmp_path):
     manifest = tmp_path / "M00_3d_baseline_v2" / "artifacts" / "train" / "replays" / "eval_u000061_s00024M.json"
-    assert replay_label(manifest) == "M00_3d_baseline_v2-[24M]"
+    assert replay_label(manifest) == "M00_3d_baseline_v2_[24M]_[Replay]"
 
 
 def test_heatmap_labels_distinguish_training_and_standalone_evaluation(tmp_path):
