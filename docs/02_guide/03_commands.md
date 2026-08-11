@@ -62,6 +62,15 @@ Run multiple training iterations with the same configuration, utilizing differen
 uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5 base_seed=99
 ```
 
+The 3D trainer has the same sequential multi-seed workflow:
+
+```bash
+uv run swarmecho-multi-train-3d \
+  level=M00_no_maze_open_cuboid_tall_3D \
+  logging.run_name=tall_v1 logging.wandb_group=tall_v1 \
+  seeds=3 base_seed=9
+```
+
 ### General Grid Search
 Sweep arbitrary configuration values for one level. Repeat `--grid` for each
 parameter axis and use `--set` for overrides shared by every run:
@@ -80,6 +89,15 @@ uv run swarmecho-curriculum
 
 # Run a custom sequence of levels
 uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_maze,M01_small_maze
+```
+
+For 3D, provide the ordered level list directly. The final checkpoint from
+each stage is used to initialize the next stage:
+
+```bash
+uv run swarmecho-curriculum-3d \
+  levels=M00_no_maze_open_cuboid_3D,M00_no_maze_open_cuboid_tall_3D \
+  logging.run_name=tall_curriculum logging.wandb_group=tall_curriculum
 ```
 
 ---
@@ -112,6 +130,18 @@ inspector smoke run is:
 uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.total_timesteps=400000 logging.run_name=inspector_smoke logging.wandb_mode=disabled
 ```
 
+To train with the same bounded pre-`tanh` action perturbation used by robust
+checkpoint evaluation, add `training.training_noise=true`. It is disabled by
+default; `training.noise_level` defaults to `0.011` (the robust-evaluation
+noise level) and can be overridden independently:
+
+```bash
+uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.training_noise=true training.noise_level=0.02
+```
+
+This noise is used only to step the training environments. Periodic
+during-training evaluations remain unperturbed.
+
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
 `outputs/<run>/checkpoints/`; scheduled training inspection artifacts live in
 `outputs/<run>/artifacts/train/replays/`; and manual checkpoint evaluations live
@@ -136,7 +166,30 @@ The evaluator defaults to `mode=parallel`, which writes the checkpoint-scoped
 parallel evaluation CSV. Use `mode=selective_auto_pick result=success offset=0`
 to replay a target selected from the closest CSV, or
 `mode=selective_manual_pick target_position=x,y,z` for an explicit target.
-The old `parallel_eval=true|false` argument remains accepted for compatibility.
+For the combined workflow, add `replay_after=true` to a
+`mode=parallel` command; it runs the parallel evaluation and then replays the
+selected target, using `result=success` and `offset=0` unless overridden.
+When launching from WSL, a Windows checkpoint path is accepted directly; quote
+the `checkpoint=` argument so Bash preserves the backslashes:
+
+```bash
+uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_added_noise_v2_M01\checkpoints\ckpt_001201'
+```
+It is converted internally to `/mnt/q/_0_Projects/...` before the checkpoint
+and its evaluation/replay artifacts are accessed.
+
+If you want a command with no quoting, use forward slashes in the Windows path:
+
+```bash
+uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint=Q:/_0_Projects/000_SwarmEcho/SwarmEcho/outputs/curr_added_noise_v2_M01/checkpoints/ckpt_001201
+```
+
+Alternatively, run the command from PowerShell through `wsl.exe`; PowerShell
+does not consume the backslashes:
+
+```powershell
+wsl.exe uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint=Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_added_noise_v2_M01\checkpoints\ckpt_001201
+```
 
 Inspect any completed replay from a separate terminal. The inspector is a
 standalone browser process with orbit/zoom/pan, playback and scrubbing, coverage

@@ -32,6 +32,23 @@ def evaluation_stage(
     return "not_found"
 
 
+def evaluation_stage_from_rates(
+    *,
+    chain_success_rate: float,
+    found_and_delivered_rate: float,
+    visually_found_rate: float,
+    confidence: float = 1.0,
+) -> str:
+    """Return the highest cumulative stage meeting ``confidence``."""
+    if chain_success_rate >= confidence:
+        return "chain_success"
+    if found_and_delivered_rate >= confidence:
+        return "found_and_delivered"
+    if visually_found_rate >= confidence:
+        return "visually_found"
+    return "not_found"
+
+
 def parse_checkpoint_update(name_or_path: str | Path) -> int | None:
     """Return the update encoded in checkpoint-like names such as ckpt_000700."""
     name = Path(name_or_path).name
@@ -112,9 +129,11 @@ def save_eval_info_csv(
     path: str | Path,
     target_positions: Any,
     base_positions: Any,
-    successes: Any,
-    delivered: Any,
-    visually_found: Any,
+    successes: Any = None,
+    delivered: Any = None,
+    visually_found: Any = None,
+    *,
+    stage_rates: dict[str, Any] | None = None,
 ) -> Path:
     """Save the canonical per-episode result of a parallel evaluation."""
     targets = np.asarray(target_positions, dtype=np.float32)
@@ -126,49 +145,123 @@ def save_eval_info_csv(
         bases = np.broadcast_to(bases, targets.shape)
     else:
         bases = bases.reshape((-1, dimensions))
-    successes = np.asarray(successes, dtype=bool).reshape((-1,))
-    delivered = np.asarray(delivered, dtype=bool).reshape((-1,))
-    visually_found = np.asarray(visually_found, dtype=bool).reshape((-1,))
-
-    if not (
-        len(targets)
-        == len(bases)
-        == len(successes)
-        == len(delivered)
-        == len(visually_found)
-    ):
-        raise ValueError(
-            "Evaluation CSV arrays must contain one target, base, and outcome "
-            "for every evaluated episode."
+    robust_rates: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if stage_rates is not None:
+        required_rates = {
+            "chain_success",
+            "found_and_delivered",
+            "visually_found",
+        }
+        if set(stage_rates) != required_rates:
+            raise ValueError(
+                f"stage_rates must contain exactly {sorted(required_rates)}."
+            )
+        chain_rates = np.asarray(stage_rates["chain_success"], dtype=np.float32).reshape((-1,))
+        delivered_rates = np.asarray(
+            stage_rates["found_and_delivered"], dtype=np.float32
+        ).reshape((-1,))
+        visually_found_rates = np.asarray(
+            stage_rates["visually_found"], dtype=np.float32
+        ).reshape((-1,))
+        if not (
+            len(targets)
+            == len(bases)
+            == len(chain_rates)
+            == len(delivered_rates)
+            == len(visually_found_rates)
+        ):
+            raise ValueError(
+                "Evaluation CSV arrays must contain one target, base, and rate "
+                "for every evaluated episode."
+            )
+        if (
+            np.any(visually_found_rates < 0.0)
+            or np.any(visually_found_rates > 1.0)
+            or np.any(delivered_rates < 0.0)
+            or np.any(delivered_rates > visually_found_rates)
+            or np.any(chain_rates < 0.0)
+            or np.any(chain_rates > delivered_rates)
+        ):
+            raise ValueError(
+                "Stage rates must satisfy 0 <= chain <= delivered <= visually_found <= 1."
+            )
+        robust_rates = chain_rates, delivered_rates, visually_found_rates
+    else:
+        if successes is None or delivered is None or visually_found is None:
+            raise ValueError(
+                "Legacy evaluation CSV output requires successes, delivered, "
+                "and visually_found arrays."
+            )
+        successes = np.asarray(successes, dtype=bool).reshape((-1,))
+        delivered = np.asarray(delivered, dtype=bool).reshape((-1,))
+        visually_found = np.asarray(visually_found, dtype=bool).reshape((-1,))
+        if not (
+            len(targets)
+            == len(bases)
+            == len(successes)
+            == len(delivered)
+            == len(visually_found)
+        ):
+            raise ValueError(
+                "Evaluation CSV arrays must contain one target, base, and outcome "
+                "for every evaluated episode."
+            )
+        stages = np.asarray(
+            [
+                evaluation_stage(
+                    success=bool(success),
+                    delivered=bool(is_delivered),
+                    visually_found=bool(was_visually_found),
+                )
+                for success, is_delivered, was_visually_found in zip(
+                    successes, delivered, visually_found, strict=True
+                )
+            ],
+            dtype="<U21",
         )
-
-    stages = np.asarray(
-        [
-            evaluation_stage(
-                success=bool(success),
-                delivered=bool(is_delivered),
-                visually_found=bool(was_visually_found),
-            )
-            for success, is_delivered, was_visually_found in zip(
-                successes, delivered, visually_found, strict=True
-            )
-        ],
-        dtype="<U21",
-    )
     distances = np.linalg.norm(targets - bases, axis=-1)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
         coordinates = ["x", "y"] + (["z"] if dimensions == 3 else [])
-        writer.writerow([*coordinates, "stage", "distance_to_base"])
-        writer.writerows(
-            # Nine significant digits round-trip float32 coordinates while
-            # avoiding the precision loss that made manual replays diverge.
-            tuple(f"{float(coordinate):.9g}" for coordinate in target)
-            + (stage, f"{distance:.6f}")
-            for target, stage, distance in zip(targets, stages, distances)
-        )
+        if robust_rates is None:
+            writer.writerow([*coordinates, "stage", "distance_to_base"])
+            writer.writerows(
+                # Nine significant digits round-trip float32 coordinates while
+                # avoiding the precision loss that made manual replays diverge.
+                tuple(f"{float(coordinate):.9g}" for coordinate in target)
+                + (stage, f"{distance:.6f}")
+                for target, stage, distance in zip(targets, stages, distances)
+            )
+        else:
+            chain_rates, delivered_rates, visually_found_rates = robust_rates
+            writer.writerow(
+                [
+                    *coordinates,
+                    "visually_found_rate",
+                    "found_and_delivered_rate",
+                    "chain_success_rate",
+                    "distance_to_base",
+                ]
+            )
+            writer.writerows(
+                tuple(f"{float(coordinate):.9g}" for coordinate in target)
+                + (
+                    f"{float(visual_rate):.6f}",
+                    f"{float(delivered_rate):.6f}",
+                    f"{float(chain_rate):.6f}",
+                    f"{distance:.6f}",
+                )
+                for target, visual_rate, delivered_rate, chain_rate, distance in zip(
+                    targets,
+                    visually_found_rates,
+                    delivered_rates,
+                    chain_rates,
+                    distances,
+                    strict=True,
+                )
+            )
     return path
 
 
@@ -177,25 +270,55 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
     path = Path(path)
     positions: list[tuple[float, ...]] = []
     stages: list[str] = []
+    chain_success_rates: list[float] = []
+    found_and_delivered_rates: list[float] = []
+    visually_found_rates: list[float] = []
     distances: list[float] = []
     with path.open("r", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
-        required = {"x", "y", "stage", "distance_to_base"}
-        if not required.issubset(set(reader.fieldnames or [])):
+        fields = set(reader.fieldnames or [])
+        base_required = {"x", "y", "distance_to_base"}
+        rate_required = {
+            "visually_found_rate",
+            "found_and_delivered_rate",
+            "chain_success_rate",
+        }
+        has_legacy_stage = "stage" in fields
+        has_rates = rate_required.issubset(fields)
+        if not base_required.issubset(fields) or not (has_legacy_stage or has_rates):
             raise ValueError(
-                f"Evaluation CSV must contain {sorted(required)}: {path}"
+                "Evaluation CSV must contain coordinates, distance, and either "
+                f"stage or {sorted(rate_required)}: {path}"
             )
         for row in reader:
-            stage = str(row["stage"])
-            if stage not in EVAL_STAGES:
-                raise ValueError(
-                    f"Unknown evaluation stage {stage!r} in {path}"
+            if has_rates:
+                visual_rate = float(row["visually_found_rate"])
+                delivered_rate = float(row["found_and_delivered_rate"])
+                chain_rate = float(row["chain_success_rate"])
+                stage = evaluation_stage_from_rates(
+                    chain_success_rate=chain_rate,
+                    found_and_delivered_rate=delivered_rate,
+                    visually_found_rate=visual_rate,
                 )
+            else:
+                stage = str(row["stage"])
+                if stage not in EVAL_STAGES:
+                    raise ValueError(
+                        f"Unknown evaluation stage {stage!r} in {path}"
+                    )
+                chain_rate = float(stage == "chain_success")
+                delivered_rate = float(
+                    stage in {"found_and_delivered", "chain_success"}
+                )
+                visual_rate = float(stage != "not_found")
             point = (float(row["x"]), float(row["y"]))
             if "z" in (reader.fieldnames or []):
                 point += (float(row["z"]),)
             positions.append(point)
             stages.append(stage)
+            chain_success_rates.append(chain_rate)
+            found_and_delivered_rates.append(delivered_rate)
+            visually_found_rates.append(visual_rate)
             distances.append(float(row["distance_to_base"]))
 
     return {
@@ -203,5 +326,10 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
             (-1, 3 if positions and len(positions[0]) == 3 else 2)
         ),
         "stages": np.asarray(stages, dtype="<U21"),
+        "chain_success_rate": np.asarray(chain_success_rates, dtype=np.float32),
+        "found_and_delivered_rate": np.asarray(
+            found_and_delivered_rates, dtype=np.float32
+        ),
+        "visually_found_rate": np.asarray(visually_found_rates, dtype=np.float32),
         "distance_to_base": np.asarray(distances, dtype=np.float32),
     }

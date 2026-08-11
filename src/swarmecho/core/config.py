@@ -497,6 +497,10 @@ if __name__ == "__main__":
 # this canonical config module. These typed wrappers retain strict validation
 # while the 3D environment adapter is being connected to the common runner.
 
+# Keep training action perturbations aligned with the default used by the
+# standalone robust checkpoint evaluator.
+DEFAULT_3D_ACTION_NOISE_LEVEL = 0.011
+
 @dataclass(frozen=True)
 class Network3DConfig:
     hidden_dim: int = 256
@@ -530,6 +534,10 @@ class Training3DConfig:
     checkpoint_path: str | None = None
     checkpoint_step_offset: int | None = None
     ckpt_loading_mode: str = "branch"  # "resume", "branch", or "init"; see TrainingConfig
+    # Perturb sampled pre-tanh actions before stepping training environments.
+    # This deliberately does not affect periodic during-training evaluation.
+    training_noise: bool = False
+    noise_level: float = DEFAULT_3D_ACTION_NOISE_LEVEL
 
 
 @dataclass(frozen=True)
@@ -538,6 +546,9 @@ class Evaluation3DConfig:
     eval_offset: int = 1
     eval_min_train_success: float = 0.0
     eval_parallel_envs: int = 4000
+    # Standalone heatmap evaluation samples bounded actor-output sensitivity.
+    eval_robustness_runs: int = 5
+    eval_action_noise_max: float = DEFAULT_3D_ACTION_NOISE_LEVEL
     eval_broadcast_on_curriculum_early_stop: bool = False
     early_exit: bool = False
     early_exit_threshold: float = 0.99
@@ -637,6 +648,14 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
         raise ValueError(f"3D level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
     if level.training.num_envs % level.training.num_minibatches:
         raise ValueError("Recurrent training requires num_envs divisible by num_minibatches.")
+    if level.training.noise_level < 0.0:
+        raise ValueError("training.noise_level must be non-negative.")
+    if level.evaluation.eval_parallel_envs < 1:
+        raise ValueError("evaluation.eval_parallel_envs must be positive.")
+    if level.evaluation.eval_robustness_runs < 1:
+        raise ValueError("evaluation.eval_robustness_runs must be positive.")
+    if level.evaluation.eval_action_noise_max < 0.0:
+        raise ValueError("evaluation.eval_action_noise_max must be non-negative.")
     if level.num_updates < 1:
         raise ValueError("training.total_timesteps must cover at least one rollout.")
     if level.logging.wandb_mode not in {"disabled", "offline", "online"}:

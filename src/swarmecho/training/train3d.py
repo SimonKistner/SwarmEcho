@@ -240,6 +240,8 @@ def train_3d(
     print(f"  model parameters : {parameter_count:,}")
     print(f"  environments     : {training.num_envs:,}")
     print(f"  rollout / updates: {training.num_steps} / {num_updates}")
+    if training.training_noise:
+        print(f"  training noise   : uniform pre-tanh +/-{training.noise_level:g}")
     print(f"  total env steps  : {total_steps:,}")
     print(f"  output           : {destination.resolve()}")
     if wandb_run is not None:
@@ -330,7 +332,29 @@ def train_3d(
                 base_masks,
                 resets,
             )
-            next_states, rewards, dones, info = jax.vmap(env_step)(states, jnp.tanh(actions))
+            # Mirror robust evaluation: perturb pre-tanh actions with bounded
+            # uniform noise. Keep the sampled policy actions and their
+            # log-probabilities in the rollout, since the perturbation belongs
+            # to the environment transition rather than to the policy density.
+            if training.training_noise:
+                noise_roots = jax.vmap(lambda key: jax.random.fold_in(key, 1))(
+                    action_roots
+                )
+                action_noise = jax.vmap(
+                    lambda key: jax.random.uniform(
+                        key,
+                        (cfg.num_agents, 3),
+                        dtype=actions.dtype,
+                        minval=-training.noise_level,
+                        maxval=training.noise_level,
+                    )
+                )(noise_roots)
+                executed_actions = actions + action_noise
+            else:
+                executed_actions = actions
+            next_states, rewards, dones, info = jax.vmap(env_step)(
+                states, jnp.tanh(executed_actions)
+            )
             next_base_valid, next_base_signature, next_base_value = _update_base_memory(
                 states,
                 in_base_range,
@@ -625,6 +649,9 @@ def train_3d(
             )
         )
         if eval_due or replay_due:
+            # Periodic training evaluation deliberately remains one unperturbed
+            # parallel pass. The five-pass robustness ensemble is exclusive to
+            # the standalone checkpoint evaluator.
             eval_metrics, episode_info = evaluate_suite_3d(
                 model,
                 level,
@@ -773,19 +800,7 @@ def train_3d(
     return checkpoint, latest_stats
 
 
-@functools.partial(
-    nnx.jit,
-    static_argnames=(
-        "reset",
-        "step",
-        "observations",
-        "reward_cfg",
-        "cfg",
-        "horizon",
-        "target_position",
-    ),
-)
-def _collect_replay_3d_jit(
+def _collect_replay_3d_impl(
     model: MAPPOModel,
     key: jax.Array,
     *,
@@ -932,6 +947,38 @@ def _collect_replay_3d_jit(
     return states, rewards, final_carry[-1]
 
 
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "reset",
+        "step",
+        "observations",
+        "reward_cfg",
+        "cfg",
+        "horizon",
+        "target_position",
+    ),
+)
+def _collect_replay_3d_jit(
+    model: MAPPOModel,
+    key: jax.Array,
+    *,
+    reset,
+    step,
+    observations,
+    reward_cfg,
+    cfg,
+    horizon: int,
+    target_position: tuple[float, float, float] | None = None,
+):
+    """Compile one scalar replay collector."""
+    return _collect_replay_3d_impl(
+        model, key, reset=reset, step=step, observations=observations,
+        reward_cfg=reward_cfg, cfg=cfg, horizon=horizon,
+        target_position=target_position,
+    )
+
+
 def evaluate_model_3d(
     model: MAPPOModel,
     level: Level3D,
@@ -980,11 +1027,16 @@ def evaluate_model_3d(
         "cfg",
         "num_envs",
         "horizon",
+        "action_noise_max",
+        "capture_actions",
+        "capture_result",
+        "capture_offset",
     ),
 )
 def _run_parallel_evaluation_3d_jit(
     model: MAPPOModel,
     key: jax.Array,
+    action_noise_key: jax.Array,
     *,
     reset,
     step,
@@ -993,13 +1045,18 @@ def _run_parallel_evaluation_3d_jit(
     cfg,
     num_envs: int,
     horizon: int,
+    action_noise_max: float = 0.0,
+    capture_actions: bool = False,
+    capture_result: str = "success",
+    capture_offset: int = 0,
 ):
-    """Run deterministic 3D metrics as one compiled device program."""
+    """Run deterministic 3D metrics and optionally retain one lane's actions."""
     env_keys = jax.random.split(key, num_envs)
+    env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
     comm_cadence = int(model.memory_comm_every_k_steps)
 
-    def run_single_environment(env_key):
+    def run_single_environment(env_key, env_action_noise_key):
         state = reset(env_key)
         actor_hidden = model.initial_actor_hidden(())
         actor_signature = model.initial_actor_signature(())
@@ -1080,7 +1137,21 @@ def _run_parallel_evaluation_3d_jit(
                 base_memory_mask=base_memory_mask,
                 deterministic=True,
             )
-            next_state = step(state, jnp.tanh(means))
+            if action_noise_max > 0.0:
+                # Probe the observed shape-dependent actor-mean discrepancy
+                # without altering resets, target positions, or matrix shapes.
+                step_noise_key = jax.random.fold_in(
+                    env_action_noise_key, step_index
+                )
+                means = means + jax.random.uniform(
+                    step_noise_key,
+                    means.shape,
+                    dtype=means.dtype,
+                    minval=-action_noise_max,
+                    maxval=action_noise_max,
+                )
+            executed_actions = jnp.tanh(means)
+            next_state = step(state, executed_actions)
             rewards, _ = rewards_3d(state, next_state, reward_cfg, cfg)
             live = ~completed
             _, step_chain_progress = chain_diagnostics_3d(next_state)
@@ -1123,16 +1194,36 @@ def _run_parallel_evaluation_3d_jit(
                 ),
                 visually_found | (live & jnp.any(next_state.target_known)),
             )
-            return next_carry, None
+            return next_carry, executed_actions if capture_actions else None
 
-        final_carry, _ = jax.lax.scan(
+        final_carry, action_history = jax.lax.scan(
             evaluation_step,
             initial_carry,
             jnp.arange(horizon, dtype=jnp.int32),
         )
-        return (*final_carry[8:], state.target_pos, state.base_pos)
+        metrics = (*final_carry[8:], state.target_pos, state.base_pos)
+        return (*metrics, action_history) if capture_actions else metrics
 
-    return jax.vmap(run_single_environment)(env_keys)
+    batched = jax.vmap(run_single_environment)(
+        env_keys, env_action_noise_keys
+    )
+    if not capture_actions:
+        return batched
+
+    successes = batched[2]
+    target_positions = batched[7]
+    base_positions = batched[8]
+    action_histories = batched[9]
+    if capture_result == "success":
+        distances = jnp.linalg.norm(target_positions - base_positions, axis=-1)
+        scores = jnp.where(successes, distances, -jnp.inf)
+        selected_lane = jnp.argsort(-scores, stable=True)[capture_offset]
+    else:
+        failure_lanes = jnp.nonzero(
+            ~successes, size=num_envs, fill_value=-1
+        )[0]
+        selected_lane = failure_lanes[capture_offset]
+    return batched[:9], selected_lane, action_histories[selected_lane]
 
 
 def evaluate_suite_3d(
@@ -1142,6 +1233,8 @@ def evaluate_suite_3d(
     episodes: int,
     max_steps: int | None = None,
     return_episode_info: bool = False,
+    action_noise_max: float = 0.0,
+    action_noise_seed: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
     """Evaluate a deterministic 3D batch without collecting replay frames."""
     cfg = level.env
@@ -1161,6 +1254,11 @@ def evaluate_suite_3d(
         _run_parallel_evaluation_3d_jit(
             model,
             jax.random.PRNGKey(level.training.seed + 10_000),
+            jax.random.PRNGKey(
+                level.training.seed + 20_000
+                if action_noise_seed is None
+                else action_noise_seed
+            ),
             reset=reset,
             step=step,
             observations=observations,
@@ -1168,6 +1266,7 @@ def evaluate_suite_3d(
             cfg=cfg,
             num_envs=episodes,
             horizon=horizon,
+            action_noise_max=action_noise_max,
         )
     )
     metrics = {
@@ -1187,6 +1286,182 @@ def evaluate_suite_3d(
         "delivered": np.asarray(target_found),
         "visually_found": np.asarray(visually_found),
     }
+
+
+def evaluate_suite_3d_with_action_capture(
+    model: MAPPOModel,
+    level: Level3D,
+    *,
+    episodes: int,
+    result: str,
+    offset: int,
+    max_steps: int | None = None,
+) -> tuple[dict[str, float], dict[str, np.ndarray], dict[str, object]]:
+    """Evaluate and capture one selected lane's executed actions in one JIT."""
+    normalized = result.lower()
+    if normalized in {"success", "successful"}:
+        capture_result = "success"
+    elif normalized in {"fail", "failure", "failed"}:
+        capture_result = "fail"
+    else:
+        raise ValueError("result must be success or fail.")
+    if offset < 0:
+        raise ValueError("offset must be non-negative.")
+
+    cfg = level.env
+    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
+    batched, selected_lane, selected_actions = jax.device_get(
+        _run_parallel_evaluation_3d_jit(
+            model,
+            jax.random.PRNGKey(level.training.seed + 10_000),
+            jax.random.PRNGKey(level.training.seed + 20_000),
+            reset=reset,
+            step=step,
+            observations=observations,
+            reward_cfg=level.reward,
+            cfg=cfg,
+            num_envs=episodes,
+            horizon=horizon,
+            capture_actions=True,
+            capture_result=capture_result,
+            capture_offset=offset,
+        )
+    )
+    (
+        returns,
+        lengths,
+        successes,
+        target_found,
+        chain_progress_pct,
+        terminal_coverage,
+        visually_found,
+        target_positions,
+        base_positions,
+    ) = batched
+    matching_count = int(np.count_nonzero(successes if capture_result == "success" else ~successes))
+    if offset >= matching_count:
+        raise ValueError(
+            f"Requested {capture_result.upper()}_{offset}, but the captured "
+            f"evaluation contains only {matching_count} matching episodes."
+        )
+    lane = int(selected_lane)
+    metrics = {
+        "eval_return": float(np.mean(returns)),
+        "eval_success": float(np.mean(successes)),
+        "eval_target_found_rate": float(np.mean(target_found)),
+        "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
+        "eval_coverage": float(np.mean(terminal_coverage)),
+        "eval_episode_length": float(np.mean(lengths)),
+    }
+    episode_info = {
+        "target_positions": np.asarray(target_positions),
+        "base_positions": np.asarray(base_positions),
+        "successes": np.asarray(successes),
+        "delivered": np.asarray(target_found),
+        "visually_found": np.asarray(visually_found),
+    }
+    capture = {
+        "lane": lane,
+        "actions": np.asarray(selected_actions),
+        "length": int(np.asarray(lengths)[lane]),
+    }
+    return metrics, episode_info, capture
+
+
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "reset",
+        "step",
+        "reward_cfg",
+        "cfg",
+        "horizon",
+        "num_envs",
+        "capture_lane",
+    ),
+)
+def _replay_recorded_actions_3d_jit(
+    root_key: jax.Array,
+    actions: jax.Array,
+    *,
+    reset,
+    step,
+    reward_cfg,
+    cfg,
+    horizon: int,
+    num_envs: int,
+    capture_lane: int,
+):
+    """Rebuild one lane from actions emitted by the authoritative evaluation."""
+    lane_key = jax.random.split(root_key, num_envs)[capture_lane]
+    initial_state = reset(lane_key)
+
+    def replay_step(carry, action):
+        state, completed, episode_length = carry
+        candidate_state = step(state, action)
+        rewards, _ = rewards_3d(state, candidate_state, reward_cfg, cfg)
+        next_state = jax.lax.cond(
+            completed,
+            lambda _: state,
+            lambda _: candidate_state,
+            operand=None,
+        )
+        live = ~completed
+        return (
+            next_state,
+            completed | candidate_state.done,
+            episode_length + live.astype(jnp.int32),
+        ), (next_state, jnp.where(live, rewards, jnp.zeros_like(rewards)))
+
+    final_carry, (rollout_states, rollout_rewards) = jax.lax.scan(
+        replay_step,
+        (initial_state, jnp.bool_(False), jnp.int32(0)),
+        actions[:horizon],
+    )
+    states = jax.tree_util.tree_map(
+        lambda initial, rollout: jnp.concatenate((initial[None], rollout), axis=0),
+        initial_state,
+        rollout_states,
+    )
+    rewards = jnp.concatenate(
+        (jnp.zeros((1, cfg.num_agents), dtype=jnp.float32), rollout_rewards), axis=0
+    )
+    return states, rewards, final_carry[-1]
+
+
+def replay_recorded_actions_3d(
+    level: Level3D,
+    actions: np.ndarray,
+    *,
+    capture_lane: int,
+    batch_size: int,
+    max_steps: int | None = None,
+) -> tuple[list, np.ndarray]:
+    """Materialise one evaluation lane without invoking the policy again."""
+    cfg = level.env
+    reset, step, _, _ = make_baseline_3d_fns(level.building, cfg)
+    horizon = min(max_steps or cfg.max_steps, cfg.max_steps, len(actions))
+    timeline, rewards, episode_length = jax.device_get(
+        _replay_recorded_actions_3d_jit(
+            jax.random.PRNGKey(level.training.seed + 10_000),
+            jnp.asarray(actions, dtype=jnp.float32),
+            reset=reset,
+            step=step,
+            reward_cfg=level.reward,
+            cfg=cfg,
+            horizon=horizon,
+            num_envs=batch_size,
+            capture_lane=capture_lane,
+        )
+    )
+    frames = int(episode_length) + 1
+    timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)
+    states = [
+        jax.tree_util.tree_map(lambda item, index=index: item[index], timeline)
+        for index in range(frames)
+    ]
+    return states, np.asarray(rewards[:frames])[:, :, None]
 
 
 def main() -> None:

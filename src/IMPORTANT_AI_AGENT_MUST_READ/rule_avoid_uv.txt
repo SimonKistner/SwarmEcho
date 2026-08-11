@@ -1,0 +1,5 @@
+Dont concern yourself with uv or the .venv folder. if you run commands, make sure you run them in a way that doesnt interfere, change or use uv or the .venv build. this code is supposed to be user executed only. it runs in WLS. you dont have access to WLS. you cant run the code.
+
+however you can run commands, test and code that doesnt use uv or relies on the WLS or any of the ML packages like compile checks or simpler tests etc.
+
+THIS RULE IS VERY IMORTANT. MAKE SURE TO OBEY IT.

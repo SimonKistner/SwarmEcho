@@ -97,6 +97,22 @@ uv run swarmecho-multi-train level=M01_small_maze \
   logging.run_name=small_maze_v1 seeds=3 base_seed=42
 ```
 
+The equivalent 3D command is:
+
+```bash
+uv run swarmecho-multi-train-3d level=M00_no_maze_open_cuboid_tall_3D \
+  logging.run_name=tall_v1 logging.wandb_group=tall_v1 seeds=3 base_seed=9
+```
+
+Run a 3D curriculum by listing levels in the order they should execute. Each
+stage starts from the previous stage's final checkpoint:
+
+```bash
+uv run swarmecho-curriculum-3d \
+  levels=M00_no_maze_open_cuboid_3D,M00_no_maze_open_cuboid_tall_3D \
+  logging.run_name=tall_curriculum logging.wandb_group=tall_curriculum
+```
+
 ### 5. 2D Grid Maze Builder
 Launch the browser-based grid editor to draw maze walls and target no-spawn cells.
 ```bash

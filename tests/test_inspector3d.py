@@ -6,6 +6,7 @@ from swarmecho.env.baseline3d import make_baseline_3d_fns
 from swarmecho.visualize.inspector3d import (
     HTML,
     discover_replays,
+    heatmap_label,
     inspector_html,
     replay_payload,
     replay_label,
@@ -42,6 +43,9 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="showVisualRange"' in HTML
     assert 'id="showCommRange"' in HTML
     assert 'id="refreshReplays"' in HTML
+    assert 'id="heatmapConfidence"' in HTML
+    assert 'id="heatmapConfidenceValue">100%' in HTML
+    assert "function heatmapStage(index)" in HTML
     assert 'id="coverageOpacity"' in HTML
     assert 'id="visualOpacity"' in HTML
     assert 'id="commOpacity"' in HTML
@@ -65,3 +69,22 @@ def test_replay_label_uses_run_name_before_artifacts(tmp_path):
 def test_replay_label_adds_unpadded_training_steps(tmp_path):
     manifest = tmp_path / "M00_3d_baseline_v2" / "artifacts" / "train" / "replays" / "eval_u000061_s00024M.json"
     assert replay_label(manifest) == "M00_3d_baseline_v2-[24M]"
+
+
+def test_heatmap_labels_distinguish_training_and_standalone_evaluation(tmp_path):
+    run = tmp_path / "M00_3d_baseline"
+    train_heatmap = (
+        run / "artifacts/train/data/eval_info_u000061_s00024M.csv"
+    )
+    eval_heatmap = (
+        run
+        / "artifacts/eval/ckpt_u000351_s00140M/data/"
+        "eval_info_u000351_s00140M.csv"
+    )
+
+    assert heatmap_label(train_heatmap) == (
+        "M00_3d_baseline_[24M]_[TRAIN Heatmap]"
+    )
+    assert heatmap_label(eval_heatmap) == (
+        "M00_3d_baseline_[140M]_[EVAL Heatmap]"
+    )

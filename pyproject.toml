@@ -48,6 +48,8 @@ swarmecho-artefacts = "swarmecho.analysis.artefacts.server:main"
 swarmecho-benchmark-3d = "swarmecho.training.benchmark_3d:main"
 swarmecho-validate-3d = "swarmecho.training.validate_3d_workflow:main"
 swarmecho-train-3d = "swarmecho.training.train3d:main"
+swarmecho-multi-train-3d = "swarmecho.training.multi_train3d:main"
+swarmecho-curriculum-3d = "swarmecho.training.curriculum3d:main"
 swarmecho-evaluate-3d = "swarmecho.training.evaluate3d:main"
 swarmecho-inspect-3d = "swarmecho.visualize.inspector3d:main"
 
@@ -66,6 +68,7 @@ system = false  # always use the project's venv
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.11.1",
     "pytest>=9.1.1",
 ]
 

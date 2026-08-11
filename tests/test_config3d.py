@@ -24,8 +24,12 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.training.num_steps == 100
     assert level.training.num_epochs == 4
     assert level.training.num_minibatches == 20
+    assert not level.training.training_noise
+    assert level.training.noise_level == level.evaluation.eval_action_noise_max
     assert level.network.actor_memory
     assert level.evaluation.eval_parallel_envs == 4000
+    assert level.evaluation.eval_robustness_runs == 5
+    assert level.evaluation.eval_action_noise_max == 0.011
     assert level.logging.wandb_mode == "online"
     assert level.ideal_chain_margin_m > 0
 
@@ -67,6 +71,22 @@ def test_3d_cli_uses_the_same_dotlist_overrides_as_2d():
     assert level.env.radar_bins == 16
     assert level.env.coverage_voxel_size == 2.5
     assert level.num_updates == 1
+
+
+def test_3d_cli_can_enable_training_only_action_noise():
+    level = load_level_3d_cli(
+        [
+            "level=M00_no_maze_open_cuboid_3D",
+            "training.training_noise=true",
+            "training.noise_level=0.02",
+        ]
+    )
+
+    assert level.training.training_noise
+    assert level.training.noise_level == 0.02
+    # This setting is solely consumed by the training rollout; it must not
+    # alter the standalone robust-evaluation configuration.
+    assert level.evaluation.eval_action_noise_max == 0.011
 
 
 def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
