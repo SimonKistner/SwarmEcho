@@ -2,6 +2,27 @@
 
 SwarmEcho uses a modular, layered configuration ecosystem. Default values are defined directly in Python dataclasses, and custom settings or difficulty levels are layered on top via YAML files.
 
+> **3D migration note:** the executable 3D slice uses strict configs from
+> `curriculum_config/levels/` rather than merging them through the legacy 2D
+> level loader. `M00_no_maze_open_cuboid_3D.yaml` selects its map and declares its
+> physics, radar, episode, connectivity, target-distance, and reward parameters.
+> Unknown fields are rejected, and a level is rejected when its ideal straight
+> relay cannot reach the map's farthest top corner. This becomes the main
+> configuration path as production training moves to 3D.
+
+For 3D levels, `env.coverage_voxel_size` controls only exploration-coverage
+resolution, in metres. It defaults to the map's `cell_size_m`, preserving the
+legacy one-voxel-per-building-cell behaviour. For example, a 20 m cuboid map
+with `cell_size_m: 5.0` and `coverage_voxel_size: 2.5` keeps its 4 × 4 × 4
+building grid but uses an 8 × 8 × 8 coverage grid. The voxel size must evenly
+divide all three world dimensions.
+
+All environments default to `env.no_movement_termination_steps: 50`: an
+episode ends when no agent displaces by more than `env.movement_epsilon`
+(default `0.001` m) for 50 consecutive transitions. This catches stalled
+rollouts while allowing slow residual motion to settle. It is an ordinary
+failed termination with no additional terminal reward penalty.
+
 ## 1. Parameters & Where to Find Them
 Rather than a global YAML file, baseline configurations are declared in the structured dataclasses in `src/swarmecho/core/config.py` (specifically `SwarmEchoConfig`). The configuration structure is separated into semantic domains:
 
@@ -81,8 +102,11 @@ run. `save_model` controls scheduled and final saves; it does not suppress this
 required handoff checkpoint.
 
 Checkpoint loading remains under `training`: `checkpoint_path`,
-`checkpoint_step_offset`, and `ckpt_loading_mode` control branch/resume input
-semantics. Checkpoint saving belongs to `evaluation` because it follows the
+`checkpoint_step_offset`, and `ckpt_loading_mode` control input semantics.
+`resume` continues the checkpoint's update and cumulative-step timeline;
+`branch` starts updates at zero while preserving that timeline for curriculum
+history; `init` restores weights only and starts a completely new run at zero
+steps with no inherited history. Checkpoint saving belongs to `evaluation` because it follows the
 same update schedule as evaluation and video artifacts.
 
 When `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline

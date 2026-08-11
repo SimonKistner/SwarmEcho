@@ -1,0 +1,238 @@
+{
+  "benchmarks": [
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 256,
+      "steps": 200,
+      "radar_bins": 8,
+      "compile_seconds": 2.1727451539991307,
+      "run_seconds": 0.9100907749998441,
+      "environment_steps_per_second": 56258.124361285576,
+      "device_memory_bytes_in_use": 278784,
+      "device_memory_peak_bytes_in_use": 67452928,
+      "coverage_shape": [
+        256,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        256,
+        5,
+        38
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 256,
+      "steps": 200,
+      "radar_bins": 16,
+      "compile_seconds": 1.6752427669998724,
+      "run_seconds": 0.6886634059992502,
+      "environment_steps_per_second": 74346.91542192346,
+      "device_memory_bytes_in_use": 442112,
+      "device_memory_peak_bytes_in_use": 67452928,
+      "coverage_shape": [
+        256,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        256,
+        5,
+        70
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 256,
+      "steps": 200,
+      "radar_bins": 32,
+      "compile_seconds": 1.6819244270009222,
+      "run_seconds": 0.7351463670020166,
+      "environment_steps_per_second": 69645.99472727797,
+      "device_memory_bytes_in_use": 783616,
+      "device_memory_peak_bytes_in_use": 67452928,
+      "coverage_shape": [
+        256,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        256,
+        5,
+        134
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 1024,
+      "steps": 200,
+      "radar_bins": 8,
+      "compile_seconds": 1.8866260579998197,
+      "run_seconds": 1.031481279002037,
+      "environment_steps_per_second": 198549.41060893028,
+      "device_memory_bytes_in_use": 1103616,
+      "device_memory_peak_bytes_in_use": 68474368,
+      "coverage_shape": [
+        1024,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        1024,
+        5,
+        38
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 1024,
+      "steps": 200,
+      "radar_bins": 16,
+      "compile_seconds": 1.802953864000301,
+      "run_seconds": 0.841000864002126,
+      "environment_steps_per_second": 243519.36932074575,
+      "device_memory_bytes_in_use": 1758720,
+      "device_memory_peak_bytes_in_use": 68474368,
+      "coverage_shape": [
+        1024,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        1024,
+        5,
+        70
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 1024,
+      "steps": 200,
+      "radar_bins": 32,
+      "compile_seconds": 1.700235207001242,
+      "run_seconds": 0.8499052099978144,
+      "environment_steps_per_second": 240968.04866101086,
+      "device_memory_bytes_in_use": 3072512,
+      "device_memory_peak_bytes_in_use": 68474368,
+      "coverage_shape": [
+        1024,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        1024,
+        5,
+        134
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 4000,
+      "steps": 200,
+      "radar_bins": 8,
+      "compile_seconds": 2.094290013999853,
+      "run_seconds": 1.7463218180018885,
+      "environment_steps_per_second": 458105.71210485493,
+      "device_memory_bytes_in_use": 4304384,
+      "device_memory_peak_bytes_in_use": 72434176,
+      "coverage_shape": [
+        4000,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        4000,
+        5,
+        38
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 4000,
+      "steps": 200,
+      "radar_bins": 16,
+      "compile_seconds": 1.8367643880010291,
+      "run_seconds": 0.8162348849982664,
+      "environment_steps_per_second": 980110.0329125227,
+      "device_memory_bytes_in_use": 6864384,
+      "device_memory_peak_bytes_in_use": 72434176,
+      "coverage_shape": [
+        4000,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        4000,
+        5,
+        70
+      ]
+    },
+    {
+      "backend": "gpu",
+      "devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.9.2",
+      "num_envs": 4000,
+      "steps": 200,
+      "radar_bins": 32,
+      "compile_seconds": 1.6851992400006566,
+      "run_seconds": 0.8204044020021684,
+      "environment_steps_per_second": 975128.8487087927,
+      "device_memory_bytes_in_use": 11984896,
+      "device_memory_peak_bytes_in_use": 72434176,
+      "coverage_shape": [
+        4000,
+        4,
+        4,
+        4
+      ],
+      "observation_shape": [
+        4000,
+        5,
+        134
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+env:
+  map_names:
+  - M01_no_maze_open_cuboid_tall
+  num_agents: 4
+  max_steps: 700
+  no_movement_termination_steps: 50
+  visual_radius: 5.0
+  comm_radius: 9.0
+  comm_radius_base: 8.0
+  radar_bins: 16
+  spawn_delay: 5
+  hold_chain_for: 50
+  drone_radius: 0.25
+  target_spawn_buffer: 0.5
+  coverage_voxel_size: 2.5
+  observe_target_vector: false
+  observe_base_vector: false
+  observe_coverage_probe: true
+reward:
+  target_found_requires_delivery: true
+  chain_reward_system: euclidean
+  exploration_bonus: 0.25
+  finder_bonus: 50.0
+  max_gap_penalty: 5.0
+  collision_penalty: 0.5
+  target_found_bonus: 100.0
+  success_bonus: 500.0
+training:
+  total_timesteps: 500000000
+  num_envs: 4000
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+  seed: 6302026950
+  training_noise: true
+  noise_level: 0.011
+network:
+  num_layers: 3
+  actor_num_layers: 3
+  actor_memory: true
+  critic_memory: true
+  critic_type: observation
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 3
+  tarmac_sig_dim: 16
+  tarmac_val_dim: 32
+  tarmac_include_self: false
+evaluation:
+  eval_parallel_envs: 4000
+  eval_broadcast_on_curriculum_early_stop: false
+  early_exit: true
+  early_exit_threshold: 0.999
+  save_model: true
+  checkpoint_freq: 50
+  checkpoint_offset: 1
+  eval_freq: 30
+  eval_offset: 1
+  eval_not_delivered_or_visually_found_heatmap: false
+  eval_video: true
+  eval_video_freq: 9999999999
+  eval_video_offset: 1

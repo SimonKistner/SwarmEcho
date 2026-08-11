@@ -349,14 +349,17 @@ class MAPPOTrainer:
         preserve time order and additionally include reset masks plus rollout
         initial actor/critic hidden states.
         """
-        stats_sums = {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy": 0.0,
-            "total_loss": 0.0,
-            "approx_kl": 0.0,
-            "clip_fraction": 0.0,
-        }
+        # Keep this scalar accumulator on the accelerator for the complete
+        # PPO update.  Reading each minibatch's diagnostics on the host forced
+        # a device synchronization ``num_epochs * num_minibatches`` times.
+        stats_sums = MAPPOStats(
+            policy_loss=jnp.array(0.0, dtype=jnp.float32),
+            value_loss=jnp.array(0.0, dtype=jnp.float32),
+            entropy=jnp.array(0.0, dtype=jnp.float32),
+            total_loss=jnp.array(0.0, dtype=jnp.float32),
+            approx_kl=jnp.array(0.0, dtype=jnp.float32),
+            clip_fraction=jnp.array(0.0, dtype=jnp.float32),
+        )
         num_stat_steps = 0
 
         for _epoch in range(self.num_epochs):
@@ -384,29 +387,24 @@ class MAPPOTrainer:
                         mb["base_memory_masks"],
                     ) if self.recurrent else ()),
                 )
-                # Materialise the scalar diagnostics immediately instead of
-                # keeping one device-resident stats tuple per PPO minibatch.
-                # On large recurrent runs the queued update work can otherwise
-                # accumulate until the final jnp.array([...]) conversion below,
-                # making the stats readback the first place that trips a large
-                # XLA allocation/OOM even though the diagnostics themselves are
-                # tiny.
-                stats_host = jax.device_get(stats)
-                stats_sums["policy_loss"] += float(stats_host.policy_loss)
-                stats_sums["value_loss"] += float(stats_host.value_loss)
-                stats_sums["entropy"] += float(stats_host.entropy)
-                stats_sums["total_loss"] += float(stats_host.total_loss)
-                stats_sums["approx_kl"] += float(stats_host.approx_kl)
-                stats_sums["clip_fraction"] += float(stats_host.clip_fraction)
+                stats_sums = MAPPOStats(
+                    policy_loss=stats_sums.policy_loss + stats.policy_loss,
+                    value_loss=stats_sums.value_loss + stats.value_loss,
+                    entropy=stats_sums.entropy + stats.entropy,
+                    total_loss=stats_sums.total_loss + stats.total_loss,
+                    approx_kl=stats_sums.approx_kl + stats.approx_kl,
+                    clip_fraction=stats_sums.clip_fraction + stats.clip_fraction,
+                )
                 num_stat_steps += 1
-                del _loss, stats, stats_host
+                del _loss, stats
 
         denom = max(1, num_stat_steps)
+        stats_host = jax.device_get(stats_sums)
         return {
-            "policy_loss":   stats_sums["policy_loss"] / denom,
-            "value_loss":    stats_sums["value_loss"] / denom,
-            "entropy":       stats_sums["entropy"] / denom,
-            "total_loss":    stats_sums["total_loss"] / denom,
-            "approx_kl":     stats_sums["approx_kl"] / denom,
-            "clip_fraction": stats_sums["clip_fraction"] / denom,
+            "policy_loss":   float(stats_host.policy_loss) / denom,
+            "value_loss":    float(stats_host.value_loss) / denom,
+            "entropy":       float(stats_host.entropy) / denom,
+            "total_loss":    float(stats_host.total_loss) / denom,
+            "approx_kl":     float(stats_host.approx_kl) / denom,
+            "clip_fraction": float(stats_host.clip_fraction) / denom,
         }

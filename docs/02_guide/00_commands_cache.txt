@@ -1,0 +1,3 @@
+Eval
+
+uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_added_noise_HR20p_v3_M01\checkpoints\ckpt_000401'

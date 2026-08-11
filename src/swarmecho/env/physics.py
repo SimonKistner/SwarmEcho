@@ -97,6 +97,7 @@ def make_env_fns(cfg: DictConfig):
     comm_r_base = float(cfg.env.get("comm_radius_base", cfg.env.comm_radius))
     spawn_delay = int(cfg.env.spawn_delay)
     wall_res    = float(cfg.env.wall_restitution)
+    movement_epsilon = float(cfg.env.get("movement_epsilon", 1e-3))
     # How many matrix-squaring steps to guarantee full-graph reachability.
     # 2^n_reach steps covers paths up to 2^n_reach hops — always > N.
     n_reach = max(1, math.ceil(math.log2(N + 2)))
@@ -373,6 +374,7 @@ def make_env_fns(cfg: DictConfig):
                 active=active,
                 box_width=jnp.float32(W),
                 box_height=jnp.float32(H),
+                stationary_steps=jnp.int32(0),
             ),
             communication=CommunicationState(
                 target_known=target_known,
@@ -514,6 +516,14 @@ def make_env_fns(cfg: DictConfig):
         new_pos = jnp.where(new_active[:, None], new_pos, physics.base_pos[None, :])
         new_vel = jnp.where(new_active[:, None], new_vel, 0.0)
         collided = collided & new_active
+        any_agent_moved = jnp.any(
+            jnp.linalg.norm(new_pos - physics.pos, axis=-1) > movement_epsilon
+        )
+        stationary_steps = jnp.where(
+            any_agent_moved,
+            jnp.int32(0),
+            physics.stationary_steps + jnp.int32(1),
+        )
 
         # 5. Coverage (active drones only)
         new_coverage, new_cov_deltas = update_coverage(
@@ -533,6 +543,7 @@ def make_env_fns(cfg: DictConfig):
                 step=physics.step + jnp.int32(1),
                 key=new_key,
                 active=new_active,
+                stationary_steps=stationary_steps,
             ),
             exploration=state.exploration.replace(
                 coverage_grid=new_coverage,

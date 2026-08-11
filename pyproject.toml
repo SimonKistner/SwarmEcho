@@ -45,6 +45,13 @@ swarmecho-verify-maze = "swarmecho.curriculum_config.maps.scripts.verify_chain_m
 swarmecho-dashboard = "swarmecho.analysis.launch:dashboard_main"
 swarmecho-eval-dashboard = "swarmecho.analysis.launch:eval_dashboard_main"
 swarmecho-artefacts = "swarmecho.analysis.artefacts.server:main"
+swarmecho-benchmark-3d = "swarmecho.training.benchmark_3d:main"
+swarmecho-validate-3d = "swarmecho.training.validate_3d_workflow:main"
+swarmecho-train-3d = "swarmecho.training.train3d:main"
+swarmecho-multi-train-3d = "swarmecho.training.multi_train3d:main"
+swarmecho-curriculum-3d = "swarmecho.training.curriculum3d:main"
+swarmecho-evaluate-3d = "swarmecho.training.evaluate3d:main"
+swarmecho-inspect-3d = "swarmecho.visualize.inspector3d:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -58,6 +65,12 @@ required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_6
 
 [tool.uv.pip]
 system = false  # always use the project's venv
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.11.1",
+    "pytest>=9.1.1",
+]
 
 # ---------------------------------------------------------------------------
 # Development / linting extras (optional, not required for training)

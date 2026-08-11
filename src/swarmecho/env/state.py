@@ -28,6 +28,7 @@ class PhysicsState:
     active: jax.Array
     box_width: jax.Array
     box_height: jax.Array
+    stationary_steps: jax.Array
 
     def replace(self, **kwargs) -> PhysicsState:
         return dataclasses.replace(self, **kwargs)
@@ -139,6 +140,7 @@ _register(
         "active",
         "box_width",
         "box_height",
+        "stationary_steps",
     ],
 )
 _register(
@@ -192,6 +194,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_shape(physics.active, (N,))
     chex.assert_shape(physics.box_width, ())
     chex.assert_shape(physics.box_height, ())
+    chex.assert_shape(physics.stationary_steps, ())
 
     chex.assert_shape(communication.target_known, (N,))
     chex.assert_shape(communication.base_target_known, ())
@@ -214,6 +217,7 @@ def assert_env_state(state: EnvState, N: int, GW: int, GH: int) -> None:
     chex.assert_type(physics.active, jnp.bool_)
     chex.assert_type(physics.box_width, jnp.float32)
     chex.assert_type(physics.box_height, jnp.float32)
+    chex.assert_type(physics.stationary_steps, jnp.int32)
 
     chex.assert_type(communication.target_known, jnp.bool_)
     chex.assert_type(communication.base_target_known, jnp.bool_)

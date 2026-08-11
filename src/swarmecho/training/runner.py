@@ -65,7 +65,13 @@ from swarmecho.core.config import compute_action_dim, compute_obs_dim
 from swarmecho.env.grid_utils import has_inner_obstacles
 from swarmecho.env.critic_state import make_privileged_critic_state_fn
 from swarmecho.models.mappo import MAPPOModel
-from swarmecho.training.artifacts import artifact_suffix, train_artifact_root
+from swarmecho.training.artifacts import artifact_suffix
+from swarmecho.training.run_lifecycle import (
+    broadcast_early_stop_metrics,
+    init_wandb,
+    resolve_run_layout,
+    schedule_due,
+)
 from swarmecho.training.checkpoints import (
     restore_model_checkpoint,
     save_model_checkpoint,
@@ -86,116 +92,6 @@ from swarmecho.training.video_worker import render_eval_video
 # W&B init
 # ---------------------------------------------------------------------------
 
-def _init_wandb(cfg: DictConfig, run_name: str, run_dir: Path) -> Optional[object]:
-    mode = cfg.logging.get("wandb_mode", "disabled")
-    if mode == "disabled":
-        return None
-
-    env_path = Path.cwd() / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
-
-    wandb_kwargs = {
-        "project": cfg.logging.get("wandb_project", "swarmecho"),
-        "entity": cfg.logging.get("wandb_entity", None),
-        "name": run_name,
-        "mode": mode,
-        "dir": str(run_dir),
-        "config": OmegaConf.to_container(cfg, resolve=True),
-    }
-    wandb_group = cfg.logging.get("wandb_group", None)
-    if wandb_group:
-        wandb_kwargs["group"] = str(wandb_group)
-
-    # Auto-resume WandB run if resuming training and a previous run directory exists
-    if cfg.training.checkpoint_path:
-        wandb_dir = run_dir / "wandb"
-        if wandb_dir.exists():
-            run_dirs = [d for d in wandb_dir.iterdir() if d.is_dir() and d.name.startswith("run-")]
-            if run_dirs:
-                # Sort by modification time to find the most recent run folder
-                run_dirs.sort(key=lambda d: d.stat().st_mtime)
-                latest_run_dir = run_dirs[-1]
-                parts = latest_run_dir.name.split("-")
-                if len(parts) >= 3:
-                    run_id = parts[-1]
-                    wandb_kwargs["id"] = run_id
-                    wandb_kwargs["resume"] = "allow"
-                    print(f"  [W&B] Auto-detected previous run ID '{run_id}' from '{latest_run_dir.name}'. Resuming run.")
-
-    import wandb
-    run = wandb.init(**wandb_kwargs)
-    return run
-
-
-def _broadcast_eval_metrics_to_remaining_wandb_steps(
-    *,
-    wandb_run,
-    cfg: DictConfig,
-    eval_logs: dict[str, float],
-    trigger_update: int,
-    n_updates: int,
-    steps_per_update: int,
-    total_timesteps: int,
-) -> None:
-    """Carry the final early-stop eval point forward for grouped W&B charts.
-
-    Curriculum stages can stop early once an eval crosses the configured
-    threshold. Without extra points, W&B grouped averages at later x-axis
-    steps only include slower/worse runs that are still training. This helper
-    logs the exact threshold-hitting eval metrics at each remaining scheduled
-    eval step and at the configured final timestep, without performing more
-    training or evaluation.
-    """
-    if wandb_run is None:
-        return
-    if not bool(cfg.evaluation.get("eval_broadcast_on_curriculum_early_stop", True)):
-        return
-    if not eval_logs:
-        return
-
-    eval_every = max(1, int(cfg.evaluation.get("eval_freq", 50)))
-    eval_offset = int(cfg.evaluation.get("eval_offset", 1))
-    future_steps: list[int] = []
-
-    for future_update in range(trigger_update + 1, n_updates + 1):
-        is_eval_step = (
-            ((future_update - eval_offset) % eval_every == 0)
-            and future_update > eval_offset
-        )
-        if future_update == n_updates:
-            is_eval_step = True
-        if is_eval_step:
-            future_steps.append(min(int(future_update * steps_per_update), int(total_timesteps)))
-
-    # Always include the configured budget endpoint, even when total_timesteps
-    # is not exactly divisible by the PPO update size or the final update was
-    # already included above.
-    if future_steps and future_steps[-1] != int(total_timesteps):
-        future_steps.append(int(total_timesteps))
-    elif not future_steps and int(trigger_update * steps_per_update) < int(total_timesteps):
-        future_steps.append(int(total_timesteps))
-
-    if not future_steps:
-        return
-
-    broadcast_logs = {
-        **eval_logs,
-        "eval/curriculum_early_stop_broadcast": 1.0,
-    }
-    unique_steps = sorted(set(future_steps))
-    for step in unique_steps:
-        wandb_run.log(broadcast_logs, step=step)
-
-    print(
-        f"  [wandb-carry-forward] broadcast final eval metrics to "
-        f"{len(unique_steps)} future W&B step(s), through step {unique_steps[-1]:,}."
-    )
-
 
 # ---------------------------------------------------------------------------
 # Auto-reset step factory
@@ -208,6 +104,7 @@ def _make_autoreset_step(
     max_steps: int,
     hold_chain_for: int = 0,
     terminate_on_target_found: bool = False,
+    no_movement_termination_steps: int = 50,
     success_bonus: float = 0.0,
 ):
     """
@@ -217,6 +114,7 @@ def _make_autoreset_step(
       * time_up        : new_state.physics.step >= max_steps
       * fully_connected: the chain is closed and held for `hold_chain_for` timesteps (success)
       * target_found   : target is found/delivered (if terminate_on_target_found is True)
+      * no_movement    : no agent has displaced by movement_epsilon for the configured number of steps
 
     Returns
     -------
@@ -226,6 +124,7 @@ def _make_autoreset_step(
     max_steps_jnp = jnp.int32(max_steps)
     hold_chain_for_jnp = jnp.int32(hold_chain_for)
     terminate_on_target_found_jnp = jnp.bool_(terminate_on_target_found)
+    no_movement_termination_steps_jnp = jnp.int32(no_movement_termination_steps)
     success_bonus_jnp = jnp.float32(success_bonus)
 
     def step(state, actions):
@@ -253,7 +152,16 @@ def _make_autoreset_step(
         success_achieved = new_chain_held_steps >= (hold_chain_for_jnp + jnp.int32(1))
         
         target_found = info["global_target_found"] > jnp.float32(0.5)
-        done = time_up | success_achieved | (terminate_on_target_found_jnp & target_found)
+        idle_terminated = (
+            new_state.physics.stationary_steps
+            >= no_movement_termination_steps_jnp
+        )
+        done = (
+            time_up
+            | success_achieved
+            | (terminate_on_target_found_jnp & target_found)
+            | idle_terminated
+        )
 
         reward_terminal = success_bonus_jnp / reward.shape[0]
         extra_bonus = jnp.where(
@@ -272,6 +180,7 @@ def _make_autoreset_step(
         # Override key fields in info dict to reflect hold status and terminal target data
         info = {
             **info,
+            "idle_terminated": idle_terminated,
             "fully_connected": success_achieved.astype(jnp.float32),
             "terminal_target_pos": new_state.physics.target_pos,
             "terminal_delivered": new_state.communication.base_target_known,
@@ -822,6 +731,9 @@ def train(cfg: DictConfig):
 
     hold_chain_for   = int(cfg.env.get("hold_chain_for", 0))
     terminate_on_target_found = bool(cfg.env.get("terminate_on_target_found", False))
+    no_movement_termination_steps = int(
+        cfg.env.get("no_movement_termination_steps", 50)
+    )
     autoreset_step = _make_autoreset_step(
         env_step,
         reset,
@@ -829,6 +741,7 @@ def train(cfg: DictConfig):
         max_steps,
         hold_chain_for,
         terminate_on_target_found,
+        no_movement_termination_steps,
         float(cfg.reward.success_bonus),
     )
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
@@ -913,27 +826,14 @@ def train(cfg: DictConfig):
     batched_rollout_step_jit = nnx.jit(batched_rollout_step_fn)
 
     # ── Run directory & Name ──────────────────────────────────────────────
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cfg_run_name = cfg.logging.get("run_name", None)
-    use_ts = cfg.logging.get("use_timestamp_postfix", False)
-
-    if not cfg_run_name:
-        run_name = f"run_{ts}"
-    else:
-        run_name = f"{cfg_run_name}_{ts}" if use_ts else cfg_run_name
-
-    log_root = Path(cfg.logging.get("log_dir", "outputs")).absolute()
-    run_dir  = log_root / run_name
-    configured_ckpt_dir = cfg.evaluation.get("checkpoint_dir", None)
-    ckpt_dir = (
-        Path(str(configured_ckpt_dir).replace("\\", "/")).absolute()
-        if configured_ckpt_dir
-        else run_dir / "checkpoints"
-    )
-    train_artifacts = train_artifact_root(run_dir)
-    train_video_dir = train_artifacts / "vids"
-    train_data_dir = train_artifacts / "data"
-    train_manifest_dir = train_artifacts / "manifests"
+    layout = resolve_run_layout(cfg.logging, cfg.evaluation, media_dir="vids")
+    run_name = layout.run_name
+    run_dir = layout.run_dir
+    ckpt_dir = layout.checkpoint_dir
+    train_artifacts = layout.train_artifact_dir
+    train_video_dir = layout.train_media_dir
+    train_data_dir = layout.train_data_dir
+    train_manifest_dir = layout.train_manifest_dir
     eval_video_dir = run_dir / "artifacts" / "eval" / "early" / "vids"
     run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -949,7 +849,7 @@ def train(cfg: DictConfig):
     print(f"  Run dir      : {run_dir}")
 
     # ── W&B ──────────────────────────────────────────────────────────────
-    wandb_run = _init_wandb(cfg, run_name, run_dir)
+    wandb_run = init_wandb(cfg.logging, cfg.training, run_name, run_dir, OmegaConf.to_container(cfg, resolve=True))
     if wandb_run:
         print(f"  W&B run      : {wandb_run.url}")
 
@@ -1008,6 +908,10 @@ def train(cfg: DictConfig):
 
     start_update = 0
     loading_mode = cfg.training.get("ckpt_loading_mode", "branch").lower()
+    if loading_mode not in {"resume", "branch", "init"}:
+        raise ValueError(
+            "training.ckpt_loading_mode must be 'resume', 'branch', or 'init'."
+        )
 
     loaded_history = []
     total_checkpoint_steps = 0
@@ -1026,6 +930,8 @@ def train(cfg: DictConfig):
                 if loading_mode == "resume":
                     start_update = int(match.group(1))
                     print(f"  [resumption] Resuming from update {start_update} (step {start_update * E * T:,})")
+                elif loading_mode == "init":
+                    print(f"  [checkpoint-init] Loaded weights from {path_name}; counters and history start at zero")
                 else:
                     print(f"  [checkpoint-load] Loaded weights from {path_name}, but training will start at update 0 (loading_mode=branch)")
         except Exception as e:
@@ -1033,7 +939,7 @@ def train(cfg: DictConfig):
 
         # Load history
         history_file = checkpoint_path / "step_history.json"
-        if history_file.exists():
+        if loading_mode != "init" and history_file.exists():
             try:
                 import json
                 with open(history_file, "r") as f:
@@ -1044,7 +950,7 @@ def train(cfg: DictConfig):
             except Exception as e:
                 print(f"  [checkpoint-history] Failed to load step_history.json: {e}")
                 
-        if not loaded_history or total_checkpoint_steps == 0:
+        if loading_mode != "init" and (not loaded_history or total_checkpoint_steps == 0):
             # Fallback to name parsing if no history file exists
             try:
                 import re
@@ -1077,7 +983,10 @@ def train(cfg: DictConfig):
 
     # Manual offset override
     manual_offset = cfg.training.get("checkpoint_step_offset", None)
-    if manual_offset is not None:
+    if loading_mode == "init":
+        step_offset = 0
+        print("  [ckpt] Init mode: cumulative step offset and checkpoint history reset to zero")
+    elif manual_offset is not None:
         step_offset = int(manual_offset)
         print(f"  [ckpt] Using manual checkpoint_step_offset override: {step_offset:,}")
     else:
@@ -1213,8 +1122,8 @@ def train(cfg: DictConfig):
             eval_min_succ = float(cfg.evaluation.get("eval_min_train_success", 0.0))
             succ_threshold_met = (train_succ_rate >= eval_min_succ) or (update == n_updates)
 
-            is_eval_step = ((update - eval_offset) % eval_every == 0) and update > eval_offset and succ_threshold_met
-            is_video_step = (eval_video and ((update - eval_video_offset) % eval_video_every == 0) and update > eval_video_offset) and succ_threshold_met
+            is_eval_step = schedule_due(update, eval_every, eval_offset) and succ_threshold_met
+            is_video_step = eval_video and schedule_due(update, eval_video_every, eval_video_offset) and succ_threshold_met
             if update == n_updates:
                 # Run the same train-eval artifact path one final time instead of
                 # using a separate special final-eval renderer/output folder.
@@ -1338,12 +1247,12 @@ def train(cfg: DictConfig):
                                 del ep_states_list, ep_rewards_list, all_metrics_list
                                 release_video_evaluation_trajectory()
                                 time.sleep(1.0)
-                            _broadcast_eval_metrics_to_remaining_wandb_steps(
+                            broadcast_early_stop_metrics(
                                 wandb_run=wandb_run,
-                                cfg=cfg,
+                                evaluation=cfg.evaluation,
                                 eval_logs=eval_wandb_logs,
                                 trigger_update=update,
-                                n_updates=n_updates,
+                                num_updates=n_updates,
                                 steps_per_update=E * T,
                                 total_timesteps=total_ts,
                             )
@@ -1377,7 +1286,7 @@ def train(cfg: DictConfig):
             # other scheduled training eval.
 
             # ── Checkpoint ────────────────────────────────────────────────────
-            is_ckpt_step = ((update - ckpt_offset) % ckpt_every == 0)
+            is_ckpt_step = schedule_due(update, ckpt_every, ckpt_offset)
             if save_model and not is_benchmark and is_ckpt_step:
                 ckpt_path = (ckpt_dir / f"ckpt_{update:06d}").absolute()
                 save_model_checkpoint(
