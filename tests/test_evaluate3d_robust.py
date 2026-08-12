@@ -24,9 +24,20 @@ def test_diverse_successes_balance_chain_length_and_spatial_separation():
         "positions": np.asarray([[0, 0, 0], [0.1, 0, 0], [10, 0, 0], [0, 10, 0]]),
         "final_chain_length": np.asarray([100.0, 99.0, 95.0, 94.0]),
     }
-    selected = diverse_success_lanes(records, np.arange(4))
+    selected = diverse_success_lanes(records, np.arange(4), limit=3)
+    assert selected.shape == (3,)
     assert selected[0] == 0
     assert set(selected[:3]) == {0, 2, 3}
+
+
+def test_diverse_success_selection_does_not_rank_all_4000_lanes():
+    records = {
+        "positions": np.random.default_rng(1).uniform(size=(4000, 3)),
+        "final_chain_length": np.arange(4000, dtype=np.float32),
+    }
+    selected = diverse_success_lanes(records, np.arange(4000), limit=3)
+    assert selected.shape == (3,)
+    assert selected[0] == 3999
 
 
 def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(

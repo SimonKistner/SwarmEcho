@@ -360,7 +360,9 @@ def select_eval_target_with_lane(
     else:
         raise ValueError("result must be success or fail.")
     if label == "SUCCESS":
-        candidate_lanes = diverse_success_lanes(records, candidate_lanes)
+        candidate_lanes = diverse_success_lanes(
+            records, candidate_lanes, limit=offset + 1
+        )
     if offset >= len(candidate_lanes):
         raise ValueError(
             f"Requested {label}_{offset}, but {info_path.name} contains only "
@@ -381,27 +383,36 @@ def eval_layout_for_csv(info_path: Path) -> tuple[np.ndarray | None, np.ndarray 
     return load_eval_layout(info_path.parent / layout_file) if layout_file else (None, None)
 
 
-def diverse_success_lanes(records: dict[str, np.ndarray], lanes: np.ndarray) -> np.ndarray:
-    """Greedily balance long chains with spatially distinct representatives."""
+def diverse_success_lanes(
+    records: dict[str, np.ndarray], lanes: np.ndarray, *, limit: int | None = None
+) -> np.ndarray:
+    """Select at most ``limit`` long, spatially distinct representatives."""
     lanes = np.asarray(lanes, dtype=np.int64)
-    if len(lanes) < 2:
+    selection_count = min(len(lanes), len(lanes) if limit is None else limit)
+    if selection_count == 0:
         return lanes
     positions = records["positions"][lanes]
     lengths = records["final_chain_length"][lanes]
     length_span = float(np.ptp(lengths))
     length_score = ((lengths - np.min(lengths)) / length_span) if length_span else np.ones(len(lanes))
     world_span = float(np.linalg.norm(np.ptp(positions, axis=0))) or 1.0
-    remaining = list(range(len(lanes)))
-    selected = [remaining.pop(int(np.argmax(length_score)))]
-    while remaining:
-        scores = []
-        for index in remaining:
-            separation = min(
-                float(np.linalg.norm(positions[index] - positions[chosen])) / world_span
-                for chosen in selected
-            )
-            scores.append(0.35 * length_score[index] + 0.65 * separation)
-        selected.append(remaining.pop(int(np.argmax(scores))))
+    selected = [int(np.argmax(length_score))]
+    if selection_count == 1:
+        return lanes[np.asarray(selected)]
+    available = np.ones(len(lanes), dtype=bool)
+    available[selected[0]] = False
+    nearest_separation = np.linalg.norm(
+        positions - positions[selected[0]], axis=1
+    ) / world_span
+    while len(selected) < selection_count:
+        score = 0.35 * length_score + 0.65 * nearest_separation
+        choice = int(np.argmax(np.where(available, score, -np.inf)))
+        selected.append(choice)
+        available[choice] = False
+        nearest_separation = np.minimum(
+            nearest_separation,
+            np.linalg.norm(positions - positions[choice], axis=1) / world_span,
+        )
     return lanes[np.asarray(selected)]
 
 
@@ -421,7 +432,7 @@ def render_csv_replays(
     horizon = min(max_steps or level.env.max_steps, level.env.max_steps)
     print(
         f"[REPLAY] using {source_csv} for {replay_count} replay(s); "
-        f"first replay may compile JAX...", flush=True,
+        "selecting spatially diverse representatives...", flush=True,
     )
     for replay_number in range(replay_count):
         selection_offset = start_offset + replay_number
