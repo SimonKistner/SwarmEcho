@@ -46,6 +46,9 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="showVisualRange"' in HTML
     assert 'id="showCommRange"' in HTML
     assert 'id="refreshReplays"' in HTML
+    assert 'id="refreshCurrent"' in HTML
+    assert "function refreshCurrent()" in HTML
+    assert "cache:'no-store'" in HTML
     assert 'id="heatmapConfidence"' in HTML
     assert 'id="heatmapConfidenceValue">100%' in HTML
     assert "function heatmapStage(index)" in HTML
