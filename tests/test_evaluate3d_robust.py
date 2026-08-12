@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,6 +10,13 @@ from swarmecho.training.evaluate3d import (
     run_parallel_evaluation_3d,
     select_eval_target_with_lane,
 )
+
+
+def test_replay_only_cli_has_progress_logging_and_no_subprocess_duplication():
+    source = Path("src/swarmecho/training/evaluate3d.py").read_text()
+    assert "def render_csv_replays(" in source
+    assert "[REPLAY {replay_number + 1}/{replay_count}]" in source
+    assert "subprocess.run" not in source
 
 
 def test_diverse_successes_balance_chain_length_and_spatial_separation():

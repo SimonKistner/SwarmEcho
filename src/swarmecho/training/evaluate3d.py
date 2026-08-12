@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -406,6 +405,78 @@ def diverse_success_lanes(records: dict[str, np.ndarray], lanes: np.ndarray) -> 
     return lanes[np.asarray(selected)]
 
 
+def render_csv_replays(
+    model, level, checkpoint: Path, run_dir: Path, *, result: str,
+    replay_count: int, start_offset: int = 0, max_steps: int | None = None,
+) -> None:
+    """Render selected CSV lanes without retaining the 4k evaluation batch."""
+    source_csv = find_nearest_eval_info_csv(run_dir, checkpoint, level)
+    if source_csv is None:
+        raise FileNotFoundError(
+            "No evaluation CSV was found. Run mode=parallel before replay-only mode."
+        )
+    records = load_eval_info_csv(source_csv)
+    shared_min, shared_max = eval_layout_for_csv(source_csv)
+    artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
+    horizon = min(max_steps or level.env.max_steps, level.env.max_steps)
+    print(
+        f"[REPLAY] using {source_csv} for {replay_count} replay(s); "
+        f"first replay may compile JAX...", flush=True,
+    )
+    for replay_number in range(replay_count):
+        selection_offset = start_offset + replay_number
+        target, replay_tag, lane = select_eval_target_with_lane(
+            source_csv, result=result, offset=selection_offset
+        )
+        obstacle_min, obstacle_max = shared_min, shared_max
+        if obstacle_min is None and records["obstacle_min"].shape[1]:
+            obstacle_min = records["obstacle_min"][lane]
+            obstacle_max = records["obstacle_max"][lane]
+        print(
+            f"[REPLAY {replay_number + 1}/{replay_count}] {replay_tag}, lane={lane}, "
+            f"target=({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}); "
+            f"collecting up to {horizon} steps...", flush=True,
+        )
+        started = time.perf_counter()
+        states, rewards = evaluate_model_3d(
+            model, level, max_steps=max_steps, target_position=target,
+            obstacle_min=obstacle_min, obstacle_max=obstacle_max,
+        )
+        print(
+            f"[REPLAY {replay_number + 1}/{replay_count}] collected "
+            f"{len(states) - 1} steps in {time.perf_counter() - started:.1f}s; "
+            "compressing archive...", flush=True,
+        )
+        output = eval_checkpoint_replay_root(run_dir, checkpoint, level) / (
+            f"eval_{artifact_tag}_{replay_tag}"
+        )
+        _, manifest = write_replay(
+            output, states, map_name=level.building_name, dt=level.env.dt,
+            reward_terms=rewards,
+            metadata={
+                "world_size_m": level.building.world_size_m.tolist(),
+                "cell_size_m": level.building.cell_size_m,
+                "coverage_voxel_size_m": level.building.cell_size_m
+                if level.env.coverage_voxel_size is None
+                else level.env.coverage_voxel_size,
+                "comm_radius_m": level.env.comm_radius,
+                "comm_radius_base_m": level.env.comm_radius_base,
+                "visual_radius_m": level.env.visual_radius,
+                "checkpoint": str(checkpoint),
+                "target_source_csv": str(source_csv),
+                "target_selection": replay_tag,
+                "replay_execution": "single",
+                "replay_source_lane": lane,
+                "selected_target_position": target.tolist(),
+                "artifact_scope": "eval",
+            },
+        )
+        print(
+            f"[REPLAY {replay_number + 1}/{replay_count}] ready: {manifest}",
+            flush=True,
+        )
+
+
 def main() -> None:
     checkpoint: Path | None = None
     output: Path | None = None
@@ -503,16 +574,24 @@ def main() -> None:
         # Parallel mode is independent of selective arguments unless
         # replay_after=true requests the combined workflow.
         if replay_after:
-            for replay_index in range(replay_count):
-                subprocess.run([
-                    sys.executable, "-m", "swarmecho.training.evaluate3d",
-                    f"checkpoint={checkpoint}", "mode=selective_auto_pick",
-                    f"result={result}", f"offset={replay_index}",
-                    *config_arguments,
-                ], check=True)
+            print(
+                "[EVAL] evaluation artifacts complete; releasing batched results "
+                "and starting replay rendering in this process...", flush=True,
+            )
+            render_csv_replays(
+                model, level, checkpoint, run_dir, result=result,
+                replay_count=replay_count, start_offset=offset, max_steps=max_steps,
+            )
             return
         else:
             return
+
+    if mode == "selective_auto_pick" and replay_execution == "single":
+        render_csv_replays(
+            model, level, checkpoint, run_dir, result=result,
+            replay_count=replay_count, start_offset=offset, max_steps=max_steps,
+        )
+        return
 
     selected_target: np.ndarray | None = None
     selected_obstacle_min: np.ndarray | None = None

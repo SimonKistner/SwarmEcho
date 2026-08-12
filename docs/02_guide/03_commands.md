@@ -41,6 +41,17 @@ uv run swarmecho-inspect-3d root=outputs
 
 Use `replays=1` for only the longest representative.
 
+If the robustness CSV already exists, skip the 4,000-environment evaluation and
+render only the selected replays:
+
+```bash
+uv run swarmecho-evaluate-3d \
+  checkpoint="$CHECKPOINT" \
+  mode=selective_auto_pick \
+  result=success \
+  replays=3
+```
+
 ---
 
 ## Environment Setup & Smoke Tests
