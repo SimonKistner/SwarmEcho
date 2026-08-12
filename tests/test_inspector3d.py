@@ -53,12 +53,18 @@ def test_inspector_payload_and_controls(tmp_path):
     assert "cache:'no-store'" in HTML
     assert 'id="autoRotate"' in HTML
     assert 'id="rotateSpeed"' in HTML
+    assert 'id="cameraElevation"' in HTML
+    assert 'id="cameraElevationValue"' in HTML
     assert 'id="loopReplay"' in HTML
     assert 'id="fixedBounds"' not in HTML
     assert "function rotateCamera(timestamp)" in HTML
-    assert "rangeRadius=mode==='replay'" in HTML
-    assert "autorange:false" in HTML
+    assert "rangeRadius=mode==='replay'" not in HTML
+    assert "autorange:false" not in HTML
+    assert "aspectmode:'data'" in HTML
     assert "function rememberCamera()" in HTML
+    assert "function renderPlot(" in HTML
+    assert "if(rendering)" in HTML
+    assert "draw(frame>=last?0:frame+1).finally" in HTML
     assert "frame>=last&&!$('loopReplay').checked" in HTML
     assert "z:.75" in HTML
     assert 'id="heatmapConfidence"' in HTML
