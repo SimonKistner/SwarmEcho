@@ -372,6 +372,31 @@ def select_eval_target_with_lane(
     return positions[lane], f"{label}_{offset}", lane
 
 
+def select_eval_replay_lanes(
+    records: dict[str, np.ndarray], *, result: str, count: int, start_offset: int = 0
+) -> tuple[np.ndarray, str]:
+    """Select replay configurations using only persisted CSV metrics."""
+    normalized = result.lower()
+    if normalized in {"success", "successful"}:
+        lanes = np.flatnonzero(records["stages"] == "chain_success")
+        label = "SUCCESS"
+        lanes = diverse_success_lanes(
+            records, lanes, limit=min(len(lanes), start_offset + count)
+        )
+    elif normalized in {"fail", "failure", "failed"}:
+        lanes = np.flatnonzero(records["stages"] != "chain_success")
+        label = "FAIL"
+    else:
+        raise ValueError("result must be success or fail.")
+    selected = lanes[start_offset:start_offset + count]
+    if len(selected) != count:
+        raise ValueError(
+            f"Requested {count} {label} replay(s) starting at {start_offset}, "
+            f"but only {len(lanes)} matching CSV rows exist."
+        )
+    return selected, label
+
+
 def eval_layout_for_csv(info_path: Path) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Load the shared layout referenced by a heatmap sidecar, if present."""
     sidecar = info_path.with_suffix(".heatmap.json")
@@ -434,11 +459,24 @@ def render_csv_replays(
         f"[REPLAY] using {source_csv} for {replay_count} replay(s); "
         "selecting spatially diverse representatives...", flush=True,
     )
-    for replay_number in range(replay_count):
+    selected_lanes, label = select_eval_replay_lanes(
+        records, result=result, count=replay_count, start_offset=start_offset
+    )
+    selection_summary = ", ".join(
+        f"lane {lane}: {records['final_chain_length'][lane]:.2f}m @ "
+        f"({records['positions'][lane, 0]:.2f}, {records['positions'][lane, 1]:.2f}, "
+        f"{records['positions'][lane, 2]:.2f})"
+        for lane in selected_lanes
+    )
+    print(
+        f"[REPLAY] selected from CSV chain lengths and target positions: "
+        f"{selection_summary}", flush=True,
+    )
+    for replay_number, lane_value in enumerate(selected_lanes):
+        lane = int(lane_value)
         selection_offset = start_offset + replay_number
-        target, replay_tag, lane = select_eval_target_with_lane(
-            source_csv, result=result, offset=selection_offset
-        )
+        target = records["positions"][lane]
+        replay_tag = f"{label}_{selection_offset}"
         obstacle_min, obstacle_max = shared_min, shared_max
         if obstacle_min is None and records["obstacle_min"].shape[1]:
             obstacle_min = records["obstacle_min"][lane]

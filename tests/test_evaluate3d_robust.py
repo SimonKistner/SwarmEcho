@@ -8,6 +8,7 @@ from swarmecho.training.artifacts import save_eval_info_csv
 from swarmecho.training.evaluate3d import (
     diverse_success_lanes,
     run_parallel_evaluation_3d,
+    select_eval_replay_lanes,
     select_eval_target_with_lane,
 )
 
@@ -38,6 +39,17 @@ def test_diverse_success_selection_does_not_rank_all_4000_lanes():
     selected = diverse_success_lanes(records, np.arange(4000), limit=3)
     assert selected.shape == (3,)
     assert selected[0] == 3999
+
+
+def test_replay_configs_are_selected_only_from_csv_metrics():
+    records = {
+        "positions": np.asarray([[0, 0, 0], [0.1, 0, 0], [10, 0, 0], [0, 10, 0]]),
+        "final_chain_length": np.asarray([100.0, 99.0, 95.0, 94.0]),
+        "stages": np.asarray(["chain_success"] * 4),
+    }
+    lanes, label = select_eval_replay_lanes(records, result="success", count=3)
+    assert label == "SUCCESS"
+    assert lanes.tolist() == [0, 2, 3]
 
 
 def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(

@@ -27,6 +27,10 @@ Obstacle levels automatically use their configured static layout for all 4,000
 targets and store that layout once beside the target CSV. Replay candidates are
 100%-agreement successes across the robustness runs. `replays=N` greedily
 balances final chain length with spatial separation.
+Selection is performed entirely from the completed CSV's target positions,
+unanimous outcome stage, and final chain lengths. Only those selected target
+and shared-layout configurations are subsequently simulated and recorded as
+replays; the 4,000 evaluation episodes are not recorded.
 
 ```bash
 CHECKPOINT=outputs/<run>/checkpoints/ckpt_<update>
