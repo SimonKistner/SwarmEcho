@@ -49,6 +49,10 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="refreshCurrent"' in HTML
     assert "function refreshCurrent()" in HTML
     assert "cache:'no-store'" in HTML
+    assert 'id="autoRotate"' in HTML
+    assert 'id="rotateSpeed"' in HTML
+    assert "function rotateCamera(timestamp)" in HTML
+    assert "range:[0,maximum],autorange:false" in HTML
     assert 'id="heatmapConfidence"' in HTML
     assert 'id="heatmapConfidenceValue">100%' in HTML
     assert "function heatmapStage(index)" in HTML
