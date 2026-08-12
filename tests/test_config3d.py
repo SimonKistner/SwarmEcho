@@ -14,18 +14,18 @@ from swarmecho.training.artifacts import (
 def test_baseline_level_is_strict_and_solvable():
     level = load_level_3d()
     assert level.name == "M00_no_maze_open_cuboid_3D"
-    assert level.env.radar_bins == 8
+    assert level.env.radar_bins == 16
     assert level.env.num_agents == 4
     assert level.env.max_steps == 700
     assert level.env.coverage_voxel_size == 2.5
     assert level.map_names == ["M00_no_maze_open_cuboid"]
-    assert level.training.total_timesteps == 500_000_000
+    assert level.training.total_timesteps == 400_000_000
     assert level.training.num_envs == 4000
     assert level.training.num_steps == 100
     assert level.training.num_epochs == 4
     assert level.training.num_minibatches == 20
-    assert not level.training.training_noise
-    assert level.training.noise_level == level.evaluation.eval_action_noise_max
+    assert level.training.training_noise
+    assert level.training.noise_level == 0.015
     assert level.network.actor_memory
     assert level.evaluation.eval_parallel_envs == 4000
     assert level.evaluation.eval_robustness_runs == 5
@@ -35,13 +35,24 @@ def test_baseline_level_is_strict_and_solvable():
 
 
 def test_tall_level_adds_two_solvable_spawn_layers():
-    level = load_level_3d("M00_no_maze_open_cuboid_tall_3D")
+    level = load_level_3d("M01_no_maze_open_cuboid_tall_3D")
     assert level.building.target_exclusion.shape == (4, 4, 6)
     assert level.building.target_exclusion[:, :, :2].all()
     assert not level.building.target_exclusion[:, :, 2:].any()
     assert level.env.num_agents == 4
     assert level.env.max_steps == 700
     assert level.ideal_chain_margin_m > 0
+
+
+def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
+    open_level = load_level_3d("M01_no_maze_open_cuboid_tall_3D")
+    obstacle_level = load_level_3d("M02_random_cuboid_obstacles_3D")
+    assert open_level.env.num_obstacles == 0
+    assert open_level.reward.chain_reward_system == "euclidean"
+    assert obstacle_level.env.num_obstacles == 3
+    assert obstacle_level.reward.chain_reward_system == "obstacle_geodesic"
+    assert obstacle_level.env.obstacle_layout_version == "three_aabb_v1"
+    assert len(obstacle_level.evaluation.eval_fixed_obstacle_bounds) == 3
 
 
 def test_unknown_3d_environment_parameter_is_rejected(tmp_path):

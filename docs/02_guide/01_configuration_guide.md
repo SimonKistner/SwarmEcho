@@ -153,3 +153,10 @@ The retained level and map sequence is:
 
 `M04_tiny_grid_maze_CORE_ONLY_TEST` remains a dedicated core validation
 profile and uses the retained `M01_small_maze` map.
+### 3D obstacle evaluation
+
+When `env.num_obstacles > 0`, evaluation automatically uses one static layout
+for every independently sampled target. Define handcrafted cuboids with
+`evaluation.eval_fixed_obstacle_bounds` entries in
+`[min_x,min_y,min_z,max_x,max_y,max_z]` order. The target CSV stores only
+per-target results; one adjacent layout JSON stores the shared cuboids.

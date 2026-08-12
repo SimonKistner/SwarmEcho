@@ -3,7 +3,22 @@ from types import SimpleNamespace
 import numpy as np
 
 from swarmecho.training.artifacts import load_eval_info_csv
-from swarmecho.training.evaluate3d import run_parallel_evaluation_3d
+from swarmecho.training.artifacts import save_eval_info_csv
+from swarmecho.training.evaluate3d import (
+    diverse_success_lanes,
+    run_parallel_evaluation_3d,
+    select_eval_target_with_lane,
+)
+
+
+def test_diverse_successes_balance_chain_length_and_spatial_separation():
+    records = {
+        "positions": np.asarray([[0, 0, 0], [0.1, 0, 0], [10, 0, 0], [0, 10, 0]]),
+        "final_chain_length": np.asarray([100.0, 99.0, 95.0, 94.0]),
+    }
+    selected = diverse_success_lanes(records, np.arange(4))
+    assert selected[0] == 0
+    assert set(selected[:3]) == {0, 2, 3}
 
 
 def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
@@ -40,6 +55,9 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
             "successes": successes,
             "delivered": successes.copy(),
             "visually_found": np.ones(2, dtype=bool),
+            "final_chain_lengths": np.asarray([7.0, 8.0]),
+            "obstacle_min": np.empty((2, 0, 3), dtype=np.float32),
+            "obstacle_max": np.empty((2, 0, 3), dtype=np.float32),
         }
 
     monkeypatch.setattr(
@@ -67,3 +85,19 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
     )
     np.testing.assert_allclose(records["visually_found_rate"], [1.0, 1.0])
     assert records["stages"].tolist() == ["visually_found", "chain_success"]
+
+
+def test_successful_replay_priority_uses_final_chain_length(tmp_path):
+    path = save_eval_info_csv(
+        tmp_path / "eval.csv",
+        target_positions=np.asarray([[20, 0, 0], [10, 0, 0]], dtype=np.float32),
+        base_positions=np.zeros((2, 3), dtype=np.float32),
+        successes=[True, True], delivered=[True, True], visually_found=[True, True],
+        final_chain_lengths=[21.0, 30.0],
+    )
+    target, label, lane = select_eval_target_with_lane(
+        path, result="success", offset=0
+    )
+    assert label == "SUCCESS_0"
+    assert lane == 1
+    np.testing.assert_allclose(target, [10, 0, 0])

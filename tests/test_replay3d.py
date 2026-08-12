@@ -38,6 +38,7 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     assert arrays["position"].shape == (4, cfg.num_agents, 3)
     assert arrays["coverage"].shape == (4, 4, 4, 4)
     assert arrays["reward_terms"].shape == (4, cfg.num_agents, 2)
+    assert arrays["obstacle_min"].shape == (4, 0, 3)
 
 
 def test_replay_rejects_unknown_format(tmp_path):
