@@ -45,6 +45,8 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="showCoverage"' in HTML
     assert 'id="showVisualRange"' in HTML
     assert 'id="showCommRange"' in HTML
+    assert 'id="showVisualRange" type="checkbox" checked' not in HTML
+    assert 'id="showCommRange" type="checkbox" checked' not in HTML
     assert 'id="refreshReplays"' in HTML
     assert 'id="refreshCurrent"' in HTML
     assert "function refreshCurrent()" in HTML
@@ -52,10 +54,11 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="autoRotate"' in HTML
     assert 'id="rotateSpeed"' in HTML
     assert 'id="loopReplay"' in HTML
-    assert 'id="fixedBounds"' in HTML
+    assert 'id="fixedBounds"' not in HTML
     assert "function rotateCamera(timestamp)" in HTML
-    assert "fixed=$('fixedBounds')?.checked" in HTML
-    assert "autorange:true" in HTML
+    assert "rangeRadius=mode==='replay'" in HTML
+    assert "autorange:false" in HTML
+    assert "function rememberCamera()" in HTML
     assert "frame>=last&&!$('loopReplay').checked" in HTML
     assert "z:.75" in HTML
     assert 'id="heatmapConfidence"' in HTML
