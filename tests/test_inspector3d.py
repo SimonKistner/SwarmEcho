@@ -51,10 +51,13 @@ def test_inspector_payload_and_controls(tmp_path):
     assert "cache:'no-store'" in HTML
     assert 'id="autoRotate"' in HTML
     assert 'id="rotateSpeed"' in HTML
+    assert 'id="loopReplay"' in HTML
     assert 'id="fixedBounds"' in HTML
     assert "function rotateCamera(timestamp)" in HTML
     assert "fixed=$('fixedBounds')?.checked" in HTML
     assert "autorange:true" in HTML
+    assert "frame>=last&&!$('loopReplay').checked" in HTML
+    assert "z:.75" in HTML
     assert 'id="heatmapConfidence"' in HTML
     assert 'id="heatmapConfidenceValue">100%' in HTML
     assert "function heatmapStage(index)" in HTML
