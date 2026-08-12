@@ -35,7 +35,7 @@ def generate(destination: str | Path = "outputs/testresults/obstacles.roadmap.js
     cfg, building = level.env, level.building
     world = np.asarray(building.world_size_m)
     layouts = []
-    for layout_index in range(5):
+    for layout_index in range(10):
         lower, upper = generate_obstacles(
             jax.random.PRNGKey(9000 + layout_index), world,
             count=cfg.num_obstacles, size_min=cfg.obstacle_size_min_m,
