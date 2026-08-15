@@ -4,6 +4,59 @@ This document serves as a cheat sheet for all common execution commands in the S
 
 Unless noted otherwise, run all commands from the project root directory.
 
+## HOW TO EVAL 3D
+
+### Design and inspect the static M02 obstacle layout
+
+Edit `EVAL_FIXED_OBSTACLE_BOUNDS` at the top of
+`tools/inspect_obstacle_eval_layout.py`. Each row is exactly
+`(min_x, min_y, min_z, max_x, max_y, max_z)`, the format accepted by
+`evaluation.eval_fixed_obstacle_bounds`. Generate and inspect the cuboids,
+roadmap, and up to five routes:
+
+```bash
+uv run python tools/inspect_obstacle_eval_layout.py
+uv run swarmecho-inspect-3d root=outputs
+```
+
+Copy the edited tuple rows into the M02 level YAML.
+
+### Robust evaluation plus diverse successful replays
+
+Obstacle levels automatically use their configured static layout for all 4,000
+targets and store that layout once beside the target CSV. Replay candidates are
+100%-agreement successes across the robustness runs. `replays=N` greedily
+balances final chain length with spatial separation.
+Selection is performed entirely from the completed CSV's target positions,
+unanimous outcome stage, and final chain lengths. Only those selected target
+and shared-layout configurations are subsequently simulated and recorded as
+replays; the 4,000 evaluation episodes are not recorded.
+
+```bash
+CHECKPOINT=outputs/<run>/checkpoints/ckpt_<update>
+uv run swarmecho-evaluate-3d \
+  checkpoint="$CHECKPOINT" \
+  mode=parallel \
+  replay_after=true \
+  result=success \
+  eval_name=agents7 \
+  replays=3
+uv run swarmecho-inspect-3d root=outputs
+```
+
+Use `replays=1` for only the longest representative.
+
+If the robustness CSV already exists, skip the 4,000-environment evaluation and
+render only the selected replays:
+
+```bash
+uv run swarmecho-evaluate-3d \
+  checkpoint="$CHECKPOINT" \
+  mode=selective_auto_pick \
+  result=success \
+  replays=3
+```
+
 ---
 
 ## Environment Setup & Smoke Tests
@@ -45,6 +98,78 @@ uv run swarmecho-render M03_big_maze --format svg --no-spawns --no-zones
 # Render a snappy simulated GIF preview using a specific level config
 uv run swarmecho-render M01_small_maze --mode gif --level M01_small_maze
 ```
+
+---
+
+## Required pre-training checks
+
+Run these commands from the repository root **before the first training
+command**. Do not start `swarmecho-train-3d` until every automated command exits
+with status 0 and the visual inspection looks correct.
+
+### 1. Focused obstacle, configuration, and inspector tests
+
+```bash
+uv run pytest -q \
+  tests/test_obstacles3d.py \
+  tests/test_config3d.py \
+  tests/test_inspector3d.py
+```
+
+Expected output: pytest reaches `[100%]`, reports `15 passed in ...s`, and
+prints no `FAILED` or `ERROR` section.
+
+### 2. Complete regression suite
+
+```bash
+uv run pytest -q
+```
+
+Expected output: pytest reaches `[100%]` and ends with all tests passed. Tests
+explicitly marked as manual CUDA diagnostics may be reported as skipped; there
+must be no failures or errors.
+
+### 3. Generate the inspectable roadmap fixture
+
+```bash
+uv run python tests/generate_obstacle_roadmap_testresult.py
+```
+
+Expected output:
+
+```text
+outputs/testresults/obstacles.roadmap.json
+```
+
+### 4. Visually inspect the exact generated layouts
+
+```bash
+uv run swarmecho-inspect-3d root=outputs
+```
+
+Expected result: the browser opens without a server error and the artifact
+dropdown contains `TESTRESULT_[Obstacle roadmap]`. Loading it must show five
+selectable layouts, three cuboids per layout, the base and top-layer dummy
+target, roadmap nodes and edges, with shortest path 1 enabled by default and up
+to four additional path toggles. Verify that no displayed path crosses a
+cuboid before continuing.
+
+### 5. Small maintained 3D update validation
+
+```bash
+uv run swarmecho-validate-3d
+```
+
+Expected output: the validation completes one rollout/GAE/MAPPO update, prints
+finite training statistics, and exits successfully without a traceback or
+non-finite-value error.
+
+For M02, each evaluation writes a per-environment randomized-layout CSV and a
+fixed-layout companion CSV suitable for a spatial heatmap. Both CSVs contain
+the obstacle bounds and final physical chain length for every lane. Automatic
+successful replay offsets are ordered by descending final chain length, so
+`offset=0` selects the longest successful relay route rather than the target
+with the greatest straight-line base distance.
 
 ---
 
@@ -122,6 +247,13 @@ directory:
 uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
 ```
 
+After completing the required pre-training checks, train the randomized
+three-cuboid level with its new M02 name:
+
+```bash
+uv run swarmecho-train-3d level=M02_random_cuboid_obstacles_3D
+```
+
 The 3D entry point deliberately uses the same OmegaConf-style `key=value`
 contract as maintained 2D training. For example, the quickest normal-pipeline
 inspector smoke run is:
@@ -145,7 +277,9 @@ during-training evaluations remain unperturbed.
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
 `outputs/<run>/checkpoints/`; scheduled training inspection artifacts live in
 `outputs/<run>/artifacts/train/replays/`; and manual checkpoint evaluations live
-in `outputs/<run>/artifacts/eval/ckpt_<update-and-steps>/replays/`. A 3D replay
+in `outputs/<run>/artifacts/eval/ckpt_<update-and-steps>/eval_<timestamp>/replays/`.
+Every manual evaluator invocation creates its own `eval_<timestamp>` folder;
+use `eval_name=<label>` to name it `eval_<label>_<timestamp>`. A 3D replay
 occupies the role of a 2D MP4 and uses the same canonical
 `u<update>_s<environment-steps>` suffix. There is intentionally no special
 `replays/latest.json` path that bypasses this artifact contract.
@@ -222,3 +356,13 @@ backend and devices, compilation and run times, environment steps per second,
 state/observation shapes, ideal chain margin, and device memory statistics when
 the backend exposes them. The `grid` matrix is important: `4x4x4` is only a
 correctness case, while larger entries expose volumetric-coverage scaling.
+## Inspect randomized 3D obstacle roadmaps
+
+Generate five deterministic training-style layouts, their visibility roadmaps,
+and up to five alternative shortest routes per layout, then open the ordinary
+3D inspector. The generated artifact appears as `TESTRESULT_[Obstacle roadmap]`.
+
+```bash
+uv run python tests/generate_obstacle_roadmap_testresult.py
+uv run swarmecho-inspect-3d root=outputs
+```

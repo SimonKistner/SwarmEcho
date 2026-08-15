@@ -1,7 +1,7 @@
 env:
   map_names:
   - M01_no_maze_open_cuboid_tall
-  num_agents: 4
+  num_agents: 7
   max_steps: 700
   no_movement_termination_steps: 50
   visual_radius: 5.0
@@ -16,10 +16,19 @@ env:
   observe_target_vector: false
   observe_base_vector: false
   observe_coverage_probe: true
+  num_obstacles: 3
+  obstacle_size_min_m: 5.0
+  obstacle_size_max_m: 15.0
+  obstacle_spawn_layer_min: 2
+  obstacle_spawn_layer_max: 5
+  obstacle_boundary_buffer_m: 0.5
+  obstacle_target_buffer_m: 0.5
+  obstacle_planning_clearance_m: 0.15
+  obstacle_layout_version: three_aabb_v1
 
 reward:
   target_found_requires_delivery: true
-  chain_reward_system: euclidean
+  chain_reward_system: obstacle_geodesic
   exploration_bonus: 0.25
   finder_bonus: 50.0
   max_gap_penalty: 5.0
@@ -34,7 +43,7 @@ training:
   num_epochs: 4
   num_minibatches: 20
   seed: 6302026950
-  training_noise: true
+  training_noise: false
   noise_level: 0.011
 
 network:
@@ -51,6 +60,10 @@ network:
 
 evaluation:
   eval_parallel_envs: 4000
+  eval_fixed_obstacle_bounds:
+  - [1.0, 5.0, 7.0, 14.0, 15.0, 10.0]
+  - [8.0, 3.0, 13.0, 16.0, 18.0, 15.0]
+  - [7.5, 7.5, 20.0, 12.5, 12.5, 26.0]
   eval_broadcast_on_curriculum_early_stop: false
   early_exit: true
   early_exit_threshold: 0.999

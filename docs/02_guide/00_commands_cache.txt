@@ -1,3 +1,12 @@
+Train:
+
+uv run swarmecho-curriculum-3d \
+  levels=M00_no_maze_open_cuboid_3D,M02_random_cuboid_obstacles_3D \
+  logging.run_name=7agents
+
+
 Eval
 
-uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_added_noise_HR20p_v3_M01\checkpoints\ckpt_000401'
+uv run swarmecho-evaluate-3d mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_random_obstacles_5a_M02\checkpoints\ckpt_000351'
+
+uv run swarmecho-evaluate-3d eval_name=agents7 env.num_agents=7 mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_random_obstacles_5a_M02\checkpoints\ckpt_000351'

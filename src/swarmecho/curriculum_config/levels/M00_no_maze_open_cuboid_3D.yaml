@@ -1,7 +1,7 @@
 env:
   map_names:
   - M00_no_maze_open_cuboid
-  num_agents: 4
+  num_agents: 7
   max_steps: 700
   no_movement_termination_steps: 50
   visual_radius: 5.0
@@ -16,6 +16,7 @@ env:
   observe_target_vector: false
   observe_base_vector: false
   observe_coverage_probe: true
+
 reward:
   target_found_requires_delivery: true
   chain_reward_system: euclidean
@@ -25,6 +26,7 @@ reward:
   collision_penalty: 0.5
   target_found_bonus: 100.0
   success_bonus: 500.0
+
 training:
   total_timesteps: 400000000
   num_envs: 4000
@@ -32,8 +34,9 @@ training:
   num_epochs: 4
   num_minibatches: 20
   seed: 6302026950
-  training_noise: true
+  training_noise: false
   noise_level: 0.015
+
 network:
   num_layers: 3
   actor_num_layers: 3
@@ -45,17 +48,21 @@ network:
   tarmac_sig_dim: 16
   tarmac_val_dim: 32
   tarmac_include_self: false
+
 evaluation:
   eval_parallel_envs: 4000
   eval_broadcast_on_curriculum_early_stop: false
   early_exit: true
-  early_exit_threshold: 0.9
+  early_exit_threshold: 0.99
+
   save_model: true
   checkpoint_freq: 50
   checkpoint_offset: 1
   eval_freq: 30
   eval_offset: 1
+
   eval_not_delivered_or_visually_found_heatmap: false
+
   eval_video: true
   eval_video_freq: 9999999999
   eval_video_offset: 1

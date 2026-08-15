@@ -81,7 +81,7 @@ def _success_zero_index(records: dict[str, np.ndarray]) -> int:
     successful = np.flatnonzero(records["stages"] == "chain_success")
     assert len(successful), "Parallel evaluation did not produce a successful lane."
     ranking = successful[
-        np.argsort(-records["distance_to_base"][successful], kind="stable")
+        np.argsort(-records["final_chain_length"][successful], kind="stable")
     ]
     return int(ranking[0])
 
@@ -380,7 +380,7 @@ def test_parallel_success_replays_identically_step_by_step():
     target = records["positions"][lane]
     print(
         f"[DIAG] CSV SUCCESS_0: lane={lane}; target={target.tolist()}; "
-        f"distance={float(records['distance_to_base'][lane]):.6f}",
+        f"chain_length={float(records['final_chain_length'][lane]):.6f}",
         flush=True,
     )
 
