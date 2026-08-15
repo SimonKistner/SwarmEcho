@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +119,47 @@ def eval_checkpoint_replay_root(
 ) -> Path:
     """Return the replay directory for one checkpoint-scoped 3D evaluation."""
     return eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg) / "replays"
+
+
+_EVAL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def create_eval_run_root(
+    run_dir: str | Path,
+    checkpoint_path: str | Path,
+    cfg: Any,
+    *,
+    eval_name: str | None = None,
+    timestamp_ns: int | None = None,
+) -> Path:
+    """Create one isolated manual-evaluation folder for a checkpoint.
+
+    The normal layout is ``eval_<UTC timestamp>``. A caller-provided label
+    produces ``eval_<label>_<UTC timestamp>``. The directory is created with
+    exclusive semantics so every new evaluation has a distinct destination.
+    ``timestamp_ns`` is only an injection point for deterministic tests.
+    """
+    if eval_name is not None and not _EVAL_NAME_PATTERN.fullmatch(eval_name):
+        raise ValueError(
+            "eval_name must contain only letters, numbers, underscores, and hyphens."
+        )
+
+    value_ns = time.time_ns() if timestamp_ns is None else int(timestamp_ns)
+    seconds, nanoseconds = divmod(value_ns, 1_000_000_000)
+    stamp = datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y%m%dT%H%M%S")
+    timestamp = f"{stamp}_{nanoseconds:09d}Z"
+    prefix = "eval" if eval_name is None else f"eval_{eval_name}"
+    parent = eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg)
+
+    for suffix in range(1_000):
+        postfix = "" if suffix == 0 else f"_{suffix}"
+        candidate = parent / f"{prefix}_{timestamp}{postfix}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError("Could not allocate a unique evaluation-run directory.")
 
 
 def write_manifest(path: str | Path, payload: dict[str, Any]) -> None:

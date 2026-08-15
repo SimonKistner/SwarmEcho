@@ -37,14 +37,14 @@ input[type=range]{width:100%;accent-color:var(--cyan)}select,input[type=text]{wi
 </style></head><body>
 <header><h1><span class="tag">SwarmEcho</span> 3D Inspector</h1><select id="replaySelect" style="width:min(520px,40vw)"></select><button id="loadReplay" type="button" title="Load selected artifact">Load</button><button id="refreshCurrent" type="button" title="Reload only the currently selected artifact from disk">Refresh current</button><button id="refreshReplays" type="button" title="Rediscover all available artifacts">Refresh all</button><span id="loading" class="loading hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="loadingText">Loading...</span></span><span id="replayDiscovery" class="meta"></span><span id="replayName" class="meta"></span><span class="meta">Drag to orbit · wheel to zoom · right-drag to pan</span></header>
 <div id="layout"><div id="scene"></div><aside class="panel">
-<div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><label style="display:block;margin-top:10px"><input id="loopReplay" type="checkbox"> Loop episode</label><div class="label" style="margin-top:16px">Camera</div><label class="layer-control"><span>Elevation</span><span id="cameraElevationValue" class="opacity-value">20°</span></label><input id="cameraElevation" type="range" min="-85" max="85" step="1" value="20" aria-label="Camera elevation in degrees"><label class="layer-control"><span><input id="autoRotate" type="checkbox"> Auto rotate</span><span id="rotateSpeedValue" class="opacity-value">20°/s</span></label><input id="rotateSpeed" type="range" min="-90" max="90" step="1" value="20" aria-label="Camera rotation speed in degrees per second"></div>
+<div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><label style="display:block;margin-top:10px"><input id="loopReplay" type="checkbox"> Loop episode</label><div class="label" style="margin-top:16px">Camera</div><label class="layer-control"><span>Elevation</span><span id="cameraElevationValue" class="opacity-value">4°</span></label><input id="cameraElevation" type="range" min="-85" max="85" step="1" value="4" aria-label="Camera elevation in degrees"><label class="layer-control"><span><input id="autoRotate" type="checkbox" checked> Auto rotate</span><span id="rotateSpeedValue" class="opacity-value">20°/s</span></label><input id="rotateSpeed" type="range" min="-90" max="90" step="1" value="20" aria-label="Camera rotation speed in degrees per second"></div>
 <div class="card"><div class="label">Episode</div><div id="status" class="value">Exploring</div><div class="row"><span>Reward</span><b id="reward">—</b></div><div class="row"><span>Coverage</span><b id="coverage">0%</b></div><div class="row"><span>Known agents</span><b id="known">0</b></div><div class="row"><span>Base connected</span><b id="baseConn">0</b></div><div class="label" style="margin-top:16px">Target known</div><div id="knownList" class="known-list"></div></div>
 <div class="card"><div class="label">Layers</div><label class="layer-control"><span><input id="showCoverage" type="checkbox"> Coverage voxels</span><span id="coverageOpacityValue" class="opacity-value">2%</span></label><input id="coverageOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.02" aria-label="Coverage voxel opacity"><label class="layer-control"><span><input id="showVisualRange" type="checkbox"> Visual range</span><span id="visualOpacityValue" class="opacity-value">4.5%</span></label><input id="visualOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.045" aria-label="Visual range opacity"><label class="layer-control"><span><input id="showCommRange" type="checkbox"> Communication range</span><span id="commOpacityValue" class="opacity-value">2.5%</span></label><input id="commOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.025" aria-label="Communication range opacity"><label><input id="showLinks" type="checkbox" checked> Communication links</label><br><label><input id="showShell" type="checkbox" checked> Transparent shell</label></div>
 <div id="heatmapControls" class="card hidden"><div class="label">Heatmap categories</div><label><input id="heatmapShowChainSuccess" type="checkbox" checked> Chain success</label><br><label><input id="heatmapShowFoundDelivered" type="checkbox" checked> Found and delivered</label><br><label><input id="heatmapShowVisuallyFound" type="checkbox" checked> Visually found</label><br><label><input id="heatmapShowNotFound" type="checkbox" checked> Not found</label><div class="label" style="margin-top:16px">Confidence</div><div class="row"><span>Required agreement</span><b id="heatmapConfidenceValue">100%</b></div><input id="heatmapConfidence" type="range" min="1" max="100" step="1" value="100" aria-label="Required evaluation agreement"><div class="label" style="margin-top:16px">Selected target</div><div id="selectedPoint" class="meta">Click a point to create a replay command.</div><input id="heatmapCommand" type="text" readonly style="margin-top:8px" value=""><button id="copyHeatmapCommand" type="button" style="margin-top:8px">Copy command</button></div>
 <div id="replayLegend" class="card legend"><div class="label">Legend</div><span><i class="dot" style="background:#22d3ee"></i>Drone</span><span><i class="dot" style="background:#60a5fa"></i>Base</span><span><i class="dot" style="background:#fb7185"></i>Target</span><span><i class="dot" style="background:#fb7185"></i>Target-known drone / base</span><span><i class="dot" style="background:#a3e635"></i>Known area highlight</span></div>
 <div id="heatmapLegend" class="card legend hidden"><div class="label">Evaluation result</div><span><i class="dot" style="background:#22c55e"></i>Chain success</span><span><i class="dot" style="background:#3b82f6"></i>Found and delivered</span><span><i class="dot" style="background:#fbbf24"></i>Visually found</span><span><i class="dot" style="background:#ef4444"></i>Not found</span></div>
 </aside></div><script>
-let D,H,mode='replay',frame=0,playing=false,timer=null,camera=null,heatmapAgreement=1,rotationFrame=null,rotationTime=null,rendering=false,renderQueue=Promise.resolve();const $=id=>document.getElementById(id);const DEFAULT_CAMERA={eye:{x:1.45,y:1.45,z:.75},projection:{type:'perspective'}};
+let D,H,mode='replay',frame=0,playing=false,timer=null,camera=null,heatmapAgreement=1,rotationFrame=null,rotationTime=null,rendering=false,renderQueue=Promise.resolve();const $=id=>document.getElementById(id);const DEFAULT_CAMERA={eye:{x:1.45,y:1.45,z:.1433925964},projection:{type:'perspective'}};
 function worldSize(){return D?.manifest?.world_size_m||H?.manifest?.world_size_m||[20,20,20]}
 function sceneAxes(){let axis=title=>({title,gridcolor:'#22304a'});return {xaxis:axis('X'),yaxis:axis('Y'),zaxis:axis('Z')}}
 function sceneLayout(revision){return {bgcolor:'#090e18',uirevision:revision,aspectmode:'data',...sceneAxes(),camera:camera||DEFAULT_CAMERA}}
@@ -71,7 +71,7 @@ function showHeatmapCommand(point,stage){let checkpoint=H.manifest.checkpoint||'
 function heatmapStage(index){if(!H.stage_rates)return H.stages[index];let confidence=heatmapAgreement/(Number(H.manifest.robustness_runs)||1),epsilon=1e-9;if(H.stage_rates.chain_success[index]+epsilon>=confidence)return 'chain_success';if(H.stage_rates.found_and_delivered[index]+epsilon>=confidence)return 'found_and_delivered';if(H.stage_rates.visually_found[index]+epsilon>=confidence)return 'visually_found';return 'not_found'}
 function drawHeatmap(){let traces=[],groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]};H.positions.forEach((point,index)=>{let stage=heatmapStage(index),rates=H.stage_rates?{chain:H.stage_rates.chain_success[index],delivered:H.stage_rates.found_and_delivered[index],visual:H.stage_rates.visually_found[index]}:{chain:Number(stage==='chain_success'),delivered:Number(stage==='chain_success'||stage==='found_and_delivered'),visual:Number(stage!=='not_found')};(groups[stage]||groups.not_found).push({point,stage,rates})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));if(H.obstacle_min?.length&&H.manifest.obstacle_layout_mode==='fixed')H.obstacle_min[0].forEach((lo,i)=>{traces.push(cuboidMesh(lo,H.obstacle_max[0][i]));traces.push(cuboidLines(lo,H.obstacle_max[0][i],'rgba(255,190,100,.8)'))});Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length||!$(HEATMAP_CATEGORY_CONTROLS[stage]).checked)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage,entry.rates.chain,entry.rates.delivered,entry.rates.visual,(H.final_chain_length||[])[H.positions.indexOf(entry.point)]||0]),marker:{size:8,color,opacity:.55,line:{color:'#e5eefc',width:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>chain success=%{customdata[2]:.0%}<br>found and delivered=%{customdata[3]:.0%}<br>visually found=%{customdata[4]:.0%}<br>final chain length=%{customdata[5]:.2f}m<extra>Click to create replay command</extra>'})});return renderPlot(traces,'heatmap-camera',{uirevision:'heatmap-camera',showlegend:false})}
 function updateElevation(){let eye=(camera||DEFAULT_CAMERA).eye,angle=Math.round(Math.atan2(eye.z,Math.hypot(eye.x,eye.y))*180/Math.PI);$('cameraElevation').value=angle;$('cameraElevationValue').textContent=angle+'°'}
-function captureCamera(){rememberCamera();updateElevation();let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){scene.on('plotly_relayout',event=>{if(event['scene.camera']){camera=event['scene.camera'];updateElevation()}});scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}}
+function captureCamera(){rememberCamera();updateElevation();let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){scene.on('plotly_relayout',event=>{if(event['scene.camera']){camera=event['scene.camera'];updateElevation()}});scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}updateAutoRotate()}
 function rememberCamera(){let current=$('scene')._fullLayout?.scene?.camera;if(current)camera=structuredClone(current)}
 function rotateCamera(timestamp){if(!$('autoRotate').checked){rotationFrame=null;rotationTime=null;return}if(rendering){rotationTime=null;rotationFrame=requestAnimationFrame(rotateCamera);return}if(rotationTime===null)rotationTime=timestamp;let elapsed=Math.min((timestamp-rotationTime)/1000,.1),speed=+$('rotateSpeed').value*Math.PI/180,current=camera||structuredClone(DEFAULT_CAMERA),eye=current.eye||DEFAULT_CAMERA.eye,angle=speed*elapsed,cos=Math.cos(angle),sin=Math.sin(angle);camera={...current,eye:{x:eye.x*cos-eye.y*sin,y:eye.x*sin+eye.y*cos,z:eye.z}};rotationTime=timestamp;Plotly.relayout('scene',{'scene.camera':camera});rotationFrame=requestAnimationFrame(rotateCamera)}
 function updateAutoRotate(){if($('autoRotate').checked&&!rotationFrame){rotationTime=null;rotationFrame=requestAnimationFrame(rotateCamera)}else if(!$('autoRotate').checked&&rotationFrame){cancelAnimationFrame(rotationFrame);rotationFrame=null;rotationTime=null}}
@@ -205,6 +205,7 @@ def discover_replays(root: str | Path = "outputs") -> list[Path]:
         "*/artifacts/train/replays",
         "*/artifacts/eval/replays",
         "*/artifacts/eval/*/replays",
+        "*/artifacts/eval/*/eval_*/replays",
     ):
         replay_dirs.update(path for path in root.glob(pattern) if path.is_dir())
     for replay_dir in replay_dirs:
@@ -237,6 +238,7 @@ def discover_heatmaps(root: str | Path = "outputs") -> list[Path]:
     for pattern in (
         "*/artifacts/train/data",
         "*/artifacts/eval/*/data",
+        "*/artifacts/eval/*/eval_*/data",
     ):
         data_dirs.update(path for path in root.glob(pattern) if path.is_dir())
     heatmaps: list[Path] = []
@@ -294,7 +296,12 @@ def replay_label(manifest_path: str | Path) -> str:
     path = Path(manifest_path)
     run_name = _artifact_run_name(path, fallback=path.stem)
     kind = "Target-Replay" if _is_target_replay(path) else "Replay"
-    return _artifact_label(run_name, _replay_steps_label(path), kind)
+    return _artifact_label(
+        run_name,
+        _replay_steps_label(path),
+        kind,
+        eval_name=_artifact_eval_name(path),
+    )
 
 
 def _is_target_replay(manifest_path: str | Path) -> bool:
@@ -318,6 +325,7 @@ def heatmap_label(info_path: str | Path) -> str:
         run_name,
         _replay_steps_label(path),
         f"{scope.upper()} Heatmap",
+        eval_name=_artifact_eval_name(path.with_suffix(".heatmap.json")),
     )
 
 
@@ -350,8 +358,25 @@ def _artifact_run_name(path: Path, *, fallback: str) -> str:
         return path.parent.parent.name if path.parent.name == "replays" else fallback
 
 
-def _artifact_label(run_name: str, steps: str | None, kind: str) -> str:
-    return f"{run_name}_[{steps or 'unknown'}]_[{kind}]"
+def _artifact_eval_name(path: Path) -> str | None:
+    """Read the optional human evaluation label without exposing timestamps."""
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = metadata.get("eval_name") if isinstance(metadata, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _artifact_label(
+    run_name: str,
+    steps: str | None,
+    kind: str,
+    *,
+    eval_name: str | None = None,
+) -> str:
+    label = f"{run_name}_[{steps or 'unknown'}]_[{kind}]"
+    return f"{label}_[{eval_name}]" if eval_name else label
 
 
 def make_handler(

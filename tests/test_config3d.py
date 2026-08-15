@@ -6,6 +6,7 @@ import yaml
 from swarmecho.core.config import load_level_3d, load_level_3d_cli
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
+    create_eval_run_root,
     eval_checkpoint_replay_root,
     train_replay_root,
 )
@@ -109,3 +110,20 @@ def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
     assert eval_checkpoint_replay_root(tmp_path, checkpoint, level) == (
         tmp_path / "artifacts/eval/ckpt_u000050_s00020M/replays"
     )
+
+
+def test_manual_evaluations_use_unique_named_run_folders(tmp_path):
+    level = load_level_3d()
+    checkpoint = tmp_path / "checkpoints/ckpt_000050"
+    timestamp_ns = 1_725_000_000_123_456_789
+
+    named = create_eval_run_root(
+        tmp_path, checkpoint, level, eval_name="agents7", timestamp_ns=timestamp_ns
+    )
+    collision_safe = create_eval_run_root(
+        tmp_path, checkpoint, level, eval_name="agents7", timestamp_ns=timestamp_ns
+    )
+
+    assert named.name == "eval_agents7_20240830T064000_123456789Z"
+    assert collision_safe.name == f"{named.name}_1"
+    assert named.parent == tmp_path / "artifacts/eval/ckpt_u000050_s00020M"

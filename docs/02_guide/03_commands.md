@@ -39,6 +39,7 @@ uv run swarmecho-evaluate-3d \
   mode=parallel \
   replay_after=true \
   result=success \
+  eval_name=agents7 \
   replays=3
 uv run swarmecho-inspect-3d root=outputs
 ```
@@ -276,7 +277,9 @@ during-training evaluations remain unperturbed.
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
 `outputs/<run>/checkpoints/`; scheduled training inspection artifacts live in
 `outputs/<run>/artifacts/train/replays/`; and manual checkpoint evaluations live
-in `outputs/<run>/artifacts/eval/ckpt_<update-and-steps>/replays/`. A 3D replay
+in `outputs/<run>/artifacts/eval/ckpt_<update-and-steps>/eval_<timestamp>/replays/`.
+Every manual evaluator invocation creates its own `eval_<timestamp>` folder;
+use `eval_name=<label>` to name it `eval_<label>_<timestamp>`. A 3D replay
 occupies the role of a 2D MP4 and uses the same canonical
 `u<update>_s<environment-steps>` suffix. There is intentionally no special
 `replays/latest.json` path that bypasses this artifact contract.

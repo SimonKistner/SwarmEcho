@@ -1,7 +1,7 @@
 env:
   map_names:
   - M00_no_maze_open_cuboid
-  num_agents: 4
+  num_agents: 7
   max_steps: 700
   no_movement_termination_steps: 50
   visual_radius: 5.0
@@ -34,7 +34,7 @@ training:
   num_epochs: 4
   num_minibatches: 20
   seed: 6302026950
-  training_noise: true
+  training_noise: false
   noise_level: 0.015
 
 network:
@@ -53,7 +53,7 @@ evaluation:
   eval_parallel_envs: 4000
   eval_broadcast_on_curriculum_early_stop: false
   early_exit: true
-  early_exit_threshold: 0.9
+  early_exit_threshold: 0.99
 
   save_model: true
   checkpoint_freq: 50

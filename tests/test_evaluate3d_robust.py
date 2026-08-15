@@ -116,6 +116,9 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
     )
     np.testing.assert_allclose(records["visually_found_rate"], [1.0, 1.0])
     assert records["stages"].tolist() == ["visually_found", "chain_success"]
+    assert path.parent.name == "data"
+    assert path.parent.parent.name.startswith("eval_")
+    assert path.parent.parent.parent.name == "ckpt_u000001_s00400k"
 
 
 def test_successful_replay_priority_uses_final_chain_length(tmp_path):
