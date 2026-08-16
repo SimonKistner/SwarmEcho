@@ -1,7 +1,7 @@
 env:
   map_names:
   - M01_no_maze_open_cuboid_tall
-  num_agents: 7
+  num_agents: 5
   max_steps: 700
   no_movement_termination_steps: 50
   visual_radius: 5.0
