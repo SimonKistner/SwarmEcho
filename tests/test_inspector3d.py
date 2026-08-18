@@ -44,6 +44,13 @@ def test_inspector_payload_and_controls(tmp_path):
     assert payload["manifest"]["coverage_voxel_size_m"] == 2.5
     assert 'id="timeline"' in HTML
     assert 'id="replaySelect"' in HTML
+    assert 'id="artifactPickerButton"' in HTML
+    assert 'id="artifactMenu"' in HTML
+    assert 'id="artifactSubmenu"' in HTML
+    assert "function artifactParts(label)" in HTML
+    assert "function openArtifactSubmenu(group,anchor)" in HTML
+    assert "group.length>1?' group':''" in HTML
+    assert "count.textContent=group.length" in HTML
     assert 'id="showCoverage"' in HTML
     assert 'id="showVisualRange"' in HTML
     assert 'id="showCommRange"' in HTML
