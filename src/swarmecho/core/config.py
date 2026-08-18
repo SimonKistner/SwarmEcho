@@ -135,8 +135,7 @@ class EvalConfig:
     eval_video_offset: int = 1
 
     # --- Evaluation data and heatmaps ---
-    eval_failed_chain_heatmap: bool = True
-    eval_not_delivered_or_visually_found_heatmap: bool = True
+    training_heatmap_creation: bool = False
     eval_not_deliv_not_visual_splitt_in_two: bool = False
 
     # --- Checkpoint saving ---
@@ -557,8 +556,7 @@ class Evaluation3DConfig:
     eval_video: bool = True
     eval_video_freq: int = 20
     eval_video_offset: int = 1
-    eval_failed_chain_heatmap: bool = True
-    eval_not_delivered_or_visually_found_heatmap: bool = True
+    training_heatmap_creation: bool = False
     eval_not_deliv_not_visual_splitt_in_two: bool = False
     save_model: bool = True
     checkpoint_freq: int = 50

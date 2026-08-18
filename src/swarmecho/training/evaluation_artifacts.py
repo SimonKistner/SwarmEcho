@@ -332,11 +332,14 @@ def write_training_evaluation_artifacts(
 ) -> None:
     """Write canonical evaluation data and any configured heatmaps."""
     generate_any_heatmap = bool(
-        cfg.evaluation.get("eval_failed_chain_heatmap", False)
-        or cfg.evaluation.get(
-            "eval_not_delivered_or_visually_found_heatmap", False
-        )
+        cfg.evaluation.get("training_heatmap_creation", False)
     )
+
+    # Do not even transfer the large parallel result to the host when training
+    # artifacts are disabled. Terminal and W&B metrics are computed by the
+    # caller before this function is reached.
+    if not generate_any_heatmap:
+        return
 
     target_positions = np.asarray(result.final_state.physics.target_pos)
     base_positions = np.asarray(result.final_state.physics.base_pos)
@@ -366,9 +369,6 @@ def write_training_evaluation_artifacts(
         )
         return
 
-    if not generate_any_heatmap:
-        return
-
     try:
         records = load_eval_info_csv(info_path)
         target_positions = records["positions"]
@@ -384,29 +384,23 @@ def write_training_evaluation_artifacts(
         chain_dir = artifact_root / "chain_heatmaps"
         found_dir = artifact_root / "found_heatmaps"
 
-        if cfg.evaluation.get("eval_failed_chain_heatmap", False):
-            failed_positions = target_positions[~successes]
-            success_rate = float(np.mean(successes) * 100.0)
-            render_and_save_failed_chain_heatmap(
-                failed_positions=failed_positions,
-                map_data=map_data,
-                map_def=map_def,
-                success_rate=success_rate,
-                num_fail=len(failed_positions),
-                run_dir=run_dir,
-                video_dir=chain_dir,
-                run_timestamp=suffix,
-                save_png=True,
-                total_episodes=total_episodes,
-                manifest_dir=manifest_dir,
-                artifact_stem=f"failed_chain_{suffix}",
-                source_csv=info_path,
-            )
-
-        if not cfg.evaluation.get(
-            "eval_not_delivered_or_visually_found_heatmap", False
-        ):
-            return
+        failed_positions = target_positions[~successes]
+        success_rate = float(np.mean(successes) * 100.0)
+        render_and_save_failed_chain_heatmap(
+            failed_positions=failed_positions,
+            map_data=map_data,
+            map_def=map_def,
+            success_rate=success_rate,
+            num_fail=len(failed_positions),
+            run_dir=run_dir,
+            video_dir=chain_dir,
+            run_timestamp=suffix,
+            save_png=True,
+            total_episodes=total_episodes,
+            manifest_dir=manifest_dir,
+            artifact_stem=f"failed_chain_{suffix}",
+            source_csv=info_path,
+        )
 
         split_in_two = bool(
             cfg.evaluation.get(

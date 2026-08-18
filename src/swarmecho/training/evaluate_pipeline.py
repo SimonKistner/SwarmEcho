@@ -44,9 +44,9 @@ from swarmecho.training.runtime import build_evaluation_runtime
 # ==============================================================================
 # Pipeline Artifact Output Toggles
 # ==============================================================================
-CREATE_FAILED_CHAIN_HEATMAP = None   # None = use evaluation.eval_failed_chain_heatmap
-CREATE_NOT_DELIVERED_HEATMAP = None  # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
-CREATE_NOT_VISUALLY_FOUND_HEATMAP = None # None = use evaluation.eval_not_delivered_or_visually_found_heatmap
+CREATE_FAILED_CHAIN_HEATMAP = True
+CREATE_NOT_DELIVERED_HEATMAP = True
+CREATE_NOT_VISUALLY_FOUND_HEATMAP = True
 
 # ==============================================================================
 # Pipeline Configuration Constants
@@ -137,13 +137,9 @@ def main():
         elif arg.lower() in ["connectivity=false", "conn_matrix=false", "--no-connectivity", "--no-conn-matrix"]:
             overrides.append("visualize.render_conn_matrix=false")
         elif arg.lower() in ["heatmap=true", "--heatmap"]:
-            CREATE_FAILED_CHAIN_HEATMAP = True
-            CREATE_NOT_DELIVERED_HEATMAP = True
-            CREATE_NOT_VISUALLY_FOUND_HEATMAP = True
-        elif arg.lower() in ["heatmap=false", "--no-heatmap"]:
-            CREATE_FAILED_CHAIN_HEATMAP = False
-            CREATE_NOT_DELIVERED_HEATMAP = False
-            CREATE_NOT_VISUALLY_FOUND_HEATMAP = False
+            # Retained as a compatibility no-op: standalone evaluation always
+            # creates all heatmaps.
+            pass
         else:
             overrides.append(arg)
 
@@ -167,16 +163,6 @@ def main():
         overrides = overrides,
     )
     validate_config(cfg)
-    if CREATE_FAILED_CHAIN_HEATMAP is None:
-        CREATE_FAILED_CHAIN_HEATMAP = bool(cfg.evaluation.get("eval_failed_chain_heatmap", False))
-    if CREATE_NOT_DELIVERED_HEATMAP is None:
-        CREATE_NOT_DELIVERED_HEATMAP = bool(
-            cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False)
-        )
-    if CREATE_NOT_VISUALLY_FOUND_HEATMAP is None:
-        CREATE_NOT_VISUALLY_FOUND_HEATMAP = bool(
-            cfg.evaluation.get("eval_not_delivered_or_visually_found_heatmap", False)
-        )
     COMBINE_FOUND_AND_DELIVERED_HEATMAPS = not bool(
         cfg.evaluation.get("eval_not_deliv_not_visual_splitt_in_two", False)
     )

@@ -135,6 +135,66 @@ def _update_base_memory(
     return base_valid, base_signature, base_value
 
 
+def _create_final_checkpoint_evaluation(
+    model: MAPPOModel, level: Level3D, checkpoint: Path, run_dir: Path
+) -> None:
+    """Run the standalone checkpoint evaluation contract without risking training."""
+    try:
+        # Local import avoids the evaluate3d -> train3d import cycle.
+        from swarmecho.training.evaluate3d import (
+            render_csv_replays,
+            run_parallel_evaluation_3d,
+        )
+        from swarmecho.training.artifacts import create_eval_run_root
+
+        eval_run_root = create_eval_run_root(run_dir, checkpoint, level)
+        info_path = run_parallel_evaluation_3d(
+            model,
+            level,
+            checkpoint,
+            run_dir,
+            eval_run_root=eval_run_root,
+        )
+    except Exception as exc:
+        print(
+            f"[WARNING] Final checkpoint evaluation failed; replay creation skipped: {exc}",
+            flush=True,
+        )
+        return
+
+    for result in ("success", "fail"):
+        try:
+            render_csv_replays(
+                model,
+                level,
+                checkpoint,
+                run_dir,
+                result=result,
+                replay_count=1,
+                start_offset=0,
+                source_csv=info_path,
+                eval_run_root=eval_run_root,
+            )
+            if result == "fail":
+                print(
+                    "[WARNING] No successful final-evaluation lane was available; "
+                    "created a failure replay instead.",
+                    flush=True,
+                )
+            return
+        except Exception as exc:
+            print(
+                f"[WARNING] Final {result} replay selection failed: {exc}",
+                flush=True,
+            )
+
+    print(
+        "[WARNING] Final success and failure replay creation both failed; "
+        "replay creation skipped.",
+        flush=True,
+    )
+
+
 def train_3d(
     level: Level3D,
     *,
@@ -659,11 +719,9 @@ def train_3d(
                 num_steps=training.num_steps,
                 prior_history=resume.prior_history,
             )
-        # Keep the 2D schedule semantics exactly: regular evaluations/videos
-        # require the training-success gate, while the final checkpoint always
-        # receives an evaluation and (when enabled) one replay.  In particular,
-        # a very large eval_video_freq suppresses all intermediate videos but
-        # does not suppress the final one.
+        # Regular evaluations/replays require the training-success gate. The
+        # final update always receives metrics; its checkpoint-scoped robust
+        # evaluation and replay run only after the checkpoint is saved below.
         is_final_update = update == num_updates
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
@@ -674,8 +732,8 @@ def train_3d(
             and evaluation_enabled
         )
         replay_due = bool(evaluation.eval_video) and (
-            is_final_update
-            or (
+            not is_final_update
+            and (
                 schedule_due(
                     update, evaluation.eval_video_freq, evaluation.eval_video_offset
                 )
@@ -686,56 +744,61 @@ def train_3d(
             # Periodic evaluation is one unperturbed generalization pass. M02
             # may request a second fixed-layout pass solely for spatial heatmaps;
             # the five-pass robustness ensemble remains standalone-only.
-            eval_metrics, episode_info = evaluate_suite_3d(
+            evaluation_output = evaluate_suite_3d(
                 model,
                 level,
                 episodes=evaluation.eval_parallel_envs,
                 max_steps=cfg.max_steps,
-                return_episode_info=True,
+                return_episode_info=evaluation.training_heatmap_creation,
             )
+            if evaluation.training_heatmap_creation:
+                eval_metrics, episode_info = evaluation_output
+            else:
+                eval_metrics = evaluation_output
             latest_stats.update(eval_metrics)
             suffix = artifact_suffix(update, steps_done)
-            info_path = save_eval_info_csv(
-                destination / "artifacts" / "train" / "data" / f"eval_info_{suffix}.csv",
-                target_positions=episode_info["target_positions"],
-                base_positions=episode_info["base_positions"],
-                successes=episode_info["successes"],
-                delivered=episode_info["delivered"],
-                visually_found=episode_info["visually_found"],
-                final_chain_lengths=episode_info["final_chain_lengths"],
-            )
-            layout_path = None
-            if cfg.num_obstacles:
-                layout_path = save_eval_layout(
-                    info_path.with_suffix(".layout.json"),
-                    episode_info["obstacle_min"],
-                    episode_info["obstacle_max"],
+            if evaluation.training_heatmap_creation:
+                info_path = save_eval_info_csv(
+                    destination / "artifacts" / "train" / "data" / f"eval_info_{suffix}.csv",
+                    target_positions=episode_info["target_positions"],
+                    base_positions=episode_info["base_positions"],
+                    successes=episode_info["successes"],
+                    delivered=episode_info["delivered"],
+                    visually_found=episode_info["visually_found"],
+                    final_chain_lengths=episode_info["final_chain_lengths"],
                 )
-            write_manifest(
-                info_path.with_suffix(".heatmap.json"),
-                {
-                    "format": "swarmecho-3d-eval-heatmap/v1",
-                    "data_file": info_path.name,
-                    "map_name": level.building_name,
-                    "world_size_m": level.building.world_size_m.tolist(),
-                    "training_update": update,
-                    "environment_steps": steps_done,
-                    "artifact_scope": "train",
-                    "obstacle_layout_mode": "fixed" if cfg.num_obstacles else "free_space",
-                    **({"layout_file": layout_path.name} if layout_path else {}),
-                },
-            )
-            write_manifest(
-                destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
-                {
-                    "type": "3d_evaluation",
-                    "update": update,
-                    "steps": steps_done,
-                    "episodes": evaluation.eval_parallel_envs,
-                    "data_path": str(info_path),
-                    **eval_metrics,
-                },
-            )
+                layout_path = None
+                if cfg.num_obstacles:
+                    layout_path = save_eval_layout(
+                        info_path.with_suffix(".layout.json"),
+                        episode_info["obstacle_min"],
+                        episode_info["obstacle_max"],
+                    )
+                write_manifest(
+                    info_path.with_suffix(".heatmap.json"),
+                    {
+                        "format": "swarmecho-3d-eval-heatmap/v1",
+                        "data_file": info_path.name,
+                        "map_name": level.building_name,
+                        "world_size_m": level.building.world_size_m.tolist(),
+                        "training_update": update,
+                        "environment_steps": steps_done,
+                        "artifact_scope": "train",
+                        "obstacle_layout_mode": "fixed" if cfg.num_obstacles else "free_space",
+                        **({"layout_file": layout_path.name} if layout_path else {}),
+                    },
+                )
+                write_manifest(
+                    destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
+                    {
+                        "type": "3d_evaluation",
+                        "update": update,
+                        "steps": steps_done,
+                        "episodes": evaluation.eval_parallel_envs,
+                        "data_path": str(info_path),
+                        **eval_metrics,
+                    },
+                )
             if replay_due:
                 replay_started = time.perf_counter()
                 replay_bounds = evaluation.eval_fixed_obstacle_bounds
@@ -822,38 +885,6 @@ def train_3d(
                     training.num_envs * training.num_steps,
                     training.total_timesteps,
                 )
-                if evaluation.eval_video and not replay_due:
-                    replay_bounds = evaluation.eval_fixed_obstacle_bounds
-                    eval_states, eval_rewards = evaluate_model_3d(
-                        model, level, max_steps=cfg.max_steps,
-                        obstacle_min=(
-                            None if not replay_bounds else jnp.asarray(replay_bounds)[:, :3]
-                        ),
-                        obstacle_max=(
-                            None if not replay_bounds else jnp.asarray(replay_bounds)[:, 3:]
-                        ),
-                    )
-                    write_replay(
-                        replay_dir / f"eval_{suffix}", eval_states,
-                        map_name=level.building_name, dt=cfg.dt,
-                        reward_terms=eval_rewards,
-                        metadata={
-                            "world_size_m": level.building.world_size_m.tolist(),
-                            "cell_size_m": level.building.cell_size_m,
-                            "coverage_voxel_size_m": (
-                                level.building.cell_size_m
-                                if cfg.coverage_voxel_size is None
-                                else cfg.coverage_voxel_size
-                            ),
-                            "comm_radius_m": cfg.comm_radius,
-                            "comm_radius_base_m": cfg.comm_radius_base,
-                            "visual_radius_m": cfg.visual_radius,
-                            "training_update": update,
-                            "environment_steps": steps_done,
-                            "artifact_scope": "train",
-                        },
-                        progress=False,
-                    )
                 num_updates = update
                 break
 
@@ -869,6 +900,8 @@ def train_3d(
             num_steps=training.num_steps,
             prior_history=resume.prior_history,
         )
+        if evaluation.eval_video:
+            _create_final_checkpoint_evaluation(model, level, checkpoint, destination)
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"
     )
@@ -876,10 +909,6 @@ def train_3d(
         wandb_run.finish()
     print("──────────────────────────────────────────────────────")
     print(f"  Training complete ✓  checkpoint: {checkpoint or 'saving disabled'}")
-    if evaluation.eval_video:
-        final_steps = int(latest_stats.get("global_step", total_steps))
-        final_suffix = artifact_suffix(num_updates, final_steps)
-        print(f"  Replay ready      ✓  {replay_dir / f'eval_{final_suffix}.json'}")
     return checkpoint, latest_stats
 
 
