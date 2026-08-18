@@ -74,19 +74,17 @@ settings live under `evaluation`:
 | `eval_broadcast_on_curriculum_early_stop` | `false` | Fills remaining scheduled W&B evaluation points with the terminal evaluation metrics when a level exits early. |
 | `early_exit` | `false` | Enables training exit when parallel evaluation success reaches the threshold. |
 | `early_exit_threshold` | `0.99` | Parallel evaluation success rate required for early exit. |
-| `eval_video` | `true` | Enables evaluation video rendering. Each video event collects and renders exactly one episode. |
+| `eval_video` | `true` | Enables scheduled training replays and a checkpoint-scoped evaluation plus replay after the final checkpoint is saved. |
 | `eval_video_freq` | `20` | Evaluation-video frequency in training updates. |
 | `eval_video_offset` | `1` | Update offset applied to the video schedule. |
-| `eval_failed_chain_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where the shortest chain was not successfully completed/held. |
-| `eval_not_delivered_or_visually_found_heatmap` | `true` | Generates a heatmap mapping target positions for episodes where target was not successfully delivered or not visually found. |
+| `training_heatmap_creation` | `false` | Persists during-training evaluation CSV/manifest data and heatmaps. Standalone evaluation always creates its checkpoint-scoped heatmap data. |
 | `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one found-and-delivered heatmap. |
 | `save_model` | `true` | Enables scheduled and final checkpoint saves. |
 | `checkpoint_freq` | `50` | Scheduled checkpoint frequency in training updates. |
 | `checkpoint_offset` | `0` | Update offset applied to the checkpoint schedule. |
 | `checkpoint_dir` | `null` | Optional checkpoint output directory; otherwise the run checkpoint directory is used. |
 
-During training, the evaluation CSV is written under `artifacts/train/data`;
-manual checkpoint evaluation writes it under that checkpoint's
+When `training_heatmap_creation` is enabled, the during-training evaluation CSV is written under `artifacts/train/data`; manual checkpoint evaluation always writes it under that checkpoint's
 `artifacts/eval/.../data` folder. A filename such as
 `eval_info_u000700_s00070M.csv` contains `x`, `y`, `stage`, and
 `distance_to_base`. `stage` is one of `not_found`, `visually_found`,
@@ -109,7 +107,7 @@ history; `init` restores weights only and starts a completely new run at zero
 steps with no inherited history. Checkpoint saving belongs to `evaluation` because it follows the
 same update schedule as evaluation and video artifacts.
 
-When `eval_not_delivered_or_visually_found_heatmap` is enabled, the pipeline
+When `training_heatmap_creation` is enabled, the training pipeline
 combines "Not Visually Found" (sky blue) and "Not Delivered" (dark blue)
 target groups into one found-and-delivered heatmap by default. Setting
 `eval_not_deliv_not_visual_splitt_in_two: true` writes separate heatmaps.

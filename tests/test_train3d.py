@@ -28,10 +28,16 @@ def test_tiny_3d_training_creates_checkpoint_metrics_and_replay(tmp_path):
     assert checkpoint.exists()
     assert stats
     assert json.loads((tmp_path / "metrics.json").read_text())["total_loss"] == stats["total_loss"]
-    replay = tmp_path / "artifacts/train/replays/eval_u000001_s00004.json"
+    replays = list(
+        (tmp_path / "artifacts/eval/ckpt_u000001_s00004").glob(
+            "eval_*/replays/*.json"
+        )
+    )
+    assert len(replays) == 1
+    replay = replays[0]
     metadata, arrays = load_replay(replay)
-    assert metadata["artifact_scope"] == "train"
-    assert metadata["environment_steps"] == 4
+    assert metadata["artifact_scope"] == "eval"
+    assert metadata["checkpoint"] == str(checkpoint)
     assert metadata["frames"] > 1
     assert arrays["position"].shape[-1] == 3
 

@@ -31,6 +31,7 @@ def test_baseline_level_is_strict_and_solvable():
     assert level.evaluation.eval_parallel_envs == 4000
     assert level.evaluation.eval_robustness_runs == 5
     assert level.evaluation.eval_action_noise_max == 0.011
+    assert not level.evaluation.training_heatmap_creation
     assert level.logging.wandb_mode == "online"
     assert level.ideal_chain_margin_m > 0
 
@@ -99,6 +100,7 @@ def test_3d_cli_can_enable_training_only_action_noise():
     # This setting is solely consumed by the training rollout; it must not
     # alter the standalone robust-evaluation configuration.
     assert level.evaluation.eval_action_noise_max == 0.011
+    assert not level.evaluation.training_heatmap_creation
 
 
 def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):

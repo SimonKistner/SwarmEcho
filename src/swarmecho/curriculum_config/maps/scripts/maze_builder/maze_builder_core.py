@@ -325,7 +325,7 @@ def build_level_data(map_name: str) -> dict[str, Any]:
             "checkpoint_offset": 0,
             "eval_freq": 50,
             "eval_offset": 1,
-            "eval_not_delivered_or_visually_found_heatmap": True,
+            "training_heatmap_creation": False,
             "eval_video": False,
             "eval_video_freq": 100,
             "eval_video_offset": 1,

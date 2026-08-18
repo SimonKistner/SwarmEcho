@@ -61,7 +61,7 @@ evaluation:
   eval_freq: 30
   eval_offset: 1
 
-  eval_not_delivered_or_visually_found_heatmap: false
+  training_heatmap_creation: false
 
   eval_video: true
   eval_video_freq: 9999999999

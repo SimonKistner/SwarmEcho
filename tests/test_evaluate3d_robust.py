@@ -135,3 +135,58 @@ def test_successful_replay_priority_uses_final_chain_length(tmp_path):
     assert label == "SUCCESS_0"
     assert lane == 1
     np.testing.assert_allclose(target, [10, 0, 0])
+
+
+def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch, capsys):
+    from swarmecho.training.train3d import _create_final_checkpoint_evaluation
+
+    info_path = tmp_path / "eval.csv"
+    results = []
+    monkeypatch.setattr(
+        "swarmecho.training.artifacts.create_eval_run_root",
+        lambda *args, **kwargs: tmp_path / "eval_run",
+    )
+    monkeypatch.setattr(
+        "swarmecho.training.evaluate3d.run_parallel_evaluation_3d",
+        lambda *args, **kwargs: info_path,
+    )
+
+    def fake_render(*args, result, **kwargs):
+        results.append(result)
+        if result == "success":
+            raise ValueError("no successful lanes")
+
+    monkeypatch.setattr(
+        "swarmecho.training.evaluate3d.render_csv_replays", fake_render
+    )
+    _create_final_checkpoint_evaluation(
+        object(), object(), tmp_path / "ckpt", tmp_path
+    )
+
+    assert results == ["success", "fail"]
+    assert "[WARNING] Final success replay selection failed" in capsys.readouterr().out
+
+
+def test_final_checkpoint_evaluation_skips_replay_after_both_selections_fail(
+    tmp_path, monkeypatch, capsys
+):
+    from swarmecho.training.train3d import _create_final_checkpoint_evaluation
+
+    monkeypatch.setattr(
+        "swarmecho.training.artifacts.create_eval_run_root",
+        lambda *args, **kwargs: tmp_path / "eval_run",
+    )
+    monkeypatch.setattr(
+        "swarmecho.training.evaluate3d.run_parallel_evaluation_3d",
+        lambda *args, **kwargs: tmp_path / "eval.csv",
+    )
+    monkeypatch.setattr(
+        "swarmecho.training.evaluate3d.render_csv_replays",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no lanes")),
+    )
+
+    _create_final_checkpoint_evaluation(
+        object(), object(), tmp_path / "ckpt", tmp_path
+    )
+    output = capsys.readouterr().out
+    assert "[WARNING] Final success and failure replay creation both failed" in output
