@@ -87,7 +87,7 @@ class RewardConfig:
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
     target_found_requires_delivery: bool = True
-    chain_reward_system: str = "euclidean"  # "euclidean" | "discrete_finders_path"
+    chain_reward_system: str = "euclidean"  # "euclidean" | "obstacle_geodesic" [ "discrete_finders_path" ]
 
 
 @dataclass
