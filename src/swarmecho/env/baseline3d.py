@@ -498,6 +498,7 @@ def _target_spawn_boxes(
     cells = np.stack(np.meshgrid(*[np.arange(size) for size in dims], indexing="ij"), axis=-1)
     cells = cells.reshape(-1, 3)
     excluded = building.target_exclusion[tuple(cells.T)]
+    interior = building.interior_cells[tuple(cells.T)]
     clearance = cfg.target_wall_buffer_fraction * building.cell_size_m
     if not 0 <= cfg.target_wall_buffer_fraction < 0.5:
         raise ValueError("target_wall_buffer_fraction must be in [0, 0.5).")
@@ -519,7 +520,7 @@ def _target_spawn_boxes(
         if building.tiles[x, y, z + 1]:
             upper[index, 2] -= half_tile + clearance
     volumes = np.prod(np.maximum(upper - lower, 0), axis=-1)
-    valid = ~excluded & (volumes > 0)
+    valid = interior & ~excluded & (volumes > 0)
     if not np.any(valid):
         raise ValueError("Building has no non-excluded target spawn volume.")
     return tuple(
@@ -572,6 +573,26 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         axis=-1,
     )
     coverage_centres = (coverage_indices.astype(jnp.float32) + 0.5) * coverage_voxel_size
+    coverage_cell_indices = np.minimum(
+        np.floor(np.asarray(coverage_centres) / building.cell_size_m).astype(np.int64),
+        np.asarray(building.interior_cells.shape) - 1,
+    )
+    coverage_interior = jnp.asarray(
+        building.interior_cells[tuple(coverage_cell_indices.reshape(-1, 3).T)].reshape(
+            coverage_shape
+        )
+    )
+    authored_min = jnp.asarray(building.solid_min_m, dtype=jnp.float32)
+    authored_max = jnp.asarray(building.solid_max_m, dtype=jnp.float32)
+    has_authored_solids = bool(building.solid_min_m.shape[0])
+
+    def all_solids(obstacle_min, obstacle_max):
+        if has_authored_solids:
+            return (
+                jnp.concatenate((authored_min, obstacle_min), axis=0),
+                jnp.concatenate((authored_max, obstacle_max), axis=0),
+            )
+        return obstacle_min, obstacle_max
 
     obstacle_z_min = cfg.obstacle_spawn_layer_min * building.cell_size_m
     obstacle_z_max = min(cfg.obstacle_spawn_layer_max * building.cell_size_m, float(world_size[2]))
@@ -595,6 +616,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
     def sample_target(key, obstacle_min, obstacle_max):
         """Sample uniformly by volume, rejecting the base exclusion sphere."""
         minimum_distance = jnp.float32(minimum_target_distance(cfg))
+        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
 
         def draw(draw_key):
             box_key, point_key = jax.random.split(draw_key)
@@ -613,7 +635,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
                 <= minimum_distance
             )
             invalid_obstacle = points_inside_aabbs(
-                point, obstacle_min, obstacle_max, cfg.obstacle_target_buffer_m
+                point, solid_min, solid_max, cfg.obstacle_target_buffer_m
             )
             return (iteration < 64) & (invalid_distance | invalid_obstacle)
 
@@ -625,7 +647,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         point = jax.lax.while_loop(condition, retry, (0, key, first))[2]
         fallback_candidates = (spawn_lower + spawn_upper) / 2
         fallback_valid = ~points_inside_aabbs(
-            fallback_candidates, obstacle_min, obstacle_max,
+            fallback_candidates, solid_min, solid_max,
             cfg.obstacle_target_buffer_m,
         ) & (
             jnp.linalg.norm(
@@ -637,11 +659,12 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             jnp.where(fallback_valid, fallback_candidates[:, 2], -jnp.inf)
         )
         point_invalid = points_inside_aabbs(
-            point, obstacle_min, obstacle_max, cfg.obstacle_target_buffer_m
+            point, solid_min, solid_max, cfg.obstacle_target_buffer_m
         ) | (jnp.linalg.norm(point - jnp.asarray(building.base_position_m)) <= minimum_distance)
         return jnp.where(point_invalid, fallback_candidates[fallback_index], point)
 
     def connectivity(pos, active, base_pos, target_pos, obstacle_min, obstacle_max):
+        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
         delta = pos[:, None, :] - pos[None, :, :]
         distances = jnp.linalg.norm(delta, axis=-1)
         agent_adj = (
@@ -650,15 +673,15 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             & active[None, :]
             & ~jnp.eye(n, dtype=jnp.bool_)
         )
-        if cfg.num_obstacles:
+        if cfg.num_obstacles or has_authored_solids:
             agent_adj &= ~segments_blocked(
-                pos[:, None, :], pos[None, :, :], obstacle_min, obstacle_max
+                pos[:, None, :], pos[None, :, :], solid_min, solid_max
             )
         base_edges = (jnp.linalg.norm(pos - base_pos, axis=-1) <= cfg.comm_radius_base) & active
         sees = (jnp.linalg.norm(pos - target_pos, axis=-1) <= cfg.visual_radius) & active
-        if cfg.num_obstacles:
-            base_edges &= ~segments_blocked(pos, base_pos, obstacle_min, obstacle_max)
-            sees &= ~segments_blocked(pos, target_pos, obstacle_min, obstacle_max)
+        if cfg.num_obstacles or has_authored_solids:
+            base_edges &= ~segments_blocked(pos, base_pos, solid_min, solid_max)
+            sees &= ~segments_blocked(pos, target_pos, solid_min, solid_max)
 
         reach = agent_adj | jnp.eye(n, dtype=jnp.bool_)
         for _ in range(n):
@@ -668,6 +691,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         return sees, conn_base, conn_target, agent_adj
 
     def update_coverage(coverage, pos, active, obstacle_min, obstacle_max):
+        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
         delta = coverage_centres[None, ...] - pos[:, None, None, None, :]
         visible = jnp.linalg.norm(delta, axis=-1) <= cfg.visual_radius
         occupied = jnp.clip(
@@ -680,10 +704,11 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             axis=-1,
         )
         visible &= active[:, None, None, None]
-        if cfg.num_obstacles:
+        visible &= coverage_interior[None, ...]
+        if cfg.num_obstacles or has_authored_solids:
             visible &= ~segments_blocked(
                 pos[:, None, None, None, :], coverage_centres[None, ...],
-                obstacle_min, obstacle_max,
+                solid_min, solid_max,
             )
         newly_covered = ~coverage & jnp.any(visible, axis=0)
         viewers = jnp.sum(visible, axis=0)
@@ -757,9 +782,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         velocity *= jnp.minimum(1.0, cfg.max_speed / jnp.maximum(speed, 1e-8))
         proposed = state.pos + velocity * cfg.dt
         collided = (proposed < lower) | (proposed > upper)
-        if cfg.num_obstacles:
-            motion_min = state.obstacle_min - cfg.drone_radius
-            motion_max = state.obstacle_max + cfg.drone_radius
+        if cfg.num_obstacles or has_authored_solids:
+            solid_min, solid_max = all_solids(state.obstacle_min, state.obstacle_max)
+            motion_min = solid_min - cfg.drone_radius
+            motion_max = solid_max + cfg.drone_radius
             obstacle_collision = segments_blocked(state.pos, proposed, motion_min, motion_max)
             collided |= obstacle_collision[:, None]
             proposed = jnp.where(obstacle_collision[:, None], state.pos, proposed)
@@ -838,20 +864,21 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             positive = jnp.where(directions > 0, (upper - origin) / directions, jnp.inf)
             negative = jnp.where(directions < 0, (lower - origin) / directions, jnp.inf)
             wall_distance = jnp.min(jnp.minimum(positive, negative), axis=-1)
-            if cfg.num_obstacles:
+            if cfg.num_obstacles or has_authored_solids:
+                solid_min, solid_max = all_solids(state.obstacle_min, state.obstacle_max)
                 ray_end = origin[None, :] + directions * cfg.visual_radius
                 lo = jnp.zeros(cfg.radar_bins, dtype=jnp.float32)
                 hi = jnp.ones(cfg.radar_bins, dtype=jnp.float32)
                 hit = segments_blocked(
                     jnp.broadcast_to(origin, ray_end.shape), ray_end,
-                    state.obstacle_min, state.obstacle_max,
+                    solid_min, solid_max,
                 )
                 for _ in range(8):
                     mid = (lo + hi) / 2
                     mid_point = origin[None, :] + directions * (mid * cfg.visual_radius)[:, None]
                     blocked = segments_blocked(
                         jnp.broadcast_to(origin, mid_point.shape), mid_point,
-                        state.obstacle_min, state.obstacle_max,
+                        solid_min, solid_max,
                     )
                     hi = jnp.where(blocked, mid, hi)
                     lo = jnp.where(blocked, lo, mid)
@@ -915,7 +942,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
 
     def metrics(state: Baseline3DState):
         return {
-            "coverage_fraction": jnp.mean(state.coverage),
+            "coverage_fraction": jnp.sum(state.coverage & coverage_interior)
+            / jnp.maximum(jnp.sum(coverage_interior), 1),
             "active_agents": jnp.sum(state.active),
             "target_seen": jnp.any(state.directly_sees_target),
             "success": state.success,

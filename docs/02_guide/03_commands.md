@@ -71,10 +71,21 @@ source .venv/bin/activate
 
 ## Map Design & Analysis Dashboard
 
-### 2D Grid Maze Builder
-Launch the browser-based editor to draw grid mazes and target no-spawn cells:
+### Layered 3D Map Builder
+Launch the browser editor to paint floor tiles, solid walls, storeys, the base,
+and target no-spawn cells. Existing `swarmecho-map/v1` building maps can be
+opened directly:
 ```bash
 uv run swarmecho-maze-builder
+```
+
+After saving, run the standalone map contract and optional CPU runtime smoke
+check. This constructs and resets the same environment functions used by
+training but does not train a model or require CUDA:
+
+```bash
+uv run swarmecho-validate-building path/to/map.yaml --runtime-smoke
+uv run pytest -q tests/test_3d_map_builder.py
 ```
 
 ### Discovery & Analysis Dashboard

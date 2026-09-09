@@ -21,6 +21,17 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core imp
     crop_canvas_payload,
     normalize_machine_maze,
 )
+from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
+    add_outer_walls,
+    add_roof,
+    available_maps,
+    load_document,
+    new_document,
+    save_document,
+    validate_document,
+)
+from swarmecho.core.config import MAP_DIR
+from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core import validate_map_name
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _INDEX = _SCRIPT_DIR / "index.html"
@@ -48,6 +59,22 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - stdlib API
         path = urlparse(self.path).path
+        if path == "/api/buildings":
+            self._send_json(HTTPStatus.OK, {"ok": True, "maps": list(available_maps())})
+            return
+        if path == "/api/buildings/new":
+            self._send_json(HTTPStatus.OK, {"ok": True, "document": new_document()})
+            return
+        if path.startswith("/api/buildings/"):
+            try:
+                name = validate_map_name(path.removeprefix("/api/buildings/"))
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "document": load_document(MAP_DIR / f"{name}.yaml")},
+                )
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
         if path not in {"/", "/index.html"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -62,6 +89,55 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/api/buildings/new":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "document": new_document(
+                            payload.get("cols", 6),
+                            payload.get("rows", 4),
+                            payload.get("layers", 1),
+                        ),
+                    },
+                )
+                return
+            if path == "/api/buildings/validate":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "report": validate_document(payload)},
+                )
+                return
+            if path == "/api/buildings/outer-walls":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "document": add_outer_walls(payload, payload.get("selected_layer", 0)),
+                    },
+                )
+                return
+            if path == "/api/buildings/roof":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "document": add_roof(payload)},
+                )
+                return
+            if path == "/api/buildings/save":
+                name = validate_map_name(payload.get("name"))
+                target = MAP_DIR / f"{name}.yaml"
+                if target.exists() and not payload.get("overwrite", False):
+                    raise FileExistsError(f"Map already exists: {target}")
+                saved = save_document(payload, target)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "path": str(saved),
+                        "report": validate_document(payload),
+                    },
+                )
+                return
             if path == "/api/export-machine":
                 machine = crop_canvas_payload(payload)
                 self._send_json(HTTPStatus.OK, {"ok": True, "machine_maze": machine})

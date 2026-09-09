@@ -28,6 +28,9 @@ documentation map and intentionally sorts before the numbered topic folders.
 - [3D transition discovery brief](03_roadmap/03_3d_transition_discovery.md) —
   coupling audit, architecture recommendation, first executable slice, and
   owner decision gate.
+- [3D map builder implementation plan](03_roadmap/04_3d_map_builder_implementation_plan.md)
+  — current-runtime audit, map-format and geometry decisions, editor workflow,
+  compatibility strategy, delivery gates, and test matrix.
 
 ### `04_archive/` — historical and experimental context
 
