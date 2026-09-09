@@ -75,9 +75,13 @@ source .venv/bin/activate
 Launch the browser editor to paint floor tiles, solid walls, storeys, the base,
 and target no-spawn cells. Existing `swarmecho-map/v1` building maps can be
 opened directly. Drag across tiles or no-target cells to paint rectangular
-selections, drag across wall edges to paint continuously, use the four edge
-buttons to copy-expand the footprint, and drag outside the floor (or select
-Orbit) to rotate the structure; the mouse wheel zooms:
+selections, drag across wall edges to paint continuously, and use each edge's
+`+1`/`-1` controls to copy-expand or trim the footprint. Storeys inherit the
+interior, wall, and no-target pattern below (but not tiles), and can be deleted.
+The separately selectable roof is an opaque inspection view of the single top
+tile boundary. **Copy current YAML** copies the exact payload used by validation
+and saving. Drag outside the floor (or select Orbit) to rotate the structure;
+the mouse wheel zooms:
 ```bash
 uv run swarmecho-maze-builder
 ```

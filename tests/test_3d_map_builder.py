@@ -9,6 +9,8 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     add_roof,
     add_layer,
     document_from_map_data,
+    document_yaml,
+    delete_layer,
     map_data_from_document,
     new_document,
     expand_document,
@@ -170,6 +172,8 @@ def test_add_layer_copies_walls_and_target_exclusions_but_not_tiles():
     assert expanded["layers"] == 2
     assert [0, 0, 1] in expanded["x_walls"]
     assert [1, 1, 1] in expanded["target_exclusion_cells"]
+    assert [1, 1, 1] in expanded["interior_cells"]
+    assert not any(tile[2] == 1 for tile in expanded["tiles"])
     assert not any(tile[2] == 2 for tile in expanded["tiles"])
 
 
@@ -184,3 +188,42 @@ def test_directional_expansion_preserves_and_duplicates_neighbor_state(direction
     assert len(expanded["interior_cells"]) == 6
     assert len(expanded["tiles"]) == 12
     assert validate_document(expanded)["valid"]
+
+
+@pytest.mark.parametrize("direction", ["west", "east", "north", "south"])
+def test_directional_shrink_removes_edge_and_preserves_valid_geometry(direction):
+    document = _placed_document(3, 3, 1)
+    shrunk = expand_document(document, direction, -1)
+
+    assert shrunk["cols"] == 3 - int(direction in {"west", "east"})
+    assert shrunk["rows"] == 3 - int(direction in {"north", "south"})
+    if direction in {"west", "north"}:
+        assert shrunk["base_cell"] is None
+    assert len(shrunk["interior_cells"]) == 6
+
+
+def test_shrink_rejects_dimension_below_one_cell():
+    with pytest.raises(ValueError, match="below one cell"):
+        expand_document(_placed_document(1, 2, 1), "west", -1)
+
+
+def test_delete_storey_shifts_geometry_and_base_and_delete_roof_only_removes_roof():
+    document = _placed_document(2, 2, 3)
+    document["base_cell"] = [0, 0, 2]
+    document["target_exclusion_cells"] = [[1, 1, 2]]
+    deleted = delete_layer(document, 1)
+    assert deleted["layers"] == 2
+    assert deleted["base_cell"] == [0, 0, 1]
+    assert [1, 1, 1] in deleted["target_exclusion_cells"]
+    assert "base_position_m" not in deleted
+
+    without_roof = delete_layer(deleted, deleted["layers"])
+    assert without_roof["layers"] == deleted["layers"]
+    assert not any(tile[2] == deleted["layers"] for tile in without_roof["tiles"])
+
+
+def test_delete_only_storey_is_rejected_and_yaml_matches_map_payload():
+    document = _placed_document(2, 2, 1)
+    with pytest.raises(ValueError, match="at least one"):
+        delete_layer(document, 0)
+    assert yaml.safe_load(document_yaml(document)) == map_data_from_document(document)

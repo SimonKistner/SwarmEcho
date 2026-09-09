@@ -256,11 +256,17 @@ def add_roof(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def add_layer(document: dict[str, Any]) -> dict[str, Any]:
-    """Append an empty floor while copying walls and target exclusions below it."""
+    """Append a storey that inherits the editable volume, but not its tile plane."""
     doc = normalize_document(deepcopy(document))
     source_layer = doc["layers"] - 1
     new_layer = doc["layers"]
     doc["layers"] += 1
+    # The old roof occupies the new storey's editable boundary.  Remove it;
+    # explicitly authored tiles must never become an implicit floor.
+    doc["tiles"] = [tile for tile in doc["tiles"] if tile[2] != new_layer]
+    doc["interior_cells"].extend(
+        [[x, y, new_layer] for x, y, z in doc["interior_cells"] if z == source_layer]
+    )
     doc["x_walls"].extend(
         [[x, y, new_layer] for x, y, z in doc["x_walls"] if z == source_layer]
     )
@@ -277,16 +283,98 @@ def add_layer(document: dict[str, Any]) -> dict[str, Any]:
     return normalize_document(doc)
 
 
-def expand_document(document: dict[str, Any], direction: str) -> dict[str, Any]:
-    """Grow one horizontal edge and copy its neighboring row or column."""
+def delete_layer(document: dict[str, Any], layer: int) -> dict[str, Any]:
+    """Delete a storey, or delete the roof when its inspection level is selected."""
+    doc = normalize_document(deepcopy(document))
+    layer = int(layer)
+    if layer == doc["layers"]:
+        doc["tiles"] = [tile for tile in doc["tiles"] if tile[2] != layer]
+        return normalize_document(doc)
+    if not 0 <= layer < doc["layers"]:
+        raise ValueError("Selected layer is outside the building.")
+    if doc["layers"] == 1:
+        raise ValueError("A building must retain at least one storey.")
+
+    for key in ("interior_cells", "target_exclusion_cells", "x_walls", "y_walls"):
+        doc[key] = [
+            [x, y, z - 1 if z > layer else z]
+            for x, y, z in doc[key]
+            if z != layer
+        ]
+    doc["tiles"] = [
+        [x, y, z - 1 if z > layer + 1 else z]
+        for x, y, z in doc["tiles"]
+        if z != layer + 1
+    ]
+    base = doc["base_cell"]
+    if base is not None:
+        if base[2] == layer:
+            doc["base_cell"] = None
+        elif base[2] > layer:
+            base[2] -= 1
+        doc.pop("base_position_m", None)
+    doc["layers"] -= 1
+    return normalize_document(doc)
+
+
+def expand_document(
+    document: dict[str, Any], direction: str, delta: int = 1
+) -> dict[str, Any]:
+    """Resize one horizontal edge, copying its neighbor when growing."""
     doc = normalize_document(deepcopy(document))
     direction = str(direction).lower()
     if direction not in {"west", "east", "north", "south"}:
         raise ValueError("direction must be west, east, north, or south.")
+    if isinstance(delta, bool) or int(delta) != delta or int(delta) not in {-1, 1}:
+        raise ValueError("delta must be -1 or 1.")
+    delta = int(delta)
     axis = 0 if direction in {"west", "east"} else 1
     prepend = direction in {"west", "north"}
     dimension_key = "cols" if axis == 0 else "rows"
     old_size = doc[dimension_key]
+    if delta == -1:
+        if old_size == 1:
+            raise ValueError(f"{dimension_key} cannot shrink below one cell.")
+        removed = 0 if prepend else old_size - 1
+
+        def crop_cells(values: list[list[int]], value_axis: int = axis) -> list[list[int]]:
+            return [
+                [coordinate - 1 if prepend and i == value_axis else coordinate
+                 for i, coordinate in enumerate(value)]
+                for value in values if value[value_axis] != removed
+            ]
+
+        for key in ("interior_cells", "target_exclusion_cells", "tiles"):
+            doc[key] = crop_cells(doc[key])
+        perpendicular = "y_walls" if axis == 0 else "x_walls"
+        parallel = "x_walls" if axis == 0 else "y_walls"
+        doc[perpendicular] = crop_cells(doc[perpendicular], axis)
+
+        # Preserve the removed exterior wall state on the new outside edge,
+        # while dropping the old shared boundary.
+        exterior = 0 if prepend else old_size
+        shared = 1 if prepend else old_size - 1
+        rebuilt = []
+        for wall in doc[parallel]:
+            boundary = wall[axis]
+            if boundary == shared:
+                continue
+            value = wall.copy()
+            if boundary == exterior:
+                value[axis] = 0 if prepend else old_size - 1
+            elif prepend:
+                value[axis] -= 1
+            rebuilt.append(value)
+        doc[parallel] = rebuilt
+        if doc["base_cell"] is not None:
+            if doc["base_cell"][axis] == removed:
+                doc["base_cell"] = None
+            elif prepend:
+                doc["base_cell"][axis] -= 1
+            doc.pop("base_position_m", None)
+        doc[dimension_key] -= 1
+        return normalize_document(doc)
+
     if old_size >= MAX_GRID_AXIS:
         raise ValueError(f"{dimension_key} cannot exceed {MAX_GRID_AXIS}.")
 
@@ -341,6 +429,11 @@ def expand_document(document: dict[str, Any], direction: str) -> dict[str, Any]:
 
     doc[dimension_key] += 1
     return normalize_document(doc)
+
+
+def document_yaml(document: dict[str, Any]) -> str:
+    """Return exactly the normalized map payload consumed by validation/save."""
+    return yaml.safe_dump(map_data_from_document(document), sort_keys=False)
 
 
 def validate_document(document: dict[str, Any]) -> dict[str, Any]:

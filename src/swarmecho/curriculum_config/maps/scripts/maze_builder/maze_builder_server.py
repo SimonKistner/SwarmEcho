@@ -26,6 +26,8 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     add_roof,
     add_layer,
     available_maps,
+    delete_layer,
+    document_yaml,
     load_document,
     new_document,
     expand_document,
@@ -125,13 +127,26 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                     {"ok": True, "document": add_layer(payload)},
                 )
                 return
+            if path == "/api/buildings/delete-layer":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "document": delete_layer(payload, payload.get("selected_layer", 0))},
+                )
+                return
             if path == "/api/buildings/expand":
                 self._send_json(
                     HTTPStatus.OK,
                     {
                         "ok": True,
-                        "document": expand_document(payload, payload.get("direction")),
+                        "document": expand_document(
+                            payload, payload.get("direction"), payload.get("delta", 1)
+                        ),
                     },
+                )
+                return
+            if path == "/api/buildings/code":
+                self._send_json(
+                    HTTPStatus.OK, {"ok": True, "code": document_yaml(payload)}
                 )
                 return
             if path == "/api/buildings/roof":
