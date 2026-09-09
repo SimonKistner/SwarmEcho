@@ -15,7 +15,7 @@ env:
   coverage_voxel_size: 2.5
   observe_target_vector: false
   observe_base_vector: false
-  observe_coverage_probe: true
+  observe_coverage_probe: false
 
 reward:
   target_found_requires_delivery: true
@@ -53,7 +53,7 @@ evaluation:
   eval_parallel_envs: 4000
   eval_broadcast_on_curriculum_early_stop: false
   early_exit: true
-  early_exit_threshold: 0.99
+  early_exit_threshold: 0.9
 
   save_model: true
   checkpoint_freq: 50
@@ -63,6 +63,6 @@ evaluation:
 
   training_heatmap_creation: false
 
-  eval_video: true
+  eval_video: false
   eval_video_freq: 9999999999
   eval_video_offset: 1

@@ -15,7 +15,7 @@ env:
   coverage_voxel_size: 2.5
   observe_target_vector: false
   observe_base_vector: false
-  observe_coverage_probe: true
+  observe_coverage_probe: false
   num_obstacles: 3
   obstacle_size_min_m: 5.0
   obstacle_size_max_m: 15.0
