@@ -7,9 +7,11 @@ import yaml
 from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
     add_outer_walls,
     add_roof,
+    add_layer,
     document_from_map_data,
     map_data_from_document,
     new_document,
+    expand_document,
     save_document,
     validate_document,
 )
@@ -19,14 +21,23 @@ from swarmecho.curriculum_config.maps.scripts.validate_building import (
 from swarmecho.env.buildings import BuildingValidationError, compile_building
 
 
+def _placed_document(cols=6, rows=4, layers=1):
+    document = new_document(cols, rows, layers)
+    document["base_cell"] = [0, 0, 0]
+    return document
+
+
 def test_new_builder_document_passes_training_map_contract():
     document = new_document(6, 4, 2)
+    assert document["base_cell"] is None
+    assert document["target_exclusion_cells"] == []
+    document["base_cell"] = [0, 0, 0]
     report = validate_document(document)
 
     assert report["valid"]
     assert report["world_size_m"] == [30.0, 20.0, 10.0]
     assert report["interior_cells"] == 48
-    assert report["target_candidate_cells"] == 47
+    assert report["target_candidate_cells"] == 48
 
 
 def test_existing_v1_map_opens_without_migration():
@@ -49,7 +60,7 @@ def test_existing_v1_map_opens_without_migration():
 
 
 def test_outer_walls_make_exact_eight_segments_for_two_by_two_footprint():
-    document = new_document(4, 4, 1)
+    document = _placed_document(4, 4, 1)
     document["interior_cells"] = [
         [x, y, 0] for x in (1, 2) for y in (1, 2)
     ]
@@ -68,7 +79,7 @@ def test_outer_walls_make_exact_eight_segments_for_two_by_two_footprint():
 
 
 def test_add_roof_only_closes_exposed_top_faces():
-    document = new_document(2, 1, 2)
+    document = _placed_document(2, 1, 2)
     document["tiles"] = [tile for tile in document["tiles"] if tile[2] == 0]
     document["interior_cells"].remove([1, 0, 1])
 
@@ -79,7 +90,7 @@ def test_add_roof_only_closes_exposed_top_faces():
 
 
 def test_validator_reports_an_exterior_leak_like_level_loading():
-    document = new_document(2, 2, 1)
+    document = _placed_document(2, 2, 1)
     document["x_walls"].remove([0, 0, 0])
 
     with pytest.raises(BuildingValidationError, match=r"leaks through -X"):
@@ -87,7 +98,7 @@ def test_validator_reports_an_exterior_leak_like_level_loading():
 
 
 def test_internal_walls_compile_to_runtime_aabbs():
-    document = new_document(2, 1, 2)
+    document = _placed_document(2, 1, 2)
     document["x_walls"].append([1, 0, 0])
     building = compile_building(map_data_from_document(document))
 
@@ -97,12 +108,12 @@ def test_internal_walls_compile_to_runtime_aabbs():
 
 
 def test_runtime_saved_builder_map_can_run_cpu_training_contract_smoke(tmp_path):
-    path = save_document(new_document(3, 2, 1), tmp_path / "created_map.yaml")
+    path = save_document(_placed_document(3, 2, 1), tmp_path / "created_map.yaml")
     report = validate_building_file(path, runtime_smoke=True)
 
     assert report["runtime_smoke"] is True
     assert report["observation_shape"] == [2, 38]
-    assert report["target_candidate_cells"] == 5
+    assert report["target_candidate_cells"] == 6
 
 
 def test_runtime_authored_wall_blocks_motion_and_visibility():
@@ -111,7 +122,7 @@ def test_runtime_authored_wall_blocks_motion_and_visibility():
 
     from swarmecho.env.baseline3d import Baseline3DConfig, make_baseline_3d_fns
 
-    document = new_document(2, 1, 2)
+    document = _placed_document(2, 1, 2)
     document["x_walls"].append([1, 0, 0])
     building = compile_building(map_data_from_document(document))
     cfg = Baseline3DConfig(
@@ -142,10 +153,34 @@ def test_runtime_authored_wall_blocks_motion_and_visibility():
 
 
 def test_non_interior_target_exclusion_is_rejected():
-    document = new_document(2, 2, 1)
+    document = _placed_document(2, 2, 1)
     document["interior_cells"].remove([0, 0, 0])
     document["target_exclusion_cells"] = [[0, 0, 0]]
     document["base_cell"] = [1, 1, 0]
 
     with pytest.raises(BuildingValidationError, match="non-interior"):
         validate_document(deepcopy(document))
+
+
+def test_add_layer_copies_walls_and_target_exclusions_but_not_tiles():
+    document = _placed_document(2, 2, 1)
+    document["target_exclusion_cells"] = [[1, 1, 0]]
+    expanded = add_layer(document)
+
+    assert expanded["layers"] == 2
+    assert [0, 0, 1] in expanded["x_walls"]
+    assert [1, 1, 1] in expanded["target_exclusion_cells"]
+    assert not any(tile[2] == 2 for tile in expanded["tiles"])
+
+
+@pytest.mark.parametrize("direction", ["west", "east", "north", "south"])
+def test_directional_expansion_preserves_and_duplicates_neighbor_state(direction):
+    document = _placed_document(2, 2, 1)
+    document["target_exclusion_cells"] = [[0, 0, 0]]
+    expanded = expand_document(document, direction)
+
+    assert expanded["cols"] == 2 + int(direction in {"west", "east"})
+    assert expanded["rows"] == 2 + int(direction in {"north", "south"})
+    assert len(expanded["interior_cells"]) == 6
+    assert len(expanded["tiles"]) == 12
+    assert validate_document(expanded)["valid"]

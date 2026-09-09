@@ -74,8 +74,8 @@ def new_document(cols: int = 6, rows: int = 4, layers: int = 1) -> dict[str, Any
         "tiles": tiles,
         "x_walls": x_walls,
         "y_walls": y_walls,
-        "base_cell": [cols // 2, rows // 2, 0],
-        "target_exclusion_cells": [[cols // 2, rows // 2, 0]],
+        "base_cell": None,
+        "target_exclusion_cells": [],
     }
 
 
@@ -91,11 +91,12 @@ def normalize_document(data: dict[str, Any]) -> dict[str, Any]:
     x_wall_shape = (cols + 1, rows, layers)
     y_wall_shape = (cols, rows + 1, layers)
     base = data.get("base_cell")
-    if not isinstance(base, (list, tuple)) or len(base) != 3:
-        raise ValueError("base_cell must contain [x, y, z].")
-    base = [int(value) for value in base]
-    if any(value < 0 or value >= limit for value, limit in zip(base, cell_shape)):
-        raise ValueError(f"base_cell {base} is outside {cell_shape}.")
+    if base is not None:
+        if not isinstance(base, (list, tuple)) or len(base) != 3:
+            raise ValueError("base_cell must contain [x, y, z] or be unset.")
+        base = [int(value) for value in base]
+        if any(value < 0 or value >= limit for value, limit in zip(base, cell_shape)):
+            raise ValueError(f"base_cell {base} is outside {cell_shape}.")
     result = {
         "format": BUILDING_FORMAT,
         "name": str(data.get("name") or "custom_3d_building").strip(),
@@ -141,11 +142,13 @@ def document_from_map_data(data: dict[str, Any]) -> dict[str, Any]:
     grid = data.get("building_cell_grid") or {}
     cols, rows, layers = (int(grid.get(key, 0)) for key in ("cols", "rows", "layers"))
     cell = float(data.get("cell_size_m", DEFAULT_CELL_SIZE_M))
-    base_position = data.get("base_position_m", [cell / 2, cell / 2, 0])
-    base_cell = [
-        min(limit - 1, max(0, int(float(value) // cell)))
-        for value, limit in zip(base_position, (cols, rows, layers))
-    ]
+    base_position = data.get("base_position_m")
+    base_cell = None
+    if base_position is not None:
+        base_cell = [
+            min(limit - 1, max(0, int(float(value) // cell)))
+            for value, limit in zip(base_position, (cols, rows, layers))
+        ]
     geometry = data.get("geometry") or {}
     interior = data.get("interior_cells")
     if interior is None:
@@ -169,7 +172,7 @@ def document_from_map_data(data: dict[str, Any]) -> dict[str, Any]:
             "x_walls": geometry.get("x_walls", []),
             "y_walls": geometry.get("y_walls", []),
             "base_cell": base_cell,
-            "base_position_m": base_position,
+            **({"base_position_m": base_position} if base_position is not None else {}),
             "target_exclusion_cells": data.get("target_exclusion_cells", []),
         }
     )
@@ -179,6 +182,8 @@ def map_data_from_document(document: dict[str, Any]) -> dict[str, Any]:
     """Compile the editor representation into the existing v1 YAML contract."""
     doc = normalize_document(document)
     cell = doc["cell_size_m"]
+    if doc["base_cell"] is None:
+        raise ValueError("Place the base before validating or saving the map.")
     x, y, z = doc["base_cell"]
     tile_thickness = doc["tile_thickness_m"]
     return {
@@ -248,6 +253,94 @@ def add_roof(document: dict[str, Any]) -> dict[str, Any]:
             tiles.add((x, y, z + 1))
     doc["tiles"] = [list(value) for value in sorted(tiles)]
     return doc
+
+
+def add_layer(document: dict[str, Any]) -> dict[str, Any]:
+    """Append an empty floor while copying walls and target exclusions below it."""
+    doc = normalize_document(deepcopy(document))
+    source_layer = doc["layers"] - 1
+    new_layer = doc["layers"]
+    doc["layers"] += 1
+    doc["x_walls"].extend(
+        [[x, y, new_layer] for x, y, z in doc["x_walls"] if z == source_layer]
+    )
+    doc["y_walls"].extend(
+        [[x, y, new_layer] for x, y, z in doc["y_walls"] if z == source_layer]
+    )
+    doc["target_exclusion_cells"].extend(
+        [
+            [x, y, new_layer]
+            for x, y, z in doc["target_exclusion_cells"]
+            if z == source_layer
+        ]
+    )
+    return normalize_document(doc)
+
+
+def expand_document(document: dict[str, Any], direction: str) -> dict[str, Any]:
+    """Grow one horizontal edge and copy its neighboring row or column."""
+    doc = normalize_document(deepcopy(document))
+    direction = str(direction).lower()
+    if direction not in {"west", "east", "north", "south"}:
+        raise ValueError("direction must be west, east, north, or south.")
+    axis = 0 if direction in {"west", "east"} else 1
+    prepend = direction in {"west", "north"}
+    dimension_key = "cols" if axis == 0 else "rows"
+    old_size = doc[dimension_key]
+    if old_size >= MAX_GRID_AXIS:
+        raise ValueError(f"{dimension_key} cannot exceed {MAX_GRID_AXIS}.")
+
+    def shifted(values: list[list[int]], coordinate_axis: int = axis) -> list[list[int]]:
+        result = deepcopy(values)
+        if prepend:
+            for value in result:
+                value[coordinate_axis] += 1
+        return result
+
+    doc["interior_cells"] = shifted(doc["interior_cells"])
+    doc["target_exclusion_cells"] = shifted(doc["target_exclusion_cells"])
+    doc["tiles"] = shifted(doc["tiles"])
+    doc["x_walls"] = shifted(doc["x_walls"], axis)
+    doc["y_walls"] = shifted(doc["y_walls"], axis)
+    if doc["base_cell"] is not None and prepend:
+        doc["base_cell"][axis] += 1
+    if doc.get("base_position_m") is not None and prepend:
+        doc["base_position_m"][axis] += doc["cell_size_m"]
+
+    # Move the old exterior wall outward. Parallel segments are duplicated
+    # below, while the shared boundary remains open like an extended room.
+    walls = doc["x_walls"] if axis == 0 else doc["y_walls"]
+    if prepend:
+        for wall in walls:
+            if wall[axis] == 1:
+                wall[axis] = 0
+    else:
+        for wall in walls:
+            if wall[axis] == old_size:
+                wall[axis] += 1
+
+    source = 1 if prepend else old_size - 1
+    destination = 0 if prepend else old_size
+
+    def duplicate(values: list[list[int]], value_axis: int = axis) -> None:
+        values.extend(
+            [
+                [destination if i == value_axis else coordinate for i, coordinate in enumerate(value)]
+                for value in list(values)
+                if value[value_axis] == source
+            ]
+        )
+
+    duplicate(doc["interior_cells"])
+    duplicate(doc["target_exclusion_cells"])
+    duplicate(doc["tiles"])
+    if axis == 0:
+        duplicate(doc["y_walls"], 0)
+    else:
+        duplicate(doc["x_walls"], 1)
+
+    doc[dimension_key] += 1
+    return normalize_document(doc)
 
 
 def validate_document(document: dict[str, Any]) -> dict[str, Any]:

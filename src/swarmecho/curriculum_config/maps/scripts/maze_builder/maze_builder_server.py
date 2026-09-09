@@ -24,9 +24,11 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core imp
 from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
     add_outer_walls,
     add_roof,
+    add_layer,
     available_maps,
     load_document,
     new_document,
+    expand_document,
     save_document,
     validate_document,
 )
@@ -114,6 +116,21 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "document": add_outer_walls(payload, payload.get("selected_layer", 0)),
+                    },
+                )
+                return
+            if path == "/api/buildings/add-layer":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "document": add_layer(payload)},
+                )
+                return
+            if path == "/api/buildings/expand":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "document": expand_document(payload, payload.get("direction")),
                     },
                 )
                 return

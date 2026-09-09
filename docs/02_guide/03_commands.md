@@ -74,7 +74,10 @@ source .venv/bin/activate
 ### Layered 3D Map Builder
 Launch the browser editor to paint floor tiles, solid walls, storeys, the base,
 and target no-spawn cells. Existing `swarmecho-map/v1` building maps can be
-opened directly:
+opened directly. Drag across tiles or no-target cells to paint rectangular
+selections, drag across wall edges to paint continuously, use the four edge
+buttons to copy-expand the footprint, and drag outside the floor (or select
+Orbit) to rotate the structure; the mouse wheel zooms:
 ```bash
 uv run swarmecho-maze-builder
 ```
