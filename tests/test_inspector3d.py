@@ -14,9 +14,29 @@ from swarmecho.visualize.inspector3d import (
     inspector_html,
     replay_payload,
     replay_label,
+    building_geometry,
 )
 from swarmecho.training.artifacts import save_eval_info_csv
 from swarmecho.visualize.replay3d import write_replay
+from swarmecho.visualize.replay3d import building_snapshot
+
+
+def test_snapshot_geometry_survives_missing_original_map():
+    level = load_level_3d("B01_office")
+    snapshot = building_snapshot(level.building)
+    geometry = building_geometry({"map_name": "does_not_exist", "building_snapshot": snapshot})
+    assert geometry["source"] == "replay snapshot"
+    assert len(geometry["walls"]) > 0
+    assert geometry["solid_min"] == level.building.solid_min_m.tolist()
+    assert geometry["solid_max"] == level.building.solid_max_m.tolist()
+
+
+def test_legacy_office_visibility_bounds_match_runtime():
+    level = load_level_3d("B01_office")
+    geometry = building_geometry({"map_name": level.building_name})
+    actual = sorted(tuple(lo + hi) for lo, hi in zip(geometry["solid_min"], geometry["solid_max"]))
+    expected = sorted(tuple(lo.tolist() + hi.tolist()) for lo, hi in zip(level.building.solid_min_m, level.building.solid_max_m))
+    assert actual == expected
 
 
 def test_inspector_payload_and_controls(tmp_path):
@@ -64,9 +84,12 @@ def test_inspector_payload_and_controls(tmp_path):
     assert 'id="rotateSpeed"' in HTML
     assert 'id="cameraElevation"' in HTML
     assert 'id="cameraElevationValue"' in HTML
-    assert 'id="cameraElevation" type="range" min="-85" max="85" step="1" value="4"' in HTML
+    assert 'id="cameraElevation" type="range" min="-85" max="85" step="1" value="25"' in HTML
     assert 'id="autoRotate" type="checkbox" checked' in HTML
-    assert "DEFAULT_CAMERA={eye:{x:1.45,y:1.45,z:.1433925964}" in HTML
+    assert "Math.tan(25*Math.PI/180)" in HTML
+    assert 'id="cameraControls" class="card"' in HTML
+    assert 'id="wallMaterial"' not in HTML
+    assert 'id="wallTransparency" type="range" min="0" max="100" step="1" value="50"' in HTML
     assert 'id="loopReplay"' in HTML
     assert 'id="fixedBounds"' not in HTML
     assert "function rotateCamera(timestamp)" in HTML
@@ -79,7 +102,6 @@ def test_inspector_payload_and_controls(tmp_path):
     assert "if(rendering)" in HTML
     assert "draw(frame>=last?0:frame+1).finally" in HTML
     assert "frame>=last&&!$('loopReplay').checked" in HTML
-    assert "z:.75" in HTML
     assert 'id="heatmapConfidence"' in HTML
     assert 'id="heatmapConfidenceValue">100%' in HTML
     assert "function heatmapStage(index)" in HTML
@@ -195,6 +217,7 @@ def test_inspector_discovers_dedicated_roadmap_testresult(tmp_path):
     result.write_text(json.dumps({"format": "swarmecho-roadmap-test/v1"}))
     assert discover_roadmap_tests(tmp_path) == [result.resolve()]
     assert "function drawRoadmap()" in HTML
-    assert "showRoute4" in HTML
+    assert "roadmapPaths.forEach" in HTML
+    assert 'id="roadmapRoutes"' in HTML
     assert "function cuboidMesh" in HTML
     assert "opacity:.5" in HTML

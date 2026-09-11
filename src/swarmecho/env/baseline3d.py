@@ -19,12 +19,18 @@ import numpy as np
 
 from swarmecho.env.buildings import BuildingArrays
 from swarmecho.env.obstacles3d import (
+    _roadmap_attachment,
+    _route_costs,
+    authored_roadmap_vertices,
     free_space_distance,
+    pairwise_free_space_distance,
     generate_obstacles,
     points_inside_aabbs,
     roadmap_distances,
     roadmap_vertices,
     segments_blocked,
+    SharedRoadmap,
+    shared_roadmap,
 )
 
 
@@ -58,6 +64,45 @@ class Baseline3DState(NamedTuple):
     obstacle_max: jax.Array = jnp.zeros((0, 3), dtype=jnp.float32)
     roadmap_vertices: jax.Array = jnp.zeros((0, 3), dtype=jnp.float32)
     roadmap_distances: jax.Array = jnp.zeros((0, 0), dtype=jnp.float32)
+    shared_geometry: SharedRoadmap | None = None
+    spawn_pair_attempts: jax.Array = jnp.int32(1)
+    roadmap_corner_distances: jax.Array = jnp.zeros((0, 0), dtype=jnp.float32)
+
+    @property
+    def solid_min(self):
+        if self.shared_geometry is None:
+            return self.obstacle_min
+        authored = jnp.broadcast_to(jnp.asarray(self.shared_geometry.solid_min), self.obstacle_min.shape[:-2] + self.shared_geometry.solid_min.shape)
+        return jnp.concatenate((authored, self.obstacle_min), axis=-2)
+
+    @property
+    def solid_max(self):
+        if self.shared_geometry is None:
+            return self.obstacle_max
+        authored = jnp.broadcast_to(jnp.asarray(self.shared_geometry.solid_max), self.obstacle_max.shape[:-2] + self.shared_geometry.solid_max.shape)
+        return jnp.concatenate((authored, self.obstacle_max), axis=-2)
+
+    @property
+    def planning_vertices(self):
+        if self.shared_geometry is not None and self.obstacle_min.shape[0] == 0:
+            return jnp.asarray(self.shared_geometry.vertices)
+        return self.roadmap_vertices
+
+    @property
+    def planning_distances(self):
+        if self.shared_geometry is not None and self.obstacle_min.shape[0] == 0:
+            return jnp.asarray(self.shared_geometry.distances)
+        return self.roadmap_distances
+
+    @property
+    def planning_min(self):
+        margin = self.shared_geometry.clearance - 1e-4 if self.shared_geometry is not None else 0.0
+        return self.solid_min - margin
+
+    @property
+    def planning_max(self):
+        margin = self.shared_geometry.clearance - 1e-4 if self.shared_geometry is not None else 0.0
+        return self.solid_max + margin
 
 
 @dataclass(frozen=True)
@@ -71,7 +116,7 @@ class Baseline3DConfig:
     comm_radius_base: float = 6.0
     comm_radius: float = 5.0
     visual_radius: float = 4.0
-    target_spawn_buffer: float = 0.5
+    target_spawn_buffer: float = 0.5  # Legacy config compatibility; no base-distance restriction.
     target_wall_buffer_fraction: float = 0.1
     radar_bins: int = 8
     spawn_delay: int = 0
@@ -82,6 +127,7 @@ class Baseline3DConfig:
     observe_target_vector: bool = False
     observe_base_vector: bool = False
     observe_coverage_probe: bool = False
+    observe_chain_contributor: bool = False
     coverage_voxel_size: float | None = None
     num_obstacles: int = 0
     obstacle_size_min_m: float = 2.0
@@ -91,6 +137,8 @@ class Baseline3DConfig:
     obstacle_boundary_buffer_m: float = 0.5
     obstacle_target_buffer_m: float = 0.5
     obstacle_planning_clearance_m: float = 0.1
+    roadmap_merge_walls: bool = True
+    roadmap_corner_bonus_m: float = 8.0
     obstacle_layout_version: str = "three_aabb_v1"
 
 
@@ -129,11 +177,6 @@ def spherical_directions(count: int) -> np.ndarray:
     return np.stack([radius * np.cos(azimuth), radius * np.sin(azimuth), z], axis=1).astype(
         np.float32
     )
-
-
-def minimum_target_distance(cfg: Baseline3DConfig) -> float:
-    """Distance that prevents an immediate base/first-drone discovery."""
-    return cfg.comm_radius_base + 0.5 * cfg.comm_radius + cfg.target_spawn_buffer
 
 
 def coverage_grid_geometry(
@@ -177,6 +220,7 @@ def observation_dim_3d(cfg: Baseline3DConfig) -> int:
         + 3 * int(cfg.observe_target_vector)
         + cfg.radar_bins * 4
         + cfg.radar_bins * int(cfg.observe_coverage_probe)
+        + int(cfg.observe_chain_contributor)
     )
 
 
@@ -235,35 +279,29 @@ def chain_diagnostics_3d(state: Baseline3DState) -> tuple[jax.Array, jax.Array]:
     return chain_gap_dist, chain_progress_pct
 
 
-def obstacle_chain_diagnostics_3d(state: Baseline3DState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def chain_distance_matrix_3d(state: Baseline3DState):
+    """Distances for [base, target, agents], computed once per transition."""
+    points = jnp.concatenate((state.base_pos[None], state.target_pos[None], state.pos))
+    return pairwise_free_space_distance(points, state.planning_vertices,
+                                       state.planning_distances, state.planning_min, state.planning_max)
+
+
+def obstacle_chain_diagnostics_3d(state: Baseline3DState, distances=None) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Jointly select compatible partial-chain leaders using free-space distance."""
     active = state.active
-    base_candidates = jnp.concatenate([state.base_pos[None, :], state.pos], axis=0)
-    target_candidates = jnp.concatenate([state.target_pos[None, :], state.pos], axis=0)
+    if distances is None:
+        distances = chain_distance_matrix_3d(state)
+    agents = jnp.arange(state.pos.shape[0]) + 2
+    base_indices = jnp.concatenate((jnp.array([0]), agents))
+    target_indices = jnp.concatenate((jnp.array([1]), agents))
     base_valid = jnp.concatenate([jnp.ones(1, dtype=bool), state.is_conn_base & active])
     target_valid = jnp.concatenate([jnp.ones(1, dtype=bool), state.is_conn_target & active & state.target_known])
-    gaps = free_space_distance(
-        base_candidates,
-        target_candidates,
-        state.roadmap_vertices,
-        state.roadmap_distances,
-        state.obstacle_min,
-        state.obstacle_max,
-    )
-    mission = free_space_distance(
-        state.base_pos, state.target_pos, state.roadmap_vertices, state.roadmap_distances,
-        state.obstacle_min, state.obstacle_max,
-    )[0, 0]
+    gaps = distances[base_indices[:, None], target_indices[None, :]]
+    mission = distances[0, 1]
     # Route excess is a secondary tie-breaker only; one millimetre of gap always
     # dominates it, preserving the meaning of the primary joint gap objective.
-    from_base = free_space_distance(
-        state.base_pos, base_candidates, state.roadmap_vertices, state.roadmap_distances,
-        state.obstacle_min, state.obstacle_max,
-    )[0]
-    to_target = free_space_distance(
-        target_candidates, state.target_pos, state.roadmap_vertices, state.roadmap_distances,
-        state.obstacle_min, state.obstacle_max,
-    )[:, 0]
+    from_base = distances[0, base_indices]
+    to_target = distances[target_indices, 1]
     excess = jnp.maximum(from_base[:, None] + gaps + to_target[None, :] - mission, 0.0)
     score = gaps + jnp.minimum(excess, 1e3) * 1e-6
     score = jnp.where(base_valid[:, None] & target_valid[None, :], score, 1e6)
@@ -292,18 +330,18 @@ def final_chain_length_3d(state: Baseline3DState, cfg: Baseline3DConfig) -> jax.
         & active[None, :]
         & ~jnp.eye(n, dtype=bool)
     )
-    if state.obstacle_min.shape[0] > 0:
+    if state.solid_min.shape[0] > 0:
         drone_edges &= ~segments_blocked(
             state.pos[:, None, :], state.pos[None, :, :],
-            state.obstacle_min, state.obstacle_max,
+            state.solid_min, state.solid_max,
         )
     base_edges = (
         jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
         <= cfg.comm_radius_base
     ) & active
-    if state.obstacle_min.shape[0] > 0:
+    if state.solid_min.shape[0] > 0:
         base_edges &= ~segments_blocked(
-            state.pos, state.base_pos, state.obstacle_min, state.obstacle_max
+            state.pos, state.base_pos, state.solid_min, state.solid_max
         )
     target_edges = state.directly_sees_target & active
     vertex_count = n + 2
@@ -345,13 +383,13 @@ def _contributing_chain_agents_3d(
         jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
         <= cfg.comm_radius_base
     ) & active
-    if state.obstacle_min.shape[0] > 0:
+    if state.solid_min.shape[0] > 0:
         drone_edges &= ~segments_blocked(
             state.pos[:, None, :], state.pos[None, :, :],
-            state.obstacle_min, state.obstacle_max,
+            state.solid_min, state.solid_max,
         )
         base_edges &= ~segments_blocked(
-            state.pos, state.base_pos, state.obstacle_min, state.obstacle_max
+            state.pos, state.base_pos, state.solid_min, state.solid_max
         )
     target_edges = state.directly_sees_target & active
 
@@ -417,6 +455,7 @@ def rewards_3d(
     current: Baseline3DState,
     cfg: Baseline3DRewardConfig,
     env_cfg: Baseline3DConfig,
+    geodesic_distances=None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute 3D rewards with the same event semantics as the 2D task.
 
@@ -452,13 +491,12 @@ def rewards_3d(
             current.directly_sees_target & ~previous.target_known
         )
 
-    use_obstacle_reward = cfg.chain_reward_system == "obstacle_geodesic" and current.obstacle_min.shape[0] > 0
+    use_obstacle_reward = cfg.chain_reward_system == "obstacle_geodesic"
     if use_obstacle_reward:
-        gap_distance, _, _, _ = obstacle_chain_diagnostics_3d(current)
-        full_distance = free_space_distance(
-            current.base_pos, current.target_pos, current.roadmap_vertices,
-            current.roadmap_distances, current.obstacle_min, current.obstacle_max,
-        )[0, 0]
+        if geodesic_distances is None:
+            geodesic_distances = chain_distance_matrix_3d(current)
+        gap_distance, _, _, _ = obstacle_chain_diagnostics_3d(current, geodesic_distances)
+        full_distance = geodesic_distances[0, 1]
     else:
         gap_distance, _ = chain_diagnostics_3d(current)
         full_distance = jnp.linalg.norm(current.target_pos - current.base_pos)
@@ -491,13 +529,13 @@ def rewards_3d(
 
 
 def _target_spawn_boxes(
-    building: BuildingArrays, cfg: Baseline3DConfig
+    building: BuildingArrays, cfg: Baseline3DConfig, *, include_excluded: bool = False
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Return valid cell boxes and their volumes for continuous target sampling."""
     dims = building.target_exclusion.shape
     cells = np.stack(np.meshgrid(*[np.arange(size) for size in dims], indexing="ij"), axis=-1)
     cells = cells.reshape(-1, 3)
-    excluded = building.target_exclusion[tuple(cells.T)]
+    excluded = building.target_exclusion[tuple(cells.T)] & (not include_excluded)
     interior = building.interior_cells[tuple(cells.T)]
     clearance = cfg.target_wall_buffer_fraction * building.cell_size_m
     if not 0 <= cfg.target_wall_buffer_fraction < 0.5:
@@ -529,7 +567,10 @@ def _target_spawn_boxes(
     )
 
 
-def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
+def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, plan_geodesic: bool = True,
+                       randomize_base: bool = False, minimum_geodesic_separation: bool = False,
+                       minimum_geodesic_separation_multiplier: float = 2.0,
+                       spawn_pair_max_attempts: int = 1024):
     """Create pure reset, step, observation, and metric functions."""
     if cfg.num_agents < 1:
         raise ValueError("num_agents must be positive.")
@@ -552,6 +593,19 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
     coverage_voxel_size, coverage_shape = coverage_grid_geometry(building, cfg)
     directions = jnp.asarray(spherical_directions(cfg.radar_bins))
     spawn_lower, spawn_upper, spawn_volumes = _target_spawn_boxes(building, cfg)
+    if not math.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:
+        raise ValueError("roadmap_corner_bonus_m must be finite and nonnegative.")
+    corner_merge_distance = building.wall_thickness_m + 2 * (cfg.drone_radius + cfg.obstacle_planning_clearance_m)
+    if randomize_base or minimum_geodesic_separation:
+        if isinstance(spawn_pair_max_attempts, bool) or not isinstance(spawn_pair_max_attempts, int) or not 1 <= spawn_pair_max_attempts <= np.iinfo(np.int32).max:
+            raise ValueError("spawn_pair_max_attempts must be a positive int32 integer.")
+    if minimum_geodesic_separation:
+        if not plan_geodesic:
+            raise ValueError("Minimum geodesic separation requires obstacle_geodesic chain reward.")
+        if not math.isfinite(minimum_geodesic_separation_multiplier) or minimum_geodesic_separation_multiplier < 0:
+            raise ValueError("Minimum geodesic separation multiplier must be finite and nonnegative.")
+    if randomize_base:
+        base_lower, base_upper, base_volumes = _target_spawn_boxes(building, cfg, include_excluded=True)
     n = cfg.num_agents
     world_size = jnp.asarray(building.world_size_m)
     lower = jnp.asarray(
@@ -585,6 +639,19 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
     authored_min = jnp.asarray(building.solid_min_m, dtype=jnp.float32)
     authored_max = jnp.asarray(building.solid_max_m, dtype=jnp.float32)
     has_authored_solids = bool(building.solid_min_m.shape[0])
+    geometry = shared_roadmap(
+        building.solid_min_m, building.solid_max_m, np.asarray(lower), np.asarray(upper),
+        cfg.drone_radius + cfg.obstacle_planning_clearance_m,
+        plan=plan_geodesic and cfg.num_obstacles == 0,
+        merge_walls=cfg.roadmap_merge_walls, edge_spacing=building.cell_size_m,
+        corner_bonus_m=cfg.roadmap_corner_bonus_m if minimum_geodesic_separation else 0.0,
+        corner_merge_distance_m=corner_merge_distance,
+    )
+    authored_vertices = jnp.asarray(geometry.vertices)
+    if plan_geodesic and cfg.roadmap_merge_walls and cfg.num_obstacles:
+        authored_vertices = jnp.asarray(authored_roadmap_vertices(
+            building.solid_min_m, building.solid_max_m, np.asarray(lower), np.asarray(upper),
+            cfg.drone_radius + cfg.obstacle_planning_clearance_m, building.cell_size_m))
 
     def all_solids(obstacle_min, obstacle_max):
         if has_authored_solids:
@@ -597,6 +664,24 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
     obstacle_z_min = cfg.obstacle_spawn_layer_min * building.cell_size_m
     obstacle_z_max = min(cfg.obstacle_spawn_layer_max * building.cell_size_m, float(world_size[2]))
 
+    def layout_roadmap(obstacle_min, obstacle_max):
+        """Build from the full layout, not only its generated cuboids.
+
+        Future generated buildings can use a factory per shared layout, or
+        supply their varying solids through these layout-specific arrays.
+        """
+        if not plan_geodesic or obstacle_min.shape[0] == 0:
+            return jnp.zeros((0, 3), dtype=jnp.float32), jnp.zeros((0, 0), dtype=jnp.float32)
+        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
+        clearance = cfg.drone_radius + cfg.obstacle_planning_clearance_m
+        if cfg.roadmap_merge_walls:
+            vertices = jnp.concatenate((authored_vertices,
+                jnp.clip(roadmap_vertices(obstacle_min, obstacle_max, clearance), lower, upper)))
+        else:
+            vertices = jnp.clip(roadmap_vertices(solid_min, solid_max, clearance), lower, upper)
+        distances = roadmap_distances(vertices, solid_min, solid_max, clearance)
+        return vertices, distances
+
     def build_layout(key):
         obstacle_min, obstacle_max = generate_obstacles(
             key, world_size, count=cfg.num_obstacles,
@@ -604,18 +689,15 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             z_min=obstacle_z_min, z_max=obstacle_z_max,
             boundary_buffer=cfg.obstacle_boundary_buffer_m,
         )
-        if cfg.num_obstacles:
-            vertices, distances = build_obstacle_roadmap_3d(
-                obstacle_min, obstacle_max, cfg
-            )
+        if cfg.num_obstacles and plan_geodesic:
+            vertices, distances = layout_roadmap(obstacle_min, obstacle_max)
         else:
             vertices = jnp.zeros((0, 3), dtype=jnp.float32)
             distances = jnp.zeros((0, 0), dtype=jnp.float32)
         return obstacle_min, obstacle_max, vertices, distances
 
     def sample_target(key, obstacle_min, obstacle_max):
-        """Sample uniformly by volume, rejecting the base exclusion sphere."""
-        minimum_distance = jnp.float32(minimum_target_distance(cfg))
+        """Sample allowed interior volume, rejecting buffered solid geometry."""
         solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
 
         def draw(draw_key):
@@ -630,14 +712,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
 
         def condition(carry):
             iteration, _, point = carry
-            invalid_distance = (
-                jnp.linalg.norm(point - jnp.asarray(building.base_position_m))
-                <= minimum_distance
-            )
             invalid_obstacle = points_inside_aabbs(
                 point, solid_min, solid_max, cfg.obstacle_target_buffer_m
             )
-            return (iteration < 64) & (invalid_distance | invalid_obstacle)
+            return (iteration < 64) & invalid_obstacle
 
         def retry(carry):
             iteration, retry_key, _ = carry
@@ -649,18 +727,13 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         fallback_valid = ~points_inside_aabbs(
             fallback_candidates, solid_min, solid_max,
             cfg.obstacle_target_buffer_m,
-        ) & (
-            jnp.linalg.norm(
-                fallback_candidates - jnp.asarray(building.base_position_m)[None, :],
-                axis=-1,
-            ) > minimum_distance
         )
         fallback_index = jnp.argmax(
             jnp.where(fallback_valid, fallback_candidates[:, 2], -jnp.inf)
         )
         point_invalid = points_inside_aabbs(
             point, solid_min, solid_max, cfg.obstacle_target_buffer_m
-        ) | (jnp.linalg.norm(point - jnp.asarray(building.base_position_m)) <= minimum_distance)
+        )
         return jnp.where(point_invalid, fallback_candidates[fallback_index], point)
 
     def connectivity(pos, active, base_pos, target_pos, obstacle_min, obstacle_max):
@@ -723,6 +796,7 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         obstacle_max: jax.Array | None = None,
         stored_vertices: jax.Array | None = None,
         stored_distances: jax.Array | None = None,
+        stored_corner_distances: jax.Array | None = None,
     ):
         """Reset an episode, optionally at one validated external target point.
 
@@ -733,8 +807,87 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
         layout_key, target_key, next_key = jax.random.split(key, 3)
         if obstacle_min is None:
             obstacle_min, obstacle_max, stored_vertices, stored_distances = build_layout(layout_key)
+        elif obstacle_min.shape[0] and plan_geodesic:
+            expected_vertices = (authored_vertices.shape[0] + 8 * obstacle_min.shape[0]
+                                 if cfg.roadmap_merge_walls else
+                                 8 * (authored_min.shape[0] + obstacle_min.shape[0]))
+            if (stored_vertices is None or stored_distances is None
+                    or stored_vertices.shape != (expected_vertices, 3)
+                    or stored_distances.shape != (expected_vertices, expected_vertices)):
+                stored_vertices, stored_distances = layout_roadmap(obstacle_min, obstacle_max)
+                stored_corner_distances = None
+        else:
+            stored_vertices = jnp.zeros((0, 3), dtype=jnp.float32)
+            stored_distances = jnp.zeros((0, 0), dtype=jnp.float32)
         target = sample_target(target_key, obstacle_min, obstacle_max) if target_pos is None else jnp.asarray(target_pos)
+        if minimum_geodesic_separation and obstacle_min.shape[0] and cfg.roadmap_corner_bonus_m:
+            if stored_corner_distances is None or stored_corner_distances.shape != stored_distances.shape:
+                solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
+                stored_corner_distances = roadmap_distances(
+                    stored_vertices, solid_min, solid_max,
+                    cfg.drone_radius + cfg.obstacle_planning_clearance_m,
+                    cfg.roadmap_corner_bonus_m, corner_merge_distance)
+        else:
+            stored_corner_distances = jnp.zeros((0, 0), dtype=jnp.float32)
         base_pos = jnp.asarray(building.base_position_m)
+        pair_attempts = jnp.int32(1)
+        if randomize_base or minimum_geodesic_separation:
+            solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
+            vertices = jnp.asarray(geometry.vertices) if cfg.num_obstacles == 0 else stored_vertices
+            distances = (jnp.asarray(geometry.corner_distances) if cfg.num_obstacles == 0 else
+                         stored_corner_distances if minimum_geodesic_separation and cfg.roadmap_corner_bonus_m else stored_distances)
+            fixed_target = target
+            if minimum_geodesic_separation:
+                margin = geometry.clearance - 1e-4
+                planning_min, planning_max = solid_min - margin, solid_max + margin
+                # One endpoint is fixed throughout rejection sampling. Attach
+                # it and propagate through the graph once, not on every retry.
+                fixed_point = fixed_target if randomize_base else base_pos
+                fixed_cost = _roadmap_attachment(fixed_point[None], vertices, planning_min, planning_max)
+                fixed_routes = _route_costs(
+                    fixed_cost + cfg.roadmap_corner_bonus_m,
+                    distances.T if randomize_base else distances)[0]
+
+            def draw_pair(draw_key):
+                base_key, point_key, target_key = jax.random.split(draw_key, 3)
+                base = base_pos
+                if randomize_base:
+                    box = jax.random.categorical(base_key, jnp.log(base_volumes))
+                    base = jax.random.uniform(point_key, (3,), minval=base_lower[box], maxval=base_upper[box])
+                # Randomized bases retry against the same episode target.
+                # With a fixed base, retry targets instead.
+                target = fixed_target if randomize_base else sample_target(target_key, obstacle_min, obstacle_max)
+                drone = base + jnp.asarray([0.0, 0.0, cfg.drone_radius])
+                valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
+                         & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
+                         & jnp.all((drone >= lower) & (drone <= upper))) if randomize_base else jnp.bool_(True)
+                valid &= ~points_inside_aabbs(target, solid_min, solid_max, cfg.obstacle_target_buffer_m)
+                if minimum_geodesic_separation:
+                    distance = jnp.linalg.norm(base - target)
+                    distance = jnp.where(segments_blocked(base, target, planning_min, planning_max), 1e6, distance)
+                    if vertices.shape[0]:
+                        moving_point = base if randomize_base else target
+                        moving_cost = _roadmap_attachment(moving_point[None], vertices, planning_min, planning_max)[0]
+                        distance = jnp.minimum(distance, jnp.min(moving_cost + fixed_routes))
+                    valid &= (distance < 1e6) & (distance >= minimum_geodesic_separation_multiplier * cfg.comm_radius)
+                return base, target, valid
+
+            pair_key, first_key = jax.random.split(target_key)
+            first_base, first_target, valid = draw_pair(first_key)
+
+            def retry_pair(carry):
+                count, key, _, _, _ = carry
+                key, draw_key = jax.random.split(key)
+                base, target, valid = draw_pair(draw_key)
+                return count + 1, key, base, target, valid
+
+            pair_attempts, _, base_pos, target, valid = jax.lax.while_loop(
+                lambda carry: (~carry[4]) & (carry[0] < spawn_pair_max_attempts), retry_pair,
+                (pair_attempts, pair_key, first_base, first_target, valid))
+
+            # Zero marks exhausted sampling. Training checks this on its
+            # existing host transfer, avoiding per-environment host callbacks.
+            pair_attempts = jnp.where(valid, pair_attempts, jnp.int32(0))
         # The station itself sits on the floor; drone centres start one radius
         # above it so the initial state does not intersect the floor tile.
         drone_spawn = base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
@@ -770,6 +923,9 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             obstacle_max=obstacle_max,
             roadmap_vertices=stored_vertices,
             roadmap_distances=stored_distances,
+            shared_geometry=geometry,
+            spawn_pair_attempts=pair_attempts,
+            roadmap_corner_distances=stored_corner_distances,
         )
 
     def step(state: Baseline3DState, action: jax.Array):
@@ -848,10 +1004,16 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             obstacle_max=state.obstacle_max,
             roadmap_vertices=state.roadmap_vertices,
             roadmap_distances=state.roadmap_distances,
+            shared_geometry=state.shared_geometry,
+            spawn_pair_attempts=state.spawn_pair_attempts,
+            roadmap_corner_distances=state.roadmap_corner_distances,
         )
 
     def observations(state: Baseline3DState):
         pos = state.pos
+        if cfg.observe_chain_contributor:
+            chain_contributor = (state.target_known & state.fully_connected
+                                 & _contributing_chain_agents_3d(state, cfg))
         delta = pos[:, None, :] - pos[None, :, :]
         pair_dist = jnp.linalg.norm(delta, axis=-1)
         _, _, _, agent_adj = connectivity(
@@ -873,7 +1035,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
                     jnp.broadcast_to(origin, ray_end.shape), ray_end,
                     solid_min, solid_max,
                 )
-                for _ in range(8):
+                def refine_radar(_, interval):
+                    lo, hi = interval
                     mid = (lo + hi) / 2
                     mid_point = origin[None, :] + directions * (mid * cfg.visual_radius)[:, None]
                     blocked = segments_blocked(
@@ -882,6 +1045,11 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
                     )
                     hi = jnp.where(blocked, mid, hi)
                     lo = jnp.where(blocked, lo, mid)
+                    return lo, hi
+
+                # Preserve all eight bisections without tracing eight copies
+                # of the wall-intersection calculation into every rollout.
+                lo, hi = jax.lax.fori_loop(0, 8, refine_radar, (lo, hi))
                 wall_distance = jnp.minimum(
                     wall_distance,
                     jnp.where(hit, hi * cfg.visual_radius, jnp.inf),
@@ -916,6 +1084,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
                 ]
             )
             optional = []
+            if cfg.observe_chain_contributor:
+                optional.append(jnp.asarray([chain_contributor[i]], dtype=jnp.float32))
             scale = jnp.maximum(jnp.max(world_size), 1e-6)
             if cfg.observe_base_vector:
                 optional.append((state.base_pos - origin) / scale)
@@ -954,6 +1124,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig):
             "done": state.done,
         }
 
+    # Replay/evaluation prepare persisted layouts through the same geometry path.
+    reset.build_roadmap = layout_roadmap
     return reset, step, observations, metrics
 
 
@@ -961,35 +1133,33 @@ def make_autoreset_3d_fns(
     building: BuildingArrays,
     cfg: Baseline3DConfig,
     reward_cfg: Baseline3DRewardConfig = Baseline3DRewardConfig(),
+    *, randomize_base: bool = False, minimum_geodesic_separation: bool = False,
+    minimum_geodesic_separation_multiplier: float = 2.0,
+    spawn_pair_max_attempts: int = 1024,
 ):
     """Return reset and terminal-aware step functions for batched training.
 
     Terminal rewards and diagnostic state describe the completed transition;
     only the returned carry state is replaced by a fresh episode.
     """
-    reset, step, observations, metrics = make_baseline_3d_fns(building, cfg)
+    reset, step, observations, metrics = make_baseline_3d_fns(
+        building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic",
+        randomize_base=randomize_base, minimum_geodesic_separation=minimum_geodesic_separation,
+        minimum_geodesic_separation_multiplier=minimum_geodesic_separation_multiplier,
+        spawn_pair_max_attempts=spawn_pair_max_attempts,
+    )
 
-    def autoreset_step(state: Baseline3DState, action: jax.Array):
+    def transition(state: Baseline3DState, action: jax.Array):
         terminal_state = step(state, action)
-        reward, reward_terms = rewards_3d(state, terminal_state, reward_cfg, cfg)
-        if reward_cfg.chain_reward_system == "obstacle_geodesic" and cfg.num_obstacles:
-            chain_gap_dist, chain_progress_pct, route_excess, leaders = obstacle_chain_diagnostics_3d(terminal_state)
+        distances = (chain_distance_matrix_3d(terminal_state)
+                     if reward_cfg.chain_reward_system == "obstacle_geodesic" else None)
+        reward, reward_terms = rewards_3d(state, terminal_state, reward_cfg, cfg, distances)
+        if reward_cfg.chain_reward_system == "obstacle_geodesic":
+            chain_gap_dist, chain_progress_pct, route_excess, leaders = obstacle_chain_diagnostics_3d(terminal_state, distances)
         else:
             chain_gap_dist, chain_progress_pct = chain_diagnostics_3d(terminal_state)
             route_excess = jnp.float32(0.0)
             leaders = jnp.asarray([-1, -1], dtype=jnp.int32)
-        reset_state = reset(
-            terminal_state.key,
-            obstacle_min=terminal_state.obstacle_min,
-            obstacle_max=terminal_state.obstacle_max,
-            stored_vertices=terminal_state.roadmap_vertices,
-            stored_distances=terminal_state.roadmap_distances,
-        )
-        next_state = jax.tree_util.tree_map(
-            lambda fresh, current: jnp.where(terminal_state.done, fresh, current),
-            reset_state,
-            terminal_state,
-        )
         info = {
             **reward_terms,
             "done": terminal_state.done,
@@ -1010,6 +1180,60 @@ def make_autoreset_3d_fns(
             "terminal_target_pos": terminal_state.target_pos,
             "terminal_coverage_fraction": jnp.mean(terminal_state.coverage),
         }
-        return next_state, reward, terminal_state.done, info
+        return terminal_state, reward, terminal_state.done, info
+
+    def reset_persisted(state):
+        return reset(state.key, obstacle_min=state.obstacle_min, obstacle_max=state.obstacle_max,
+                     stored_vertices=state.roadmap_vertices, stored_distances=state.roadmap_distances,
+                     stored_corner_distances=state.roadmap_corner_distances)
+
+    def autoreset_step(state: Baseline3DState, action: jax.Array):
+        """Original scalar API retained as the dense equivalence reference."""
+        terminal, reward, done, info = transition(state, action)
+        fresh = reset_persisted(terminal)
+        result = jax.tree_util.tree_map(lambda a, b: jnp.where(done, a, b), fresh, terminal)
+        return result, reward, done, info
+
+    def batched_step(states, actions):
+        terminal, rewards, done, info = jax.vmap(transition)(states, actions)
+        size = done.shape[0]
+        count = jnp.sum(done, dtype=jnp.int32)
+
+        def dense(current):
+            fresh = jax.vmap(reset_persisted)(current)
+            return jax.tree_util.tree_map(
+                lambda a, b: jnp.where(done.reshape((size,) + (1,) * (a.ndim - 1)), a, b),
+                fresh, current,
+            )
+
+        def sparse(current):
+            block = min(32, size)
+            indices = jnp.nonzero(done, size=size, fill_value=size)[0]
+            indices = jnp.pad(indices, (0, block - 1), constant_values=size)
+
+            def reset_chunk(index, result):
+                lanes = jax.lax.dynamic_slice_in_dim(indices, index * block, block)
+                selected = jax.tree_util.tree_map(lambda a: a[jnp.minimum(lanes, size - 1)], current)
+                fresh = jax.vmap(reset_persisted)(selected)
+                # Layout and roadmap are invariant across episode reset. Avoid
+                # scattering potentially large matrices back into their copies.
+                unchanged = {"obstacle_min", "obstacle_max", "roadmap_vertices", "roadmap_corner_distances",
+                             "roadmap_distances", "shared_geometry"}
+                return result._replace(**{
+                    field: getattr(result, field).at[lanes].set(getattr(fresh, field), mode="drop")
+                    for field in result._fields if field not in unchanged
+                })
+
+            return jax.lax.fori_loop(0, (count + block - 1) // block, reset_chunk, current)
+
+        # This conditional is outside vmap. No reset is executed when count=0;
+        # dense reset remains efficient for synchronized episode endings.
+        # Rejection sampling in a dense vmap runs until the slowest of all
+        # lanes accepts. Keep it in small groups even at synchronized endings.
+        result = (sparse(terminal) if randomize_base or minimum_geodesic_separation else
+                  jax.lax.cond(count > size // 2, dense, sparse, terminal))
+        return result, rewards, done, info
+
+    autoreset_step.batched = batched_step
 
     return reset, autoreset_step, observations, metrics

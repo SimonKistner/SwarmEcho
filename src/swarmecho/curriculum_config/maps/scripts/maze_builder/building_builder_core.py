@@ -137,8 +137,29 @@ def normalize_document(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _reflect_map_y(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert between studio row-down and world north-positive coordinates."""
+    result = deepcopy(data)
+    rows = int(data["building_cell_grid"]["rows"])
+    for key in ("interior_cells", "target_exclusion_cells"):
+        if key in result:
+            result[key] = [[x, rows - 1 - y, z] for x, y, z in result[key]]
+    geometry = result.get("geometry", {})
+    for key in ("tiles", "x_walls", "y_walls"):
+        # Y walls lie on row boundaries; other coordinates index cells.
+        limit = rows if key == "y_walls" else rows - 1
+        if key in geometry:
+            geometry[key] = [[x, limit - y, z] for x, y, z in geometry[key]]
+    if result.get("base_position_m") is not None:
+        x, y, z = result["base_position_m"]
+        result["base_position_m"] = [x, rows * float(data["cell_size_m"]) - y, z]
+    return result
+
+
 def document_from_map_data(data: dict[str, Any]) -> dict[str, Any]:
     """Open an existing v1 map without requiring a format migration."""
+    if data.get("studio_coordinate_convention") == "east_x_north_y_v1":
+        data = _reflect_map_y(data)
     grid = data.get("building_cell_grid") or {}
     cols, rows, layers = (int(grid.get(key, 0)) for key in ("cols", "rows", "layers"))
     cell = float(data.get("cell_size_m", DEFAULT_CELL_SIZE_M))
@@ -186,7 +207,7 @@ def map_data_from_document(document: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Place the base before validating or saving the map.")
     x, y, z = doc["base_cell"]
     tile_thickness = doc["tile_thickness_m"]
-    return {
+    data = {
         "format": BUILDING_FORMAT,
         "name": doc["name"],
         "width": doc["cols"] * cell,
@@ -216,6 +237,8 @@ def map_data_from_document(document: dict[str, Any]) -> dict[str, Any]:
             ],
         ),
     }
+    data["studio_coordinate_convention"] = "east_x_north_y_v1"
+    return _reflect_map_y(data)
 
 
 def add_outer_walls(document: dict[str, Any], layer: int) -> dict[str, Any]:
@@ -243,11 +266,61 @@ def add_outer_walls(document: dict[str, Any], layer: int) -> dict[str, Any]:
     return doc
 
 
+def _trim_exterior_volume(doc: dict[str, Any]) -> None:
+    """Remove open exterior cutouts from the authored storey footprints.
+
+    Horizontal walls determine enclosure; a floor tile is not required. This
+    keeps upper storeys of tall rooms while excluding open facade recesses.
+    """
+    x_walls = {tuple(wall) for wall in doc["x_walls"]}
+    y_walls = {tuple(wall) for wall in doc["y_walls"]}
+    outside = set()
+    for z in range(doc["layers"]):
+        pending = []
+        for y in range(doc["rows"]):
+            if (0, y, z) not in x_walls:
+                pending.append((0, y, z))
+            if (doc["cols"], y, z) not in x_walls:
+                pending.append((doc["cols"] - 1, y, z))
+        for x in range(doc["cols"]):
+            if (x, 0, z) not in y_walls:
+                pending.append((x, 0, z))
+            if (x, doc["rows"], z) not in y_walls:
+                pending.append((x, doc["rows"] - 1, z))
+        while pending:
+            cell = pending.pop()
+            if cell in outside:
+                continue
+            outside.add(cell)
+            x, y, _ = cell
+            for nx, ny, closed in (
+                (x - 1, y, (x, y, z) in x_walls),
+                (x + 1, y, (x + 1, y, z) in x_walls),
+                (x, y - 1, (x, y, z) in y_walls),
+                (x, y + 1, (x, y + 1, z) in y_walls),
+            ):
+                if not closed and 0 <= nx < doc["cols"] and 0 <= ny < doc["rows"]:
+                    pending.append((nx, ny, z))
+    interior = [c for c in doc["interior_cells"] if tuple(c) not in outside]
+    if not interior:
+        raise ValueError("Close the room perimeter with walls before adding a roof.")
+    doc["interior_cells"] = interior
+    doc["target_exclusion_cells"] = [
+        c for c in doc["target_exclusion_cells"] if tuple(c) not in outside
+    ]
+
+
 def add_roof(document: dict[str, Any]) -> dict[str, Any]:
     """Add tiles over every exposed top face in the interior volume."""
     doc = normalize_document(deepcopy(document))
+    _trim_exterior_volume(doc)
     interior = {tuple(value) for value in doc["interior_cells"]}
-    tiles = {tuple(value) for value in doc["tiles"]}
+    # Replace obsolete roof overhangs too, while preserving lower authored tiles.
+    tiles = {
+        tuple(value) for value in doc["tiles"]
+        if value[2] < doc["layers"]
+        or (value[0], value[1], value[2] - 1) in interior
+    }
     for x, y, z in interior:
         if (x, y, z + 1) not in interior:
             tiles.add((x, y, z + 1))

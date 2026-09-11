@@ -517,7 +517,12 @@ class Network3DConfig:
 
 @dataclass(frozen=True)
 class Training3DConfig:
+    randomize_base: bool = False
+    minimum_geodesic_separation: bool = False
+    minimum_geodesic_separation_multiplier: float = 2.0
+    spawn_pair_max_attempts: int = 1024
     total_timesteps: int = 250_000_000
+    profile_timing: bool = False
     seed: int = 42
     num_envs: int = 4000
     num_steps: int = 100
@@ -675,8 +680,6 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
         raise ValueError("3D reward.chain_reward_system must be euclidean or obstacle_geodesic.")
     if level.env.num_obstacles and level.env.obstacle_spawn_layer_max <= level.env.obstacle_spawn_layer_min:
         raise ValueError("The 3D obstacle spawn layer range must have positive height.")
-    if level.reward.chain_reward_system == "obstacle_geodesic" and not level.env.num_obstacles:
-        raise ValueError("obstacle_geodesic requires at least one configured obstacle.")
     return level
 
 

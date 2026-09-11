@@ -1,25 +1,28 @@
 env:
   map_names:
-  - M01_no_maze_open_cuboid_tall
+  - office_mirrored
   num_agents: 4
   max_steps: 700
   no_movement_termination_steps: 50
-  visual_radius: 5.0
-  comm_radius: 9.0
-  comm_radius_base: 8.0
+  visual_radius: 16.0
+  comm_radius: 50.0
+  comm_radius_base: 50.0
   radar_bins: 16
   spawn_delay: 5
   hold_chain_for: 50
   drone_radius: 0.25
   target_spawn_buffer: 0.5
-  coverage_voxel_size: 2.5
+  coverage_voxel_size: 5.0 # 9 x 20 x 3 = 540 voxels (8x fewer than at 2.5 m)
   observe_target_vector: false
   observe_base_vector: false
   observe_coverage_probe: true
+  observe_chain_contributor: false
+
+  roadmap_merge_walls: true
 
 reward:
   target_found_requires_delivery: true
-  chain_reward_system: euclidean
+  chain_reward_system: obstacle_geodesic
   exploration_bonus: 0.25
   finder_bonus: 50.0
   max_gap_penalty: 5.0
@@ -36,6 +39,10 @@ training:
   seed: 6302026950
   training_noise: false
   noise_level: 0.011
+
+  randomize_base: true
+  minimum_geodesic_separation: true
+  minimum_geodesic_separation_multiplier: 1.5
 
 network:
   num_layers: 3
@@ -61,8 +68,8 @@ evaluation:
   eval_freq: 30
   eval_offset: 1
 
-  training_heatmap_creation: false
+  training_heatmap_creation: true
 
   eval_video: true
-  eval_video_freq: 9999999999
+  eval_video_freq: 100
   eval_video_offset: 1

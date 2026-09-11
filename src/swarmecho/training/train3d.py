@@ -27,8 +27,8 @@ from flax import nnx
 
 from swarmecho.core.config import Level3D, load_level_3d_cli
 from swarmecho.env.baseline3d import (
-    build_obstacle_roadmap_3d,
     chain_diagnostics_3d,
+    coverage_grid_geometry,
     final_chain_length_3d,
     make_autoreset_3d_fns,
     make_baseline_3d_fns,
@@ -55,7 +55,7 @@ from swarmecho.training.run_lifecycle import (
     resolve_run_layout,
     schedule_due,
 )
-from swarmecho.visualize.replay3d import write_replay
+from swarmecho.visualize.replay3d import building_snapshot, write_replay
 
 
 def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
@@ -92,17 +92,17 @@ def _communication_inputs(states, cfg, base_valid, base_signature, base_value):
         jnp.linalg.norm(states.pos - states.base_pos[:, None, :], axis=-1)
         <= cfg.comm_radius_base
     ) & states.active
-    if cfg.num_obstacles:
+    if states.solid_min.shape[-2]:
         comm_masks &= ~jax.vmap(
             lambda pos, lower, upper: segments_blocked(
                 pos[:, None, :], pos[None, :, :], lower, upper
             )
-        )(states.pos, states.obstacle_min, states.obstacle_max)
+        )(states.pos, states.solid_min, states.solid_max)
         in_base_range &= ~jax.vmap(
             lambda pos, base, lower, upper: segments_blocked(
                 pos, base, lower, upper
             )
-        )(states.pos, states.base_pos, states.obstacle_min, states.obstacle_max)
+        )(states.pos, states.base_pos, states.solid_min, states.solid_max)
     base_memory_masks = base_valid[:, None] & in_base_range & ~states.target_known
     return comm_masks, in_base_range, base_memory_masks, base_signature, base_value
 
@@ -202,6 +202,19 @@ def train_3d(
     checkpoint_path: str | Path | None = None,
 ) -> tuple[Path | None, dict[str, float]]:
     """Train the strict 3D level and return its final checkpoint and metrics."""
+    init_started = init_previous = time.perf_counter()
+
+    def init_log(message):
+        nonlocal init_previous
+        now = time.perf_counter()
+        print(
+            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT +{now - init_started:.1f}s; "
+            f"stage {now - init_previous:.1f}s] {message}",
+            flush=True,
+        )
+        init_previous = now
+
+    init_log(f"Starting training setup: {level.name} / {level.building_name}")
     training = level.training
     network = level.network
     evaluation = level.evaluation
@@ -211,16 +224,39 @@ def train_3d(
     run_name = layout.run_name
     destination = Path(output_dir).absolute() if output_dir is not None else layout.run_dir
     destination.mkdir(parents=True, exist_ok=True)
+    def record_timing(update, phase, **values):
+        if not training.profile_timing:
+            return
+        row = {"update": update, "phase": phase, **values}
+        with (destination / "timings.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+        print("[TIMING] " + json.dumps(row), flush=True)
     checkpoint_dir = layout.checkpoint_dir if output_dir is None else destination / "checkpoints"
     replay_dir = train_replay_root(destination)
     cfg = level.env
+    init_log("Initializing JAX devices...")
+    devices = jax.devices()
+    init_log(f"JAX devices ready: {devices}")
+    voxel_size, coverage_shape = coverage_grid_geometry(level.building, cfg)
+    init_log(
+        f"Geometry: {len(level.building.solid_min_m):,} authored solids; "
+        f"{cfg.num_obstacles} generated obstacles; coverage {coverage_shape} = "
+        f"{int(np.prod(coverage_shape)):,} voxels at {voxel_size:g} m; "
+        f"{training.num_envs:,} environments. Constructing environment functions..."
+    )
     reset, env_step, observations, _ = make_autoreset_3d_fns(
-        level.building, cfg, level.reward
+        level.building, cfg, level.reward,
+        randomize_base=training.randomize_base,
+        minimum_geodesic_separation=training.minimum_geodesic_separation,
+        minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
+        spawn_pair_max_attempts=training.spawn_pair_max_attempts,
     )
     obs_dim = observation_dim_3d(cfg)
     sig_dim = network.tarmac_sig_dim
     val_dim = network.tarmac_val_dim
+    init_log("Environment functions constructed. Initializing model...")
     model = build_model_3d(level)
+    init_log("Model constructed. Preparing checkpoint, optimizer and rollout buffer...")
     resume_from = checkpoint_path or training.checkpoint_path
     resume = resolve_resume_state(training, run_name, training.num_envs, training.num_steps)
     if resume_from:
@@ -252,8 +288,37 @@ def train_3d(
         actor_memory=level.network.actor_memory,
         critic_memory=level.network.critic_memory,
     )
+    init_log("Optimizer and buffer prepared. Initial batched environment reset...")
     keys = jax.random.split(jax.random.PRNGKey(training.seed + 1), training.num_envs)
-    states = jax.vmap(reset)(keys)
+    if training.randomize_base or training.minimum_geodesic_separation:
+        reset_batch_size = min(32, training.num_envs)
+        reset_batch_count = (training.num_envs + reset_batch_size - 1) // reset_batch_size
+        reset_padded_count = reset_batch_count * reset_batch_size
+        reset_keys = jnp.concatenate((keys, jnp.repeat(keys[-1:], reset_padded_count - training.num_envs, axis=0)))
+        reset_keys = reset_keys.reshape((reset_batch_count, reset_batch_size) + keys.shape[1:])
+        reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
+        # Explicit dimensions avoid lax.map(batch_size=...)'s inferred -1
+        # reshape, which fails for legitimate zero-sized geometry leaves.
+        states = jax.tree_util.tree_map(
+            lambda value: value.reshape((reset_padded_count,) + value.shape[2:])[:training.num_envs],
+            reset_batches,
+        )
+    else:
+        states = jax.vmap(reset)(keys)
+    # Synchronize once at startup so this milestone reports completion, not dispatch.
+    jax.block_until_ready(states)
+    def check_spawn_pairs(attempts):
+        if np.any(np.asarray(attempts) == 0):
+            raise ValueError(
+                f"No valid base/target pair in {training.spawn_pair_max_attempts} attempts per environment. "
+                f"Required roadmap separation: {training.minimum_geodesic_separation_multiplier * cfg.comm_radius if training.minimum_geodesic_separation else 0:g} m. "
+                "Randomized bases keep the target fixed; it may have no qualifying base location. "
+                "Reduce the separation multiplier or check spawn geometry; increasing the attempt limit only helps feasible targets."
+            )
+
+    if training.randomize_base or training.minimum_geodesic_separation:
+        check_spawn_pairs(states.spawn_pair_attempts)
+    init_log("Initial reset complete on device. Preparing recurrent state and logging...")
     actor_hidden = model.initial_actor_hidden((training.num_envs,))
     actor_signature = model.initial_actor_signature((training.num_envs,))
     actor_value = model.initial_actor_value((training.num_envs,))
@@ -284,6 +349,7 @@ def train_3d(
     window_gap: deque[float] = deque(maxlen=window_size)
     window_prog_pct: deque[float] = deque(maxlen=window_size)
     window_cov: deque[float] = deque(maxlen=window_size)
+    window_pair_attempts: deque[int] = deque(maxlen=window_size)
     window_success_target_distance: deque[float] = deque(maxlen=window_size)
     window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
     completed_eps_count = 0
@@ -301,7 +367,9 @@ def train_3d(
     (destination / "config.yaml").write_text(
         yaml.safe_dump(config_snapshot, sort_keys=False), encoding="utf-8"
     )
+    init_log("State and configuration prepared. Initializing W&B...")
     wandb_run = init_wandb(logging, training, run_name, destination, config_snapshot)
+    init_log("W&B initialization returned. Preparing first rollout...")
 
     _, params = nnx.split(model)
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
@@ -429,7 +497,7 @@ def train_3d(
                 executed_actions = actions + action_noise
             else:
                 executed_actions = actions
-            next_states, rewards, dones, info = jax.vmap(env_step)(
+            next_states, rewards, dones, info = env_step.batched(
                 states, jnp.tanh(executed_actions)
             )
             next_base_valid, next_base_signature, next_base_value = _update_base_memory(
@@ -468,6 +536,8 @@ def train_3d(
                 "chain_progress_pct": info["chain_progress_pct"],
                 "global_coverage": info["global_coverage"],
                 "terminal_target_pos": info["terminal_target_pos"],
+                "terminal_base_pos": states.base_pos,
+                "spawn_pair_attempts": states.spawn_pair_attempts,
             }
             next_carry = (
                 next_states,
@@ -511,6 +581,10 @@ def train_3d(
     rollout_jit = nnx.jit(rollout_impl)
 
     for update in range(resume.start_update + 1, num_updates + 1):
+        update_started = time.perf_counter()
+        initial_update = update == resume.start_update + 1
+        if initial_update:
+            init_log("First rollout: entering JIT tracing/compilation and dispatch...")
         start_actor_hidden = actor_hidden
         start_actor_signature = actor_signature
         start_actor_value = actor_value
@@ -541,6 +615,8 @@ def train_3d(
             base_value,
             resets,
         )
+        if initial_update:
+            init_log("First rollout call returned. Waiting for device results and host transfer...")
         rollout_host, final_values_host, initial_states = jax.device_get(
             (
                 rollout_device,
@@ -548,6 +624,12 @@ def train_3d(
                 (start_actor_hidden, start_critic_hidden, start_actor_signature, start_actor_value),
             )
         )
+        rollout_finished = time.perf_counter()
+        if training.randomize_base or training.minimum_geodesic_separation:
+            check_spawn_pairs(rollout_host["spawn_pair_attempts"])
+            check_spawn_pairs(states.spawn_pair_attempts)
+        if initial_update:
+            init_log("First rollout results received. Building host buffer and advantages...")
         buffer.reset(
             initial_states[0], initial_states[1], initial_states[2], initial_states[3]
         )
@@ -592,10 +674,11 @@ def train_3d(
                 window_gap.append(float(episode_gap[index]))
                 window_prog_pct.append(float(episode_progress_pct[index]))
                 window_cov.append(float(episode_coverage[index]))
+                window_pair_attempts.append(int(rollout_host["spawn_pair_attempts"][step_index, index]))
                 if episode_success[index] > 0.5:
                     target_distance = np.linalg.norm(
                         rollout_host["terminal_target_pos"][step_index, index]
-                        - np.asarray(level.building.base_position_m)
+                        - rollout_host["terminal_base_pos"][step_index, index]
                     ) / max(level.building.max_base_to_top_corner_m, 1e-6)
                     window_success_target_distance.append(float(target_distance))
                 else:
@@ -619,7 +702,23 @@ def train_3d(
             training.num_minibatches,
             jax.random.fold_in(jax.random.PRNGKey(training.seed), update),
         )
+        if initial_update:
+            init_log("First buffer and advantages ready. Entering first optimizer update...")
+        optimizer_started = time.perf_counter()
         latest_stats = trainer.update(minibatches)
+        if initial_update or training.profile_timing:
+            jax.block_until_ready(latest_stats)
+        if initial_update:
+            init_log("First optimizer update complete. Initialization diagnostics finished.")
+        optimizer_finished = time.perf_counter()
+        record_timing(
+            update, "training", first_update=initial_update,
+            rollout_and_transfer_s=rollout_finished - update_started,
+            buffer_and_advantages_s=optimizer_started - rollout_finished,
+            optimizer_s=optimizer_finished - optimizer_started,
+            total_s=optimizer_finished - update_started,
+            training_sps=training.num_envs * training.num_steps / max(optimizer_finished - update_started, 1e-6),
+        )
         elapsed = time.perf_counter() - start_time
         session_steps = update * training.num_envs * training.num_steps
         steps_done = resume.step_offset + session_steps
@@ -664,12 +763,17 @@ def train_3d(
             display_found = f"{np.mean(window_fnd):>5.1%}" if window_full else " ----"
             display_progress = f"{np.mean(window_prog_pct):>5.1f}%" if window_full else "  ---%"
             display_success = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
+            pair_stat = ""
+            if training.minimum_geodesic_separation:
+                rejected = (1.0 - len(window_pair_attempts) / sum(window_pair_attempts)) if window_full else 0.0
+                display_rejected = f"{rejected:>5.1%}" if window_full else " ----"
+                pair_stat = f"  pair_reject={display_rejected}"
             print(
                 f"[{datetime.now():%H:%M:%S}]  [{update:>4}/{num_updates}]  "
                 f"steps={steps_done:>12,}  sps={sps:>6,.0f}  "
                 f"ep_len={display_length}  cov={display_coverage}  "
                 f"found={display_found}  chain={display_progress}  "
-                f"succ={display_success}  eta={eta}"
+                f"succ={display_success}  eta={eta}{pair_stat}"
             )
             if not window_full:
                 current_steps = np.asarray(states.step)
@@ -741,6 +845,7 @@ def train_3d(
             )
         )
         if eval_due or replay_due:
+            evaluation_started = time.perf_counter()
             # Periodic evaluation is one unperturbed generalization pass. M02
             # may request a second fixed-layout pass solely for spatial heatmaps;
             # the five-pass robustness ensemble remains standalone-only.
@@ -779,7 +884,7 @@ def train_3d(
                     {
                         "format": "swarmecho-3d-eval-heatmap/v1",
                         "data_file": info_path.name,
-                        "map_name": level.building_name,
+                        "map_name": level.building_name, "building_snapshot": building_snapshot(level.building),
                         "world_size_m": level.building.world_size_m.tolist(),
                         "training_update": update,
                         "environment_steps": steps_done,
@@ -814,7 +919,7 @@ def train_3d(
                 write_replay(
                     replay_dir / f"eval_{suffix}",
                     eval_states,
-                    map_name=level.building_name,
+                    map_name=level.building_name, building=level.building,
                     dt=cfg.dt,
                     reward_terms=eval_rewards,
                     metadata={
@@ -871,6 +976,7 @@ def train_3d(
             if wandb_run is not None:
                 import wandb
                 wandb.log(eval_wandb_logs, step=steps_done)
+            record_timing(update, "evaluation_and_artifacts", total_s=time.perf_counter() - evaluation_started)
             if evaluation.early_exit and latest_stats["eval_success"] >= evaluation.early_exit_threshold:
                 print(
                     f"  [eval-early-exit] success {latest_stats['eval_success']:.1%} >= "
@@ -937,9 +1043,7 @@ def _collect_replay_3d_impl(
             key, target_pos=jnp.asarray(target_position, dtype=jnp.float32)
         )
     else:
-        vertices, distances = build_obstacle_roadmap_3d(
-            obstacle_min, obstacle_max, cfg
-        )
+        vertices, distances = reset.build_roadmap(obstacle_min, obstacle_max)
         state = reset(
             key,
             target_pos=None if target_position is None else jnp.asarray(target_position, dtype=jnp.float32),
@@ -980,14 +1084,14 @@ def _collect_replay_3d_impl(
             jnp.linalg.norm(current_state.pos - current_state.base_pos[None, :], axis=-1)
             <= cfg.comm_radius_base
         ) & current_state.active
-        if cfg.num_obstacles:
+        if current_state.solid_min.shape[0]:
             comm_mask &= ~segments_blocked(
                 current_state.pos[:, None, :], current_state.pos[None, :, :],
-                current_state.obstacle_min, current_state.obstacle_max,
+                current_state.solid_min, current_state.solid_max,
             )
             in_base_range &= ~segments_blocked(
                 current_state.pos, current_state.base_pos,
-                current_state.obstacle_min, current_state.obstacle_max,
+                current_state.solid_min, current_state.solid_max,
             )
         share_now = (step_index % comm_cadence) == 0
         comm_mask = comm_mask & share_now
@@ -1128,7 +1232,7 @@ def evaluate_model_3d(
 ) -> tuple[list, np.ndarray]:
     """Run one deterministic trained-policy episode for replay/inspection."""
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     timeline, rewards, episode_length = jax.device_get(
         _collect_replay_3d_jit(
@@ -1265,14 +1369,14 @@ def _run_parallel_evaluation_3d_jit(
                 jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
                 <= cfg.comm_radius_base
             ) & state.active
-            if cfg.num_obstacles:
+            if state.solid_min.shape[0]:
                 comm_mask &= ~segments_blocked(
                     state.pos[:, None, :], state.pos[None, :, :],
-                    state.obstacle_min, state.obstacle_max,
+                    state.solid_min, state.solid_max,
                 )
                 in_base_range &= ~segments_blocked(
                     state.pos, state.base_pos,
-                    state.obstacle_min, state.obstacle_max,
+                    state.solid_min, state.solid_max,
                 )
             base_memory_mask = base_valid & in_base_range & ~state.target_known
             share_now = (step_index % comm_cadence) == 0
@@ -1316,7 +1420,7 @@ def _run_parallel_evaluation_3d_jit(
             next_state = step(state, executed_actions)
             rewards, _ = rewards_3d(state, next_state, reward_cfg, cfg)
             live = ~completed
-            if reward_cfg.chain_reward_system == "obstacle_geodesic" and cfg.num_obstacles:
+            if reward_cfg.chain_reward_system == "obstacle_geodesic":
                 _, step_chain_progress, _, _ = obstacle_chain_diagnostics_3d(next_state)
             else:
                 _, step_chain_progress = chain_diagnostics_3d(next_state)
@@ -1407,7 +1511,7 @@ def evaluate_suite_3d(
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
     """Evaluate a deterministic 3D batch without collecting replay frames."""
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
     layout_mode = layout_mode or ("fixed" if cfg.num_obstacles else "per_environment")
     fixed_layout = bool(cfg.num_obstacles)
     layout_seed_offset = 30_000 if layout_seed_offset is None else layout_seed_offset
@@ -1424,9 +1528,7 @@ def evaluate_suite_3d(
                     "eval_fixed_obstacle_bounds must contain six values per obstacle."
                 )
             fixed_min, fixed_max = bounds[:, :3], bounds[:, 3:]
-            fixed_vertices, fixed_distances = build_obstacle_roadmap_3d(
-                fixed_min, fixed_max, cfg
-            )
+            fixed_vertices, fixed_distances = reset.build_roadmap(fixed_min, fixed_max)
         else:
             reference_state = reset(
                 jax.random.PRNGKey(level.training.seed + layout_seed_offset)
@@ -1516,7 +1618,7 @@ def evaluate_suite_3d_with_action_capture(
         raise ValueError("offset must be non-negative.")
 
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
     fixed_layout = bool(cfg.num_obstacles)
     reference_state = (
         reset(jax.random.PRNGKey(level.training.seed + 30_000))
@@ -1528,9 +1630,7 @@ def evaluate_suite_3d_with_action_capture(
         if configured_bounds:
             bounds = jnp.asarray(configured_bounds, dtype=jnp.float32)
             fixed_min, fixed_max = bounds[:, :3], bounds[:, 3:]
-            fixed_vertices, fixed_distances = build_obstacle_roadmap_3d(
-                fixed_min, fixed_max, cfg
-            )
+            fixed_vertices, fixed_distances = reset.build_roadmap(fixed_min, fixed_max)
         else:
             fixed_min, fixed_max = reference_state.obstacle_min, reference_state.obstacle_max
             fixed_vertices = reference_state.roadmap_vertices
@@ -1677,7 +1777,7 @@ def replay_recorded_actions_3d(
 ) -> tuple[list, np.ndarray]:
     """Materialise one evaluation lane without invoking the policy again."""
     cfg = level.env
-    reset, step, _, _ = make_baseline_3d_fns(level.building, cfg)
+    reset, step, _, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps, len(actions))
     timeline, rewards, episode_length = jax.device_get(
         _replay_recorded_actions_3d_jit(
@@ -1702,7 +1802,10 @@ def replay_recorded_actions_3d(
 
 
 def main() -> None:
-    checkpoint, _ = train_3d(load_level_3d_cli(sys.argv[1:]))
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Loading level configuration and building...", flush=True)
+    level = load_level_3d_cli(sys.argv[1:])
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Level and building loaded.", flush=True)
+    checkpoint, _ = train_3d(level)
     print(f"3D training complete: {checkpoint or 'checkpoint saving disabled'}")
 
 

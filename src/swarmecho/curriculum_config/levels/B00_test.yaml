@@ -1,6 +1,6 @@
 env:
   map_names:
-  - M01_no_maze_open_cuboid_tall
+  - easy_room
   num_agents: 4
   max_steps: 700
   no_movement_termination_steps: 50
@@ -55,14 +55,14 @@ evaluation:
   early_exit: true
   early_exit_threshold: 0.999
 
-  save_model: true
+  save_model: false
   checkpoint_freq: 50
   checkpoint_offset: 1
   eval_freq: 30
   eval_offset: 1
 
-  training_heatmap_creation: false
+  training_heatmap_creation: true
 
   eval_video: true
-  eval_video_freq: 9999999999
+  eval_video_freq: 20
   eval_video_offset: 1

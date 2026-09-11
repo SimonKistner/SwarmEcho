@@ -72,14 +72,26 @@ source .venv/bin/activate
 ## Map Design & Analysis Dashboard
 
 ### Layered 3D Map Builder
+The map builder uses port **8766**; the 3D inspector uses **8765**, so both
+can run together. Override with `swarmecho-maze-builder --port <port>` or
+`swarmecho-inspect-3d port=<port>` if needed.
+
 Launch the browser editor to paint floor tiles, solid walls, storeys, the base,
 and target no-spawn cells. Existing `swarmecho-map/v1` building maps can be
 opened directly. Drag across tiles or no-target cells to paint rectangular
-selections, drag across wall edges to paint continuously, and use each edge's
+selections. Click and hold to preview a straight row of walls (cyan to add,
+red to remove); drag back to shorten the row and release to apply it.
+Use each edge's
 `+1`/`-1` controls to copy-expand or trim the footprint. Storeys inherit the
-interior, wall, and no-target pattern below (but not tiles), and can be deleted.
-The separately selectable roof is an opaque inspection view of the single top
-tile boundary. **Copy current YAML** copies the exact payload used by validation
+interior volume, walls, and no-target pattern below, removing the old roof and
+leaving the new floor and roof empty. Cells count cubic interior volumes,
+independently of tiles; painting or removing a tile does not delete the volume
+or its no-target setting. **Show no-target filling** hides/shows the overlay
+without changing spawn exclusions. **Add roof** creates roof tiles without
+switching views, excluding facade cutouts open to the outside and removing old
+top-roof overhangs. Enclosed upper rooms do not need floor tiles to receive a roof.
+Select **Roof** in Current storey or Structure to inspect the
+whole building with its opaque roof. **Copy current YAML** copies the exact payload used by validation
 and saving. Drag outside the floor (or select Orbit) to rotate the structure;
 the mouse wheel zooms:
 ```bash
@@ -94,6 +106,9 @@ training but does not train a model or require CUDA:
 uv run swarmecho-validate-building path/to/map.yaml --runtime-smoke
 uv run pytest -q tests/test_3d_map_builder.py
 ```
+
+The editor's volume/tile and roof controls also have standalone JavaScript
+regression checks: `node --test tests/test_3d_map_builder_ui.cjs`.
 
 ### Discovery & Analysis Dashboard
 Launch the Streamlit visualization tool to check run stats, compare parameters, and view evaluation/rendering videos:
@@ -150,13 +165,13 @@ must be no failures or errors.
 ### 3. Generate the inspectable roadmap fixture
 
 ```bash
-uv run python tests/generate_obstacle_roadmap_testresult.py
+uv run python tests/generate_obstacle_roadmap_testresult.py --obstacles
 ```
 
 Expected output:
 
 ```text
-outputs/testresults/obstacles.roadmap.json
+outputs/testresults/M01_no_maze_open_cuboid_tall_[<x>-<y>-<z>].roadmap.json
 ```
 
 ### 4. Visually inspect the exact generated layouts
@@ -166,10 +181,10 @@ uv run swarmecho-inspect-3d root=outputs
 ```
 
 Expected result: the browser opens without a server error and the artifact
-dropdown contains `TESTRESULT_[Obstacle roadmap]`. Loading it must show five
+dropdown contains the map-named Roadmap entry. Loading it must show five
 selectable layouts, three cuboids per layout, the base and top-layer dummy
-target, roadmap nodes and edges, with shortest path 1 enabled by default and up
-to four additional path toggles. Verify that no displayed path crosses a
+target, roadmap nodes and edges, with all returned paths enabled and individually
+selectable, ranked by length. Verify that no displayed path crosses a
 cuboid before continuing.
 
 ### 5. Small maintained 3D update validation
@@ -349,6 +364,19 @@ and communication toggles, reward/status readouts, and transparent shell. It
 discovers completed replays below `outputs/` and presents them in a selector, so
 no artifact path is required:
 
+The left visibility panel controls interior walls per storey (all on except
+the top storey), outer walls (off), and roof (off). Outer walls follow the
+storey checkboxes; roof visibility is independent. Concrete walls start at 50%
+transparency. The optional experimental height fade starts at an adjustable
+height and increases upward to the transparency slider's value. Floors and
+roofs remain opaque. Dark tile floors and the wall/floor cell grid are on
+by default, with separate visibility toggles. The artifact picker groups each
+run into one entry, with its replays and evaluations in a submenu.
+Authored geometry is read from the replay's
+named map as it currently exists. Visibility persists during playback and
+rotation; the default camera elevation is 25°. Elevation, auto-rotation, and
+rotation-speed controls are available for both replays and heatmaps.
+
 ```bash
 uv run swarmecho-inspect-3d
 ```
@@ -374,13 +402,92 @@ backend and devices, compilation and run times, environment steps per second,
 state/observation shapes, ideal chain margin, and device memory statistics when
 the backend exposes them. The `grid` matrix is important: `4x4x4` is only a
 correctness case, while larger entries expose volumetric-coverage scaling.
-## Inspect randomized 3D obstacle roadmaps
+## Inspect 3D map roadmaps and ranked paths
 
-Generate five deterministic training-style layouts, their visibility roadmaps,
-and up to five alternative shortest routes per layout, then open the ordinary
-3D inspector. The generated artifact appears as `TESTRESULT_[Obstacle roadmap]`.
+To scan each interior raster point's farthest reachable roadmap partner:
 
 ```bash
-uv run python tests/generate_obstacle_roadmap_testresult.py
+uv run python tests/scan_roadmap_distances.py --level B01_office --spacing 5
 uv run swarmecho-inspect-3d root=outputs
 ```
+
+This writes a CSV under `outputs/testresults` with point coordinates, farthest
+partner, adjusted distance in equivalent metres and drone communication ranges.
+It generates only `shortest_farthest` and `longest_farthest` inspectable roadmaps,
+one best route for each extreme pair. The longest is the largest shortest-path
+distance across sampled pairs, not a deliberately long detour. The restricted
+minimum for allowed targets and valid base/drone spawn positions is still printed
+in the stats. Unreachable pairs are excluded and reported separately. The scan
+uses static authored geometry, the level's roadmap setting and communication
+range; generated obstacles are not included. `--map` can override the map.
+Spacing defaults to the map cell size; smaller spacing increases cost sharply
+because all raster pairs are checked. Results approximate the continuous volume
+and do not prove that no qualifying position exists between raster samples.
+
+`env.roadmap_corner_bonus_m` defaults to `8.0`. The scan, standalone roadmap
+generator and training spawn-separation check include this allowance **before**
+shortest-path selection and ranking. Set it to zero for physical distance alone,
+or override scripts with `--corner-bonus-m 8`. The chain reward is unchanged.
+The efficient roadmap approximation charges one allowance for the first
+intermediate waypoint group and another for each internal link longer than
+`wall_thickness_m + 2 * (drone_radius + obstacle_planning_clearance_m)`.
+Consecutive shorter links stay in one group, accounting for wall-depth detours.
+A direct visible route has no allowance. This is waypoint grouping, not exact
+angle-aware corner counting; dense chains of short waypoints can form one group.
+The inspector displays the saved adjusted score rather than recomputing physical
+polyline length. Older artifacts keep their original scores until regenerated.
+
+Choose a level (uses its map and clearance settings), a target XYZ point in
+metres, and the maximum number of paths. For example, for B00:
+
+```bash
+uv run python tests/generate_obstacle_roadmap_testresult.py --level B00_test --target 2.5 2.5 12.5 --paths 5
+uv run swarmecho-inspect-3d root=outputs
+```
+
+Use your desired target coordinates. `--map easy_room` selects a map directly;
+it can also override a level's map. `--start X Y Z` overrides the base as the
+starting point. The default filename includes the target coordinates, for example
+`outputs/testresults/easy_room_[25-14-8].roadmap.json`, so different target points
+do not overwrite each other. The same map/target is overwritten on rerun;
+`--output` still overrides the filename.
+
+Generated obstacles are **off by default**; authored map walls/tiles remain.
+`env.roadmap_merge_walls` defaults to `true`: authored rectangular wall/tile
+unions are merged for roadmap generation, with clearance-offset edge samples
+spaced evenly at most one map cell apart. Collision geometry is unchanged.
+The generator inherits this setting from `--level`, or the general environment
+default when using `--map` alone. Use `--no-merge-walls` to compare with the old
+generator, or `env.roadmap_merge_walls=false` for training.
+To generate randomized layouts with a level's obstacle configuration, use
+`--level M02_random_cuboid_obstacles_3D --obstacles --layouts 5 --seed 9000`.
+
+The inspector ranks distinct loopless visibility-graph paths by total length
+in metres and displays the difference from the shortest in metres and percent.
+All returned paths have individual toggles; fewer than requested may exist.
+These are geometric diagnostic costs, not episode reward scores. The diagnostic
+includes authored solids and constrains vertices to the building interior; it
+does not change the level's configured chain reward or training roadmap.
+
+Training also supports `reward.chain_reward_system=obstacle_geodesic` with
+`env.num_obstacles=0`. Authored walls and tiles participate in its roadmap.
+For a static map, the roadmap is precomputed on the CPU and shared across
+environments; it is not copied into each environment's rollout state. The
+in-process cache keys include solid geometry, world bounds and clearance.
+Generated obstacles use a per-layout roadmap containing both authored and
+generated solids, reused across episode resets. Euclidean training skips
+roadmap construction. Future assembled maps will need to supply their own
+layout geometry; map assembly itself is not implemented here.
+
+To retry the office level with geodesic rewards in your activated WSL environment:
+
+```bash
+uv run swarmecho-train-3d level=B01_office reward.chain_reward_system=obstacle_geodesic
+```
+
+B01 now uses 5 m coverage voxels (540 instead of 4,320). Timestamped `[INIT]`
+messages identify setup stages, shared-roadmap construction, the first rollout
+dispatch/host transfer and the first optimizer update. First-update messages
+are emitted once per training invocation, including a resumed run; they are
+not recurring training-step logs. They locate the blocking stage but do not
+identify individual XLA compiler passes.

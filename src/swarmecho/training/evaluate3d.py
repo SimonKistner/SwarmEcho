@@ -38,7 +38,7 @@ from swarmecho.training.train3d import (
     evaluate_suite_3d,
     replay_recorded_actions_3d,
 )
-from swarmecho.visualize.replay3d import write_replay
+from swarmecho.visualize.replay3d import building_snapshot, write_replay
 
 
 _EVAL_INFO_UPDATE = re.compile(r"eval_info_u(\d+)_")
@@ -102,7 +102,7 @@ def _heatmap_manifest(
     manifest = {
         "format": "swarmecho-3d-eval-heatmap/v1",
         "data_file": info_path.name,
-        "map_name": level.building_name,
+        "map_name": level.building_name, "building_snapshot": building_snapshot(level.building),
         "world_size_m": level.building.world_size_m.tolist(),
         "checkpoint": str(checkpoint),
         "artifact_scope": "eval",
@@ -507,7 +507,7 @@ def render_csv_replays(
             f"eval_{artifact_tag}_{replay_tag}"
         )
         write_replay(
-            output, states, map_name=level.building_name, dt=level.env.dt,
+            output, states, map_name=level.building_name, building=level.building, dt=level.env.dt,
             reward_terms=rewards,
             progress=False,
             metadata={
@@ -760,7 +760,7 @@ def main() -> None:
     write_replay(
         output,
         states,
-        map_name=level.building_name,
+        map_name=level.building_name, building=level.building,
         dt=level.env.dt,
         reward_terms=rewards,
         progress=False,

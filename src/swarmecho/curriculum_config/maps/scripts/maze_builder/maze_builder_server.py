@@ -4,7 +4,7 @@ Run from the repository root:
 
     uv run swarmecho-maze-builder
 
-Then open http://127.0.0.1:8765/ in a browser.
+Then open http://127.0.0.1:8766/ in a browser.
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the SwarmEcho maze builder web UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
+    parser.add_argument("--port", type=int, default=8766, help="Bind port (default: 8766)")
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), MazeBuilderHandler)

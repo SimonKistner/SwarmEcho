@@ -68,6 +68,16 @@ def test_unknown_3d_environment_parameter_is_rejected(tmp_path):
         load_level_3d(path)
 
 
+def test_geodesic_reward_does_not_require_generated_obstacles():
+    level = load_level_3d_cli([
+        "level=B01_office", "reward.chain_reward_system=obstacle_geodesic",
+        "env.num_obstacles=0",
+    ])
+    assert level.env.num_obstacles == 0
+    assert level.building.solid_min_m.shape[0] > 0
+    assert level.reward.chain_reward_system == "obstacle_geodesic"
+
+
 def test_3d_cli_uses_the_same_dotlist_overrides_as_2d():
     level = load_level_3d_cli(
         [

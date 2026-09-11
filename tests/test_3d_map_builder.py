@@ -53,12 +53,29 @@ def test_existing_v1_map_opens_without_migration():
     rebuilt = map_data_from_document(document)
 
     assert rebuilt["format"] == "swarmecho-map/v1"
+    reopened = document_from_map_data(rebuilt)
     for collection in ("tiles", "x_walls", "y_walls"):
-        assert {tuple(value) for value in rebuilt["geometry"][collection]} == {
-            tuple(value) for value in source["geometry"][collection]
-        }
-    assert rebuilt["base_position_m"] == source["base_position_m"]
+        assert reopened[collection] == document[collection]
+    assert reopened["base_position_m"] == document["base_position_m"]
     assert validate_document(document)["valid"]
+
+
+def test_export_maps_studio_north_to_positive_y_and_reopens_unchanged():
+    doc = _placed_document(6, 4, 2)
+    doc["target_exclusion_cells"] = [[2, 0, 1]]
+    doc["tiles"] = [[2, 0, 0], [3, 3, 2]]
+    doc["x_walls"] = [[2, 0, 1]]
+    doc["y_walls"] = [[2, 0, 1], [3, 4, 0]]
+    saved = map_data_from_document(doc)
+    assert saved["geometry"]["x_walls"] == [[2, 3, 1]]
+    assert {tuple(c) for c in saved["geometry"]["y_walls"]} == {(2, 4, 1), (3, 0, 0)}
+    assert saved["target_exclusion_cells"] == [[2, 3, 1]]
+    assert saved["base_position_m"][:2] == [2.5, 17.5]
+    reopened = document_from_map_data(saved)
+    assert reopened["base_cell"] == doc["base_cell"]
+    for key in ("tiles", "x_walls", "y_walls", "target_exclusion_cells", "interior_cells"):
+        assert {tuple(c) for c in reopened[key]} == {tuple(c) for c in doc[key]}
+    assert map_data_from_document(reopened) == saved
 
 
 def test_outer_walls_make_exact_eight_segments_for_two_by_two_footprint():
@@ -89,6 +106,26 @@ def test_add_roof_only_closes_exposed_top_faces():
     roof_tiles = {tuple(tile) for tile in roofed["tiles"] if tile[2] > 0}
 
     assert roof_tiles == {(0, 0, 2), (1, 0, 1)}
+
+
+def test_roof_trims_open_facade_cutout_but_keeps_floorless_upper_volume():
+    document = _placed_document(3, 2, 2)
+    # Recess the facade around (1, 0), on both storeys. Its former roof exists.
+    for z in range(2):
+        document["y_walls"].remove([1, 0, z])
+        document["y_walls"].append([1, 1, z])
+        document["x_walls"].extend([[1, 0, z], [2, 0, z]])
+    document["tiles"].remove([1, 0, 0])
+    roofed = add_roof(document)
+
+    assert [1, 0, 2] not in roofed["tiles"]
+    assert [1, 0, 1] not in roofed["interior_cells"]
+    assert [0, 0, 1] in roofed["interior_cells"]
+    assert [0, 0, 1] not in roofed["tiles"]
+    assert [0, 0, 2] in roofed["tiles"]
+    assert len([c for c in roofed["tiles"] if c[2] == 2]) == 5
+    assert validate_document(roofed)["valid"]
+    assert [1, 0, 2] in document["tiles"]  # Input stays unchanged.
 
 
 def test_validator_reports_an_exterior_leak_like_level_loading():

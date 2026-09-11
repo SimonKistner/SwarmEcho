@@ -1,8 +1,11 @@
 Train:
 
+uv run swarmecho-train-3d level=B00_test logging.run_name=B00_test_v1 logging.wandb_mode=disabled
+
 uv run swarmecho-curriculum-3d \
   levels=M00_no_maze_open_cuboid_3D,M02_random_cuboid_obstacles_3D \
   logging.run_name=7agents
+
 
 
 Eval
@@ -14,5 +17,11 @@ uv run swarmecho-evaluate-3d eval_name=trained_agents7 mode=parallel replay_afte
 
 Analyse
 
+Roadmap gen:
+uv run python tests/generate_obstacle_roadmap_testresult.py --map office_mirrored --target 2.5 92.5 2.5 --paths 5
+
+
+
 uv run swarmecho-dashboard
 
+uv run swarmecho-inspect-3d root=outputs
