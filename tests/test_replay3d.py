@@ -27,6 +27,7 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
         states,
         map_name="M00_no_maze_open_cuboid",
         dt=cfg.dt,
+        building=building,
         reward_terms=np.zeros((4, cfg.num_agents, 2), dtype=np.float32),
     )
     assert data_path.exists()
@@ -39,6 +40,8 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     assert arrays["coverage"].shape == (4, 4, 4, 4)
     assert arrays["reward_terms"].shape == (4, cfg.num_agents, 2)
     assert arrays["obstacle_min"].shape == (4, 0, 3)
+    np.testing.assert_array_equal(arrays["base_target_known"], [s.base_target_known for s in states])
+    assert metadata["building_snapshot"]["geometry"]["tiles"] == np.argwhere(building.tiles).tolist()
 
 
 def test_replay_rejects_unknown_format(tmp_path):

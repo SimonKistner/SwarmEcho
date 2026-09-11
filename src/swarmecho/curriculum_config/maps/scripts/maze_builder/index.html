@@ -1,298 +1,128 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SwarmEcho Maze Builder</title>
-  <style>
-    :root {
-      --cell: 32px;
-      --cols: 40;
-      --rows: 30;
-      --edge-hit: 10px;
-      --edge-active: #111;
-      --bg: #fff;
-      --grid: #f0f0f0;
-      --exclude: rgba(220, 38, 38, .52);
-      --base: #2563eb;
-    }
-    * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f7f7; color: #111; }
-    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 16px; background: white; border-bottom: 1px solid #ddd; position: sticky; top: 0; z-index: 20; }
-    label { font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
-    input[type="number"] { width: 70px; padding: 5px; }
-    input[type="text"] { width: 190px; padding: 6px 8px; }
-    button, .file-label { padding: 7px 10px; border: 1px solid #bbb; border-radius: 6px; background: white; cursor: pointer; font-size: 14px; }
-    button:hover, .file-label:hover { background: #f1f1f1; }
-    button.primary { background: #111827; border-color: #111827; color: white; }
-    button.primary:hover { background: #374151; }
-    button.active { border-color: #111827; box-shadow: inset 0 0 0 2px #111827; }
-    button.danger.active { border-color: #dc2626; box-shadow: inset 0 0 0 2px #dc2626; }
-    input[type="file"] { display: none; }
-    main { padding: 20px; overflow: auto; }
-    #boardWrap { width: max-content; background: white; padding: 16px; border: 1px solid #ddd; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
-    #board { position: relative; width: calc(var(--cols) * var(--cell)); height: calc(var(--rows) * var(--cell)); background: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px), var(--bg); background-size: var(--cell) var(--cell); user-select: none; }
-    .edge { position: absolute; box-sizing: border-box; cursor: pointer; border-radius: 999px; transition: background .06s, opacity .06s; opacity: .95; z-index: 5; }
-    .edge:hover { background: #777; opacity: 1; }
-    .edge.h { height: var(--edge-hit); width: var(--cell); transform: translateY(calc(var(--edge-hit) / -2)); background: transparent; }
-    .edge.v { width: var(--edge-hit); height: var(--cell); transform: translateX(calc(var(--edge-hit) / -2)); background: transparent; }
-    .edge.active.h { height: 6px; transform: translateY(-3px); background: var(--edge-active); }
-    .edge.active.v { width: 6px; transform: translateX(-3px); background: var(--edge-active); }
-    .cell { position: absolute; width: var(--cell); height: var(--cell); cursor: crosshair; z-index: 2; background: transparent; }
-    .cell.excluded { background: var(--exclude); outline: 1px solid rgba(153, 27, 27, .45); }
-    .cell:hover { background: rgba(220, 38, 38, .20); }
-    .base-marker { position: absolute; z-index: 9; width: 18px; height: 18px; margin-left: -9px; margin-top: -9px; border-radius: 999px; background: var(--base); border: 3px solid white; box-shadow: 0 0 0 2px var(--base), 0 2px 8px rgba(0,0,0,.25); pointer-events: none; display: none; }
-    .base-marker::after { content: "Base"; position: absolute; left: 22px; top: -5px; color: var(--base); font-size: 13px; font-weight: 700; white-space: nowrap; }
-    .note { font-size: 13px; color: #555; margin-left: auto; }
-    #status { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff; border: 1px solid #ddd; max-width: 1100px; white-space: pre-wrap; }
-    #status.ok { border-color: #16a34a; background: #f0fdf4; color: #14532d; }
-    #status.err { border-color: #dc2626; background: #fef2f2; color: #7f1d1d; }
-    #previewCommand { width: min(100%, 1100px); margin-top: 8px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; display: none; }
-  </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SwarmEcho 3D Building Studio</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui;color:#e8eef9;background:#06101e;--cyan:#38d5e5;--panel:#0c182a;--line:#293d59}*{box-sizing:border-box}body{margin:0;overflow:hidden;background:radial-gradient(circle at 68% 8%,#183653,#07111f 48%,#040a13)}button,input,select{color:#e8eef9;background:#111f34;border:1px solid #344a68;border-radius:8px;padding:8px 10px}button{cursor:pointer}button:hover{border-color:#6b8eb8}.primary{background:var(--cyan);border-color:var(--cyan);color:#031116;font-weight:800}header{height:70px;display:flex;gap:10px;align-items:center;padding:11px 18px;background:#081426eb;border-bottom:1px solid #263952}.brand{margin-right:auto;font-weight:900;letter-spacing:.05em}.brand small{display:block;color:#7289a8;font-size:9px;letter-spacing:.22em}.workspace{height:calc(100vh - 70px);display:grid;grid-template-columns:222px minmax(450px,1fr) 260px}aside{padding:16px;background:#091527e8;border-right:1px solid #263952;overflow:auto}.right{border:0;border-left:1px solid #263952}.section{margin:14px 0 8px;color:#7790b2;font-size:10px;text-transform:uppercase;letter-spacing:.17em;font-weight:800}.tools{display:grid;grid-template-columns:1fr 1fr;gap:7px}.tools button{height:42px;font-size:12px}.tools button.active{color:#a4f8ff;border-color:var(--cyan);background:#12364a;box-shadow:inset 0 0 0 1px var(--cyan)}.wide{width:100%;margin:4px 0}.layers{display:flex;gap:6px}.layers select{min-width:0;flex:1}.grow{display:grid;grid-template-columns:1fr 1fr;gap:5px}.grow button{height:34px;padding:6px 3px;font-size:11px}.stage{position:relative;min-width:0}.stage canvas{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}.hud{position:absolute;left:18px;top:16px;pointer-events:none;padding:9px 12px;border:1px solid #2c4261;border-radius:9px;background:#071323cc;color:#8299b8;font-size:11px}.hud b{display:block;color:#e8f2ff;font-size:13px;margin-bottom:3px}.zoom{position:absolute;right:17px;bottom:16px;color:#6f87a7;font-size:11px}.status{padding:10px;border:1px solid #2d425f;border-radius:9px;background:#081525;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.status.ok{border-color:#24ba87;color:#94ebc8}.status.err{border-color:#e45d72;color:#ffb4bf}.structure{min-height:170px;max-height:270px;overflow:auto;border:1px solid #2b415f;border-radius:11px;background:#071220;padding:12px;display:flex;flex-direction:column-reverse;gap:5px}.storey{height:30px;min-height:30px;border:1px solid #385470;background:#112a3d;display:flex;align-items:center;padding:0 9px;color:#7894b5;font-size:10px;cursor:pointer;transition:.15s}.storey.roof{border-style:dashed;background:#17263c;color:#b7cbea}.storey.active{background:#1c536b;border-color:#69dfeb;color:white;transform:translateX(-4px);box-shadow:4px 0 #38d5e5}.legend{font-size:11px;color:#8499b5;line-height:1.9;margin-top:10px}.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:7px}.hint{font-size:11px;line-height:1.5;color:#7489a7}.name{width:190px}.disabled-note{color:#5f7594}dialog{color:white;background:#101e32;border:1px solid #3d5677;border-radius:12px;padding:20px}dialog::backdrop{background:#020711d9}dialog select{min-width:310px}
+</style>
 </head>
 <body>
-  <header>
-    <label>Canvas-Spalten <input id="cols" type="number" min="4" max="120" value="40"></label>
-    <label>Canvas-Zeilen <input id="rows" type="number" min="4" max="120" value="30"></label>
-    <label>Karo-Größe <input id="cell" type="number" min="12" max="80" value="32"> px</label>
-    <label>Map-Name <input id="mapName" type="text" value="custom_grid_maze"></label>
-    <label><input id="overwrite" type="checkbox"> überschreiben</label>
-    <button id="resize">Raster anwenden</button>
-    <button id="modeWalls" class="active">Wände zeichnen</button>
-    <button id="modeExcludes" class="danger">No-Spawn rot malen</button>
-    <button id="basePreview">Preview base spawn</button>
-    <button id="clear">Alles löschen</button>
-    <button id="exportJson">JSON exportieren</button>
-    <label class="file-label" for="importJson">JSON importieren</label><input id="importJson" type="file" accept="application/json,.json">
-    <button id="create" class="primary">Map + Level erstellen</button>
-    <button id="copyPreview">Preview-Befehl kopieren</button>
-    <span class="note">Wände frei auf Canvas zeichnen; äußerste Wände bestimmen die Maze-Größe.</span>
-  </header>
-
-  <main>
-    <div id="boardWrap"><div id="board"><div id="baseMarker" class="base-marker"></div></div></div>
-    <textarea id="previewCommand" readonly></textarea>
-    <div id="status">Bereit. Modus: Wände zeichnen.</div>
-  </main>
-
-  <script>
-    const board = document.getElementById("board");
-    const baseMarker = document.getElementById("baseMarker");
-    const colsInput = document.getElementById("cols");
-    const rowsInput = document.getElementById("rows");
-    const cellInput = document.getElementById("cell");
-    const mapNameInput = document.getElementById("mapName");
-    const statusBox = document.getElementById("status");
-    const previewCommand = document.getElementById("previewCommand");
-
-    let cols = +colsInput.value;
-    let rows = +rowsInput.value;
-    let cell = +cellInput.value;
-    let mode = "walls";
-    let showBase = false;
-    const activeEdges = new Map();
-    const excludedCells = new Set();
-
-    const edgeKey = (type, x, y) => `${type}:${x}:${y}`;
-    const cellKey = (row, col) => `${row}:${col}`;
-
-    function setStatus(message, kind = "") {
-      statusBox.textContent = message;
-      statusBox.className = kind;
-    }
-
-    function setMode(next) {
-      mode = next;
-      document.getElementById("modeWalls").classList.toggle("active", mode === "walls");
-      document.getElementById("modeExcludes").classList.toggle("active", mode === "exclude");
-      setStatus(`Modus: ${mode === "walls" ? "Wände zeichnen" : "No-Spawn-Zellen rot malen"}.`);
-    }
-
-    function buildBoard() {
-      cols = +colsInput.value;
-      rows = +rowsInput.value;
-      cell = +cellInput.value;
-      document.documentElement.style.setProperty("--cols", cols);
-      document.documentElement.style.setProperty("--rows", rows);
-      document.documentElement.style.setProperty("--cell", `${cell}px`);
-      board.innerHTML = "";
-      board.appendChild(baseMarker);
-
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) addCell(x, y);
-      }
-      for (let y = 0; y <= rows; y++) {
-        for (let x = 0; x < cols; x++) addEdge("h", x, y);
-      }
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x <= cols; x++) addEdge("v", x, y);
-      }
-      restoreClasses();
-      updateBaseMarker();
-    }
-
-    function addCell(x, y) {
-      const e = document.createElement("div");
-      e.className = "cell";
-      e.dataset.x = x;
-      e.dataset.y = y;
-      e.style.left = `${x * cell}px`;
-      e.style.top = `${y * cell}px`;
-      e.addEventListener("click", () => {
-        if (mode !== "exclude") return;
-        const k = cellKey(y, x);
-        if (excludedCells.has(k)) excludedCells.delete(k);
-        else excludedCells.add(k);
-        restoreClasses();
-      });
-      board.appendChild(e);
-    }
-
-    function addEdge(type, x, y) {
-      const e = document.createElement("div");
-      e.className = `edge ${type}`;
-      e.dataset.type = type;
-      e.dataset.x = x;
-      e.dataset.y = y;
-      e.style.left = `${x * cell}px`;
-      e.style.top = `${y * cell}px`;
-      e.addEventListener("click", (event) => {
-        if (mode !== "walls") return;
-        event.stopPropagation();
-        const k = edgeKey(type, x, y);
-        if (activeEdges.has(k)) activeEdges.delete(k);
-        else activeEdges.set(k, { type, x, y });
-        restoreClasses();
-        updateBaseMarker();
-      });
-      board.appendChild(e);
-    }
-
-    function restoreClasses() {
-      for (const e of board.querySelectorAll(".edge")) {
-        const k = edgeKey(e.dataset.type, +e.dataset.x, +e.dataset.y);
-        e.classList.toggle("active", activeEdges.has(k));
-      }
-      for (const e of board.querySelectorAll(".cell")) {
-        const k = cellKey(+e.dataset.y, +e.dataset.x);
-        e.classList.toggle("excluded", excludedCells.has(k));
-      }
-    }
-
-    function boundsFromEdges() {
-      if (!activeEdges.size) return null;
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const edge of activeEdges.values()) {
-        if (edge.type === "h") {
-          minX = Math.min(minX, edge.x); maxX = Math.max(maxX, edge.x + 1);
-          minY = Math.min(minY, edge.y); maxY = Math.max(maxY, edge.y);
-        } else {
-          minX = Math.min(minX, edge.x); maxX = Math.max(maxX, edge.x);
-          minY = Math.min(minY, edge.y); maxY = Math.max(maxY, edge.y + 1);
+<header><div class="brand">SWARMECHO <small>3D BUILDING STUDIO</small></div><button id="newBtn">New</button><button id="openBtn">Open map</button><input id="name" class="name" value="custom_3d_building" aria-label="Map name"><label><input id="overwrite" type="checkbox"> overwrite</label><button id="copyBtn">Copy current YAML</button><button id="validateBtn">Validate</button><button id="saveBtn" class="primary">Save map</button></header>
+<div class="workspace">
+<aside>
+<div class="section">Edit mode</div><div class="tools"><button data-mode="tiles" class="active">▦ Tiles</button><button data-mode="walls">▥ Walls</button><button data-mode="exclude">▧ No target</button><button data-mode="base">● Base</button><button data-mode="orbit">↻ Orbit</button></div>
+<label class="hint"><input id="showExclusions" type="checkbox" checked> Show no-target filling</label><div class="section">Batch tools</div><button id="outerBtn" class="wide">Add outer walls</button><button id="roofBtn" class="wide">Add roof</button>
+<div class="section">Current storey</div><div class="layers"><button id="downBtn">↓</button><select id="layer"></select><button id="upBtn">↑</button></div><button id="addLayerBtn" class="wide">＋ Add layer</button><button id="deleteLayerBtn" class="wide">− Delete current layer / roof</button>
+<div class="section">Resize footprint</div><div class="grow"><button data-expand="north" data-delta="1">North +1</button><button data-expand="north" data-delta="-1">North −1</button><button data-expand="south" data-delta="1">South +1</button><button data-expand="south" data-delta="-1">South −1</button><button data-expand="east" data-delta="1">East +1</button><button data-expand="east" data-delta="-1">East −1</button><button data-expand="west" data-delta="1">West +1</button><button data-expand="west" data-delta="-1">West −1</button></div>
+<p class="hint">Drag to preview a straight row of walls: cyan adds, red removes. Release to apply. New rows and columns copy the neighboring edge.</p>
+</aside>
+<main class="stage"><canvas id="scene"></canvas><div class="hud"><b id="title">Level 1</b><span id="count"></span></div><div class="zoom">Wheel to zoom · drag outside the floor or use Orbit to rotate</div></main>
+<aside class="right"><div class="section">Structure</div><div id="structure" class="structure"></div><div class="legend"><div><i class="sw" style="background:#3c7b91"></i>floor tile</div><div><i class="sw" style="background:#b5e3e8"></i>solid wall</div><div><i class="sw" style="background:#b64a61"></i>target excluded</div><div><i class="sw" style="background:#58aaff;border-radius:50%"></i>base spawn</div></div><div class="section">Training contract</div><div id="status" class="status">Loading…</div><p class="hint">Cells measure interior volume, independently of floor tiles. Adding a layer extends that volume, walls, and no-target areas without adding a floor. Add roof creates the top tiles; select Roof to inspect the whole building.</p></aside>
+</div>
+<dialog id="picker"><h3>Open existing v1 map</h3><select id="mapList"></select><p><button id="cancelOpen">Cancel</button> <button id="confirmOpen" class="primary">Open</button></p></dialog>
+<script>
+const $=id=>document.getElementById(id),canvas=$('scene'),ctx=canvas.getContext('2d'),coordKey=c=>c.join(',');
+let doc=null,mode='tiles',layer=0,yaw=-0.65,pitch=0.68,zoom=46,pointer=null,selection=null;
+const setOf=list=>new Set(list.map(coordKey));
+async function api(path,body){const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||r.statusText);return j}
+function status(message,type=''){const box=$('status');box.textContent=message;box.className='status '+type}
+function toggle(list,c,force){const k=coordKey(c),i=list.findIndex(v=>coordKey(v)===k),present=i>=0,want=force===undefined?!present:force;if(present&&!want)list.splice(i,1);else if(!present&&want)list.push(c);list.sort((a,b)=>coordKey(a).localeCompare(coordKey(b),undefined,{numeric:true}))}
+function resizeCanvas(){const r=canvas.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0);draw()}
+function centre(){const r=canvas.getBoundingClientRect();return [r.width/2,r.height*.42]}
+function project(x,y,z){const [cx,cy]=centre(),dx=x-doc.cols/2,dy=y-doc.rows/2,c=Math.cos(yaw),s=Math.sin(yaw),rx=dx*c-dy*s,ry=dx*s+dy*c;return [cx+rx*zoom,cy+(ry*Math.cos(pitch)-(z-layer)*Math.sin(pitch))*zoom]}
+function polygon(points,fill,stroke='#31506c',width=1){ctx.beginPath();points.forEach((p,i)=>(i?ctx.lineTo(...p):ctx.moveTo(...p)));ctx.closePath();ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=width;ctx.stroke()}
+function cellPolygon(x,y,z){return [project(x,y,z),project(x+1,y,z),project(x+1,y+1,z),project(x,y+1,z)]}
+// Render opaque faces with a depth buffer; the 2D canvas retains editing overlays.
+const solidCanvas=document.createElement('canvas'),gl=solidCanvas.getContext('webgl',{antialias:true,preserveDrawingBuffer:true});
+if(!gl){status('The 3D preview requires WebGL. Enable browser graphics acceleration and reload.','err');throw Error('WebGL unavailable')}
+function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s}
+const solidProgram=gl.createProgram();
+gl.attachShader(solidProgram,shader(gl.VERTEX_SHADER,'attribute vec3 position; attribute vec3 color; varying vec3 tint; void main(){gl_Position=vec4(position,1.0);tint=color;}'));
+gl.attachShader(solidProgram,shader(gl.FRAGMENT_SHADER,'precision mediump float; varying vec3 tint; void main(){gl_FragColor=vec4(tint,1.0);}'));
+gl.linkProgram(solidProgram);
+if(!gl.getProgramParameter(solidProgram,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(solidProgram));
+const solidBuffer=gl.createBuffer(),positionAttribute=gl.getAttribLocation(solidProgram,'position'),colorAttribute=gl.getAttribLocation(solidProgram,'color');
+let faces=[],edges=[];
+function face(points,fill,stroke){
+    const r=canvas.getBoundingClientRect(),range=doc.cols+doc.rows+doc.layers+2;
+    const vertices=points.map(([x,y,z])=>{const p=project(x,y,z),depth=((x-doc.cols/2)*Math.sin(yaw)+(y-doc.rows/2)*Math.cos(yaw))*Math.sin(pitch)+(z-layer)*Math.cos(pitch);return [2*p[0]/r.width-1,1-2*p[1]/r.height,-depth/range]});
+    const color=hex=>[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255),append=(out,indices,hex)=>{const rgb=color(hex);for(const i of indices)out.push(...vertices[i],...rgb)};
+    if(fill)append(faces,[0,1,2,0,2,3],fill);append(edges,[0,1,1,2,2,3,3,0],stroke);
+}
+function box(x0,y0,z0,x1,y1,z1,side,top,stroke){
+    face([[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]],side,stroke);
+    face([[x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]],side,stroke);
+    face([[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1]],side,stroke);
+    face([[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]],side,stroke);
+    face([[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]],top,stroke);
+    face([[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0]],side,stroke);
+}
+function wallBlock(kind,a,b,z,fill){
+    const t=doc.wall_thickness_m/doc.cell_size_m/2;
+    if(kind==='x')box(a-t,b,z,a+t,b+1,z+1,fill,'#d9fbff','#e8ffff');
+    else box(a,b-t,z,a+1,b+t,z+1,fill,'#bdeff5','#e8ffff');
+}
+function exclusionBlock(x,y,z){box(x,y,z,x+1,y+1,z+1,'#8f263e','#d54d63','#ff8293')}
+function renderSolids(){
+    if(solidCanvas.width!==canvas.width||solidCanvas.height!==canvas.height){solidCanvas.width=canvas.width;solidCanvas.height=canvas.height}
+    gl.viewport(0,0,solidCanvas.width,solidCanvas.height);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);gl.useProgram(solidProgram);gl.bindBuffer(gl.ARRAY_BUFFER,solidBuffer);
+    for(const [attribute,offset] of [[positionAttribute,0],[colorAttribute,12]]){gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,24,offset)}
+    // Offset fills so their outlines remain visible, but hidden edges still fail depth testing.
+    gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1,1);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(faces),gl.DYNAMIC_DRAW);gl.drawArrays(gl.TRIANGLES,0,faces.length/6);gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(edges),gl.DYNAMIC_DRAW);gl.drawArrays(gl.LINES,0,edges.length/6);
+    const r=canvas.getBoundingClientRect();ctx.drawImage(solidCanvas,0,0,r.width,r.height);
+}
+function draw(){
+    if(!doc)return;const r=canvas.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);
+    const interiors=setOf(doc.interior_cells),tiles=setOf(doc.tiles),excludes=setOf(doc.target_exclusion_cells),roofView=layer===doc.layers;faces=[];edges=[];
+    for(let z=0;z<=layer;z++)for(let y=0;y<doc.rows;y++)for(let x=0;x<doc.cols;x++){
+        const interior=interiors.has(coordKey([x,y,z])),floor=tiles.has(coordKey([x,y,z]));
+        if(floor){
+            const t=doc.tile_thickness_m/doc.cell_size_m/2,fill=roofView||z===layer?'#397e93':'#183b50';
+            box(x,y,z-t,x+1,y+1,z+t,fill,fill,roofView?'#73b7ca':z===layer?'#426b89':'#203d55');
+        }else if(interior&&z===layer&&!roofView){
+            // An editing grid locates empty volume without inventing an opaque floor.
+            face([[x,y,z],[x+1,y,z],[x+1,y+1,z],[x,y+1,z]],null,'#203d55');
         }
-      }
-      return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+        if(z<doc.layers&&excludes.has(coordKey([x,y,z]))&&$('showExclusions').checked)exclusionBlock(x,y,z);
     }
-
-    function updateBaseMarker() {
-      const b = boundsFromEdges();
-      if (!showBase || !b) {
-        baseMarker.style.display = "none";
-        return;
-      }
-      baseMarker.style.display = "block";
-      baseMarker.style.left = `${(b.minX + b.width / 2) * cell}px`;
-      baseMarker.style.top = `${(b.minY + b.height / 2) * cell}px`;
+    for(const w of doc.x_walls)if(w[2]<=layer&&w[2]<doc.layers)wallBlock('x',...w,roofView||w[2]===layer?'#8fd4df':'#416b78');
+    for(const w of doc.y_walls)if(w[2]<=layer&&w[2]<doc.layers)wallBlock('y',...w,roofView||w[2]===layer?'#72bfcc':'#355d6b');
+    renderSolids();drawWallPreview();if(doc.base_cell&&doc.base_cell[2]===layer){const [x,y,z]=doc.base_cell,p=project(x+.5,y+.5,z+.05);ctx.beginPath();ctx.arc(...p,Math.max(5,zoom*.14),0,Math.PI*2);ctx.fillStyle='#58aaff';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='white';ctx.font='bold 10px sans-serif';ctx.textAlign='center';ctx.fillText('B',p[0],p[1]+3)}if(selection&&!roofView){const x0=Math.min(selection.start[0],selection.end[0]),x1=Math.max(selection.start[0],selection.end[0]),y0=Math.min(selection.start[1],selection.end[1]),y1=Math.max(selection.start[1],selection.end[1]),color=mode==='exclude'?(selection.add?'#e45770aa':'#381521bb'):(selection.add?'#45ddea88':'#0b1420cc');for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)polygon(cellPolygon(x,y,layer+.03),color,'#eafcff',2)}updateUi()}
+function updateUi(){const sel=$('layer'),roofPresent=doc.tiles.some(t=>t[2]===doc.layers),optionsKey=doc.layers+':'+roofPresent;if(sel.dataset.optionsKey!==optionsKey){sel.dataset.optionsKey=optionsKey;sel.innerHTML='';for(let z=0;z<doc.layers;z++)sel.add(new Option(`Level ${z+1}`,z));if(roofPresent)sel.add(new Option('Roof · inspection',doc.layers))}if(layer>doc.layers||(layer===doc.layers&&!roofPresent))layer=doc.layers-1;sel.value=layer;$('name').value=doc.name;const roofView=layer===doc.layers;$('title').textContent=roofView?'Roof · inspection':`Level ${layer+1} · ${mode[0].toUpperCase()+mode.slice(1)}`;$('count').textContent=roofView?'Complete opaque building':`${doc.interior_cells.filter(c=>c[2]===layer).length} volume cells · ${doc.layers} levels`;$('structure').innerHTML='';for(let z=0;z<doc.layers;z++){const e=document.createElement('div'),count=doc.interior_cells.filter(c=>c[2]===z).length;e.className='storey'+(z===layer?' active':'');e.textContent=`LEVEL ${z+1}  ·  ${count} cells`;e.style.width=(55+Math.min(100,count*2))+'px';e.onclick=()=>{layer=z;draw()};$('structure').append(e)}if(roofPresent){const e=document.createElement('div'),count=doc.tiles.filter(t=>t[2]===doc.layers).length;e.className='storey roof'+(layer===doc.layers?' active':'');e.textContent=`ROOF · ${count} tiles`;e.style.width=(90+Math.min(80,count))+'px';e.onclick=()=>{layer=doc.layers;draw()};$('structure').append(e)}}
+function unproject(clientX,clientY){const r=canvas.getBoundingClientRect(),[cx,cy]=centre(),rx=(clientX-r.left-cx)/zoom,ry=(clientY-r.top-cy)/(zoom*Math.cos(pitch)),c=Math.cos(yaw),s=Math.sin(yaw),dx=rx*c+ry*s,dy=-rx*s+ry*c,x=Math.floor(dx+doc.cols/2),y=Math.floor(dy+doc.rows/2);return x>=0&&x<doc.cols&&y>=0&&y<doc.rows?[x,y]:null}
+function nearestWall(clientX,clientY){const cell=unproject(clientX,clientY);if(!cell)return null;const r=canvas.getBoundingClientRect(),[x,y]=cell,px=clientX-r.left,py=clientY-r.top,candidates=[['x',[x,y,layer],project(x,y+.5,layer+.5)],['x',[x+1,y,layer],project(x+1,y+.5,layer+.5)],['y',[x,y,layer],project(x+.5,y,layer+.5)],['y',[x,y+1,layer],project(x+.5,y+1,layer+.5)]];candidates.sort((a,b)=>Math.hypot(px-a[2][0],py-a[2][1])-Math.hypot(px-b[2][0],py-b[2][1]));return candidates[0]}
+function selectedWalls(){
+    const [kind,origin]=pointer.wall,axis=kind==='x'?1:0,walls=[];
+    for(let i=Math.min(pointer.start,pointer.end);i<=Math.max(pointer.start,pointer.end);i++){const c=[...origin];c[axis]=i;walls.push(c)}
+    return walls;
+}
+function drawWallPreview(){
+    if(pointer?.type!=='walls')return;
+    const kind=pointer.wall[0],fill=pointer.add?'#45ddea99':'#ef526d99',stroke=pointer.add?'#8cffff':'#ff9cae';
+    for(const [x,y,z] of selectedWalls()){
+        const points=kind==='x'?[[x,y,z],[x,y+1,z],[x,y+1,z+1],[x,y,z+1]]:[[x,y,z],[x+1,y,z],[x+1,y,z+1],[x,y,z+1]];
+        polygon(points.map(c=>project(...c)),fill,stroke,3);
     }
-
-    function payload() {
-      return {
-        map_name: mapNameInput.value.trim(),
-        overwrite: document.getElementById("overwrite").checked,
-        cell_size_m: 10.0,
-        edges: Array.from(activeEdges.values()),
-        target_exclude_cells: Array.from(excludedCells).map(k => k.split(":").map(Number))
-      };
-    }
-
-    async function postJson(url, data) {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
-      });
-      const json = await response.json();
-      if (!response.ok || !json.ok) throw new Error(json.error || `Request failed: ${response.status}`);
-      return json;
-    }
-
-    function applyMachineMaze(machine) {
-      activeEdges.clear();
-      excludedCells.clear();
-      colsInput.value = Math.max(+colsInput.value, machine.width + 4);
-      rowsInput.value = Math.max(+rowsInput.value, machine.height + 4);
-      cols = +colsInput.value; rows = +rowsInput.value; cell = +cellInput.value;
-      const offsetX = 2, offsetY = 2;
-      for (let y = 0; y < machine.h_walls.length; y++) {
-        for (let x = 0; x < machine.h_walls[y].length; x++) {
-          if (machine.h_walls[y][x]) activeEdges.set(edgeKey("h", x + offsetX, y + offsetY), { type: "h", x: x + offsetX, y: y + offsetY });
-        }
-      }
-      for (let y = 0; y < machine.v_walls.length; y++) {
-        for (let x = 0; x < machine.v_walls[y].length; x++) {
-          if (machine.v_walls[y][x]) activeEdges.set(edgeKey("v", x + offsetX, y + offsetY), { type: "v", x: x + offsetX, y: y + offsetY });
-        }
-      }
-      for (const [row, col] of machine.target_exclude_cells || []) {
-        excludedCells.add(cellKey(row + offsetY, col + offsetX));
-      }
-      if (machine.map_name) mapNameInput.value = machine.map_name;
-      buildBoard();
-      setStatus(`JSON importiert: ${machine.width}×${machine.height} Zellen.`, "ok");
-    }
-
-    document.getElementById("resize").addEventListener("click", buildBoard);
-    document.getElementById("modeWalls").addEventListener("click", () => setMode("walls"));
-    document.getElementById("modeExcludes").addEventListener("click", () => setMode("exclude"));
-    document.getElementById("basePreview").addEventListener("click", () => { showBase = !showBase; updateBaseMarker(); });
-    document.getElementById("clear").addEventListener("click", () => { activeEdges.clear(); excludedCells.clear(); previewCommand.style.display = "none"; restoreClasses(); updateBaseMarker(); setStatus("Alles gelöscht."); });
-
-    document.getElementById("exportJson").addEventListener("click", async () => {
-      try {
-        const result = await postJson("/api/export-machine", payload());
-        const text = JSON.stringify(result.machine_maze, null, 2);
-        await navigator.clipboard.writeText(text);
-        setStatus(`Machine-readable JSON in Zwischenablage kopiert:\n${text}`, "ok");
-      } catch (err) { setStatus(err.message, "err"); }
-    });
-
-    document.getElementById("importJson").addEventListener("change", async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-      try {
-        const machine = JSON.parse(await file.text());
-        const result = await postJson("/api/normalize-machine", machine);
-        applyMachineMaze(result.machine_maze);
-      } catch (err) { setStatus(err.message, "err"); }
-      event.target.value = "";
-    });
-
-    document.getElementById("create").addEventListener("click", async () => {
-      try {
-        const result = await postJson("/api/create", payload());
-        previewCommand.value = result.preview_command;
-        previewCommand.style.display = "block";
-        setStatus(`Erstellt:\nMap: ${result.map_path}\nLevel: ${result.level_path}\n\nPreview-Befehl:\n${result.preview_command}`, "ok");
-      } catch (err) { setStatus(err.message, "err"); }
-    });
-
-    document.getElementById("copyPreview").addEventListener("click", async () => {
-      const cmd = previewCommand.value || `uv run swarmecho-render ${mapNameInput.value.trim()} --mode image --format png --no-spawns`;
-      await navigator.clipboard.writeText(cmd);
-      setStatus(`Preview-Befehl kopiert:\n${cmd}`, "ok");
-    });
-
-    buildBoard();
-  </script>
-</body>
-</html>
+}
+function beginEdit(ev){const cell=unproject(ev.clientX,ev.clientY);if(layer===doc.layers||mode==='orbit'||!cell){pointer={type:'orbit',x:ev.clientX,y:ev.clientY,yaw,pitch};canvas.setPointerCapture(ev.pointerId);return}if(mode==='base'){doc.base_cell=[...cell,layer];delete doc.base_position_m;draw();return}if(mode==='walls'){const wall=nearestWall(ev.clientX,ev.clientY);if(!wall)return;const list=wall[0]==='x'?doc.x_walls:doc.y_walls,add=!setOf(list).has(coordKey(wall[1]));const start=wall[1][wall[0]==='x'?1:0];pointer={type:'walls',add,wall,start,end:start,x:ev.clientX,y:ev.clientY};draw();canvas.setPointerCapture(ev.pointerId);return}const c=[...cell,layer],list=mode==='tiles'?doc.tiles:doc.target_exclusion_cells;if(mode==='exclude'&&!setOf(doc.interior_cells).has(coordKey(c)))return status('No-target selection must stay inside the interior volume.','err');selection={start:cell,end:cell,add:!setOf(list).has(coordKey(c))};pointer={type:'rectangle'};canvas.setPointerCapture(ev.pointerId);draw()}
+function touchWall(ev){
+    // Project the drag onto the selected row; preview only until pointer release.
+    const kind=pointer.wall[0],axis=kind==='x'?1:0,a=project(0,0,layer),b=project(axis===0?1:0,axis===1?1:0,layer),dx=b[0]-a[0],dy=b[1]-a[1];
+    const distance=((ev.clientX-pointer.x)*dx+(ev.clientY-pointer.y)*dy)/(dx*dx+dy*dy),limit=axis===1?doc.rows:doc.cols;
+    pointer.end=Math.max(0,Math.min(limit-1,Math.floor(pointer.start+.5+distance)));draw();
+}
+function cancelEdit(){pointer=null;selection=null;draw()}
+function moveEdit(ev){if(!pointer)return;if(pointer.type==='orbit'){yaw=pointer.yaw+(ev.clientX-pointer.x)/180;pitch=Math.max(.3,Math.min(1.25,pointer.pitch+(ev.clientY-pointer.y)/220));draw()}else if(pointer.type==='walls')touchWall(ev);else{const c=unproject(ev.clientX,ev.clientY);if(c){selection.end=c;draw()}}}
+function endEdit(ev){if(!pointer)return;if(pointer.type==='walls'){if(ev&&Number.isFinite(ev.clientX))touchWall(ev);const list=pointer.wall[0]==='x'?doc.x_walls:doc.y_walls;for(const c of selectedWalls())toggle(list,c,pointer.add);}if(pointer.type==='rectangle'&&selection){const [ax,ay]=selection.start,[bx,by]=selection.end,x0=Math.min(ax,bx),x1=Math.max(ax,bx),y0=Math.min(ay,by),y1=Math.max(ay,by);for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const c=[x,y,layer];if(mode==='tiles'){toggle(doc.tiles,c,selection.add);}else if(setOf(doc.interior_cells).has(coordKey(c)))toggle(doc.target_exclusion_cells,c,selection.add)}}pointer=null;selection=null;draw()}
+$('showExclusions').onchange=draw;
+canvas.addEventListener('pointerdown',beginEdit);canvas.addEventListener('pointermove',moveEdit);canvas.addEventListener('pointerup',endEdit);canvas.addEventListener('pointercancel',cancelEdit);canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(20,Math.min(100,zoom*(e.deltaY>0?.9:1.1)));draw()},{passive:false});
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('active',x===b));canvas.style.cursor=mode==='orbit'?'grab':'crosshair';draw()});$('layer').onchange=e=>{layer=+e.target.value;draw()};$('downBtn').onclick=()=>{layer=Math.max(0,layer-1);draw()};$('upBtn').onclick=()=>{const roof=doc.tiles.some(t=>t[2]===doc.layers);layer=Math.min(roof?doc.layers:doc.layers-1,layer+1);draw()};
+$('outerBtn').onclick=async()=>runDocument('/api/buildings/outer-walls',{...doc,selected_layer:layer},'Outer walls added.');$('roofBtn').onclick=()=>runDocument('/api/buildings/roof',doc,'Roof added. Select Roof in Current storey or Structure to inspect the building.');$('addLayerBtn').onclick=async()=>{await runDocument('/api/buildings/add-layer',doc,'Layer added; interior, walls, and no-target pattern copied; tile plane left empty.');layer=doc.layers-1;draw()};$('deleteLayerBtn').onclick=async()=>{const wasRoof=layer===doc.layers;await runDocument('/api/buildings/delete-layer',{...doc,selected_layer:layer},wasRoof?'Roof removed.':'Storey deleted and higher levels shifted down.');layer=Math.min(layer,doc.layers-1);draw()};document.querySelectorAll('[data-expand]').forEach(b=>b.onclick=()=>runDocument('/api/buildings/expand',{...doc,direction:b.dataset.expand,delta:Number(b.dataset.delta)},`${b.dataset.expand} edge ${Number(b.dataset.delta)>0?'expanded':'trimmed'}.`));
+async function runDocument(path,body,message){try{doc=(await api(path,body)).document;draw();status(message)}catch(e){status(e.message,'err')}}
+async function validate(){doc.name=$('name').value;try{const r=(await api('/api/buildings/validate',doc)).report;status(`VALID BUILDING\n${r.interior_cells} interior cells\n${r.authored_solids} internal solids\n${r.target_candidate_cells} target cells\nWorld ${r.world_size_m.join(' × ')} m`,'ok');return true}catch(e){status(e.message,'err');return false}}
+$('copyBtn').onclick=async()=>{doc.name=$('name').value;try{const j=await api('/api/buildings/code',doc);await navigator.clipboard.writeText(j.code);status('Exact current map YAML copied to clipboard.','ok')}catch(e){status(e.message,'err')}};$('validateBtn').onclick=validate;$('saveBtn').onclick=async()=>{doc.name=$('name').value;if(!await validate())return;try{const j=await api('/api/buildings/save',{...doc,overwrite:$('overwrite').checked});status(`Saved ${j.path}\nRun: uv run swarmecho-validate-building ${j.path} --runtime-smoke`,'ok')}catch(e){status(e.message,'err')}};$('newBtn').onclick=()=>runDocument('/api/buildings/new',{},'New building. Place the base before validation.');$('openBtn').onclick=async()=>{try{const j=await api('/api/buildings');$('mapList').innerHTML='';j.maps.forEach(n=>$('mapList').add(new Option(n,n)));$('picker').showModal()}catch(e){status(e.message,'err')}};$('cancelOpen').onclick=()=>$('picker').close();$('confirmOpen').onclick=async()=>{try{doc=(await api('/api/buildings/'+encodeURIComponent($('mapList').value))).document;layer=0;$('picker').close();draw();status('Existing v1 map opened without conversion.')}catch(e){status(e.message,'err')}};
+new ResizeObserver(resizeCanvas).observe(canvas);api('/api/buildings/new').then(j=>{doc=j.document;resizeCanvas();status('New building. Base and no-target cells are intentionally unset.','ok')});
+</script>
+</body></html>

@@ -1,5 +1,14 @@
 # Future Features
 
+## Chain contribution visibility
+
+- [x] Add `env.observe_chain_contributor` (default off; enabled in B01 office).
+  The scalar is one only when the drone knows the target, a complete chain
+  exists, and the reward's contributor selector includes that drone.
+  It follows the existing minimum-hop contributor rule, not geometric roadmap
+  ranking. Enabling it adds one observation input; older checkpoints require
+  the option off. Inspector links highlight the same selected paths in green.
+
 ## Information-ranked selective evaluation renderer
 
 Add a renderer that selects evaluation episodes from the comprehensive

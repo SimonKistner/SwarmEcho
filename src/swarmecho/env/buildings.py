@@ -36,6 +36,9 @@ class BuildingArrays:
     x_walls: np.ndarray
     y_walls: np.ndarray
     target_exclusion: np.ndarray
+    interior_cells: np.ndarray
+    solid_min_m: np.ndarray
+    solid_max_m: np.ndarray
     base_position_m: np.ndarray
     world_size_m: np.ndarray
     cell_size_m: float
@@ -138,12 +141,27 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
     _set_coords(x_walls, _triples(geometry.get("x_walls"), "geometry.x_walls"), "geometry.x_walls")
     _set_coords(y_walls, _triples(geometry.get("y_walls"), "geometry.y_walls"), "geometry.y_walls")
 
-    if not (tiles[:, :, 0].all() and tiles[:, :, size_z].all()):
-        raise BuildingValidationError("The bottom floor and top roof must contain complete tile layers.")
-    if not (x_walls[0, :, :].all() and x_walls[size_x, :, :].all()):
-        raise BuildingValidationError("Both outer X walls must be complete.")
-    if not (y_walls[:, 0, :].all() and y_walls[:, size_y, :].all()):
-        raise BuildingValidationError("Both outer Y walls must be complete.")
+    interior_values = data.get("interior_cells")
+    interior_cells = np.ones(dimensions, dtype=np.bool_)
+    if interior_values is not None:
+        interior_cells[:] = False
+        _set_coords(
+            interior_cells,
+            _triples(interior_values, "interior_cells"),
+            "interior_cells",
+        )
+        if not interior_cells.any():
+            raise BuildingValidationError("interior_cells must contain at least one cell.")
+
+    if interior_values is None:
+        if not (tiles[:, :, 0].all() and tiles[:, :, size_z].all()):
+            raise BuildingValidationError(
+                "The bottom floor and top roof must contain complete tile layers."
+            )
+        if not (x_walls[0, :, :].all() and x_walls[size_x, :, :].all()):
+            raise BuildingValidationError("Both outer X walls must be complete.")
+        if not (y_walls[:, 0, :].all() and y_walls[:, size_y, :].all()):
+            raise BuildingValidationError("Both outer Y walls must be complete.")
 
     base_coordinate = data.get("base_position_m")
     if (
@@ -161,6 +179,14 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
     world_size = np.asarray(dimensions, dtype=np.float32) * cell_size
     if np.any(base_position < 0) or np.any(base_position > world_size):
         raise BuildingValidationError("base_position_m must be inside the building bounds.")
+    base_cell = np.minimum(
+        np.floor(base_position / cell_size).astype(np.int64),
+        np.asarray(dimensions) - 1,
+    )
+    if not interior_cells[tuple(base_cell)]:
+        raise BuildingValidationError(
+            f"base_position_m is in non-interior cell {base_cell.tolist()}."
+        )
 
     target_exclusion = np.zeros(dimensions, dtype=np.bool_)
     _set_coords(
@@ -168,6 +194,84 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
         _triples(data.get("target_exclusion_cells", []), "target_exclusion_cells"),
         "target_exclusion_cells",
     )
+    if np.any(target_exclusion & ~interior_cells):
+        coordinate = np.argwhere(target_exclusion & ~interior_cells)[0].tolist()
+        raise BuildingValidationError(
+            f"target_exclusion_cells contains non-interior cell {coordinate}."
+        )
+    if not np.any(interior_cells & ~target_exclusion):
+        raise BuildingValidationError("Building has no non-excluded interior target cell.")
+
+    def face_is_closed(x: int, y: int, z: int, axis: int, direction: int) -> bool:
+        if axis == 0:
+            return bool(x_walls[x + (direction > 0), y, z])
+        if axis == 1:
+            return bool(y_walls[x, y + (direction > 0), z])
+        return bool(tiles[x, y, z + (direction > 0)])
+
+    for x, y, z in np.argwhere(interior_cells):
+        for axis, direction, label in (
+            (0, -1, "-X"), (0, 1, "+X"),
+            (1, -1, "-Y"), (1, 1, "+Y"),
+            (2, -1, "-Z"), (2, 1, "+Z"),
+        ):
+            neighbor = [int(x), int(y), int(z)]
+            neighbor[axis] += direction
+            neighbor_is_interior = (
+                all(0 <= neighbor[i] < dimensions[i] for i in range(3))
+                and bool(interior_cells[tuple(neighbor)])
+            )
+            if not neighbor_is_interior and not face_is_closed(
+                int(x), int(y), int(z), axis, direction
+            ):
+                raise BuildingValidationError(
+                    f"Interior cell {[int(x), int(y), int(z)]} leaks through {label}."
+                )
+
+    visited = np.zeros(dimensions, dtype=np.bool_)
+    pending = [tuple(int(value) for value in base_cell)]
+    visited[pending[0]] = True
+    while pending:
+        x, y, z = pending.pop()
+        for axis, direction in ((0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)):
+            neighbor = [x, y, z]
+            neighbor[axis] += direction
+            if not all(0 <= neighbor[i] < dimensions[i] for i in range(3)):
+                continue
+            coordinate = tuple(neighbor)
+            if (
+                interior_cells[coordinate]
+                and not visited[coordinate]
+                and not face_is_closed(x, y, z, axis, direction)
+            ):
+                visited[coordinate] = True
+                pending.append(coordinate)
+    unreachable = interior_cells & ~visited
+    if np.any(unreachable):
+        coordinate = np.argwhere(unreachable)[0].tolist()
+        raise BuildingValidationError(
+            f"Interior cell {coordinate} is unreachable from the base cell."
+        )
+
+    solid_min: list[list[float]] = []
+    solid_max: list[list[float]] = []
+    for x, y, z_boundary in np.argwhere(tiles):
+        if z_boundary in (0, size_z):
+            continue
+        solid_min.append([x * cell_size, y * cell_size, z_boundary * cell_size - tile_thickness / 2])
+        solid_max.append([(x + 1) * cell_size, (y + 1) * cell_size, z_boundary * cell_size + tile_thickness / 2])
+    for x_boundary, y, z in np.argwhere(x_walls):
+        if x_boundary in (0, size_x):
+            continue
+        solid_min.append([x_boundary * cell_size - wall_thickness / 2, y * cell_size, z * cell_size])
+        solid_max.append([x_boundary * cell_size + wall_thickness / 2, (y + 1) * cell_size, (z + 1) * cell_size])
+    for x, y_boundary, z in np.argwhere(y_walls):
+        if y_boundary in (0, size_y):
+            continue
+        solid_min.append([x * cell_size, y_boundary * cell_size - wall_thickness / 2, z * cell_size])
+        solid_max.append([(x + 1) * cell_size, y_boundary * cell_size + wall_thickness / 2, (z + 1) * cell_size])
+    solid_min_array = np.asarray(solid_min, dtype=np.float32).reshape((-1, 3))
+    solid_max_array = np.asarray(solid_max, dtype=np.float32).reshape((-1, 3))
 
     top_corners = [
         np.asarray([x, y, world_size[2]], dtype=np.float32)
@@ -181,6 +285,9 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
         x_walls=x_walls,
         y_walls=y_walls,
         target_exclusion=target_exclusion,
+        interior_cells=interior_cells,
+        solid_min_m=solid_min_array,
+        solid_max_m=solid_max_array,
         base_position_m=base_position,
         world_size_m=world_size,
         cell_size_m=cell_size,
@@ -246,6 +353,9 @@ def make_cuboid_building(
         x_walls=x_walls,
         y_walls=y_walls,
         target_exclusion=target_exclusion,
+        interior_cells=np.ones(grid, dtype=np.bool_),
+        solid_min_m=np.empty((0, 3), dtype=np.float32),
+        solid_max_m=np.empty((0, 3), dtype=np.float32),
         base_position_m=base_position,
         world_size_m=world_size,
         cell_size_m=float(cell_size_m),

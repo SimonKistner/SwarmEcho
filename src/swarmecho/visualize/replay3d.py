@@ -10,9 +10,29 @@ from typing import Iterable
 import numpy as np
 
 from swarmecho.env.baseline3d import Baseline3DState
+from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 
 
 REPLAY_FORMAT = "swarmecho-replay/v1"
+
+
+def building_snapshot(building: BuildingArrays) -> dict:
+    """Freeze the actual runtime geometry, independent of later map edits."""
+    cols, rows, layers = building.interior_cells.shape
+    return {
+        "format": BUILDING_FORMAT,
+        "building_cell_grid": dict(cols=cols, rows=rows, layers=layers),
+        "cell_size_m": building.cell_size_m,
+        "wall_thickness_m": building.wall_thickness_m,
+        "tile_thickness_m": building.tile_thickness_m,
+        "interior_cells": np.argwhere(building.interior_cells).tolist(),
+        "target_exclusion_cells": np.argwhere(building.target_exclusion).tolist(),
+        "base_position_m": building.base_position_m.tolist(),
+        "geometry": {key: np.argwhere(getattr(building, key)).tolist()
+                     for key in ("tiles", "x_walls", "y_walls")},
+        "solid_min_m": building.solid_min_m.tolist(),
+        "solid_max_m": building.solid_max_m.tolist(),
+    }
 
 
 def write_replay(
@@ -24,6 +44,7 @@ def write_replay(
     reward_terms: np.ndarray | None = None,
     metadata: dict | None = None,
     progress: bool = True,
+    building: BuildingArrays | None = None,
 ) -> tuple[Path, Path]:
     """Atomically write one replay NPZ and its small JSON manifest.
 
@@ -66,6 +87,10 @@ def write_replay(
         "obstacle_min": stack("obstacle_min"),
         "obstacle_max": stack("obstacle_max"),
     }
+    if all(hasattr(state, "base_target_known") for state in state_list):
+        arrays["base_target_known"] = stack("base_target_known")
+    else:
+        arrays["base_target_known"] = np.logical_or.accumulate(arrays["fully_connected"], axis=0)
     if reward_terms is not None:
         rewards = np.asarray(reward_terms)
         if rewards.shape[0] != len(state_list):
@@ -108,6 +133,8 @@ def write_replay(
         if protected & set(metadata):
             raise ValueError(f"Replay metadata cannot replace protected keys: {sorted(protected & set(metadata))}")
         manifest.update(metadata)
+    if building is not None:
+        manifest["building_snapshot"] = building_snapshot(building)
     manifest_temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_temporary.replace(manifest_path)
     return data_path, manifest_path
