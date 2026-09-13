@@ -1,6 +1,6 @@
 env:
   map_names:
-  - office_mirrored
+  - office_mirrored_free_spawn
   num_agents: 4
   max_steps: 700
   no_movement_termination_steps: 50
@@ -15,20 +15,25 @@ env:
   coverage_voxel_size: 5.0 # 9 x 20 x 3 = 540 voxels (8x fewer than at 2.5 m)
   observe_target_vector: false
   observe_base_vector: false
-  observe_coverage_probe: true
-  observe_chain_contributor: false
+  observe_coverage_probe: false
+  observe_chain_contributor: true
+  observe_current_timestep: true
+  success_when_target_found_or_delivered: false
 
   roadmap_merge_walls: true
 
 reward:
-  target_found_requires_delivery: true
+  allow_redundancy_reward: true
+  enable_chain_efficiency_reward: true
+  chain_efficiency_bonus: 1
+  target_found_requires_delivery: false
   chain_reward_system: obstacle_geodesic
   exploration_bonus: 0.25
-  finder_bonus: 50.0
+  finder_bonus: 0.0
   max_gap_penalty: 5.0
   collision_penalty: 0.5
-  target_found_bonus: 100.0
-  success_bonus: 500.0
+  target_found_bonus: 0.0
+  success_bonus: 50.0
 
 training:
   total_timesteps: 500000000
@@ -37,12 +42,19 @@ training:
   num_epochs: 4
   num_minibatches: 20
   seed: 6302026950
+
+  actor_clip_eps: 0.2
+  value_clip_eps: 0.2 # Normalized value units below; null disables clipping (not 0).
+  entropy_mode: squashed
+  value_normalization: running
+
+
   training_noise: false
   noise_level: 0.011
 
   randomize_base: true
   minimum_geodesic_separation: true
-  minimum_geodesic_separation_multiplier: 1.5
+  minimum_geodesic_separation_multiplier: 1.2
 
 network:
   num_layers: 3
@@ -52,13 +64,15 @@ network:
   critic_type: observation
   memory_comm_enabled: true
   memory_comm_every_k_steps: 3
-  tarmac_sig_dim: 16
-  tarmac_val_dim: 32
+  tarmac_sig_dim: 32
+  tarmac_val_dim: 64
   tarmac_include_self: false
 
 evaluation:
   eval_parallel_envs: 4000
   eval_broadcast_on_curriculum_early_stop: false
+  eval_differes_from_training_map: true
+  eval_map: "office_mirrored"
   early_exit: true
   early_exit_threshold: 0.999
 

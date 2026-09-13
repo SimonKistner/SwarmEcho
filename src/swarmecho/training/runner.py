@@ -106,6 +106,7 @@ def _make_autoreset_step(
     terminate_on_target_found: bool = False,
     no_movement_termination_steps: int = 50,
     success_bonus: float = 0.0,
+    no_movement_termination_penalty: float = -300.0,
 ):
     """
     Wrap env_step to auto-reset on episode termination.
@@ -126,6 +127,7 @@ def _make_autoreset_step(
     terminate_on_target_found_jnp = jnp.bool_(terminate_on_target_found)
     no_movement_termination_steps_jnp = jnp.int32(no_movement_termination_steps)
     success_bonus_jnp = jnp.float32(success_bonus)
+    no_movement_termination_penalty_jnp = jnp.float32(no_movement_termination_penalty)
 
     def step(state, actions):
         new_state = env_step_fn(state, actions)
@@ -169,7 +171,21 @@ def _make_autoreset_step(
             reward_terminal,
             jnp.float32(0.0),
         )
-        reward = reward + extra_bonus
+        # Apply the shared failure penalty only when idleness is the effective
+        # termination cause. A simultaneous success or time limit wins over
+        # idle termination so successful episodes are never penalized.
+        idle_penalty_event = (
+            idle_terminated
+            & ~success_achieved
+            & ~time_up
+            & ~(terminate_on_target_found_jnp & target_found)
+        )
+        idle_penalty = jnp.where(
+            idle_penalty_event,
+            no_movement_termination_penalty_jnp / reward.shape[0],
+            jnp.float32(0.0),
+        )
+        reward = reward + extra_bonus + idle_penalty
 
         reset_state = reset_fn(new_state.physics.key)
         next_state = jax.tree_util.tree_map(
@@ -188,6 +204,7 @@ def _make_autoreset_step(
                 new_state.communication.target_known,
                 axis=-1,
             ),
+            "r_no_movement_termination": jnp.sum(idle_penalty),
         }
 
         return next_state, reward, done, info
@@ -353,6 +370,7 @@ def _collect_rollout_mappo(
     ep_len_accum     = ep_trackers["len"]
     ep_success_accum = ep_trackers["success"]
     ep_found_accum   = ep_trackers["found"]
+    ep_idle_accum    = ep_trackers.get("no_movement_termination", np.zeros(E))
     ep_gap_accum     = ep_trackers["gap"]
     ep_prog_pct_accum = ep_trackers.get("prog_pct", np.zeros(E))
     r_coverage_accum = ep_trackers.get("r_coverage", np.zeros(E))
@@ -366,6 +384,7 @@ def _collect_rollout_mappo(
     completed_lengths  = []
     completed_success  = []
     completed_found    = []
+    completed_idle     = []
     completed_gaps     = []
     completed_prog_pcts = []
     completed_r_coverage = []
@@ -397,6 +416,7 @@ def _collect_rollout_mappo(
         name: [] for name in (
             "fully_connected",
             "global_target_found",
+            "idle_terminated",
             "chain_gap_dist",
             "chain_progress_pct",
             "r_coverage",
@@ -545,6 +565,7 @@ def _collect_rollout_mappo(
         ep_len_accum += 1
         ep_success_accum = np.maximum(ep_success_accum, info_host["fully_connected"][t])
         ep_found_accum = np.maximum(ep_found_accum, info_host["global_target_found"][t])
+        ep_idle_accum = np.maximum(ep_idle_accum, info_host["idle_terminated"][t])
         ep_gap_accum = info_host["chain_gap_dist"][t]
         ep_prog_pct_accum = info_host["chain_progress_pct"][t]
         r_coverage_accum += info_host["r_coverage"][t]
@@ -559,6 +580,7 @@ def _collect_rollout_mappo(
             completed_lengths.append(int(ep_len_accum[e]))
             completed_success.append(float(ep_success_accum[e]))
             completed_found.append(float(ep_found_accum[e]))
+            completed_idle.append(float(ep_idle_accum[e]))
             completed_gaps.append(float(ep_gap_accum[e]))
             completed_prog_pcts.append(float(ep_prog_pct_accum[e]))
             completed_r_coverage.append(float(r_coverage_accum[e]))
@@ -572,6 +594,7 @@ def _collect_rollout_mappo(
         ep_len_accum = np.where(dones_np, 0, ep_len_accum)
         ep_success_accum = np.where(dones_np, 0.0, ep_success_accum)
         ep_found_accum = np.where(dones_np, 0.0, ep_found_accum)
+        ep_idle_accum = np.where(dones_np, 0.0, ep_idle_accum)
         ep_gap_accum = np.where(dones_np, 0.0, ep_gap_accum)
         ep_prog_pct_accum = np.where(dones_np, 0.0, ep_prog_pct_accum)
         r_coverage_accum = np.where(dones_np, 0.0, r_coverage_accum)
@@ -628,6 +651,7 @@ def _collect_rollout_mappo(
     ep_trackers["len"]     = ep_len_accum
     ep_trackers["success"] = ep_success_accum
     ep_trackers["found"]   = ep_found_accum
+    ep_trackers["no_movement_termination"] = ep_idle_accum
     ep_trackers["gap"]     = ep_gap_accum
     ep_trackers["prog_pct"] = ep_prog_pct_accum
 
@@ -647,6 +671,7 @@ def _collect_rollout_mappo(
         comm_summary,
         completed_returns, completed_lengths, completed_success,
         completed_found, completed_gaps, completed_prog_pcts,
+        completed_idle,
         completed_r_coverage, completed_r_gap, completed_r_coll,
         completed_r_found, completed_r_succ,
         completed_coverage,
@@ -743,6 +768,7 @@ def train(cfg: DictConfig):
         terminate_on_target_found,
         no_movement_termination_steps,
         float(cfg.reward.success_bonus),
+        float(cfg.reward.no_movement_termination_penalty),
     )
     autoreset_step_v = jax.jit(jax.vmap(autoreset_step))
     obs_fn_v         = jax.jit(jax.vmap(compute_obs))
@@ -887,6 +913,7 @@ def train(cfg: DictConfig):
         "success": np.zeros(E, dtype=np.float32),
         "found":   np.zeros(E, dtype=np.float32),
         "gap":     np.zeros(E, dtype=np.float32),
+        "no_movement_termination": np.zeros(E, dtype=np.float32),
     }
 
     # Sliding window for stable logging metrics
@@ -894,6 +921,7 @@ def train(cfg: DictConfig):
     window_len  = deque(maxlen=E)
     window_succ = deque(maxlen=E)
     window_fnd  = deque(maxlen=E)
+    window_idle = deque(maxlen=E)
     window_gap  = deque(maxlen=E)
     window_prog_pct = deque(maxlen=E)
 
@@ -1005,6 +1033,7 @@ def train(cfg: DictConfig):
              last_values, last_dones, actor_h, actor_signature, actor_value, critic_h, rollout_last_dones, base_signature, base_value, base_memory_valid,
              comm_summary,
              raw_ret, raw_len, raw_success, raw_found, raw_gap, raw_prog_pct,
+             raw_idle,
              raw_r_cov, raw_r_gap, raw_r_coll, raw_r_found, raw_r_succ,
              raw_cov) = _collect_rollout_mappo(
                 states, model, buf, autoreset_step_v, obs_fn_v, critic_state_fn_v,
@@ -1023,6 +1052,7 @@ def train(cfg: DictConfig):
                 window_fnd.extend(raw_found)
                 window_gap.extend(raw_gap)
                 window_prog_pct.extend(raw_prog_pct)
+                window_idle.extend(raw_idle)
 
                 window_r_cov.extend(raw_r_cov)
                 window_r_gap.extend(raw_r_gap)
@@ -1102,6 +1132,7 @@ def train(cfg: DictConfig):
                         "train/ep_return":          float(np.mean(window_ret)),
                         "train/ep_length":          float(np.mean(window_len)),
                         "train/success_rate":       float(np.mean(window_succ)),
+                        "train/no_movement_termination_rate": float(np.mean(window_idle)) * 100.0,
                         "train/target_found_rate":  float(np.mean(window_fnd)),
                         "train/chain_progress_pct": float(np.mean(window_prog_pct)),
                         "train/ep_length_reduction": (1.0 - (float(np.mean(window_len)) / max_steps)) * 100.0,

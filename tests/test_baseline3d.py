@@ -458,6 +458,34 @@ def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
     assert not next_state.done
 
 
+def test_idle_termination_applies_configured_penalty():
+    cfg = replace(
+        Baseline3DConfig(),
+        num_agents=1,
+        max_steps=10,
+        no_movement_termination_steps=1,
+    )
+    reward_cfg = Baseline3DRewardConfig(
+        exploration_bonus=0.0,
+        collision_penalty=0.0,
+        finder_bonus=0.0,
+        max_gap_penalty=0.0,
+        target_found_bonus=0.0,
+        success_bonus=0.0,
+        no_movement_termination_penalty=-300.0,
+    )
+    reset, autoreset_step, _, _ = make_autoreset_3d_fns(BUILDING, cfg, reward_cfg)
+    _, reward, done, info = autoreset_step(
+        reset(jax.random.PRNGKey(101)),
+        jnp.zeros((cfg.num_agents, 3)),
+    )
+
+    assert done
+    assert info["idle_terminated"]
+    np.testing.assert_allclose(reward, [-300.0])
+    np.testing.assert_allclose(info["no_movement_termination"], [-300.0])
+
+
 @pytest.mark.parametrize("obstacles", [0, 1])
 def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
     cfg = replace(Baseline3DConfig(), num_agents=1, max_steps=10,
@@ -541,6 +569,49 @@ def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(termin
             else:
                 np.testing.assert_array_equal(got, want, err_msg=message)
         reference, optimized = reference_out[0], optimized_out[0]
+
+
+def test_redundancy_and_efficiency_reward_modes():
+    from swarmecho.env.baseline3d import simple_chain_paths_3d, chain_path_efficiencies_3d
+
+    cfg = replace(Baseline3DConfig(), num_agents=4, comm_radius=2.3,
+                  comm_radius_base=2.1, visual_radius=2.3, observe_chain_contributor=True)
+    reset, _, _, _ = make_baseline_3d_fns(BUILDING, cfg, plan_geodesic=False)
+    state = reset(jax.random.PRNGKey(12))._replace(
+        base_pos=jnp.array([1., 1., 2.]), target_pos=jnp.array([7., 1., 2.]),
+        pos=jnp.array([[3., 1., 2.], [5., 2., 2.], [5., 0., 2.], [3., 3.3, 2.]]),
+        active=jnp.ones(4, dtype=bool), target_known=jnp.ones(4, dtype=bool),
+        is_conn_base=jnp.ones(4, dtype=bool), is_conn_target=jnp.ones(4, dtype=bool),
+        directly_sees_target=jnp.array([False, True, True, False]),
+        fully_connected=jnp.bool_(True), base_target_known=jnp.bool_(True),
+    )
+    # D0 links the base to alternate relays D1/D2. D3 is only a dead-end
+    # neighbour of D0; walking out to it and back must never count as a path.
+    paths = simple_chain_paths_3d(state, cfg)
+    assert int(jnp.sum(paths.counts)) == 4
+    reference = jnp.zeros((6, 6)).at[0, 1].set(6.)
+    expected = 6. / (2. + 2. * np.sqrt(5.))
+    np.testing.assert_allclose(jnp.max(chain_path_efficiencies_3d(paths, 6.)), expected)
+    for redundancy in (False, True):
+        for efficiency in (False, True):
+            reward_cfg = Baseline3DRewardConfig(allow_redundancy_reward=redundancy,
+                                               enable_chain_efficiency_reward=efficiency)
+            reward, terms = rewards_3d(state, state, reward_cfg, cfg, reference)
+            np.testing.assert_allclose(terms["chain_gap"], [0., 0., 0. if redundancy else -1.25, -1.25])
+            credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .5 / 4
+            if efficiency:
+                np.testing.assert_allclose(terms["efficiency"], credit, rtol=1e-6)
+                _, disconnected = rewards_3d(state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference)
+                np.testing.assert_array_equal(disconnected["efficiency"], np.zeros(4))
+            else:
+                assert "efficiency" not in terms
+                credit = np.zeros(4)
+            np.testing.assert_allclose(reward, terms["chain_gap"] + credit, rtol=1e-6)
+        _, _, observe, _ = make_baseline_3d_fns(BUILDING, cfg, plan_geodesic=False,
+                                              allow_redundancy_reward=redundancy)
+        np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., float(redundancy), 0.])
+    straight = state._replace(pos=state.pos.at[1].set(jnp.array([5., 1., 2.])))
+    np.testing.assert_allclose(jnp.max(chain_path_efficiencies_3d(simple_chain_paths_3d(straight, cfg), 6.)), 1.)
 
 
 def test_autoreset_step_uses_the_configured_reward_terms():

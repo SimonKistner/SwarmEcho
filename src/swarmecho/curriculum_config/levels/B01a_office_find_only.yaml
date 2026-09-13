@@ -1,0 +1,89 @@
+env:
+  map_names:
+  - office_mirrored_free_spawn
+  num_agents: 4
+  max_steps: 500
+  no_movement_termination_steps: 50
+  visual_radius: 16.0
+  comm_radius: 50.0
+  comm_radius_base: 50.0
+  radar_bins: 16
+  spawn_delay: 5
+  hold_chain_for: 50
+  drone_radius: 0.25
+  target_spawn_buffer: 0.5
+  coverage_voxel_size: 5.0 # 9 x 20 x 3 = 540 voxels (8x fewer than at 2.5 m)
+  observe_target_vector: false
+  observe_base_vector: false
+  observe_coverage_probe: false
+  observe_chain_contributor: true
+  observe_current_timestep: true
+  success_when_target_found_or_delivered: true
+
+  roadmap_merge_walls: true
+
+reward:
+  allow_redundancy_reward: false
+  enable_chain_efficiency_reward: false
+  chain_efficiency_bonus: 1
+  target_found_requires_delivery: false
+  chain_reward_system: obstacle_geodesic
+  exploration_bonus: 0.25
+  finder_bonus: 0.0
+  max_gap_penalty: 5.0
+  collision_penalty: 0.5
+  target_found_bonus: 0.0
+  success_bonus: 0.0
+
+training:
+  total_timesteps: 300000000
+  num_envs: 4000
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+  seed: 9112026
+
+  actor_clip_eps: 0.2
+  value_clip_eps: 0.2 # Normalized value units below; null disables clipping (not 0).
+  entropy_mode: squashed
+  value_normalization: running
+
+
+  training_noise: false
+  noise_level: 0.011
+
+  randomize_base: true
+  minimum_geodesic_separation: true
+  minimum_geodesic_separation_multiplier: 1.2
+
+network:
+  num_layers: 3
+  actor_num_layers: 3
+  actor_memory: true
+  critic_memory: true
+  critic_type: observation
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 3
+  tarmac_sig_dim: 32
+  tarmac_val_dim: 64
+  tarmac_include_self: false
+
+evaluation:
+  eval_parallel_envs: 4000
+  eval_broadcast_on_curriculum_early_stop: false
+  eval_differes_from_training_map: true
+  eval_map: "office_mirrored"
+  early_exit: true
+  early_exit_threshold: 0.999
+
+  save_model: true
+  checkpoint_freq: 50
+  checkpoint_offset: 1
+  eval_freq: 30
+  eval_offset: 1
+
+  training_heatmap_creation: true
+
+  eval_video: true
+  eval_video_freq: 100
+  eval_video_offset: 1

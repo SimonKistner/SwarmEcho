@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from swarmecho.env.buildings import BuildingArrays
+from swarmecho.core.config import RewardConfig
 from swarmecho.env.obstacles3d import (
     _roadmap_attachment,
     _route_costs,
@@ -123,11 +124,13 @@ class Baseline3DConfig:
     hold_chain_for: int = 50
     max_steps: int = 700
     no_movement_termination_steps: int = 50
+    success_when_target_found_or_delivered: bool = False
     movement_epsilon: float = 1e-3
     observe_target_vector: bool = False
     observe_base_vector: bool = False
     observe_coverage_probe: bool = False
     observe_chain_contributor: bool = False
+    observe_current_timestep: bool = False  # Episode step / max_steps, in [0, 1].
     coverage_voxel_size: float | None = None
     num_obstacles: int = 0
     obstacle_size_min_m: float = 2.0
@@ -144,14 +147,20 @@ class Baseline3DConfig:
 
 @dataclass(frozen=True)
 class Baseline3DRewardConfig:
-    target_found_requires_delivery: bool = True
-    chain_reward_system: str = "euclidean"
-    exploration_bonus: float = 0.25
-    collision_penalty: float = 0.5
-    finder_bonus: float = 50.0
-    max_gap_penalty: float = 5.0
-    target_found_bonus: float = 100.0
-    success_bonus: float = 500.0
+    target_found_requires_delivery: bool = RewardConfig.target_found_requires_delivery
+    chain_reward_system: str = RewardConfig.chain_reward_system
+    # Share the authoritative reward defaults with core/config.py.
+    exploration_bonus: float = RewardConfig.exploration_bonus
+    collision_penalty: float = RewardConfig.collision_penalty
+    finder_bonus: float = RewardConfig.finder_bonus
+    max_gap_penalty: float = RewardConfig.max_gap_penalty
+    target_found_bonus: float = RewardConfig.target_found_bonus
+    success_bonus: float = RewardConfig.success_bonus
+    no_movement_termination_penalty: float = RewardConfig.no_movement_termination_penalty
+    # Credit every drone on a simple base-target path, including alternate routes.
+    allow_redundancy_reward: bool = False
+    enable_chain_efficiency_reward: bool = False
+    chain_efficiency_bonus: float = 0.5
 
 
 def build_obstacle_roadmap_3d(obstacle_min, obstacle_max, cfg: Baseline3DConfig):
@@ -221,6 +230,7 @@ def observation_dim_3d(cfg: Baseline3DConfig) -> int:
         + cfg.radar_bins * 4
         + cfg.radar_bins * int(cfg.observe_coverage_probe)
         + int(cfg.observe_chain_contributor)
+        + int(cfg.observe_current_timestep)
     )
 
 
@@ -363,6 +373,7 @@ def final_chain_length_3d(state: Baseline3DState, cfg: Baseline3DConfig) -> jax.
 def _contributing_chain_agents_3d(
     state: Baseline3DState,
     cfg: Baseline3DConfig,
+    *, return_graph: bool = False,
 ) -> jax.Array:
     """Select 3D relay drones using 2D's deterministic shortest-path rule."""
     n = state.pos.shape[0]
@@ -400,6 +411,8 @@ def _contributing_chain_agents_3d(
     hops = hops.at[base_node, :n].set(jnp.where(base_edges, 1, hops[base_node, :n]))
     hops = hops.at[:n, target_node].set(jnp.where(target_edges, 1, hops[:n, target_node]))
     hops = hops.at[target_node, :n].set(jnp.where(target_edges, 1, hops[target_node, :n]))
+    if return_graph:
+        return hops == 1
 
     def min_plus_step(matrix, _):
         next_matrix = jnp.min(matrix[:, :, None] + matrix[None, :, :], axis=1)
@@ -450,21 +463,70 @@ def _contributing_chain_agents_3d(
     return base_path | target_path
 
 
+class ChainPaths3D(NamedTuple):
+    # Each subset represents its shortest simple route and number of valid
+    # route permutations. That is sufficient for best-per-drone credit.
+    lengths: jax.Array
+    counts: jax.Array
+    members: jax.Array
+
+
+def simple_chain_paths_3d(state: Baseline3DState, cfg: Baseline3DConfig) -> ChainPaths3D:
+    adjacency = _contributing_chain_agents_3d(state, cfg, return_graph=True)
+    n = state.pos.shape[0]
+    nodes = jnp.concatenate((state.pos, state.base_pos[None], state.target_pos[None]))
+    distance = jnp.linalg.norm(nodes[:, None] - nodes[None, :], axis=-1)
+    bits = jnp.left_shift(jnp.int32(1), jnp.arange(n))
+    masks = jnp.arange(1 << n)
+    members = (masks[:, None] & bits) != 0
+    initial_lengths = jnp.full((1 << n, n), jnp.inf)
+    initial_counts = jnp.zeros((1 << n, n), dtype=jnp.int32)
+    initial_lengths = initial_lengths.at[bits, jnp.arange(n)].set(jnp.where(adjacency[n, :n], distance[n, :n], jnp.inf))
+    initial_counts = initial_counts.at[bits, jnp.arange(n)].set(adjacency[n, :n].astype(jnp.int32))
+
+    def extend(mask, carry):
+        lengths, counts = carry
+        previous = mask ^ bits
+        present = members[mask]
+        valid = present[:, None] & adjacency[:n, :n].T
+        candidates = jnp.where(valid, lengths[previous] + distance[:n, :n].T, jnp.inf)
+        row_lengths = jnp.min(candidates, axis=1)
+        row_counts = jnp.sum(jnp.where(valid, counts[previous], 0), axis=1)
+        singleton = mask == bits
+        return (lengths.at[mask].set(jnp.where(singleton, lengths[mask], row_lengths)),
+                counts.at[mask].set(jnp.where(singleton, counts[mask], row_counts)))
+
+    lengths, counts = jax.lax.fori_loop(1, 1 << n, extend, (initial_lengths, initial_counts))
+    terminal = adjacency[:n, n + 1]
+    complete_lengths = jnp.min(jnp.where(terminal, lengths + distance[:n, n + 1], jnp.inf), axis=1)
+    complete_counts = jnp.sum(jnp.where(terminal, counts, 0), axis=1)
+    return ChainPaths3D(jnp.where(state.fully_connected, complete_lengths, jnp.inf),
+                        jnp.where(state.fully_connected, complete_counts, 0), members)
+
+
+def chain_path_efficiencies_3d(paths: ChainPaths3D, reference):
+    return jnp.where(jnp.isfinite(paths.lengths) & jnp.isfinite(reference) & (reference < 1e6),
+                     jnp.clip(reference / jnp.maximum(paths.lengths, 1e-6), 0., 1.), 0.)
+
+
 def rewards_3d(
     previous: Baseline3DState,
     current: Baseline3DState,
     cfg: Baseline3DRewardConfig,
     env_cfg: Baseline3DConfig,
     geodesic_distances=None,
+    chain_paths=None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute 3D rewards with the same event semantics as the 2D task.
 
-    In particular, target delivery and the final held-chain success are
-    separate one-shot events.  The local finder bonus is paid only to an
-    agent that performs the one-time target delivery/discovery event; merely
-    crossing the visual-radius boundary again cannot earn it repeatedly.
+    The local finder and target-found bonuses are one-shot events. The
+    terminal success bonus is emitted when either the held chain succeeds or
+    the environment's target-found success mode is enabled and its selected
+    target signal occurs.
     """
     n = current.pos.shape[0]
+    reward_active = current.active.astype(jnp.float32)
+    reward_count = jnp.maximum(jnp.sum(reward_active), 1.0)
     newly_knows = current.target_known & ~previous.target_known
     success_event = current.success & ~previous.success
     if cfg.target_found_requires_delivery:
@@ -491,6 +553,8 @@ def rewards_3d(
             current.directly_sees_target & ~previous.target_known
         )
 
+    if cfg.enable_chain_efficiency_reward and geodesic_distances is None:
+        geodesic_distances = chain_distance_matrix_3d(current)
     use_obstacle_reward = cfg.chain_reward_system == "obstacle_geodesic"
     if use_obstacle_reward:
         if geodesic_distances is None:
@@ -505,6 +569,13 @@ def rewards_3d(
     active_gap = jnp.where(dynamic_gap_enabled, gap_distance, full_distance)
     gap_penalty = -cfg.max_gap_penalty * active_gap / jnp.maximum(full_distance, 1e-6)
     is_contributing = _contributing_chain_agents_3d(current, env_cfg)
+    if cfg.allow_redundancy_reward or cfg.enable_chain_efficiency_reward:
+        if chain_paths is None:
+            chain_paths = simple_chain_paths_3d(current, env_cfg)
+        valid_paths = chain_paths.counts > 0
+        if cfg.allow_redundancy_reward:
+            all_members = jnp.any(chain_paths.members & valid_paths[:, None], axis=0)
+            is_contributing = jnp.where(current.fully_connected, all_members, is_contributing)
     terms = {
         # As in 2D, exploration ends for a drone once it knows the target.
         "coverage": cfg.exploration_bonus * current.coverage_credit
@@ -513,17 +584,29 @@ def rewards_3d(
         "finder": cfg.finder_bonus * (
             target_found_event & finder_receivers
         ).astype(jnp.float32),
-        "target_found": jnp.full(n, cfg.target_found_bonus / n) * target_found_event,
+        "target_found": reward_active * (cfg.target_found_bonus / reward_count) * target_found_event,
         "chain_gap": jnp.where(
             is_contributing,
-            gap_penalty / n,
-            -cfg.max_gap_penalty / n,
+            gap_penalty / reward_count,
+            -cfg.max_gap_penalty / reward_count,
         ),
-        "success": jnp.full(n, cfg.success_bonus / n) * success_event,
+        "success": reward_active * (cfg.success_bonus / reward_count) * success_event,
+        "no_movement_termination": reward_active * (cfg.no_movement_termination_penalty / reward_count)
+        * (current.idle_terminated & ~current.success
+           & ~(current.step >= jnp.int32(env_cfg.max_steps))).astype(jnp.float32),
     }
     # Agents learning through relayed information still receive the shared event;
+    if cfg.enable_chain_efficiency_reward:
+        efficiency = chain_path_efficiencies_3d(chain_paths, geodesic_distances[0, 1])
+        if cfg.allow_redundancy_reward:
+            credit = jnp.max(jnp.where(chain_paths.members, efficiency[:, None], 0.), axis=0)
+        else:
+            best = jnp.argmin(chain_paths.lengths)
+            credit = chain_paths.members[best] * efficiency[best]
+        terms["efficiency"] = cfg.chain_efficiency_bonus / reward_count * credit
     # ``newly_knows`` is exposed for diagnostics without double-paying finders.
     terms["newly_knows"] = newly_knows.astype(jnp.float32)
+    terms = {name: jnp.where(current.active, value, 0.0) for name, value in terms.items()}
     total = sum(value for name, value in terms.items() if name != "newly_knows")
     return total, terms
 
@@ -570,7 +653,8 @@ def _target_spawn_boxes(
 def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, plan_geodesic: bool = True,
                        randomize_base: bool = False, minimum_geodesic_separation: bool = False,
                        minimum_geodesic_separation_multiplier: float = 2.0,
-                       spawn_pair_max_attempts: int = 1024):
+                       spawn_pair_max_attempts: int = 1024, allow_redundancy_reward: bool = False,
+                       target_found_requires_delivery: bool = True):
     """Create pure reset, step, observation, and metric functions."""
     if cfg.num_agents < 1:
         raise ValueError("num_agents must be positive.")
@@ -932,7 +1016,8 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, pla
         next_step = state.step + 1
         active = next_step >= jnp.arange(n) * cfg.spawn_delay
         force = jnp.clip(action, -1.0, 1.0) * cfg.max_force
-        force = jnp.where(active[:, None], force, 0.0)
+        # Newly spawned agents first choose an action from their next observation.
+        force = jnp.where(state.active[:, None], force, 0.0)
         velocity = state.vel * cfg.drag + force * cfg.dt
         speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
         velocity *= jnp.minimum(1.0, cfg.max_speed / jnp.maximum(speed, 1e-8))
@@ -976,7 +1061,15 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, pla
             state.chain_held_steps + jnp.int32(1),
             jnp.int32(0),
         )
-        success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
+        chain_success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
+        target_found_or_delivered = (
+            base_target_known if target_found_requires_delivery else jnp.any(known)
+        )
+        target_success = (
+            jnp.bool_(cfg.success_when_target_found_or_delivered)
+            & target_found_or_delivered
+        )
+        success = chain_success | target_success
         done = success | idle_terminated | (next_step >= jnp.int32(cfg.max_steps))
         return Baseline3DState(
             pos=pos,
@@ -1012,8 +1105,12 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, pla
     def observations(state: Baseline3DState):
         pos = state.pos
         if cfg.observe_chain_contributor:
-            chain_contributor = (state.target_known & state.fully_connected
-                                 & _contributing_chain_agents_3d(state, cfg))
+            if allow_redundancy_reward:
+                paths = simple_chain_paths_3d(state, cfg)
+                contributors = jnp.any(paths.members & (paths.counts > 0)[:, None], axis=0)
+            else:
+                contributors = _contributing_chain_agents_3d(state, cfg)
+            chain_contributor = state.target_known & state.fully_connected & contributors
         delta = pos[:, None, :] - pos[None, :, :]
         pair_dist = jnp.linalg.norm(delta, axis=-1)
         _, _, _, agent_adj = connectivity(
@@ -1105,7 +1202,10 @@ def make_baseline_3d_fns(building: BuildingArrays, cfg: Baseline3DConfig, *, pla
                     jnp.asarray(state.coverage.shape) - 1,
                 )
                 optional.append(state.coverage[probe[:, 0], probe[:, 1], probe[:, 2]].astype(jnp.float32))
-            return jnp.concatenate([self_state, *optional, radar])
+            if cfg.observe_current_timestep:
+                optional.append(jnp.asarray([state.step / cfg.max_steps], dtype=jnp.float32))
+            observation = jnp.concatenate([self_state, *optional, radar])
+            return jnp.where(state.active[i], observation, 0.0)
 
         del agent_adj  # reserved for future LOS-aware radar filtering
         return jax.vmap(one_agent)(jnp.arange(n))
@@ -1142,18 +1242,26 @@ def make_autoreset_3d_fns(
     Terminal rewards and diagnostic state describe the completed transition;
     only the returned carry state is replaced by a fresh episode.
     """
+    if not math.isfinite(reward_cfg.chain_efficiency_bonus) or reward_cfg.chain_efficiency_bonus < 0:
+        raise ValueError("chain_efficiency_bonus must be finite and nonnegative.")
+    if minimum_geodesic_separation and reward_cfg.chain_reward_system != "obstacle_geodesic":
+        raise ValueError("Minimum geodesic separation requires obstacle_geodesic chain reward.")
     reset, step, observations, metrics = make_baseline_3d_fns(
-        building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic",
+        building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic" or reward_cfg.enable_chain_efficiency_reward,
         randomize_base=randomize_base, minimum_geodesic_separation=minimum_geodesic_separation,
         minimum_geodesic_separation_multiplier=minimum_geodesic_separation_multiplier,
         spawn_pair_max_attempts=spawn_pair_max_attempts,
+        allow_redundancy_reward=reward_cfg.allow_redundancy_reward,
+        target_found_requires_delivery=reward_cfg.target_found_requires_delivery,
     )
 
     def transition(state: Baseline3DState, action: jax.Array):
         terminal_state = step(state, action)
         distances = (chain_distance_matrix_3d(terminal_state)
-                     if reward_cfg.chain_reward_system == "obstacle_geodesic" else None)
-        reward, reward_terms = rewards_3d(state, terminal_state, reward_cfg, cfg, distances)
+                     if reward_cfg.chain_reward_system == "obstacle_geodesic" or reward_cfg.enable_chain_efficiency_reward else None)
+        paths = (simple_chain_paths_3d(terminal_state, cfg)
+                 if reward_cfg.allow_redundancy_reward or reward_cfg.enable_chain_efficiency_reward else None)
+        reward, reward_terms = rewards_3d(state, terminal_state, reward_cfg, cfg, distances, paths)
         if reward_cfg.chain_reward_system == "obstacle_geodesic":
             chain_gap_dist, chain_progress_pct, route_excess, leaders = obstacle_chain_diagnostics_3d(terminal_state, distances)
         else:
@@ -1169,9 +1277,11 @@ def make_autoreset_3d_fns(
             "reward_success": reward_terms["success"],
             "success": terminal_state.success,
             "fully_connected": terminal_state.fully_connected,
-            # Persistent direct analogue of 2D's ``base_target_known``.
-            # Success additionally requires the configured hold duration.
-            "global_target_found": terminal_state.base_target_known,
+            "global_target_found": (
+                terminal_state.base_target_known
+                if reward_cfg.target_found_requires_delivery
+                else jnp.any(terminal_state.target_known)
+            ),
             "chain_gap_dist": chain_gap_dist,
             "chain_progress_pct": chain_progress_pct,
             "chain_route_excess": route_excess,
@@ -1180,6 +1290,10 @@ def make_autoreset_3d_fns(
             "terminal_target_pos": terminal_state.target_pos,
             "terminal_coverage_fraction": jnp.mean(terminal_state.coverage),
         }
+        if paths is not None:
+            info["number_of_valid_paths"] = jnp.sum(paths.counts)
+            if reward_cfg.enable_chain_efficiency_reward:
+                info["chain_efficiency"] = jnp.max(chain_path_efficiencies_3d(paths, distances[0, 1]))
         return terminal_state, reward, terminal_state.done, info
 
     def reset_persisted(state):

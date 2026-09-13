@@ -17,7 +17,7 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 import numpy as np
 import yaml
 
-from swarmecho.core.config import load_level_3d_cli
+from swarmecho.core.config import load_level_3d_cli, resolve_evaluation_level_3d
 from swarmecho.core.paths import normalize_wsl_path
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
@@ -132,6 +132,7 @@ def run_parallel_evaluation_3d(
     eval_name: str | None = None,
 ) -> Path:
     """Create confidence rates from repeated, identically reset 3D evals."""
+    level = resolve_evaluation_level_3d(level)
     episodes = level.evaluation.eval_parallel_envs
     robustness_runs = level.evaluation.eval_robustness_runs
     action_noise_max = level.evaluation.eval_action_noise_max
@@ -253,6 +254,7 @@ def run_action_capturing_evaluation_3d(
     eval_name: str | None = None,
 ) -> tuple[Path, np.ndarray, str, int, list, np.ndarray]:
     """Evaluate, select, and replay actions originating in the same actor run."""
+    level = resolve_evaluation_level_3d(level)
     episodes = level.evaluation.eval_parallel_envs
     print(
         f"[EVAL] evaluating {episodes} deterministic 3D episodes while capturing "
@@ -463,6 +465,7 @@ def render_csv_replays(
     eval_name: str | None = None,
 ) -> None:
     """Render selected CSV lanes without retaining the 4k evaluation batch."""
+    level = resolve_evaluation_level_3d(level)
     source_csv = source_csv or find_nearest_eval_info_csv(run_dir, checkpoint, level)
     if source_csv is None:
         raise FileNotFoundError(
@@ -517,6 +520,7 @@ def render_csv_replays(
                 if level.env.coverage_voxel_size is None
                 else level.env.coverage_voxel_size,
                 "comm_radius_m": level.env.comm_radius,
+                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
                 "comm_radius_base_m": level.env.comm_radius_base,
                 "visual_radius_m": level.env.visual_radius,
                 "checkpoint": str(checkpoint),
@@ -773,6 +777,7 @@ def main() -> None:
                 else level.env.coverage_voxel_size
             ),
             "comm_radius_m": level.env.comm_radius,
+            "allow_redundancy_reward": level.reward.allow_redundancy_reward,
             "comm_radius_base_m": level.env.comm_radius_base,
             "visual_radius_m": level.env.visual_radius,
             "checkpoint": str(checkpoint),

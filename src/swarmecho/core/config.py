@@ -20,7 +20,8 @@ From CLI:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +87,7 @@ class RewardConfig:
     max_gap_penalty: float = 5.0       # absolute penalty when gap is at its maximum
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
+    no_movement_termination_penalty: float = -100000.0
     target_found_requires_delivery: bool = True
     chain_reward_system: str = "euclidean"  # "euclidean" | "obstacle_geodesic" [ "discrete_finders_path" ]
 
@@ -153,7 +155,7 @@ class NetworkConfig:
     actor_num_layers: int = 3    # actor depth (lighter, separate)
     actor_memory:     bool = True  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = True  # if True, agent-centric critic uses per-agent GRU memory
-    critic_type:      str = "observation"  # "observation" (legacy) or "privileged"
+    critic_type:      str = "observation"  # "observation"  or "privileged"
 
     # --- Recurrent communication ---
     memory_comm_enabled: bool = True
@@ -507,7 +509,7 @@ class Network3DConfig:
     actor_num_layers: int = 3
     actor_memory: bool = True
     critic_memory: bool = True
-    critic_type: str = "observation"
+    critic_type: str = "observation"  # observation (unchanged) | privileged (compact 3D state)
     memory_comm_enabled: bool = True
     memory_comm_every_k_steps: int = 5
     tarmac_sig_dim: int = 16
@@ -531,7 +533,13 @@ class Training3DConfig:
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_eps: float = 0.2
+    actor_clip_eps: float = 0.2
+    # Raw value units, or normalized units with value_normalization=running.
+    # None (YAML: null) disables value clipping; zero does NOT disable it.
+    value_clip_eps: float | None = 0.2
+    entropy_mode: str = "legacy"  # legacy or squashed (reparameterized tanh entropy)
+    value_normalization: str = "none"  # none or running; checkpointed critic units
+    diagnostics_every: int = 1  # PPO updates between before/after diagnostic passes
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
@@ -549,6 +557,8 @@ class Evaluation3DConfig:
     eval_freq: int = 20
     eval_offset: int = 1
     eval_min_train_success: float = 0.0
+    eval_differes_from_training_map: bool = False
+    eval_map: str | None = None
     eval_parallel_envs: int = 4000
     # Standalone heatmap evaluation samples bounded actor-output sensitivity.
     eval_robustness_runs: int = 5
@@ -608,6 +618,39 @@ class Level3D:
         return self.training.total_timesteps // (self.training.num_envs * self.training.num_steps)
 
 
+def resolve_evaluation_level_3d(level: Level3D) -> Level3D:
+    """Return the level configuration whose building should be used for eval."""
+    evaluation = level.evaluation
+    if not evaluation.eval_differes_from_training_map:
+        return level
+    if evaluation.eval_map is None:
+        warnings.warn(
+            "evaluation.eval_differes_from_training_map is enabled but "
+            "evaluation.eval_map is unset; evaluation will use the training map.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return level
+
+    from swarmecho.env.buildings import load_building
+
+    requested = Path(evaluation.eval_map)
+    source = requested if requested.exists() else MAP_DIR / f"{requested.stem}.yaml"
+    if not source.exists():
+        raise FileNotFoundError(
+            f"Evaluation map not found: {evaluation.eval_map!r}. "
+            f"Expected a map name in {MAP_DIR} or an existing path."
+        )
+    map_name = source.stem
+    if map_name == Path(level.building_name).stem:
+        return level
+    return replace(
+        level,
+        map_names=[map_name],
+        building=load_building(source),
+    )
+
+
 def _strict_3d_dataclass(cls, values: object, label: str):
     if not isinstance(values, dict):
         raise ValueError(f"{label} must be a mapping.")
@@ -651,8 +694,22 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
     )
     if level.ideal_chain_margin_m < 0:
         raise ValueError(f"3D level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
+    if level.training.num_epochs < 1 or level.training.num_minibatches < 1:
+        raise ValueError("PPO epoch and minibatch counts must be positive.")
     if level.training.num_envs % level.training.num_minibatches:
         raise ValueError("Recurrent training requires num_envs divisible by num_minibatches.")
+    if level.training.actor_clip_eps <= 0:
+        raise ValueError("training.actor_clip_eps must be positive.")
+    if level.training.value_clip_eps is not None and level.training.value_clip_eps < 0:
+        raise ValueError("training.value_clip_eps must be nonnegative or null.")
+    if level.training.entropy_mode not in {"legacy", "squashed"}:
+        raise ValueError("training.entropy_mode must be legacy or squashed.")
+    if level.training.value_normalization not in {"none", "running"}:
+        raise ValueError("training.value_normalization must be none or running.")
+    if level.training.diagnostics_every < 1:
+        raise ValueError("training.diagnostics_every must be positive.")
+    if level.network.memory_comm_every_k_steps < 1:
+        raise ValueError("network.memory_comm_every_k_steps must be positive.")
     if level.training.noise_level < 0.0:
         raise ValueError("training.noise_level must be non-negative.")
     if level.evaluation.eval_parallel_envs < 1:
