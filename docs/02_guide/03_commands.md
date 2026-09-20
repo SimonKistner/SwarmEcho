@@ -304,8 +304,21 @@ noise level) and can be overridden independently:
 uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D training.training_noise=true training.noise_level=0.02
 ```
 
-This noise is used only to step the training environments. Periodic
-during-training evaluations remain unperturbed.
+This noise is used only to step the training environments. Evaluation noise is
+controlled independently by `evaluation.eval_action_noise_max` (default 0.011).
+Periodic training evaluation is unperturbed unless
+`evaluation.training_robustness=true`; the final evaluation is always robust.
+
+```bash
+uv run swarmecho-train-3d level=B01b_office evaluation.training_robustness=true evaluation.eval_robustness_runs=5 evaluation.early_exit_hold_evals=3
+```
+
+These three settings are already selected in `B01b_office`. Other levels
+default to `training_robustness=false` and `early_exit_hold_evals=0`. The hold
+counts consecutive metric evaluations, regardless of the number of training
+updates between them. Training statistics follow the selected evaluation mode.
+With `evaluation.training_heatmap_creation=true`, both single-pass (1/1) and
+robust (N/N) training evaluations save heatmaps for the inspector.
 
 The artifact layout is unchanged from maintained 2D runs. Checkpoints remain in
 `outputs/<run>/checkpoints/`; scheduled training inspection artifacts live in
@@ -491,3 +504,45 @@ dispatch/host transfer and the first optimizer update. First-update messages
 are emitted once per training invocation, including a resumed run; they are
 not recurring training-step logs. They locate the blocking stage but do not
 identify individual XLA compiler passes.
+
+To investigate a silent CUDA training crash in WSL, run the isolated diagnostic
+matrix (W&B is disabled in every case):
+
+For the confirmed B01b CUDA graph memcpy-update crash, see
+[the investigation and standalone native reproducer](09_cuda_graph_crash_investigation.md).
+
+```bash
+uv run python tests/diagnose_training_crash_3d.py
+```
+
+The default uses B01b's 4,000 training environments and 100-step rollouts for six
+updates. Eleven separate processes check holding/robust aggregation logic,
+sparse-versus-scalar reset equivalence, the baseline, disabled CUDA graphs,
+disabled robustness/holding, explicit synchronization, skipped PPO diagnostics,
+rollouts without optimizer updates, suppressed episode endings, disabled chain
+efficiency reward, and real robust evaluations on 128 eval environments.
+Each process has a 900-second timeout; a crashed or timed-out case does not stop
+the remaining cases. Allow time for repeated JIT compilation. Logs, flushed
+phase journals and an incrementally saved `report.json` are written beneath
+`outputs/crash_diagnostics/<timestamp>/`. Exit code 1 means at least one case
+failed or timed out, not that a specific cause has been proven.
+
+Select cases or repeat comparisons with:
+
+```bash
+uv run python tests/diagnose_training_crash_3d.py --case baseline --case graphs_off --repeats 2
+uv run python tests/diagnose_training_crash_3d.py --case reset_equivalence
+uv run python tests/diagnose_training_crash_3d.py --case forced_resets --timeout 1800
+```
+
+`--envs` must be a multiple of B01b's 20 minibatches. Reducing it changes the
+workload and can hide the original failure. `--eval-envs 4000` restores full-size
+robust evals. The optional `--case dense_reference` replaces sparse auto-reset
+with the scalar reference under `vmap`; it resets even nonterminal lanes and
+can be very expensive with randomized geodesically constrained spawns.
+Startup cases omit final evaluation, checkpoint saving, replays and W&B, and
+start without a checkpoint. The eval smoke case exercises actual robust evals.
+The diagnostics-off case reports synthetic diagnostic values while preserving
+optimizer RNG ordinals; those values are not measured policy/critic statistics.
+The synchronized case changes asynchronous timing. Passing variants narrow the
+search but cannot guarantee a cause or exclude a timing-dependent code bug.

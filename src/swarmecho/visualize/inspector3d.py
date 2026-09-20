@@ -496,7 +496,7 @@ def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) 
 
 
 def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
-    """Find complete 3D evaluation CSVs in the standard artifact data folders."""
+    """Find single-pass and robust 3D heatmaps, excluding action-capture CSVs."""
     root = Path(root)
     if not root.exists():
         return []
@@ -509,9 +509,12 @@ def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False)
         data_dirs.update(path for path in root.glob(pattern.removeprefix("*/") if single_run else pattern) if path.is_dir())
     heatmaps: list[Path] = []
     for data_dir in data_dirs:
-        for filename_pattern in ("eval_info_*.csv", "eval_capture_info_*.csv"):
+        for filename_pattern in ("eval_info_*.csv",):
             for path in data_dir.glob(filename_pattern):
                 try:
+                    manifest = json.loads(path.with_suffix(".heatmap.json").read_text(encoding="utf-8"))
+                    if int(manifest.get("robustness_runs", 1)) < 1:
+                        continue
                     if load_eval_info_csv(path)["positions"].shape[-1] == 3:
                         heatmaps.append(path.resolve())
                 except (OSError, ValueError):

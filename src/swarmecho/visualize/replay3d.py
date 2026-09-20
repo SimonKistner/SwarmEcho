@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print
 from typing import Iterable
 
 import numpy as np
@@ -58,7 +59,7 @@ def write_replay(
     if not state_list:
         raise ValueError("A replay requires at least one state.")
     if progress:
-        print(
+        terminal_print(
             f"[REPLAY] materialising {len(state_list)} frames for {destination.name}...",
             flush=True,
         )
@@ -104,7 +105,7 @@ def write_replay(
     payload_started = time.perf_counter()
     if progress:
         payload_mb = sum(array.nbytes for array in arrays.values()) / (1024 * 1024)
-        print(
+        terminal_print(
             f"[REPLAY] writing compressed archive ({payload_mb:.1f} MiB uncompressed)...",
             flush=True,
         )
@@ -112,7 +113,7 @@ def write_replay(
         np.savez_compressed(stream, **arrays)
     data_temporary.replace(data_path)
     if progress:
-        print(
+        terminal_print(
             f"[REPLAY] compressed archive written in {time.perf_counter() - payload_started:.1f}s; "
             "writing manifest...",
             flush=True,

@@ -904,7 +904,7 @@ def train(cfg: DictConfig):
     if save_model:
         print(f"  [ckpt] Saving checkpoints every {ckpt_every} updates (offset: {ckpt_offset})")
 
-    log_every   = max(1, n_updates // 200)
+    log_every = int(cfg.logging.terminal_logging_frequency)
 
     # ── Persistent Accumulators & Windows ────────────────────────────────
     ep_trackers = {
@@ -1072,8 +1072,8 @@ def train(cfg: DictConfig):
             sps     = ((update - start_update) * E * T) / max(1e-6, elapsed)
 
             # ── Stdout ───────────────────────────────────────────────────────
-            if update % log_every == 0 or update == start_update + 1:
-                window_full = len(window_ret) == window_ret.maxlen
+            window_full = len(window_ret) == window_ret.maxlen
+            if update % log_every == 0 and (window_full or cfg.logging.terminal_log_warmup):
                 _cov = f"{np.mean(window_cov):>5.1%}" if window_full else " ----"
                 _l = f"{np.mean(window_len):>6.0f}" if window_full else "  ----"
                 _g = f"{np.mean(window_gap):>6.1f}" if window_full else "  ----"

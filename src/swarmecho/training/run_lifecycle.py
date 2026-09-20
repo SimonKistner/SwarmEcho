@@ -107,6 +107,20 @@ def schedule_due(update: int, frequency: int, offset: int = 0) -> bool:
     return update > offset and (update - offset) % frequency == 0
 
 
+@dataclass
+class EvaluationHold:
+    """Count consecutive actual metric evaluations, independent of update spacing."""
+
+    threshold: float
+    required: int = 0
+    consecutive: int = 0
+
+    def observe(self, success: float) -> bool:
+        # NaN also fails the comparison and clears the streak.
+        self.consecutive = self.consecutive + 1 if success >= self.threshold else 0
+        return self.consecutive >= max(1, self.required)
+
+
 def init_wandb(
     logging: Any,
     training: Any,

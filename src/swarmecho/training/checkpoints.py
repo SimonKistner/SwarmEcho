@@ -6,6 +6,7 @@ import json
 import shutil
 import warnings
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print, display_path
 from typing import Any
 
 from flax import nnx
@@ -99,7 +100,7 @@ def save_checkpoint_history(
             )
         )
     except Exception as exc:
-        print(f"  [checkpoint-history] Failed to save step_history.json to {path}: {exc}")
+        terminal_print(f"[checkpoint-history] Failed to save step_history.json to {display_path(path)}: {exc}")
 
 
 def save_model_checkpoint(
