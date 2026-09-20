@@ -5,7 +5,7 @@ from __future__ import annotations
 from itertools import product
 from dataclasses import dataclass
 from functools import lru_cache
-from datetime import datetime
+from swarmecho.core.terminal import init_message
 from time import perf_counter
 
 import jax
@@ -117,7 +117,7 @@ def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, p
     corner_distances = distances
     if plan and len(lo):
         started = perf_counter()
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Building shared geodesic roadmap: {len(lo)} authored solids", flush=True)
+        init_message(f"Building shared geodesic roadmap: {len(lo)} authored solids")
         expanded_lo, expanded_hi = lo - clearance + 1e-4, hi + clearance - 1e-4
         if merge_walls:
             vertices = authored_roadmap_vertices(lo, hi, lower, upper, clearance, edge_spacing)
@@ -155,7 +155,7 @@ def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, p
             distances = np.minimum(distances, 1e6)
             corner_distances = (np.minimum(shortest_path(corner_distances, directed=False, method="D"), 1e6)
                                 .astype(np.float32)) if corner_bonus_m else distances
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Shared geodesic roadmap ready: {len(vertices)} vertices in {perf_counter() - started:.1f}s", flush=True)
+        init_message(f"Shared geodesic roadmap ready: {len(vertices)} vertices in {perf_counter() - started:.1f}s")
     for array in (vertices, distances, visible_edges, corner_distances):
         array.setflags(write=False)
     return SharedRoadmap(lo, hi, vertices, distances, clearance, visible_edges, corner_distances)

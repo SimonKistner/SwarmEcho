@@ -20,7 +20,8 @@ From CLI:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +87,7 @@ class RewardConfig:
     max_gap_penalty: float = 5.0       # absolute penalty when gap is at its maximum
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
+    no_movement_termination_penalty: float = -1000.0
     target_found_requires_delivery: bool = True
     chain_reward_system: str = "euclidean"  # "euclidean" | "obstacle_geodesic" [ "discrete_finders_path" ]
 
@@ -153,7 +155,7 @@ class NetworkConfig:
     actor_num_layers: int = 3    # actor depth (lighter, separate)
     actor_memory:     bool = True  # if True, actor uses per-agent GRU memory
     critic_memory:    bool = True  # if True, agent-centric critic uses per-agent GRU memory
-    critic_type:      str = "observation"  # "observation" (legacy) or "privileged"
+    critic_type:      str = "observation"  # "observation"  or "privileged"
 
     # --- Recurrent communication ---
     memory_comm_enabled: bool = True
@@ -178,6 +180,9 @@ class LoggingConfig:
 
     # --- Diagnostics ---
     suppress_xla_warnings: bool = True
+    terminal_logging_frequency: int = 5
+    terminal_log_warmup: bool = False
+    terminal_log_init: bool = False
 
 
 @dataclass
@@ -419,6 +424,14 @@ def validate_config(cfg: DictConfig) -> None:
     if str(cfg.reward.get("chain_reward_system", "euclidean")) not in ("euclidean", "discrete_finders_path"):
         raise ValueError("reward.chain_reward_system must be 'euclidean' or 'discrete_finders_path'.")
     require(cfg.training.num_envs > 0, "training.num_envs must be positive.")
+    require(
+        type(cfg.logging.terminal_logging_frequency) is int and cfg.logging.terminal_logging_frequency > 0,
+        "logging.terminal_logging_frequency must be a positive integer.",
+    )
+    require(
+        type(cfg.logging.terminal_log_warmup) is bool,
+        "logging.terminal_log_warmup must be a boolean.",
+    )
     require(cfg.training.num_steps > 0, "training.num_steps must be positive.")
     require(
         cfg.training.num_minibatches > 0,
@@ -507,7 +520,7 @@ class Network3DConfig:
     actor_num_layers: int = 3
     actor_memory: bool = True
     critic_memory: bool = True
-    critic_type: str = "observation"
+    critic_type: str = "observation"  # observation (unchanged) | privileged (compact 3D state)
     memory_comm_enabled: bool = True
     memory_comm_every_k_steps: int = 5
     tarmac_sig_dim: int = 16
@@ -531,7 +544,13 @@ class Training3DConfig:
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_eps: float = 0.2
+    actor_clip_eps: float = 0.2
+    # Raw value units, or normalized units with value_normalization=running.
+    # None (YAML: null) disables value clipping; zero does NOT disable it.
+    value_clip_eps: float | None = 0.2
+    entropy_mode: str = "legacy"  # legacy or squashed (reparameterized tanh entropy)
+    value_normalization: str = "none"  # none or running; checkpointed critic units
+    diagnostics_every: int = 1  # PPO updates between before/after diagnostic passes
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
@@ -539,7 +558,7 @@ class Training3DConfig:
     checkpoint_step_offset: int | None = None
     ckpt_loading_mode: str = "branch"  # "resume", "branch", or "init"; see TrainingConfig
     # Perturb sampled pre-tanh actions before stepping training environments.
-    # This deliberately does not affect periodic during-training evaluation.
+    # Evaluation uses its separate eval_action_noise_max configuration.
     training_noise: bool = False
     noise_level: float = DEFAULT_3D_ACTION_NOISE_LEVEL
 
@@ -549,8 +568,11 @@ class Evaluation3DConfig:
     eval_freq: int = 20
     eval_offset: int = 1
     eval_min_train_success: float = 0.0
+    eval_differes_from_training_map: bool = False
+    eval_map: str | None = None
     eval_parallel_envs: int = 4000
-    # Standalone heatmap evaluation samples bounded actor-output sensitivity.
+    # Periodic metrics may use the same ensemble as the always-robust final eval.
+    training_robustness: bool = False
     eval_robustness_runs: int = 5
     eval_action_noise_max: float = DEFAULT_3D_ACTION_NOISE_LEVEL
     # Optional handcrafted [min_x,min_y,min_z,max_x,max_y,max_z] cuboids.
@@ -558,6 +580,7 @@ class Evaluation3DConfig:
     eval_broadcast_on_curriculum_early_stop: bool = False
     early_exit: bool = False
     early_exit_threshold: float = 0.99
+    early_exit_hold_evals: int = 0
     eval_video: bool = True
     eval_video_freq: int = 20
     eval_video_offset: int = 1
@@ -579,7 +602,9 @@ class Logging3DConfig:
     wandb_entity: str | None = None
     wandb_group: str | None = None
     suppress_xla_warnings: bool = True
-    log_every: int = 1
+    terminal_logging_frequency: int = 1
+    terminal_log_warmup: bool = False
+    terminal_log_init: bool = False
 
 
 @dataclass(frozen=True)
@@ -606,6 +631,39 @@ class Level3D:
     @property
     def num_updates(self) -> int:
         return self.training.total_timesteps // (self.training.num_envs * self.training.num_steps)
+
+
+def resolve_evaluation_level_3d(level: Level3D) -> Level3D:
+    """Return the level configuration whose building should be used for eval."""
+    evaluation = level.evaluation
+    if not evaluation.eval_differes_from_training_map:
+        return level
+    if evaluation.eval_map is None:
+        warnings.warn(
+            "evaluation.eval_differes_from_training_map is enabled but "
+            "evaluation.eval_map is unset; evaluation will use the training map.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return level
+
+    from swarmecho.env.buildings import load_building
+
+    requested = Path(evaluation.eval_map)
+    source = requested if requested.exists() else MAP_DIR / f"{requested.stem}.yaml"
+    if not source.exists():
+        raise FileNotFoundError(
+            f"Evaluation map not found: {evaluation.eval_map!r}. "
+            f"Expected a map name in {MAP_DIR} or an existing path."
+        )
+    map_name = source.stem
+    if map_name == Path(level.building_name).stem:
+        return level
+    return replace(
+        level,
+        map_names=[map_name],
+        building=load_building(source),
+    )
 
 
 def _strict_3d_dataclass(cls, values: object, label: str):
@@ -651,14 +709,49 @@ def load_level_3d(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overr
     )
     if level.ideal_chain_margin_m < 0:
         raise ValueError(f"3D level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
+    if level.training.num_epochs < 1 or level.training.num_minibatches < 1:
+        raise ValueError("PPO epoch and minibatch counts must be positive.")
     if level.training.num_envs % level.training.num_minibatches:
         raise ValueError("Recurrent training requires num_envs divisible by num_minibatches.")
+    if level.training.actor_clip_eps <= 0:
+        raise ValueError("training.actor_clip_eps must be positive.")
+    if level.training.value_clip_eps is not None and level.training.value_clip_eps < 0:
+        raise ValueError("training.value_clip_eps must be nonnegative or null.")
+    if level.training.entropy_mode not in {"legacy", "squashed"}:
+        raise ValueError("training.entropy_mode must be legacy or squashed.")
+    if level.training.value_normalization not in {"none", "running"}:
+        raise ValueError("training.value_normalization must be none or running.")
+    if level.training.diagnostics_every < 1:
+        raise ValueError("training.diagnostics_every must be positive.")
+    if level.network.memory_comm_every_k_steps < 1:
+        raise ValueError("network.memory_comm_every_k_steps must be positive.")
     if level.training.noise_level < 0.0:
         raise ValueError("training.noise_level must be non-negative.")
     if level.evaluation.eval_parallel_envs < 1:
         raise ValueError("evaluation.eval_parallel_envs must be positive.")
-    if level.evaluation.eval_robustness_runs < 1:
-        raise ValueError("evaluation.eval_robustness_runs must be positive.")
+    if type(level.logging.terminal_logging_frequency) is not int or level.logging.terminal_logging_frequency < 1:
+        raise ValueError("logging.terminal_logging_frequency must be a positive integer.")
+    if type(level.logging.terminal_log_warmup) is not bool:
+        raise ValueError("logging.terminal_log_warmup must be a boolean.")
+    if type(level.logging.terminal_log_init) is not bool:
+        raise ValueError("logging.terminal_log_init must be a boolean.")
+    for name in ("eval_freq", "eval_video_freq", "checkpoint_freq"):
+        value = getattr(level.evaluation, name)
+        if type(value) is not int or value < 1:
+            raise ValueError(f"evaluation.{name} must be a positive integer.")
+    for name in ("eval_offset", "eval_video_offset", "checkpoint_offset"):
+        value = getattr(level.evaluation, name)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"evaluation.{name} must be a non-negative integer.")
+    for name in ("early_exit_threshold", "eval_min_train_success"):
+        if not 0.0 <= getattr(level.evaluation, name) <= 1.0:
+            raise ValueError(f"evaluation.{name} must be in [0, 1].")
+    if type(level.evaluation.training_robustness) is not bool:
+        raise ValueError("evaluation.training_robustness must be a boolean.")
+    if type(level.evaluation.eval_robustness_runs) is not int or level.evaluation.eval_robustness_runs < 2:
+        raise ValueError("evaluation.eval_robustness_runs must be at least 2 (no 1/1 robust evaluations).")
+    if type(level.evaluation.early_exit_hold_evals) is not int or level.evaluation.early_exit_hold_evals < 0:
+        raise ValueError("evaluation.early_exit_hold_evals must be a non-negative integer.")
     if level.evaluation.eval_action_noise_max < 0.0:
         raise ValueError("evaluation.eval_action_noise_max must be non-negative.")
     fixed_bounds = level.evaluation.eval_fixed_obstacle_bounds

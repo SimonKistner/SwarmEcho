@@ -9,6 +9,29 @@
   ranking. Enabling it adds one observation input; older checkpoints require
   the option off. Inspector links highlight the same selected paths in green.
 
+- [x] Optional redundancy and route-efficiency rewards, both default off and
+  enabled for B01 office:
+  - `reward.allow_redundancy_reward`: when fully connected, all members of at
+    least one simple base-target path get zero gap penalty. Dead-end branches
+    remain non-contributors. Before full connection the old shaping is retained.
+  - `reward.enable_chain_efficiency_reward`: add
+    `chain_efficiency_bonus / num_agents * clip(roadmap_length / relay_length, 0, 1)`.
+    The default weight is `0.5`. Lengths are physical metres, without the
+    spawn-separation corner allowance. Efficiency does not modify gap shaping.
+  - Efficiency alone rewards one deterministic shortest physical relay route;
+    redundancy plus efficiency rewards each drone's best containing route,
+    without summing rewards across routes. Both off retain the original reward.
+  - With redundancy, the contributor observation and green inspector links
+    include all valid simple paths. Replays save the mode in their metadata;
+    older artifacts retain the original single-selection display.
+  - Subset dynamic programming records the minimum path length and number of
+    permutations for each visited-drone subset. It forbids repeated drones and
+    avoids factorial path enumeration in training; cost still grows with `2^N`.
+  - Only `train/chain_efficiency` (best route efficiency, when enabled) and
+    `train/number_of_valid_paths` are added to W&B. Each uses terminal values
+    from successful episodes in a `num_envs`-sized window, reported only once
+    full. No additional terminal stats are added.
+
 ## Information-ranked selective evaluation renderer
 
 Add a renderer that selects evaluation episodes from the comprehensive

@@ -60,6 +60,41 @@ over time without receiving actor hidden states.
 
 When recurrent actor communication is enabled, SwarmEcho uses a single-round TarMAC-style mechanism rather than the older configurable hidden-state attention path. Agents carry GRU hidden state plus previous `(signature, value)` communication state; the base relay stores the first target-knowing reporter's emitted TarMAC signature/value and replays that token to eligible non-knowing agents in base range.
 
+### Terminal logging
+
+Both trainers use these `logging` settings:
+
+```yaml
+logging:
+  terminal_logging_frequency: 1
+  terminal_log_warmup: false
+  terminal_log_init: false  # 3D initialization diagnostics
+```
+
+`terminal_logging_frequency` is a positive integer. A value of 10 prints
+training progress at updates 10, 20, 30, and so on, including when resuming.
+There is no first-update exception. This replaces the unused 3D `log_every`
+setting and the automatic `total_updates // 200` interval in both trainers.
+W&B logging and evaluation/checkpoint/replay schedules are independent of it.
+
+`terminal_log_warmup: false` hides training progress rows and their `[warmup]`
+details until the rolling episode window contains `training.num_envs` completed
+episodes. This defaults to false in both the 2D and 3D config classes.
+`terminal_log_init` defaults to false and controls 3D setup/JIT diagnostics and
+shared-roadmap construction messages, including during evaluation. Evaluation,
+early-stop triggers, and completion messages still print. These terminal
+settings leave W&B logging unchanged. The 3D startup summary shows the effective
+settings and evaluation map/mode once.
+
+All 3D training messages use `[HH:MM:SS]`. The existing training progress row
+format is unchanged. Evaluation labels replace the training update counter:
+single pass `[EVAL 1/1]`, robust runs `[EVAL i/N]`, and the robust
+aggregate `[EVAL UNAN]`. Final evaluation uses `[FINAL i/N]` and `[FINAL UNAN]`.
+Evaluation leaves the steps area blank and aligns the `par_envs` value with
+the training `sps` value. Its longer label borrows space from the blank steps
+area so all following metrics stay aligned. Artifact/checkpoint paths are relative to the project root when
+inside it; external paths remain absolute. Completion is reported once.
+
 ### 1.1 Evaluation, Early Exit, and Saved Artifacts
 
 Evaluation metrics always come from the parallel evaluator. The following
@@ -74,15 +109,76 @@ settings live under `evaluation`:
 | `eval_broadcast_on_curriculum_early_stop` | `false` | Fills remaining scheduled W&B evaluation points with the terminal evaluation metrics when a level exits early. |
 | `early_exit` | `false` | Enables training exit when parallel evaluation success reaches the threshold. |
 | `early_exit_threshold` | `0.99` | Parallel evaluation success rate required for early exit. |
-| `eval_video` | `true` | Enables scheduled training replays and a checkpoint-scoped evaluation plus replay after the final checkpoint is saved. |
+| `eval_video` | `true` | Enables scheduled training replays and the final checkpoint replay. The final 3D robust evaluation also runs when this is false. |
 | `eval_video_freq` | `20` | Evaluation-video frequency in training updates. |
 | `eval_video_offset` | `1` | Update offset applied to the video schedule. |
-| `training_heatmap_creation` | `false` | Persists during-training evaluation CSV/manifest data and heatmaps. Standalone evaluation always creates its checkpoint-scoped heatmap data. |
+| `training_heatmap_creation` | `false` | Persists scheduled 3D evaluation CSVs/manifests for both single-pass (1/1) and robust (N/N) evaluations. Final and standalone robust evaluations always save heatmap data. |
 | `eval_not_deliv_not_visual_splitt_in_two` | `false` | If true, splits the not-delivered/not-visual heatmap into two separate files instead of one found-and-delivered heatmap. |
 | `save_model` | `true` | Enables scheduled and final checkpoint saves. |
 | `checkpoint_freq` | `50` | Scheduled checkpoint frequency in training updates. |
 | `checkpoint_offset` | `0` | Update offset applied to the checkpoint schedule. |
 | `checkpoint_dir` | `null` | Optional checkpoint output directory; otherwise the run checkpoint directory is used. |
+
+Additional 3D evaluation settings:
+
+| Key | Default | Effect |
+|---|---:|---|
+| `training_robustness` | `false` | Select robust evaluation for training metrics and early stopping. When false, use a single deterministic pass without added action noise. Both modes publish terminal, W&B, and local history metrics. Final evaluation is always robust, including an early exit. |
+| `eval_robustness_runs` | `5` | Integer number of repeated evaluations, at least 2. Shared by training, final and standalone robust evaluation. |
+| `eval_action_noise_max` | `0.011` | Bounded pre-tanh action noise, independently seeded for each robustness run. Reset positions/layout stay identical across runs. |
+| `early_exit_hold_evals` | `0` | Consecutive metric evaluations at or above `early_exit_threshold` required to stop. Zero disables holding: the first qualifying evaluation suffices. Requires `early_exit=true`. |
+
+With `early_exit_hold_evals=3` and threshold 0.9, evaluations at 120M,
+150M and 180M reporting 0.92, 0.94 and 0.93 stop at 180M. Updates without an
+evaluation and replay-only updates do not affect the streak; an evaluation
+below threshold (including NaN) resets it. A new training invocation starts
+with an empty streak, including checkpoint resumes.
+
+Robust success, delivered and visual-found rates count only targets that reach
+that outcome in **all N runs**, using all evaluated targets as the denominator.
+`eval/success_rate` and early stopping use this unanimous success rate when
+`training_robustness=true`. Return, episode length, coverage and chain progress are
+means across the ensemble. Individual-run statistics appear only in the
+terminal; W&B and evaluation history receive one aggregate per evaluation phase.
+Heatmaps retain all per-target stage rates in the existing robust CSV format
+and default to N/N agreement in the inspector. Single-pass heatmaps use the
+same format with 0/1 stage rates, 1/1 agreement, and zero action noise.
+The inspector includes both single-pass and robust heatmaps; action-capture
+CSVs remain replay provenance and are excluded.
+
+Every training evaluation logs its update, mode, and measured success.
+W&B `visually_found_rate`
+use the fraction of episodes that visually found the target in single-pass
+mode, or the fraction of targets visually found in all runs in robust mode.
+Both ordinary and action-capture evaluators return this metric.
+The terminal omits the separate visual column. When early stopping is enabled,
+the single-pass result or unanimous summary includes `est` (threshold) and
+`hold` (qualifying evaluation streak). Only an actual stop adds `[EARLY-STOP]`
+immediately afterward, before final robustness begins. Final summaries show
+the hold as unchanged; per-run results never advance it.
+Final robustness does not change that decision or add a hold observation.
+
+Training metrics use W&B `eval/*`; final robustness is reported only in the terminal and local records, without W&B `final_eval/*` logging.
+`metrics.json` retains the last training evaluation as `eval_*` and the final
+robust measurement separately as `final_eval_*`. `evaluation_history.jsonl`
+records both phases with update, global step, and evaluation mode, including
+when W&B is disabled. Training and evaluation W&B values from one update are
+committed together.
+
+The final budget update always measures the configured training-evaluation
+mode, bypassing the training-success gate, then produces final robust metrics.
+If that same update already ran robust evaluation, the final phase reuses it;
+it never reuses an earlier update's results. Checkpoint artifacts and optional
+final replays reuse this ensemble. Final robust measurement and heatmap data
+are produced even with `eval_video=false` or `save_model=false`; checkpoint
+artifacts and final replay rendering require `save_model=true`. A scheduled
+training replay is skipped when early stopping will produce the final artifacts.
+
+Schedules retain the offset rule: `update > offset` and
+`(update - offset) % frequency == 0`. For example, frequency 10 and offset 1
+evaluate at updates 11, 21, 31, etc. A training-success gate that suppresses
+a scheduled evaluation prints its reason; skipped and replay-only updates
+never advance or reset the early-stop hold.
 
 When `training_heatmap_creation` is enabled, the during-training evaluation CSV is written under `artifacts/train/data`; manual checkpoint evaluation always writes it under that checkpoint's
 `artifacts/eval/.../data` folder. A filename such as
@@ -94,10 +190,11 @@ Heatmaps are filtered from this canonical CSV. Evaluation heatmap and video
 filenames use synchronized update/step suffixes such as
 `u000700_s00070M`.
 
-When `early_exit` is reached, training always saves a handoff checkpoint and
+In the 2D trainer, when `early_exit` is reached, training saves a handoff checkpoint and
 returns. This advances a curriculum runner to the next level and ends a solo
 run. `save_model` controls scheduled and final saves; it does not suppress this
-required handoff checkpoint.
+required handoff checkpoint. The 3D trainer honors `save_model=false` for early
+stops as well as budget completion.
 
 Checkpoint loading remains under `training`: `checkpoint_path`,
 `checkpoint_step_offset`, and `ckpt_loading_mode` control input semantics.

@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print, display_path, evaluation_row
 
 # These must be configured before importing Flax/JAX.  ``checkpoints`` imports
 # Flax below, so relying on train3d.py to set them is too late for this entry
@@ -17,7 +18,7 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 import numpy as np
 import yaml
 
-from swarmecho.core.config import load_level_3d_cli
+from swarmecho.core.config import load_level_3d_cli, resolve_evaluation_level_3d
 from swarmecho.core.paths import normalize_wsl_path
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
@@ -122,25 +123,20 @@ def _heatmap_manifest(
     write_manifest(info_path.with_suffix(".heatmap.json"), manifest)
 
 
-def run_parallel_evaluation_3d(
+def collect_robust_evaluation_3d(
     model,
     level,
-    checkpoint: Path,
-    run_dir: Path,
     *,
-    eval_run_root: Path | None = None,
-    eval_name: str | None = None,
-) -> Path:
-    """Create confidence rates from repeated, identically reset 3D evals."""
+    on_run=None,
+) -> tuple[dict[str, float], dict]:
+    """Collect unanimous outcomes and ensemble means without writing artifacts."""
+    level = resolve_evaluation_level_3d(level)
     episodes = level.evaluation.eval_parallel_envs
     robustness_runs = level.evaluation.eval_robustness_runs
+    if robustness_runs < 2:
+        raise ValueError("Robust evaluation requires at least two runs.")
     action_noise_max = level.evaluation.eval_action_noise_max
     layout_mode = "fixed" if getattr(getattr(level, "env", None), "num_obstacles", 0) else None
-    print(
-        f"[EVAL] evaluating {episodes} targets x {robustness_runs} seeded "
-        f"action-noise runs (max |noise|={action_noise_max:g})...",
-        flush=True,
-    )
     metric_runs: list[dict[str, float]] = []
     success_runs: list[np.ndarray] = []
     delivered_runs: list[np.ndarray] = []
@@ -151,10 +147,6 @@ def run_parallel_evaluation_3d(
     reference_obstacle_min: np.ndarray | None = None
     reference_obstacle_max: np.ndarray | None = None
     for run_index in range(robustness_runs):
-        print(
-            f"[EVAL] robustness run {run_index + 1}/{robustness_runs}",
-            flush=True,
-        )
         metrics, episode_info = evaluate_suite_3d(
             model,
             level,
@@ -164,6 +156,13 @@ def run_parallel_evaluation_3d(
             action_noise_seed=level.training.seed + 20_000 + run_index,
             layout_mode=layout_mode,
         )
+        if on_run is not None:
+            on_run(metrics, run_index + 1, robustness_runs)
+        else:
+            evaluation_row(
+                metrics, label=f"[EVAL {run_index + 1}/{robustness_runs}]",
+                update=0, total=0, episodes=episodes,
+            )
         targets = np.asarray(episode_info["target_positions"])
         bases = np.asarray(episode_info["base_positions"])
         chain_lengths = np.asarray(episode_info["final_chain_lengths"])
@@ -203,38 +202,69 @@ def run_parallel_evaluation_3d(
     chain_success_rate = np.mean(np.stack(success_runs), axis=0)
     found_and_delivered_rate = np.mean(np.stack(delivered_runs), axis=0)
     visually_found_rate = np.mean(np.stack(visually_found_runs), axis=0)
+    metrics = {
+        key: float(np.mean([run[key] for run in metric_runs]))
+        for key in metric_runs[0]
+    }
+    metrics.update(
+        eval_success=float(np.mean(chain_success_rate == 1.0)),
+        eval_target_found_rate=float(np.mean(found_and_delivered_rate == 1.0)),
+        eval_visually_found_rate=float(np.mean(visually_found_rate == 1.0)),
+        eval_robustness_runs=robustness_runs,
+    )
+    return metrics, {
+        "target_positions": reference_targets,
+        "base_positions": reference_bases,
+        "final_chain_lengths": reference_chain_lengths,
+        "obstacle_min": reference_obstacle_min,
+        "obstacle_max": reference_obstacle_max,
+        "stage_rates": {
+            "chain_success": chain_success_rate,
+            "found_and_delivered": found_and_delivered_rate,
+            "visually_found": visually_found_rate,
+        },
+    }
+
+
+def run_parallel_evaluation_3d(
+    model,
+    level,
+    checkpoint: Path,
+    run_dir: Path,
+    *,
+    eval_run_root: Path | None = None,
+    eval_name: str | None = None,
+    result: tuple[dict[str, float], dict] | None = None,
+) -> Path:
+    """Save a robust ensemble, optionally reusing the final training evaluation."""
+    level = resolve_evaluation_level_3d(level)
+    metrics, info = result if result is not None else collect_robust_evaluation_3d(model, level)
+    if result is None:
+        evaluation_row(metrics, label="[EVAL UNAN]", update=0, total=0,
+                       episodes=level.evaluation.eval_parallel_envs)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
         run_dir, checkpoint, level, eval_name=eval_name
     )
     info_path = save_eval_info_csv(
         eval_run_root / "data" / f"eval_info_{artifact_tag}.csv",
-        target_positions=reference_targets,
-        base_positions=reference_bases,
-        stage_rates={
-            "chain_success": chain_success_rate,
-            "found_and_delivered": found_and_delivered_rate,
-            "visually_found": visually_found_rate,
-        },
-        final_chain_lengths=reference_chain_lengths,
+        target_positions=info["target_positions"],
+        base_positions=info["base_positions"],
+        stage_rates=info["stage_rates"],
+        final_chain_lengths=info["final_chain_lengths"],
     )
     _heatmap_manifest(
         info_path,
         level,
         checkpoint=checkpoint,
-        robustness_runs=robustness_runs,
-        action_noise_max=action_noise_max,
-        obstacle_min=reference_obstacle_min,
-        obstacle_max=reference_obstacle_max,
+        robustness_runs=level.evaluation.eval_robustness_runs,
+        action_noise_max=level.evaluation.eval_action_noise_max,
+        obstacle_min=info["obstacle_min"],
+        obstacle_max=info["obstacle_max"],
         eval_name=eval_name,
     )
-    mean_success = float(
-        np.mean([metrics["eval_success"] for metrics in metric_runs])
-    )
-    unanimous_success = float(np.mean(chain_success_rate == 1.0))
-    print(
-        f"[EVAL] unanimous success={unanimous_success:.1%}; "
-        f"mean success={mean_success:.1%}",
+    terminal_print(
+        f"[EVAL ARTIFACTS] saved {display_path(info_path)}",
         flush=True,
     )
     return info_path
@@ -253,8 +283,9 @@ def run_action_capturing_evaluation_3d(
     eval_name: str | None = None,
 ) -> tuple[Path, np.ndarray, str, int, list, np.ndarray]:
     """Evaluate, select, and replay actions originating in the same actor run."""
+    level = resolve_evaluation_level_3d(level)
     episodes = level.evaluation.eval_parallel_envs
-    print(
+    terminal_print(
         f"[EVAL] evaluating {episodes} deterministic 3D episodes while capturing "
         "executed actions...",
         flush=True,
@@ -280,14 +311,13 @@ def run_action_capturing_evaluation_3d(
         visually_found=episode_info["visually_found"],
         final_chain_lengths=episode_info["final_chain_lengths"],
     )
-    _heatmap_manifest(
-        info_path,
-        level,
-        checkpoint=checkpoint,
-        obstacle_min=episode_info["obstacle_min"],
-        obstacle_max=episode_info["obstacle_max"],
-        eval_name=eval_name,
-    )
+    # Action capture is replay provenance, not a 1/1 heatmap. Retain only the
+    # layout sidecar needed to reconstruct and validate the selected replay.
+    if episode_info["obstacle_min"].shape[-2] > 0:
+        save_eval_layout(
+            info_path.with_suffix(".layout.json"),
+            episode_info["obstacle_min"], episode_info["obstacle_max"],
+        )
     lane = int(capture["lane"])
     selected_target, replay_tag, csv_lane = select_eval_target_with_lane(
         info_path, result=result, offset=offset
@@ -297,7 +327,7 @@ def run_action_capturing_evaluation_3d(
             f"On-device action selection chose lane {lane}, but the saved CSV "
             f"selected lane {csv_lane}."
         )
-    print("[REPLAY] selected target for replay rendering", flush=True)
+    terminal_print("[REPLAY] selected target for replay rendering", flush=True)
     states, rewards = replay_recorded_actions_3d(
         level,
         capture["actions"],
@@ -410,10 +440,11 @@ def select_eval_replay_lanes(
 
 
 def eval_layout_for_csv(info_path: Path) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Load the shared layout referenced by a heatmap sidecar, if present."""
+    """Load a heatmap layout or the layout-only sidecar of an action capture."""
     sidecar = info_path.with_suffix(".heatmap.json")
     if not sidecar.exists():
-        return None, None
+        layout = info_path.with_suffix(".layout.json")
+        return load_eval_layout(layout) if layout.exists() else (None, None)
     import json
     metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     layout_file = metadata.get("layout_file")
@@ -463,6 +494,7 @@ def render_csv_replays(
     eval_name: str | None = None,
 ) -> None:
     """Render selected CSV lanes without retaining the 4k evaluation batch."""
+    level = resolve_evaluation_level_3d(level)
     source_csv = source_csv or find_nearest_eval_info_csv(run_dir, checkpoint, level)
     if source_csv is None:
         raise FileNotFoundError(
@@ -477,7 +509,7 @@ def render_csv_replays(
     selected_lanes, label = select_eval_replay_lanes(
         records, result=result, count=replay_count, start_offset=start_offset
     )
-    print("[REPLAY] selected target for replay rendering", flush=True)
+    terminal_print("[REPLAY] selected target for replay rendering", flush=True)
     for replay_number, lane_value in enumerate(selected_lanes):
         lane = int(lane_value)
         selection_offset = start_offset + replay_number
@@ -497,7 +529,7 @@ def render_csv_replays(
             delivered=bool(np.asarray(final_state.base_target_known)),
             visually_found=bool(np.any(np.asarray(final_state.target_known))),
         ))
-        print(
+        terminal_print(
             f"[REPLAY {replay_number + 1}/{replay_count}] {final_stage} with "
             f"target=({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}); "
             f"len: {len(states) - 1} steps",
@@ -517,6 +549,7 @@ def render_csv_replays(
                 if level.env.coverage_voxel_size is None
                 else level.env.coverage_voxel_size,
                 "comm_radius_m": level.env.comm_radius,
+                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
                 "comm_radius_base_m": level.env.comm_radius_base,
                 "visual_radius_m": level.env.visual_radius,
                 "checkpoint": str(checkpoint),
@@ -624,7 +657,7 @@ def main() -> None:
     if checkpoint_level is not None:
         config_arguments.insert(0, f"level={checkpoint_level}")
     level = load_level_3d_cli(config_arguments)
-    print(f"[EVAL] using level: {level.name}", flush=True)
+    terminal_print(f"[EVAL] using level: {level.name}", flush=True)
     model = build_model_3d(level)
     restore_model_checkpoint(model, checkpoint)
     eval_run_root = create_eval_run_root(
@@ -694,7 +727,7 @@ def main() -> None:
     elif mode == "selective_manual_pick":
         selected_target = explicit_target
         replay_tag = "TARGET"
-        print("[REPLAY] selected target for replay rendering", flush=True)
+        terminal_print("[REPLAY] selected target for replay rendering", flush=True)
     elif (
         mode == "selective_auto_pick"
     ):
@@ -712,7 +745,7 @@ def main() -> None:
         if selected_obstacle_min is None and selected_records["obstacle_min"].shape[1]:
             selected_obstacle_min = selected_records["obstacle_min"][selected_lane]
             selected_obstacle_max = selected_records["obstacle_max"][selected_lane]
-        print("[REPLAY] selected target for replay rendering", flush=True)
+        terminal_print("[REPLAY] selected target for replay rendering", flush=True)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     output = eval_run_root / "replays" / (
         output.name if output is not None else f"eval_{artifact_tag}"
@@ -751,7 +784,7 @@ def main() -> None:
         delivered=bool(np.asarray(final_state.base_target_known)),
         visually_found=bool(np.any(np.asarray(final_state.target_known))),
     ))
-    print(
+    terminal_print(
         f"[REPLAY 1/1] {final_stage} with target="
         f"({selected_target[0]:.2f}, {selected_target[1]:.2f}, "
         f"{selected_target[2]:.2f}); len: {len(states) - 1} steps",
@@ -773,6 +806,7 @@ def main() -> None:
                 else level.env.coverage_voxel_size
             ),
             "comm_radius_m": level.env.comm_radius,
+            "allow_redundancy_reward": level.reward.allow_redundancy_reward,
             "comm_radius_base_m": level.env.comm_radius_base,
             "visual_radius_m": level.env.visual_radius,
             "checkpoint": str(checkpoint),

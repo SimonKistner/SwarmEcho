@@ -14,10 +14,10 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 import functools
 import json
 import time
-from collections import deque
-from dataclasses import asdict
-from datetime import datetime
+from collections import OrderedDict, deque
+from dataclasses import asdict, fields
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print, display_path, evaluation_row, init_logging
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +25,11 @@ import numpy as np
 import yaml
 from flax import nnx
 
-from swarmecho.core.config import Level3D, load_level_3d_cli
+from swarmecho.core.config import (
+    Level3D,
+    load_level_3d_cli,
+    resolve_evaluation_level_3d,
+)
 from swarmecho.env.baseline3d import (
     chain_diagnostics_3d,
     coverage_grid_geometry,
@@ -37,6 +41,12 @@ from swarmecho.env.baseline3d import (
     rewards_3d,
 )
 from swarmecho.env.obstacles3d import segments_blocked
+from swarmecho.env.critic3d import (
+    assemble_privileged_observations_3d,
+    make_privileged_features_3d,
+    privileged_global_dim_3d,
+    privileged_input_dim_3d,
+)
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.artifacts import (
     artifact_suffix,
@@ -47,8 +57,9 @@ from swarmecho.training.artifacts import (
 )
 from swarmecho.training.checkpoints import restore_model_checkpoint, save_model_checkpoint
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
-from swarmecho.training.mappo_trainer import MAPPOTrainer
+from swarmecho.training.ppo3d import PPO3DTrainer, RunningValueNormalizer
 from swarmecho.training.run_lifecycle import (
+    EvaluationHold,
     broadcast_early_stop_metrics,
     init_wandb,
     resolve_resume_state,
@@ -58,10 +69,20 @@ from swarmecho.training.run_lifecycle import (
 from swarmecho.visualize.replay3d import building_snapshot, write_replay
 
 
+def communication_due_3d(episode_step, every_k_steps):
+    """Shared episode clock: independent of rollout boundaries and auto-reset lanes."""
+    return (episode_step % every_k_steps) == 0
+
+
 def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
     """Construct the canonical recurrent 3D MAPPO/TarMAC model."""
     cfg = level.env
-    return MAPPOModel(
+    if not level.network.actor_memory or not level.network.critic_memory:
+        raise ValueError("The 3D runtime requires recurrent actor and critic memory.")
+    if level.network.critic_type not in {"observation", "privileged"}:
+        raise ValueError("network.critic_type must be 'observation' or 'privileged'.")
+    privileged = level.network.critic_type == "privileged"
+    model = MAPPOModel(
         obs_dim=observation_dim_3d(cfg),
         act_dim=3,
         num_agents=cfg.num_agents,
@@ -71,6 +92,8 @@ def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
         actor_memory=level.network.actor_memory,
         critic_memory=level.network.critic_memory,
         critic_type=level.network.critic_type,
+        critic_input_dim=privileged_input_dim_3d(cfg) if privileged else None,
+        critic_global_attention=privileged,
         memory_comm_enabled=level.network.memory_comm_enabled,
         memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
         tarmac_sig_dim=level.network.tarmac_sig_dim,
@@ -78,6 +101,75 @@ def build_model_3d(level: Level3D, hidden_dim: int | None = None) -> MAPPOModel:
         tarmac_include_self=level.network.tarmac_include_self,
         rngs=nnx.Rngs(level.training.seed),
     )
+    model.mask_inactive = True
+    model.actor.mask_inactive = True
+    if privileged:
+        model.privileged_3d = True
+        model.privileged_3d_include_base_vector = not cfg.observe_base_vector
+    if level.training.value_normalization == "running":
+        model.value_normalizer = RunningValueNormalizer()
+    # Static metadata; the numerical normalizer state is saved inside the model.
+    model.checkpoint_contract = tuple(sorted({
+        "format": 1,
+        "obs_dim": observation_dim_3d(cfg),
+        "hidden_dim": hidden_dim or level.network.hidden_dim,
+        "num_layers": level.network.num_layers,
+        "actor_num_layers": level.network.actor_num_layers,
+        "tarmac_sig_dim": level.network.tarmac_sig_dim,
+        "tarmac_val_dim": level.network.tarmac_val_dim,
+        "memory_comm_enabled": level.network.memory_comm_enabled,
+        "memory_comm_every_k_steps": level.network.memory_comm_every_k_steps,
+        "tarmac_include_self": level.network.tarmac_include_self,
+        "value_normalization": level.training.value_normalization,
+        "entropy_mode": level.training.entropy_mode,
+        "actor_clip_eps": level.training.actor_clip_eps,
+        "value_clip_eps": level.training.value_clip_eps,
+        "gamma": level.training.gamma,
+        "gae_lambda": level.training.gae_lambda,
+        "communication_clock": "episode",
+        "inactive_agents": "excluded",
+        **({"critic_type": "privileged", "privileged_layout": "compact_3d_v1",
+            "critic_input_dim": privileged_input_dim_3d(cfg)} if privileged else {}),
+        **{field.name: getattr(cfg, field.name) for field in fields(cfg)
+           if field.name.startswith("observe_") or field.name == "radar_bins"},
+    }.items()))
+    return model
+
+
+_EVALUATION_ENV_CACHE = OrderedDict()
+
+
+def _evaluation_env_fns(level: Level3D):
+    """Keep static JIT function arguments stable across evaluation calls.
+
+    Include all geometry contents, not just a map name or array identity, so
+    another map/config cannot accidentally reuse stale captured geometry.
+    """
+    geometry_key = []
+    for field in fields(level.building):
+        value = getattr(level.building, field.name)
+        if isinstance(value, np.ndarray):
+            value = (value.dtype.str, value.shape, value.tobytes())
+        geometry_key.append((field.name, value))
+    plan_geodesic = level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward
+    key = (
+        tuple(geometry_key),
+        level.env,
+        plan_geodesic,
+        level.reward.allow_redundancy_reward,
+        level.reward.target_found_requires_delivery,
+    )
+    if key not in _EVALUATION_ENV_CACHE:
+        with init_logging(level.logging.terminal_log_init):
+            _EVALUATION_ENV_CACHE[key] = make_baseline_3d_fns(
+                level.building, level.env, plan_geodesic=plan_geodesic,
+                allow_redundancy_reward=level.reward.allow_redundancy_reward,
+                target_found_requires_delivery=level.reward.target_found_requires_delivery,
+            )
+        if len(_EVALUATION_ENV_CACHE) > 8:
+            _EVALUATION_ENV_CACHE.popitem(last=False)
+    _EVALUATION_ENV_CACHE.move_to_end(key)
+    return _EVALUATION_ENV_CACHE[key]
 
 
 def _communication_inputs(states, cfg, base_valid, base_signature, base_value):
@@ -135,8 +227,82 @@ def _update_base_memory(
     return base_valid, base_signature, base_value
 
 
+def _evaluate_training_metrics_3d(model, level, hold, *, eval_due, on_run=None):
+    """Measure the configured training metric and advance the stop hold once."""
+    if not eval_due:
+        return None, None, False
+    from swarmecho.training.evaluate3d import collect_robust_evaluation_3d
+
+    evaluation = level.evaluation
+    evaluation_result = None
+    if evaluation.training_robustness:
+        evaluation_result = collect_robust_evaluation_3d(model, level, on_run=on_run)
+        metrics, _ = evaluation_result
+    else:
+        result = evaluate_suite_3d(
+            model, level, episodes=evaluation.eval_parallel_envs,
+            return_episode_info=evaluation.training_heatmap_creation,
+        )
+        if evaluation.training_heatmap_creation:
+            metrics, episode_info = result
+            successes = np.asarray(episode_info["successes"], dtype=bool)
+            delivered = np.asarray(episode_info["delivered"], dtype=bool) | successes
+            visually_found = np.asarray(episode_info["visually_found"], dtype=bool) | delivered
+            episode_info["stage_rates"] = {
+                "chain_success": successes.astype(float),
+                "found_and_delivered": delivered.astype(float),
+                "visually_found": visually_found.astype(float),
+            }
+        else:
+            metrics = result
+        metrics = {**metrics, "eval_robustness_runs": 1}
+        if evaluation.training_heatmap_creation:
+            evaluation_result = metrics, episode_info
+    stop = evaluation.early_exit and hold.observe(metrics["eval_success"])
+    return metrics, evaluation_result, stop
+
+
+def _report_evaluation_3d(metrics, level, *, update, total, steps, phase, wandb_run, history_path, hold):
+    """Publish one measurement with explicit provenance to all logging sinks."""
+    runs = int(metrics.get("eval_robustness_runs", 1))
+    prefix = "FINAL" if phase == "final_eval" else "EVAL"
+    tail = (
+        f"{f'est={level.evaluation.early_exit_threshold:.0%}':<10}  "
+        f"hold={hold.consecutive}/{max(1, level.evaluation.early_exit_hold_evals)}"
+        if level.evaluation.early_exit else "est=off"
+    )
+    if phase == "final_eval" and level.evaluation.early_exit:
+        tail += " (unchanged)"
+    evaluation_row(
+        metrics, label=f"[{prefix} {'UNAN' if runs > 1 else '1/1'}]",
+        update=update, total=total, episodes=level.evaluation.eval_parallel_envs, tail=tail,
+    )
+    with history_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "update": update, "global_step": steps, "phase": phase,
+            "mode": "robust" if runs > 1 else "single_pass", **metrics,
+        }) + "\n")
+    values = {
+        "ep_return": metrics["eval_return"],
+        "ep_length": metrics["eval_episode_length"],
+        "chain_progress_pct": metrics["eval_chain_progress_pct"],
+        "ep_length_reduction": (1.0 - metrics["eval_episode_length"] / level.env.max_steps) * 100.0,
+        "success_rate": metrics["eval_success"],
+        "target_found_rate": metrics["eval_target_found_rate"],
+        "visually_found_rate": metrics["eval_visually_found_rate"],
+        "map_coverage_pct": metrics["eval_coverage"] * 100.0,
+        "robustness_runs": runs,
+    }
+    logs = {f"{phase}/{key}": value for key, value in values.items()}
+    if wandb_run is not None and phase != "final_eval":
+        import wandb
+        wandb.log(logs, step=steps, commit=False)
+    return logs
+
+
 def _create_final_checkpoint_evaluation(
-    model: MAPPOModel, level: Level3D, checkpoint: Path, run_dir: Path
+    model: MAPPOModel, level: Level3D, checkpoint: Path, run_dir: Path,
+    *, result=None,
 ) -> None:
     """Run the standalone checkpoint evaluation contract without risking training."""
     try:
@@ -154,14 +320,17 @@ def _create_final_checkpoint_evaluation(
             checkpoint,
             run_dir,
             eval_run_root=eval_run_root,
+            result=result,
         )
     except Exception as exc:
-        print(
+        terminal_print(
             f"[WARNING] Final checkpoint evaluation failed; replay creation skipped: {exc}",
             flush=True,
         )
         return
 
+    if not level.evaluation.eval_video:
+        return
     for result in ("success", "fail"):
         try:
             render_csv_replays(
@@ -176,19 +345,19 @@ def _create_final_checkpoint_evaluation(
                 eval_run_root=eval_run_root,
             )
             if result == "fail":
-                print(
+                terminal_print(
                     "[WARNING] No successful final-evaluation lane was available; "
                     "created a failure replay instead.",
                     flush=True,
                 )
             return
         except Exception as exc:
-            print(
+            terminal_print(
                 f"[WARNING] Final {result} replay selection failed: {exc}",
                 flush=True,
             )
 
-    print(
+    terminal_print(
         "[WARNING] Final success and failure replay creation both failed; "
         "replay creation skipped.",
         flush=True,
@@ -206,9 +375,11 @@ def train_3d(
 
     def init_log(message):
         nonlocal init_previous
+        if not level.logging.terminal_log_init:
+            return
         now = time.perf_counter()
-        print(
-            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT +{now - init_started:.1f}s; "
+        terminal_print(
+            f"[INIT +{now - init_started:.1f}s; "
             f"stage {now - init_previous:.1f}s] {message}",
             flush=True,
         )
@@ -218,6 +389,7 @@ def train_3d(
     training = level.training
     network = level.network
     evaluation = level.evaluation
+    evaluation_level = resolve_evaluation_level_3d(level)
     logging = level.logging
     num_updates = level.num_updates
     layout = resolve_run_layout(logging, evaluation, media_dir="replays")
@@ -230,7 +402,7 @@ def train_3d(
         row = {"update": update, "phase": phase, **values}
         with (destination / "timings.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row) + "\n")
-        print("[TIMING] " + json.dumps(row), flush=True)
+        terminal_print("[TIMING] " + json.dumps(row), flush=True)
     checkpoint_dir = layout.checkpoint_dir if output_dir is None else destination / "checkpoints"
     replay_dir = train_replay_root(destination)
     cfg = level.env
@@ -244,35 +416,29 @@ def train_3d(
         f"{int(np.prod(coverage_shape)):,} voxels at {voxel_size:g} m; "
         f"{training.num_envs:,} environments. Constructing environment functions..."
     )
-    reset, env_step, observations, _ = make_autoreset_3d_fns(
-        level.building, cfg, level.reward,
-        randomize_base=training.randomize_base,
-        minimum_geodesic_separation=training.minimum_geodesic_separation,
-        minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
-        spawn_pair_max_attempts=training.spawn_pair_max_attempts,
-    )
+    with init_logging(logging.terminal_log_init):
+        reset, env_step, observations, _ = make_autoreset_3d_fns(
+            level.building, cfg, level.reward,
+            randomize_base=training.randomize_base,
+            minimum_geodesic_separation=training.minimum_geodesic_separation,
+            minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
+            spawn_pair_max_attempts=training.spawn_pair_max_attempts,
+        )
     obs_dim = observation_dim_3d(cfg)
     sig_dim = network.tarmac_sig_dim
     val_dim = network.tarmac_val_dim
     init_log("Environment functions constructed. Initializing model...")
     model = build_model_3d(level)
+    privileged = network.critic_type == "privileged"
+    collect_critic_features = make_privileged_features_3d(level.building, cfg) if privileged else None
     init_log("Model constructed. Preparing checkpoint, optimizer and rollout buffer...")
     resume_from = checkpoint_path or training.checkpoint_path
     resume = resolve_resume_state(training, run_name, training.num_envs, training.num_steps)
     if resume_from:
         restored = restore_model_checkpoint(model, resume_from)
-        print(f"  Restored weights  ✓  {restored}")
-    trainer = MAPPOTrainer(
-        model,
-        lr=training.lr,
-        max_grad_norm=training.max_grad_norm,
-        clip_eps=training.clip_eps,
-        vf_coef=training.vf_coef,
-        ent_coef=training.ent_coef,
-        num_epochs=training.num_epochs,
-        actor_memory=level.network.actor_memory,
-        critic_memory=level.network.critic_memory,
-    )
+        terminal_print(f"  Restored weights  ✓  {display_path(restored)}")
+    trainer = PPO3DTrainer(model, training)
+    trainer.updates = resume.start_update
     buffer = MAPPORolloutBuffer(
         num_steps=training.num_steps,
         num_envs=training.num_envs,
@@ -287,6 +453,9 @@ def train_3d(
         tarmac_val_dim=val_dim,
         actor_memory=level.network.actor_memory,
         critic_memory=level.network.critic_memory,
+        mask_inactive=True,
+        critic_agent_dim=9 if privileged else 0,
+        critic_global_dim=privileged_global_dim_3d(cfg) if privileged else 0,
     )
     init_log("Optimizer and buffer prepared. Initial batched environment reset...")
     keys = jax.random.split(jax.random.PRNGKey(training.seed + 1), training.num_envs)
@@ -328,16 +497,19 @@ def train_3d(
     base_value = jnp.zeros((training.num_envs, val_dim), dtype=jnp.float32)
     resets = jnp.zeros((training.num_envs, cfg.num_agents), dtype=jnp.bool_)
     latest_stats: dict[str, float] = {}
+    eval_hold = EvaluationHold(evaluation.early_exit_threshold, evaluation.early_exit_hold_evals)
+    final_robust_result = None
     episode_returns = np.zeros(training.num_envs, dtype=np.float64)
     episode_lengths = np.zeros(training.num_envs, dtype=np.int32)
     episode_success = np.zeros(training.num_envs, dtype=np.float32)
     episode_found = np.zeros(training.num_envs, dtype=np.float32)
+    episode_idle = np.zeros(training.num_envs, dtype=np.float32)
     episode_gap = np.zeros(training.num_envs, dtype=np.float32)
     episode_progress_pct = np.zeros(training.num_envs, dtype=np.float32)
     episode_coverage = np.zeros(training.num_envs, dtype=np.float32)
     episode_rewards = {
         name: np.zeros(training.num_envs, dtype=np.float64)
-        for name in ("coverage", "collision", "finder", "chain_gap", "target_found", "success")
+        for name in ("coverage", "collision", "finder", "chain_gap", "target_found", "success", "no_movement_termination")
     }
     # Match the 2D runner: one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
@@ -346,12 +518,17 @@ def train_3d(
     window_len: deque[int] = deque(maxlen=window_size)
     window_succ: deque[float] = deque(maxlen=window_size)
     window_fnd: deque[float] = deque(maxlen=window_size)
+    window_idle: deque[float] = deque(maxlen=window_size)
     window_gap: deque[float] = deque(maxlen=window_size)
     window_prog_pct: deque[float] = deque(maxlen=window_size)
     window_cov: deque[float] = deque(maxlen=window_size)
     window_pair_attempts: deque[int] = deque(maxlen=window_size)
     window_success_target_distance: deque[float] = deque(maxlen=window_size)
     window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
+    path_stat_names = (["number_of_valid_paths"] if level.reward.allow_redundancy_reward or level.reward.enable_chain_efficiency_reward else [])
+    if level.reward.enable_chain_efficiency_reward:
+        path_stat_names.append("chain_efficiency")
+    window_path_stats = {name: deque(maxlen=window_size) for name in path_stat_names}
     completed_eps_count = 0
     history_path = destination / "training_history.jsonl"
     config_snapshot = {
@@ -374,25 +551,31 @@ def train_3d(
     _, params = nnx.split(model)
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
     total_steps = num_updates * training.num_envs * training.num_steps
-    print("\n══════════════════════════════════════════════════════")
-    print("  SwarmEcho 3D — Recurrent MAPPO + TarMAC")
-    print("══════════════════════════════════════════════════════")
-    print(f"  level / building : {level.name} / {level.building_name}")
-    print(f"  devices          : {jax.devices()}")
-    print(f"  agents           : {cfg.num_agents}")
-    print(f"  observation      : {obs_dim}  (radar bins: {cfg.radar_bins})")
-    print("  action           : 3D continuous force")
-    print(f"  model parameters : {parameter_count:,}")
-    print(f"  environments     : {training.num_envs:,}")
-    print(f"  rollout / updates: {training.num_steps} / {num_updates}")
+    terminal_print("\n══════════════════════════════════════════════════════")
+    terminal_print("  SwarmEcho 3D — Recurrent MAPPO + TarMAC")
+    terminal_print("══════════════════════════════════════════════════════")
+    terminal_print(f"  level / building : {level.name} / {level.building_name}")
+    terminal_print(f"  devices          : {jax.devices()}")
+    terminal_print(f"  agents           : {cfg.num_agents}")
+    terminal_print(f"  observation      : {obs_dim}  (radar bins: {cfg.radar_bins})")
+    terminal_print("  action           : 3D continuous force")
+    terminal_print(f"  model parameters : {parameter_count:,}")
+    terminal_print(f"  environments     : {training.num_envs:,}")
+    terminal_print(f"  rollout / updates: {training.num_steps} / {num_updates}")
+    terminal_print(f"  eval map         : {evaluation_level.building_name}")
+    terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}")
+    terminal_print(f"  terminal logging : every {logging.terminal_logging_frequency}; warmup={logging.terminal_log_warmup}; init={logging.terminal_log_init}")
+    terminal_print(f"  PPO critic units : {training.value_normalization}; actor/value clip "
+          f"{training.actor_clip_eps}/{training.value_clip_eps}; entropy {training.entropy_mode}")
+    terminal_print(f"  idle penalty     : {level.reward.no_movement_termination_penalty} (effective reward config)")
     if training.training_noise:
-        print(f"  training noise   : uniform pre-tanh +/-{training.noise_level:g}")
-    print(f"  total env steps  : {total_steps:,}")
-    print(f"  output           : {destination.resolve()}")
+        terminal_print(f"  training noise   : uniform pre-tanh +/-{training.noise_level:g}")
+    terminal_print(f"  total env steps  : {total_steps:,}")
+    terminal_print(f"  output           : {display_path(destination)}")
     if wandb_run is not None:
-        print(f"  W&B              : {wandb_run.url}")
-    print("──────────────────────────────────────────────────────")
-    log_every = max(1, num_updates // 200)
+        terminal_print(f"  W&B              : {wandb_run.url}")
+    terminal_print("──────────────────────────────────────────────────────")
+    log_every = logging.terminal_logging_frequency
     start_time = time.perf_counter()
 
     # A complete rollout is one compiled device program.  In particular, do
@@ -427,6 +610,13 @@ def train_3d(
                 resets,
             ) = carry
             obs = jax.vmap(observations)(states)
+            critic_obs = obs
+            if privileged:
+                critic_agent, critic_global = jax.vmap(collect_critic_features)(states)
+                critic_obs = assemble_privileged_observations_3d(
+                    obs, critic_agent, critic_global, states.active,
+                    include_base_vector=not cfg.observe_base_vector,
+                )
             split = jax.vmap(lambda key: jax.random.split(key))(keys)
             next_keys, action_roots = split[:, 0], split[:, 1]
             agent_keys = jax.vmap(lambda key: jax.random.split(key, cfg.num_agents))(
@@ -435,11 +625,11 @@ def train_3d(
             comm_masks, in_base_range, base_masks, base_sig_in, base_val_in = (
                 _communication_inputs(states, cfg, base_valid, base_signature, base_value)
             )
-            share_step = (step_index % comm_cadence) == 0
-            comm_masks = comm_masks & share_step
-            base_masks = base_masks & share_step
+            share_step = communication_due_3d(states.step, comm_cadence)
+            comm_masks = comm_masks & share_step[:, None, None]
+            base_masks = base_masks & share_step[:, None]
 
-            def policy_one(obs_e, keys_e, ah, sig, val, ch, cm, active, bs, bv, bm, rst):
+            def policy_one(obs_e, keys_e, ah, sig, val, ch, cm, active, bs, bv, bm, rst, critic_e=None):
                 return model.rollout_step_recurrent(
                     obs_e,
                     keys_e,
@@ -453,6 +643,7 @@ def train_3d(
                     base_signature=bs,
                     base_value=bv,
                     base_memory_mask=bm,
+                    critic_obs=critic_e if privileged else None,
                 )
 
             (
@@ -475,7 +666,8 @@ def train_3d(
                 base_sig_in,
                 base_val_in,
                 base_masks,
-                resets,
+                resets | ~states.active,
+                **({"critic_e": critic_obs} if privileged else {}),
             )
             # Mirror robust evaluation: perturb pre-tanh actions with bounded
             # uniform noise. Keep the sampled policy actions and their
@@ -497,6 +689,7 @@ def train_3d(
                 executed_actions = actions + action_noise
             else:
                 executed_actions = actions
+            executed_actions = jnp.where(states.active[..., None], executed_actions, 0.0)
             next_states, rewards, dones, info = env_step.batched(
                 states, jnp.tanh(executed_actions)
             )
@@ -530,15 +723,21 @@ def train_3d(
                 "chain_gap": info["chain_gap"],
                 "target_found": info["target_found"],
                 "reward_success": info["reward_success"],
+                "no_movement_termination": info["no_movement_termination"],
                 "success": info["success"],
                 "global_target_found": info["global_target_found"],
+                "idle_terminated": info["idle_terminated"],
                 "chain_gap_dist": info["chain_gap_dist"],
                 "chain_progress_pct": info["chain_progress_pct"],
                 "global_coverage": info["global_coverage"],
                 "terminal_target_pos": info["terminal_target_pos"],
                 "terminal_base_pos": states.base_pos,
                 "spawn_pair_attempts": states.spawn_pair_attempts,
+                **{name: info[name] for name in path_stat_names},
             }
+            if privileged:
+                transition["critic_agent_features"] = critic_agent
+                transition["critic_global_features"] = critic_global
             next_carry = (
                 next_states,
                 next_keys,
@@ -571,11 +770,24 @@ def train_3d(
         )
         final_states, _, _, _, _, final_critic_hidden, _, _, _, _ = carry
         final_obs = jax.vmap(observations)(final_states)
+        final_critic_obs = final_obs
+        if privileged:
+            final_agent, final_global = jax.vmap(collect_critic_features)(final_states)
+            final_critic_obs = assemble_privileged_observations_3d(
+                final_obs, final_agent, final_global, final_states.active,
+                include_base_vector=not cfg.observe_base_vector,
+            )
 
-        def value_one(obs_e, hidden_e):
-            return model.get_value_recurrent(obs_e, hidden_e, jnp.zeros(cfg.num_agents))[1]
+        def value_one(obs_e, hidden_e, active_e, critic_e=None):
+            return model.get_value_recurrent(
+                obs_e, hidden_e, ~active_e, active=active_e,
+                critic_obs=critic_e if privileged else None,
+            )[1]
 
-        final_values = jax.vmap(value_one)(final_obs, final_critic_hidden)
+        final_values = jax.vmap(value_one)(
+            final_obs, final_critic_hidden, final_states.active,
+            **({"critic_e": final_critic_obs} if privileged else {}),
+        )
         return (*carry, final_values, rollout)
 
     rollout_jit = nnx.jit(rollout_impl)
@@ -642,6 +854,9 @@ def train_3d(
             episode_found = np.maximum(
                 episode_found, rollout_host["global_target_found"][step_index]
             )
+            episode_idle = np.maximum(
+                episode_idle, rollout_host["idle_terminated"][step_index]
+            )
             episode_gap = rollout_host["chain_gap_dist"][step_index]
             episode_progress_pct = rollout_host["chain_progress_pct"][step_index]
             episode_coverage = rollout_host["global_coverage"][step_index]
@@ -663,6 +878,10 @@ def train_3d(
                     base_values=rollout_host["base_values"][step_index],
                     base_memory_masks=rollout_host["base_memory_masks"][step_index],
                     critic_obs=rollout_host["obs"][step_index],
+                    critic_agent_features=(rollout_host["critic_agent_features"][step_index]
+                                           if privileged else None),
+                    critic_global_features=(rollout_host["critic_global_features"][step_index]
+                                            if privileged else None),
                 )
             )
             completed_indices = np.flatnonzero(dones_host)
@@ -671,11 +890,14 @@ def train_3d(
                 window_len.append(int(episode_lengths[index]))
                 window_succ.append(float(episode_success[index]))
                 window_fnd.append(float(episode_found[index]))
+                window_idle.append(float(episode_idle[index]))
                 window_gap.append(float(episode_gap[index]))
                 window_prog_pct.append(float(episode_progress_pct[index]))
                 window_cov.append(float(episode_coverage[index]))
                 window_pair_attempts.append(int(rollout_host["spawn_pair_attempts"][step_index, index]))
                 if episode_success[index] > 0.5:
+                    for name, window in window_path_stats.items():
+                        window.append(float(rollout_host[name][step_index, index]))
                     target_distance = np.linalg.norm(
                         rollout_host["terminal_target_pos"][step_index, index]
                         - rollout_host["terminal_base_pos"][step_index, index]
@@ -690,6 +912,7 @@ def train_3d(
             episode_lengths[completed_indices] = 0
             episode_success[completed_indices] = 0.0
             episode_found[completed_indices] = 0.0
+            episode_idle[completed_indices] = 0.0
             # These are read-only host views of per-step rollout data, and
             # are overwritten on the next step rather than accumulated across
             # an episode.  They therefore do not need resetting here.
@@ -754,7 +977,7 @@ def train_3d(
         window_full = len(window_ret) == window_ret.maxlen
         with history_path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
-        if update % log_every == 0 or update == resume.start_update + 1:
+        if update % log_every == 0 and (window_full or logging.terminal_log_warmup):
             eta_m, eta_s = divmod(int(eta_seconds), 60)
             eta_h, eta_m = divmod(eta_m, 60)
             eta = f"{eta_h}h{eta_m:02d}m" if eta_h else f"{eta_m}m{eta_s:02d}s"
@@ -768,8 +991,8 @@ def train_3d(
                 rejected = (1.0 - len(window_pair_attempts) / sum(window_pair_attempts)) if window_full else 0.0
                 display_rejected = f"{rejected:>5.1%}" if window_full else " ----"
                 pair_stat = f"  pair_reject={display_rejected}"
-            print(
-                f"[{datetime.now():%H:%M:%S}]  [{update:>4}/{num_updates}]  "
+            terminal_print(
+                f" [{update:>4}/{num_updates}]  "
                 f"steps={steps_done:>12,}  sps={sps:>6,.0f}  "
                 f"ep_len={display_length}  cov={display_coverage}  "
                 f"found={display_found}  chain={display_progress}  "
@@ -777,7 +1000,7 @@ def train_3d(
             )
             if not window_full:
                 current_steps = np.asarray(states.step)
-                print(
+                terminal_print(
                     f"         [warmup] completed_episodes={len(window_ret)}/{window_ret.maxlen} | "
                     f"env_steps: min={int(current_steps.min())} "
                     f"mean={float(current_steps.mean()):.1f} max={int(current_steps.max())}"
@@ -790,6 +1013,8 @@ def train_3d(
                     "ppo/entropy": latest_stats["entropy"],
                     "ppo/approx_kl": latest_stats["approx_kl"],
                     "ppo/clip_fraction": latest_stats["clip_fraction"],
+                    **{name: value for name, value in latest_stats.items()
+                       if name.startswith(("critic/", "policy/"))},
                     "perf/sps": sps,
                     "perf/ppo_updates": update,
                     "perf/global_step": steps_done,
@@ -799,6 +1024,7 @@ def train_3d(
                     "train/ep_return": latest_stats["mean_episode_return"],
                     "train/ep_length": latest_stats["mean_episode_length"],
                     "train/success_rate": latest_stats["rolling_success_rate"],
+                    "train/no_movement_termination_rate": float(np.mean(window_idle)) * 100.0,
                     "train/target_found_rate": latest_stats["target_found_rate"],
                     "train/chain_progress_pct": latest_stats["chain_progress_pct"],
                     "train/ep_length_reduction": (1.0 - latest_stats["mean_episode_length"] / cfg.max_steps) * 100.0,
@@ -808,7 +1034,11 @@ def train_3d(
                     "train/success_target_distance_max_norm": latest_stats["success_target_distance_max_norm"],
                     **{f"rewards/{name}": latest_stats[f"reward_{name}"] for name in window_rewards},
                 })
-            wandb.log(wandb_logs, step=steps_done)
+            for name, window in window_path_stats.items():
+                if len(window) == window.maxlen:
+                    wandb_logs[f"train/{name}"] = float(np.mean(window))
+            # Keep this step open for evaluation metrics from the same update.
+            wandb.log(wandb_logs, step=steps_done, commit=False)
         checkpoint_due = evaluation.save_model and schedule_due(
             update, evaluation.checkpoint_freq, evaluation.checkpoint_offset
         )
@@ -823,14 +1053,20 @@ def train_3d(
                 num_steps=training.num_steps,
                 prior_history=resume.prior_history,
             )
-        # Regular evaluations/replays require the training-success gate. The
-        # final update always receives metrics; its checkpoint-scoped robust
-        # evaluation and replay run only after the checkpoint is saved below.
+        # The final update bypasses the gate. Its training metric uses the same
+        # mode as earlier evaluations; final robustness is a separate phase.
         is_final_update = update == num_updates
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
         )
         evaluation_enabled = threshold_met or is_final_update
+        if schedule_due(update, evaluation.eval_freq, evaluation.eval_offset) and not evaluation_enabled:
+            terminal_print(
+                f"[EVAL update={update}] skipped: training success "
+                f"{latest_stats['rolling_success_rate']:.1%} < "
+                f"{evaluation.eval_min_train_success:.1%} required.",
+                flush=True,
+            )
         eval_due = is_final_update or (
             schedule_due(update, evaluation.eval_freq, evaluation.eval_offset)
             and evaluation_enabled
@@ -846,30 +1082,54 @@ def train_3d(
         )
         if eval_due or replay_due:
             evaluation_started = time.perf_counter()
-            # Periodic evaluation is one unperturbed generalization pass. M02
-            # may request a second fixed-layout pass solely for spatial heatmaps;
-            # the five-pass robustness ensemble remains standalone-only.
-            evaluation_output = evaluate_suite_3d(
-                model,
-                level,
-                episodes=evaluation.eval_parallel_envs,
-                max_steps=cfg.max_steps,
-                return_episode_info=evaluation.training_heatmap_creation,
+            def report_run(metrics, index, runs, *, prefix="EVAL "):
+                evaluation_row(
+                    metrics, label=f"[{prefix} {index}/{runs}]", update=update,
+                    total=num_updates, episodes=evaluation.eval_parallel_envs,
+                )
+            # Replay-only updates do not create metrics or advance the hold.
+            eval_metrics, evaluation_result, stop_training = _evaluate_training_metrics_3d(
+                model, evaluation_level, eval_hold,
+                eval_due=eval_due, on_run=report_run,
             )
-            if evaluation.training_heatmap_creation:
-                eval_metrics, episode_info = evaluation_output
-            else:
-                eval_metrics = evaluation_output
-            latest_stats.update(eval_metrics)
+            eval_wandb_logs = {}
+            if eval_metrics is not None:
+                latest_stats.update(eval_metrics)
+                eval_wandb_logs = _report_evaluation_3d(
+                    eval_metrics, evaluation_level, update=update, total=num_updates, steps=steps_done,
+                    phase="eval", wandb_run=wandb_run,
+                    history_path=destination / "evaluation_history.jsonl",
+                    hold=eval_hold,
+                )
+                if stop_training:
+                    terminal_print("[EARLY-STOP]")
+            if eval_metrics is not None and (is_final_update or stop_training):
+                if evaluation_result is None or int(evaluation_result[0]["eval_robustness_runs"]) == 1:
+                    from swarmecho.training.evaluate3d import collect_robust_evaluation_3d
+                    evaluation_result = collect_robust_evaluation_3d(
+                        model, evaluation_level,
+                        on_run=functools.partial(report_run, prefix="FINAL"),
+                    )
+                else:
+                    terminal_print("[FINAL] reusing this update's robust runs.")
+                final_robust_result = evaluation_result
+                final_metrics, _ = final_robust_result
+                latest_stats.update({f"final_{key}": value for key, value in final_metrics.items()})
+                _report_evaluation_3d(
+                    final_metrics, evaluation_level, update=update, total=num_updates, steps=steps_done,
+                    phase="final_eval", wandb_run=wandb_run,
+                    history_path=destination / "evaluation_history.jsonl",
+                    hold=eval_hold,
+                )
             suffix = artifact_suffix(update, steps_done)
-            if evaluation.training_heatmap_creation:
+            if evaluation_result is not None and (evaluation.training_heatmap_creation or is_final_update or stop_training):
+                artifact_metrics, episode_info = evaluation_result
+                artifact_runs = int(artifact_metrics["eval_robustness_runs"])
                 info_path = save_eval_info_csv(
                     destination / "artifacts" / "train" / "data" / f"eval_info_{suffix}.csv",
                     target_positions=episode_info["target_positions"],
                     base_positions=episode_info["base_positions"],
-                    successes=episode_info["successes"],
-                    delivered=episode_info["delivered"],
-                    visually_found=episode_info["visually_found"],
+                    stage_rates=episode_info["stage_rates"],
                     final_chain_lengths=episode_info["final_chain_lengths"],
                 )
                 layout_path = None
@@ -884,11 +1144,13 @@ def train_3d(
                     {
                         "format": "swarmecho-3d-eval-heatmap/v1",
                         "data_file": info_path.name,
-                        "map_name": level.building_name, "building_snapshot": building_snapshot(level.building),
-                        "world_size_m": level.building.world_size_m.tolist(),
+                        "map_name": evaluation_level.building_name, "building_snapshot": building_snapshot(evaluation_level.building),
+                        "world_size_m": evaluation_level.building.world_size_m.tolist(),
                         "training_update": update,
                         "environment_steps": steps_done,
                         "artifact_scope": "train",
+                        "robustness_runs": artifact_runs,
+                        "action_noise_max": evaluation.eval_action_noise_max if artifact_runs > 1 else 0.0,
                         "obstacle_layout_mode": "fixed" if cfg.num_obstacles else "free_space",
                         **({"layout_file": layout_path.name} if layout_path else {}),
                     },
@@ -901,14 +1163,14 @@ def train_3d(
                         "steps": steps_done,
                         "episodes": evaluation.eval_parallel_envs,
                         "data_path": str(info_path),
-                        **eval_metrics,
+                        **artifact_metrics,
                     },
                 )
-            if replay_due:
+            if replay_due and not stop_training:
                 replay_started = time.perf_counter()
                 replay_bounds = evaluation.eval_fixed_obstacle_bounds
                 eval_states, eval_rewards = evaluate_model_3d(
-                    model, level, max_steps=cfg.max_steps,
+                    model, evaluation_level, max_steps=cfg.max_steps,
                     obstacle_min=(
                         None if not replay_bounds else jnp.asarray(replay_bounds)[:, :3]
                     ),
@@ -919,18 +1181,19 @@ def train_3d(
                 write_replay(
                     replay_dir / f"eval_{suffix}",
                     eval_states,
-                    map_name=level.building_name, building=level.building,
+                    map_name=evaluation_level.building_name, building=evaluation_level.building,
                     dt=cfg.dt,
                     reward_terms=eval_rewards,
                     metadata={
-                        "world_size_m": level.building.world_size_m.tolist(),
-                        "cell_size_m": level.building.cell_size_m,
+                        "world_size_m": evaluation_level.building.world_size_m.tolist(),
+                        "cell_size_m": evaluation_level.building.cell_size_m,
                         "coverage_voxel_size_m": (
-                            level.building.cell_size_m
+                            evaluation_level.building.cell_size_m
                             if cfg.coverage_voxel_size is None
                             else cfg.coverage_voxel_size
                         ),
                         "comm_radius_m": cfg.comm_radius,
+                        "allow_redundancy_reward": level.reward.allow_redundancy_reward,
                         "comm_radius_base_m": cfg.comm_radius_base,
                         "visual_radius_m": cfg.visual_radius,
                         "training_update": update,
@@ -939,49 +1202,16 @@ def train_3d(
                     },
                     progress=False,
                 )
-                print(
+                terminal_print(
                     f"[REPLAY] collected {len(eval_states) - 1} steps and created replay in "
                     f"{time.perf_counter() - replay_started:.1f}s.",
                     flush=True,
                 )
-            eval_envs = int(evaluation.eval_parallel_envs)
-            if eval_envs >= 1000:
-                par_envs = (
-                    f"{eval_envs // 1000}k"
-                    if eval_envs % 1000 == 0
-                    else f"{eval_envs / 1000:.1f}k"
-                )
-            else:
-                par_envs = str(eval_envs)
-            print(
-                f"[EVAL] {'':50}"
-                f"ep_len={latest_stats['eval_episode_length']:>6.0f}  "
-                f"cov={latest_stats['eval_coverage']:>5.1%}  "
-                f"found={latest_stats['eval_target_found_rate']:>5.1%}  "
-                f"chain={latest_stats['eval_chain_progress_pct']:>5.1f}%  "
-                f"succ={latest_stats['eval_success']:>5.1%}  "
-                f"par_envs={par_envs}"
-            )
-            eval_wandb_logs = {
-                "eval/ep_return": latest_stats["eval_return"],
-                "eval/ep_length": latest_stats["eval_episode_length"],
-                "eval/chain_progress_pct": latest_stats["eval_chain_progress_pct"],
-                "eval/ep_length_reduction": (
-                    1.0 - latest_stats["eval_episode_length"] / cfg.max_steps
-                ) * 100.0,
-                "eval/success_rate": latest_stats["eval_success"],
-                "eval/target_found_rate": latest_stats["eval_target_found_rate"],
-                "eval/map_coverage_pct": latest_stats["eval_coverage"] * 100.0,
-            }
-            if wandb_run is not None:
-                import wandb
-                wandb.log(eval_wandb_logs, step=steps_done)
             record_timing(update, "evaluation_and_artifacts", total_s=time.perf_counter() - evaluation_started)
-            if evaluation.early_exit and latest_stats["eval_success"] >= evaluation.early_exit_threshold:
-                print(
-                    f"  [eval-early-exit] success {latest_stats['eval_success']:.1%} >= "
-                    f"{evaluation.early_exit_threshold:.1%}"
-                )
+            if stop_training:
+                if wandb_run is not None:
+                    import wandb
+                    wandb.log({}, step=steps_done, commit=True)
                 broadcast_early_stop_metrics(
                     wandb_run,
                     evaluation,
@@ -993,6 +1223,9 @@ def train_3d(
                 )
                 num_updates = update
                 break
+        if wandb_run is not None:
+            import wandb
+            wandb.log({}, step=steps_done, commit=True)
 
     checkpoint = None
     if evaluation.save_model:
@@ -1006,15 +1239,16 @@ def train_3d(
             num_steps=training.num_steps,
             prior_history=resume.prior_history,
         )
-        if evaluation.eval_video:
-            _create_final_checkpoint_evaluation(model, level, checkpoint, destination)
+        _create_final_checkpoint_evaluation(
+            model, level, checkpoint, destination, result=final_robust_result,
+        )
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"
     )
     if wandb_run is not None:
         wandb_run.finish()
-    print("──────────────────────────────────────────────────────")
-    print(f"  Training complete ✓  checkpoint: {checkpoint or 'saving disabled'}")
+    terminal_print("──────────────────────────────────────────────────────")
+    terminal_print(f"Training complete ✓  checkpoint: {display_path(checkpoint) if checkpoint else 'saving disabled'}")
     return checkpoint, latest_stats
 
 
@@ -1093,7 +1327,7 @@ def _collect_replay_3d_impl(
                 current_state.pos, current_state.base_pos,
                 current_state.solid_min, current_state.solid_max,
             )
-        share_now = (step_index % comm_cadence) == 0
+        share_now = communication_due_3d(current_state.step, comm_cadence)
         comm_mask = comm_mask & share_now
         base_memory_mask = (
             current_base_valid & in_base_range & ~current_state.target_known & share_now
@@ -1231,8 +1465,9 @@ def evaluate_model_3d(
     obstacle_max: np.ndarray | None = None,
 ) -> tuple[list, np.ndarray]:
     """Run one deterministic trained-policy episode for replay/inspection."""
+    level = resolve_evaluation_level_3d(level)
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
+    reset, step, observations, _ = _evaluation_env_fns(level)
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     timeline, rewards, episode_length = jax.device_get(
         _collect_replay_3d_jit(
@@ -1379,7 +1614,7 @@ def _run_parallel_evaluation_3d_jit(
                     state.solid_min, state.solid_max,
                 )
             base_memory_mask = base_valid & in_base_range & ~state.target_known
-            share_now = (step_index % comm_cadence) == 0
+            share_now = communication_due_3d(state.step, comm_cadence)
             comm_mask = comm_mask & share_now
             base_memory_mask = base_memory_mask & share_now
 
@@ -1416,9 +1651,14 @@ def _run_parallel_evaluation_3d_jit(
                     minval=-action_noise_max,
                     maxval=action_noise_max,
                 )
-            executed_actions = jnp.tanh(means)
+            executed_actions = jnp.where(state.active[:, None], jnp.tanh(means), 0.0)
             next_state = step(state, executed_actions)
             rewards, _ = rewards_3d(state, next_state, reward_cfg, cfg)
+            target_found_or_delivered = (
+                next_state.base_target_known
+                if reward_cfg.target_found_requires_delivery
+                else jnp.any(next_state.target_known)
+            )
             live = ~completed
             if reward_cfg.chain_reward_system == "obstacle_geodesic":
                 _, step_chain_progress, _, _ = obstacle_chain_diagnostics_3d(next_state)
@@ -1454,7 +1694,7 @@ def _run_parallel_evaluation_3d_jit(
                 jnp.where(live, returns + jnp.sum(rewards), returns),
                 lengths + live.astype(jnp.int32),
                 successes | (live & next_state.success),
-                target_found | (live & next_state.base_target_known),
+                target_found | (live & target_found_or_delivered),
                 jnp.where(live, step_chain_progress, chain_progress_pct),
                 jnp.where(
                     live,
@@ -1510,8 +1750,9 @@ def evaluate_suite_3d(
     layout_seed_offset: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
     """Evaluate a deterministic 3D batch without collecting replay frames."""
+    level = resolve_evaluation_level_3d(level)
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
+    reset, step, observations, _ = _evaluation_env_fns(level)
     layout_mode = layout_mode or ("fixed" if cfg.num_obstacles else "per_environment")
     fixed_layout = bool(cfg.num_obstacles)
     layout_seed_offset = 30_000 if layout_seed_offset is None else layout_seed_offset
@@ -1578,6 +1819,7 @@ def evaluate_suite_3d(
         "eval_return": float(np.mean(returns)),
         "eval_success": float(np.mean(successes)),
         "eval_target_found_rate": float(np.mean(target_found)),
+        "eval_visually_found_rate": float(np.mean(visually_found)),
         "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
         "eval_coverage": float(np.mean(terminal_coverage)),
         "eval_episode_length": float(np.mean(lengths)),
@@ -1607,6 +1849,7 @@ def evaluate_suite_3d_with_action_capture(
     max_steps: int | None = None,
 ) -> tuple[dict[str, float], dict[str, np.ndarray], dict[str, object]]:
     """Evaluate and capture one selected lane's executed actions in one JIT."""
+    level = resolve_evaluation_level_3d(level)
     normalized = result.lower()
     if normalized in {"success", "successful"}:
         capture_result = "success"
@@ -1618,7 +1861,7 @@ def evaluate_suite_3d_with_action_capture(
         raise ValueError("offset must be non-negative.")
 
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
+    reset, step, observations, _ = _evaluation_env_fns(level)
     fixed_layout = bool(cfg.num_obstacles)
     reference_state = (
         reset(jax.random.PRNGKey(level.training.seed + 30_000))
@@ -1683,6 +1926,7 @@ def evaluate_suite_3d_with_action_capture(
         "eval_return": float(np.mean(returns)),
         "eval_success": float(np.mean(successes)),
         "eval_target_found_rate": float(np.mean(target_found)),
+        "eval_visually_found_rate": float(np.mean(visually_found)),
         "eval_chain_progress_pct": float(np.mean(chain_progress_pct)),
         "eval_coverage": float(np.mean(terminal_coverage)),
         "eval_episode_length": float(np.mean(lengths)),
@@ -1776,8 +2020,9 @@ def replay_recorded_actions_3d(
     max_steps: int | None = None,
 ) -> tuple[list, np.ndarray]:
     """Materialise one evaluation lane without invoking the policy again."""
+    level = resolve_evaluation_level_3d(level)
     cfg = level.env
-    reset, step, _, _ = make_baseline_3d_fns(level.building, cfg, plan_geodesic=level.reward.chain_reward_system == "obstacle_geodesic")
+    reset, step, _, _ = _evaluation_env_fns(level)
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps, len(actions))
     timeline, rewards, episode_length = jax.device_get(
         _replay_recorded_actions_3d_jit(
@@ -1802,11 +2047,10 @@ def replay_recorded_actions_3d(
 
 
 def main() -> None:
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Loading level configuration and building...", flush=True)
     level = load_level_3d_cli(sys.argv[1:])
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INIT] Level and building loaded.", flush=True)
-    checkpoint, _ = train_3d(level)
-    print(f"3D training complete: {checkpoint or 'checkpoint saving disabled'}")
+    if level.logging.terminal_log_init:
+        terminal_print("[INIT] Level and building loaded.")
+    train_3d(level)
 
 
 if __name__ == "__main__":

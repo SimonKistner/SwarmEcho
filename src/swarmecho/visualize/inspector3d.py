@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -24,9 +25,9 @@ HTML = r"""<!doctype html>
 <style>
 :root{color-scheme:dark;--bg:#090e18;--panel:#111a2a;--line:#26344d;--cyan:#22d3ee;--text:#e5eefc;--muted:#91a4c3}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,system-ui,sans-serif;overflow:hidden}
-header{height:58px;display:flex;align-items:center;gap:18px;padding:0 20px;background:#0d1523;border-bottom:1px solid var(--line)}
+header{height:78px;display:grid;grid-template-columns:230px minmax(0,1fr) 310px;grid-template-rows:40px 37px;align-items:center;background:#0d1523;border-bottom:1px solid var(--line)}
 h1{font-size:18px;margin:0;letter-spacing:.04em}.tag{color:var(--cyan);font-weight:700}.meta{color:var(--muted)}
-#layout{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 58px)}#scene{min-width:0}.panel{padding:18px;background:var(--panel);border-left:1px solid var(--line);overflow:auto}
+#layout{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 78px)}#scene{min-width:0}.panel{padding:18px;background:var(--panel);border-left:1px solid var(--line);overflow:auto}
 .card{padding:14px;margin-bottom:12px;background:#0c1422;border:1px solid var(--line);border-radius:10px}.label{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
 .value{font-size:24px;font-weight:750}.row{display:flex;justify-content:space-between;gap:12px;margin:7px 0;color:var(--muted)}.row b{color:var(--text)}
 button{border:1px solid #325173;background:#15253a;color:var(--text);padding:8px 12px;border-radius:7px;cursor:pointer}button:hover{border-color:var(--cyan)}
@@ -36,46 +37,110 @@ input[type=range]{width:100%;accent-color:var(--cyan)}select,input[type=text]{wi
 .agreement-buttons{display:flex;flex-wrap:wrap;gap:6px}.agreement-buttons button{padding:6px 9px;font-size:12px}.agreement-buttons button.selected{border-color:var(--cyan);background:#16445a;color:#fff}.stat-row{display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:10px;margin:7px 0}.stat-row>span{color:var(--muted)}.stat-row b{display:grid;grid-template-columns:4ch auto;gap:5px;color:var(--text);min-width:90px;text-align:right;white-space:nowrap}.stat-row b span:first-child{text-align:right}.stat-row b span:last-child{color:var(--muted);font-weight:400}
 .known-list{display:grid;gap:6px}.known-item{width:100%;font:inherit;text-align:left;color:#667893;background:#0c1422;border:1px solid var(--line);border-radius:7px;padding:7px 10px;pointer-events:none}.known-item.known{color:var(--text);border-color:#a3e635;background:rgba(163,230,53,.14);box-shadow:0 0 0 1px rgba(163,230,53,.25)}
 #artifactPicker{position:relative;min-width:180px;width:min(440px,32vw)}#artifactPicker summary{cursor:pointer;padding:9px 12px;border:1px solid #325173;border-radius:7px;background:#15253a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artifact-popover{position:absolute;top:calc(100% + 8px);left:0;display:grid;grid-template-columns:minmax(200px,1fr) minmax(260px,1.3fr);width:min(720px,80vw);background:#0c1422;border:1px solid #39516e;border-radius:10px;box-shadow:0 18px 45px #0009;z-index:1000;overflow:hidden}#artifactMenu,#artifactSubmenu{max-height:65vh;overflow:auto;padding:8px}#artifactSubmenu{border-left:1px solid #26344d}.artifact-entry{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;margin:3px 0;text-align:left;overflow-wrap:anywhere}.artifact-entry.selected{background:#204457;border-color:#22d3ee}.artifact-count{font-size:11px;color:#91a4c3;white-space:nowrap}
+header h1{grid-column:1;grid-row:1;font-size:14px;padding:0 12px;white-space:nowrap}
+.header-selection{grid-column:2;grid-row:1;display:flex;align-items:center;gap:20px;min-width:0;padding-right:16px}
+#artifactPicker{flex:0 1 650px;min-width:0;width:min(650px,100%)}#artifactPicker summary{padding:6px 10px;font-size:13px}
+.header-refresh{grid-column:3;grid-row:1;display:flex;justify-content:flex-end;gap:10px;padding:0 16px}.header-refresh button{padding:6px 10px;white-space:nowrap}
+.header-status{grid-column:3;grid-row:2;padding:0 16px;text-align:right;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.header-help{grid-column:1;grid-row:2;padding-left:12px;font-size:11px;color:var(--muted)}
+#replayName{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.artifact-popover{grid-template-columns:minmax(0,1fr) 460px;width:min(950px,calc(100vw - 250px));max-width:none}
+#artifactMenu .artifact-entry{padding:8px 10px}#artifactMenu .artifact-entry>span:first-child{min-width:0}#artifactSubmenu>.label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 2px}
+.artifact-navigation{grid-column:2;grid-row:2;display:flex;justify-self:center;align-items:center;gap:8px}.artifact-navigation button{padding:5px 12px}.artifact-navigation button:first-child,.artifact-navigation button:last-child{min-width:38px;margin:0 6px}
+button:disabled{opacity:.35;cursor:default}button:disabled:hover{border-color:#325173}.artifact-navigation button[aria-pressed="true"]{background:#204457;border-color:var(--cyan)}
+.artifact-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 8px}.artifact-column-title{position:sticky;top:-8px;background:#0c1422;padding:7px 4px;margin-bottom:3px;z-index:1}
+.artifact-cell{position:relative;display:flex;min-width:0;align-items:stretch}.artifact-cell .artifact-entry{flex:1;min-width:0;margin:0;font-size:12px;padding:7px 30px 7px 9px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.artifact-star{position:absolute;right:3px;top:50%;transform:translateY(-50%);padding:3px 5px;border:0;border-radius:4px;background:transparent;color:#91a4c3;font-size:16px;line-height:20px}.artifact-star:hover{background:#ffffff12;color:#fbbf24}.artifact-star:focus-visible{outline:1px solid var(--cyan)}.artifact-star.starred,.run-star{color:#fbbf24}.artifact-count{display:flex;gap:6px;align-items:center;flex-shrink:0}
+@media(max-width:1200px){.header-selection{gap:10px}#replayName{display:none}.artifact-popover{grid-template-columns:minmax(0,1fr) 410px}.header-refresh{gap:6px;padding:0 12px}}
 </style></head><body>
-<header><h1><span class="tag">SwarmEcho</span> 3D Inspector</h1><select id="replaySelect" hidden aria-hidden="true"></select><details id="artifactPicker"><summary id="artifactPickerButton">Choose a run…</summary><div class="artifact-popover"><div id="artifactMenu"></div><div id="artifactSubmenu"><p class="meta">Select a run to see its artifacts.</p></div></div></details><button id="loadReplay" type="button" title="Load selected artifact">Load</button><button id="refreshCurrent" type="button" title="Reload only the currently selected artifact from disk">Refresh current</button><button id="refreshReplays" type="button" title="Rediscover all available artifacts">Refresh all</button><span id="loading" class="loading hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="loadingText">Loading...</span></span><span id="replayDiscovery" class="meta"></span><span id="replayName" class="meta"></span><span class="meta">Drag to orbit · wheel to zoom · right-drag to pan</span></header>
+<header>
+<h1><span class="tag">SwarmEcho</span> 3D Inspector</h1>
+<div class="header-selection"><select id="replaySelect" hidden aria-hidden="true"></select><details id="artifactPicker"><summary id="artifactPickerButton">Choose a run…</summary><div class="artifact-popover"><div id="artifactMenu"></div><div id="artifactSubmenu"><p class="meta">Select a run to see its artifacts.</p></div></div></details><span id="replayName" class="meta"></span></div>
+<div class="header-refresh"><button id="refreshRun" type="button" title="Look for new entries only in the selected run">Refresh run</button><button id="refreshReplays" type="button" title="Look for new runs and entries in all runs">Refresh all</button></div>
+<span class="header-help">Drag to orbit · scroll to zoom</span>
+<div class="artifact-navigation" role="group" aria-label="Navigate items within the current run"><button id="previousArtifact" title="Previous item (Left arrow)" disabled>←</button><button id="heatmapMode" aria-pressed="false" disabled>Heatmap</button><button id="replayMode" aria-pressed="false" disabled>Replay</button><button id="nextArtifact" title="Next item (Right arrow)" disabled>→</button></div>
+<div class="header-status"><span id="loading" class="loading hidden" role="status" aria-live="polite"><span class="spinner"></span><span id="loadingText">Loading...</span></span><span id="replayDiscovery" class="meta"></span></div>
+</header>
 <div id="layout"><aside id="buildingPanel" class="panel" style="border-left:0;border-right:1px solid var(--line)"><div class="card"><div class="label">Building visibility</div><div id="storeyVisibility"></div><hr><label class="layer-control"><span><input id="showOuterWalls" type="checkbox"> Render outer walls</span></label><label class="layer-control"><span><input id="showRoof" type="checkbox"> Render roof</span></label><hr><label class="layer-control"><span><input id="showFloor" type="checkbox" checked> Dark tile floors</span></label><label class="layer-control"><span><input id="showCellGrid" type="checkbox" checked> Cell grid</span></label><label class="layer-control" style="margin-top:16px"><span>Wall transparency</span><span id="wallTransparencyValue" class="opacity-value">50%</span></label><input id="wallTransparency" type="range" min="0" max="100" step="1" value="50" aria-label="Wall transparency"><label class="layer-control"><span><input id="heightFade" type="checkbox"> Height fade (experimental)</span></label><label class="layer-control"><span>Fade starts at height</span><span id="heightFadeStartValue" class="opacity-value">0%</span></label><input id="heightFadeStart" type="range" min="0" max="95" step="1" value="0" disabled aria-label="Height fade start percentage"><p class="meta">Concrete walls. Height fade increases transparency upward, reaching the transparency setting at the top.</p><p id="buildingSource" class="meta"></p></div></aside><div id="scene"></div><aside class="panel">
-<div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><label style="display:block;margin-top:10px"><input id="loopReplay" type="checkbox"> Loop episode</label></div><div id="cameraControls" class="card"><div class="label">Camera</div><label class="layer-control"><span>Elevation</span><span id="cameraElevationValue" class="opacity-value">25°</span></label><input id="cameraElevation" type="range" min="-85" max="85" step="1" value="25" aria-label="Camera elevation in degrees"><label class="layer-control"><span><input id="autoRotate" type="checkbox" checked> Auto rotate</span><span id="rotateSpeedValue" class="opacity-value">20°/s</span></label><input id="rotateSpeed" type="range" min="-90" max="90" step="1" value="20" aria-label="Camera rotation speed in degrees per second"></div>
+<div class="card"><div class="label">Playback</div><div class="controls"><button id="play">▶ Play</button><button id="step">Step</button></div><input id="timeline" type="range" min="0" value="0"><div class="row"><span>Frame</span><b id="frame">0</b></div><div class="row"><span>Time</span><b id="time">0.0 s</b></div><select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><label style="display:block;margin-top:10px"><input id="loopReplay" type="checkbox"> Loop episode</label></div><div id="cameraControls" class="card"><div class="label">Camera</div><label class="layer-control"><span>Elevation</span><span id="cameraElevationValue" class="opacity-value">45°</span></label><input id="cameraElevation" type="range" min="-85" max="85" step="1" value="45" aria-label="Camera elevation in degrees"><label class="layer-control"><span><input id="autoRotate" type="checkbox"> Auto rotate</span><span id="rotateSpeedValue" class="opacity-value">10°/s</span></label><input id="rotateSpeed" type="range" min="-90" max="90" step="1" value="10" aria-label="Camera rotation speed in degrees per second"></div>
 <div class="card"><div class="label">Episode</div><div id="status" class="value">Exploring</div><div class="row"><span>Reward</span><b id="reward">—</b></div><div class="row"><span>Coverage</span><b id="coverage">0%</b></div><div class="row"><span>Known agents</span><b id="known">0</b></div><div class="row"><span>Base connected</span><b id="baseConn">0</b></div><div class="label" style="margin-top:16px">Target known</div><div id="knownList" class="known-list"></div></div>
 <div class="card"><div class="label">Layers</div><label class="layer-control"><span><input id="showCoverage" type="checkbox"> Coverage voxels</span><span id="coverageOpacityValue" class="opacity-value">2%</span></label><input id="coverageOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.02" aria-label="Coverage voxel opacity"><label class="layer-control"><span><input id="showVisualRange" type="checkbox"> Visual range</span><span id="visualOpacityValue" class="opacity-value">4.5%</span></label><input id="visualOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.045" aria-label="Visual range opacity"><label class="layer-control"><span><input id="showCommRange" type="checkbox"> Communication range</span><span id="commOpacityValue" class="opacity-value">2.5%</span></label><input id="commOpacity" class="opacity-control" type="range" min="0" max="1" step="0.001" value="0.025" aria-label="Communication range opacity"><label><input id="showLinks" type="checkbox" checked> Communication links</label><br><label><input id="showShell" type="checkbox" checked> Transparent shell</label></div>
 <div id="heatmapControls" class="card hidden"><div class="label">Heatmap categories</div><label><input id="heatmapShowChainSuccess" type="checkbox" checked> Chain success</label><br><label><input id="heatmapShowFoundDelivered" type="checkbox" checked> Found and delivered</label><br><label><input id="heatmapShowVisuallyFound" type="checkbox" checked> Visually found</label><br><label><input id="heatmapShowNotFound" type="checkbox" checked> Not found</label><div class="label" style="margin-top:16px">Confidence</div><div class="row"><span>Required agreement</span><b id="heatmapConfidenceValue">100%</b></div><input id="heatmapConfidence" type="range" min="1" max="100" step="1" value="100" aria-label="Required evaluation agreement"><div class="label" style="margin-top:16px">Selected target</div><div id="selectedPoint" class="meta">Click a point to create a replay command.</div><input id="heatmapCommand" type="text" readonly style="margin-top:8px" value=""><button id="copyHeatmapCommand" type="button" style="margin-top:8px">Copy command</button></div>
 <div id="replayLegend" class="card legend"><div class="label">Legend</div><span><i class="dot" style="background:#22d3ee"></i>Drone</span><span><i class="dot" style="background:#60a5fa"></i>Base</span><span><i class="dot" style="background:#fb7185"></i>Target</span><span><i class="dot" style="background:#fb7185"></i>Target-known drone / base</span><span><i class="dot" style="background:#a3e635"></i>Known area highlight</span></div>
 <div id="heatmapLegend" class="card legend hidden"><div class="label">Evaluation result</div><span><i class="dot" style="background:#22c55e"></i>Chain success</span><span><i class="dot" style="background:#3b82f6"></i>Found and delivered</span><span><i class="dot" style="background:#fbbf24"></i>Visually found</span><span><i class="dot" style="background:#ef4444"></i>Not found</span></div>
 </aside></div><script>
-let D,H,mode='replay',frame=0,playing=false,timer=null,camera=null,heatmapAgreement=1,rotationFrame=null,rotationTime=null,rendering=false,renderQueue=Promise.resolve();const $=id=>document.getElementById(id);const DEFAULT_CAMERA={eye:{x:1.45,y:1.45,z:Math.hypot(1.45,1.45)*Math.tan(25*Math.PI/180)},projection:{type:'perspective'}};
+let D,H,mode='replay',frame=0,playing=false,timer=null,camera=null,heatmapAgreement=1,rotationFrame=null,rotationTime=null,rendering=false,renderQueue=Promise.resolve();const $=id=>document.getElementById(id);const DEFAULT_CAMERA={eye:{x:1.45,y:1.45,z:Math.hypot(1.45,1.45)*Math.tan(45*Math.PI/180)},projection:{type:'perspective'}};
 function worldSize(){return D?.manifest?.world_size_m||H?.manifest?.world_size_m||[20,20,20]}
 function sceneAxes(){let axis=title=>({title,gridcolor:'#22304a'});return {xaxis:axis('X'),yaxis:axis('Y'),zaxis:axis('Z')}}
 function sceneLayout(revision){return {bgcolor:'#090e18',uirevision:revision,aspectmode:'data',...sceneAxes(),camera:camera||DEFAULT_CAMERA}}
 function renderPlot(traces,revision,extra={}){renderQueue=renderQueue.catch(()=>{}).then(()=>{if(camera)rememberCamera();rendering=true;return Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',scene:sceneLayout(revision),...extra},{responsive:true,displaylogo:false}).then(captureCamera).finally(()=>{rendering=false;rotationTime=null})});return renderQueue}
-function setLoading(active,message){$('loading').classList.toggle('hidden',!active);if(active)$('loadingText').textContent=message}
+function setLoading(active,message){$('loading').classList.toggle('hidden',!active);$('replayDiscovery').classList.toggle('hidden',active);if(active)$('loadingText').textContent=message}
 function setMode(nextMode){mode=nextMode;$('buildingPanel').style.visibility=(mode==='replay'||mode==='heatmap')?'visible':'hidden';playing=false;clearTimeout(timer);$('play').textContent='▶ Play';let replayCards=[$('timeline').closest('.card'),$('status').closest('.card'),$('showCoverage').closest('.card')];replayCards.forEach(card=>card.classList.toggle('hidden',mode!=='replay'));$('replayLegend').classList.toggle('hidden',mode!=='replay');$('heatmapControls').classList.toggle('hidden',mode!=='heatmap');$('heatmapLegend').classList.toggle('hidden',mode!=='heatmap');if($('roadmapControls'))$('roadmapControls').classList.toggle('hidden',mode!=='roadmap');if(mode==='heatmap'){ensureHeatmapUi();$('heatmapStats').classList.remove('hidden');renderHeatmapAgreementButtons();updateHeatmapStats()}else if($('heatmapStats'))$('heatmapStats').classList.add('hidden')}
 function loadReplay(id,keepCamera=false){setLoading(true,'Loading artifact...');let url='/api/replay?id='+encodeURIComponent(id)+'&_='+Date.now();return fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('Artifact failed to load');return r.json()}).then(d=>{if(!keepCamera)camera=null;if(d.kind==='roadmap'){D=d;H=null;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'3D evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);return draw(0)}).finally(()=>setLoading(false))}
-let artifactItems=[];
+let artifactItems=[],artifactBusy=false;
+let artifactStars=new Set();try{artifactStars=new Set(JSON.parse(localStorage.getItem('swarmecho.inspector.stars')||'[]'))}catch{}
 function artifactParts(label){const start=label.indexOf('_[');return {run:start<0?label:label.slice(0,start),detail:start<0?'Open artifact':label.slice(start+2).replace(/\]_\[/g,' · ').replace(/\]$/,'')}}
-function chooseArtifact(item){$('replaySelect').value=item.id;$('artifactPickerButton').textContent=artifactParts(item.label).run;$('artifactPickerButton').title=item.label;$('artifactPicker').open=false;loadSelectedReplay()}
+function artifactDetail(item){const duplicates=artifactItems.filter(other=>artifactRun(other)===artifactRun(item)&&other.label===item.label);return artifactParts(item.label).detail+(duplicates.length>1?' · '+(duplicates.indexOf(item)+1):'')}
+function artifactKind(item){return item.kind||(/Heatmap/i.test(item.label)?'heatmap':'replay')}
+function artifactRun(item){return item.run_id||artifactParts(item.label).run}
+function artifactSteps(item){const match=artifactParts(item.label).detail.match(/^(\d+(?:\.\d+)?)\s*([MkG])?(?:\s|$)/i);return match?Number(match[1])*({m:1e6,k:1e3,g:1e9}[(match[2]||'').toLowerCase()]||1):null}
+function currentArtifact(){return artifactItems.find(item=>String(item.id)===$('replaySelect').value)}
+function runItems(item){return item?artifactItems.filter(other=>artifactRun(other)===artifactRun(item)):[]}
+function columnItems(group,kind){return group.filter(item=>artifactKind(item)===kind).sort((a,b)=>(artifactSteps(b)??-1)-(artifactSteps(a)??-1)||(kind==='heatmap'?Number(/EVAL Heatmap/i.test(b.label))-Number(/EVAL Heatmap/i.test(a.label)):0))}
+function navigationItems(item){return columnItems(runItems(item),artifactKind(item)).slice().reverse()}
+function counterpart(item,kind){return columnItems(runItems(item),kind).reduce((best,other)=>{const distance=value=>artifactSteps(item)===null||artifactSteps(value)===null?Infinity:Math.abs(artifactSteps(value)-artifactSteps(item));return !best||distance(other)<distance(best)?other:best},null)}
+function updateArtifactNavigation(){const item=currentArtifact(),entries=item?navigationItems(item):[],index=entries.indexOf(item);$('previousArtifact').disabled=artifactBusy||index<=0;$('nextArtifact').disabled=artifactBusy||index<0||index>=entries.length-1;for(const kind of ['heatmap','replay']){const button=$(kind+'Mode');button.setAttribute('aria-pressed',String(!!item&&artifactKind(item)===kind));button.disabled=artifactBusy||!item||!counterpart(item,kind)}$('refreshRun').disabled=artifactBusy||!item;$('refreshReplays').disabled=artifactBusy;if(item){$('artifactPickerButton').textContent=artifactParts(item.label).run+' · '+artifactDetail(item);$('artifactPickerButton').title=item.label}else $('artifactPickerButton').textContent='No artifacts found'}
+async function chooseArtifact(item,keepCamera=false){if(artifactBusy)return;const previous=currentArtifact();$('replaySelect').value=item.id;$('artifactPicker').open=false;artifactBusy=true;updateArtifactNavigation();try{await loadReplay(item.id,keepCamera)}catch(error){if(previous)$('replaySelect').value=previous.id;$('replayDiscovery').textContent=error.message}finally{artifactBusy=false;renderReplayList(artifactItems,$('replaySelect').value)}}
+function moveArtifact(direction){const item=currentArtifact();if(!item||artifactBusy)return;const entries=navigationItems(item),next=entries[entries.indexOf(item)+direction];if(next)chooseArtifact(next,true)}
+function artifactRows(group){const left=columnItems(group,'heatmap'),right=columnItems(group,'replay'),rows=left.map(item=>[item,null]);let cursor=0;for(const item of right){const step=artifactSteps(item),match=step===null?-1:left.findIndex(other=>artifactSteps(other)===step);const row=Math.max(cursor,match<0?cursor:match);while(rows.length<=row)rows.push([null,null]);rows[row][1]=item;cursor=row+1}return rows}
 function openArtifactSubmenu(group,anchor){
     const panel=$('artifactSubmenu');panel.replaceChildren();
     $('artifactMenu').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b===anchor));
     const heading=document.createElement('div');heading.className='label';heading.textContent=artifactParts(group[0].label).run;panel.appendChild(heading);
-    group.forEach((item,index)=>{const button=document.createElement('button');button.type='button';button.className='artifact-entry';button.textContent=artifactParts(item.label).detail+(group.filter(other=>other.label===item.label).length>1?' · '+(index+1):'');button.title=item.label;button.classList.toggle('selected',String(item.id)===$('replaySelect').value);button.onclick=()=>chooseArtifact(item);panel.appendChild(button)});
+    const columns=document.createElement('div');columns.className='artifact-columns';panel.appendChild(columns);
+    for(const title of ['Heatmaps','Replays']){const label=document.createElement('div');label.className='label artifact-column-title';label.textContent=title;columns.appendChild(label)}
+    const addItem=(item,parent)=>{const cell=document.createElement('div');cell.className='artifact-cell';parent.appendChild(cell);if(!item)return;const button=document.createElement('button');button.type='button';button.className='artifact-entry';button.textContent=artifactDetail(item);button.title=item.label;button.classList.toggle('selected',String(item.id)===$('replaySelect').value);button.onclick=()=>chooseArtifact(item);cell.appendChild(button);if(['heatmap','replay'].includes(artifactKind(item))){const star=document.createElement('button');star.type='button';const starred=artifactStars.has(item.id);star.className='artifact-star'+(starred?' starred':'');star.textContent=starred?'★':'☆';star.title=starred?'Unstar item':'Star item';star.setAttribute('aria-label',star.title+': '+button.textContent);star.setAttribute('aria-pressed',String(starred));star.onclick=()=>{if(starred)artifactStars.delete(item.id);else artifactStars.add(item.id);try{localStorage.setItem('swarmecho.inspector.stars',JSON.stringify([...artifactStars]))}catch{$('replayDiscovery').textContent='Stars saved for this session only'}renderReplayList(artifactItems,$('replaySelect').value,artifactRun(item))};cell.appendChild(star)}};
+    artifactRows(group).forEach(row=>row.forEach(item=>addItem(item,columns)));
+    group.filter(item=>!['heatmap','replay'].includes(artifactKind(item))).forEach(item=>addItem(item,panel));
 }
-function renderReplayList(items,preferredLabel){
+function renderReplayList(items,preferredId,openRun){
     artifactItems=items;const s=$('replaySelect'),menu=$('artifactMenu'),groups=new Map();s.replaceChildren();menu.replaceChildren();$('artifactSubmenu').replaceChildren();
-    items.forEach(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.label;s.appendChild(option);const key=artifactParts(item.label).run;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)});
-    const choice=items.find(x=>x.label===preferredLabel)||items.find(x=>x.selected)||items[0];if(choice){s.value=choice.id;$('artifactPickerButton').textContent=artifactParts(choice.label).run;$('artifactPickerButton').title=choice.label}else $('artifactPickerButton').textContent='No artifacts found';
-    groups.forEach(group=>{const button=document.createElement('button');button.type='button';button.className='artifact-entry'+(group.length>1?' group':'');const label=document.createElement('span'),count=document.createElement('span');label.textContent=artifactParts(group[0].label).run;count.className='artifact-count';count.textContent=group.length;button.append(label,count);button.onclick=()=>openArtifactSubmenu(group,button);menu.appendChild(button);if(choice&&group.includes(choice))openArtifactSubmenu(group,button)});
-    return Promise.resolve();
+    items.forEach(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.label;s.appendChild(option);const key=artifactRun(item);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)});
+    const choice=items.find(x=>String(x.id)===String(preferredId))||items.find(x=>x.selected)||items[0];if(choice)s.value=choice.id;
+    groups.forEach((group,key)=>{const button=document.createElement('button');button.type='button';button.className='artifact-entry'+(group.length>1?' group':'');const label=document.createElement('span'),count=document.createElement('span');label.textContent=artifactParts(group[0].label).run;count.className='artifact-count';count.textContent=group.length;if(group.some(item=>artifactStars.has(item.id))){const star=document.createElement('span');star.className='run-star';star.textContent='★';star.title='Contains starred items';count.prepend(star)}button.append(label,count);button.onclick=()=>openArtifactSubmenu(group,button);menu.appendChild(button);if(openRun?key===openRun:choice&&group.includes(choice))openArtifactSubmenu(group,button)});
+    updateArtifactNavigation();return Promise.resolve();
 }
 document.addEventListener('click',event=>{if(!$('artifactPicker').contains(event.target))$('artifactPicker').open=false});
-document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('artifactPicker').open){$('artifactPicker').open=false;$('artifactPickerButton').focus()}});
-function refreshReplays(){let s=$('replaySelect'),preferredLabel=s.options[s.selectedIndex]?.textContent,b=$('refreshReplays');b.disabled=true;setLoading(true,'Finding artifacts...');$('replayDiscovery').textContent='Finding artifacts...';fetch('/api/replays').then(r=>{if(!r.ok)throw Error('Artifact list failed to load');return r.json()}).then(items=>renderReplayList(items,preferredLabel).then(()=>{$('replayDiscovery').textContent=items.length+' artifact'+(items.length===1?'':'s')+' found'})).catch(()=>{$('replayDiscovery').textContent='Unable to find artifacts'}).finally(()=>{b.disabled=false;setLoading(false)})}
-function loadSelectedReplay(){let id=$('replaySelect').value;if(id)loadReplay(id)}
-function refreshCurrent(){let id=$('replaySelect').value,b=$('refreshCurrent');if(!id)return;b.disabled=true;loadReplay(id,true).finally(()=>{b.disabled=false})}
-$('replaySelect').onchange=loadSelectedReplay;$('loadReplay').onclick=loadSelectedReplay;$('refreshCurrent').onclick=refreshCurrent;$('refreshReplays').onclick=refreshReplays;refreshReplays();
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('artifactPicker').open){$('artifactPicker').open=false;$('artifactPickerButton').focus()}if(event.defaultPrevented||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey||event.target.closest('input,select,textarea,[contenteditable="true"]')||$('artifactPicker').open)return;if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();moveArtifact(event.key==='ArrowLeft'?-1:1)}});
+async function refreshArtifacts(onlyRun=false){
+    if(artifactBusy)return;
+    const selected=currentArtifact();if(onlyRun&&!selected)return;
+    artifactBusy=true;updateArtifactNavigation();setLoading(true,onlyRun?'Finding run entries...':'Finding all entries...');
+    try{
+        const response=await fetch('/api/replays'+(onlyRun?'?run='+encodeURIComponent(selected.run_id):''),{cache:'no-store'});
+        if(!response.ok)throw Error('Artifact list failed to load');
+        const items=await response.json();let merged=items;
+        if(onlyRun){
+            merged=[];let inserted=false;
+            for(const item of artifactItems){
+                if(artifactRun(item)===artifactRun(selected)){if(!inserted){merged.push(...items);inserted=true}}
+                else merged.push(item);
+            }
+        }
+        const preferred=items.find(item=>item.id===selected?.id)||(onlyRun?items[0]:selected);
+        await renderReplayList(merged,preferred?.id);
+        if(onlyRun&&!items.length){$('replaySelect').value='';updateArtifactNavigation();$('replayDiscovery').textContent='No entries remain in this run';return}
+        const choice=currentArtifact();
+        // Discovery preserves the current scene, camera and playback position.
+        // Load only on initial discovery or when the previous item disappeared.
+        if(choice&&(!(D||H)||choice.id!==selected?.id))await loadReplay(choice.id,!!selected);
+        $('replayDiscovery').textContent=items.length+' entries'+(onlyRun?' in current run':' across all runs');
+    }catch(error){$('replayDiscovery').textContent=error.message}
+    finally{artifactBusy=false;setLoading(false);updateArtifactNavigation()}
+}
+function refreshReplays(){return refreshArtifacts()}
+function loadSelectedReplay(){const item=currentArtifact();if(item)return chooseArtifact(item)}
+$('replaySelect').onchange=loadSelectedReplay;$('refreshRun').onclick=()=>refreshArtifacts(true);$('refreshReplays').onclick=refreshReplays;$('previousArtifact').onclick=()=>moveArtifact(-1);$('nextArtifact').onclick=()=>moveArtifact(1);for(const kind of ['heatmap','replay'])$(kind+'Mode').onclick=()=>{const item=currentArtifact();if(item&&artifactKind(item)!==kind){const next=counterpart(item,kind);if(next)chooseArtifact(next,true)}};refreshReplays();
 function lineTrace(points,color,width=3){return {type:'scatter3d',mode:'lines',x:points.map(p=>p[0]),y:points.map(p=>p[1]),z:points.map(p=>p[2]),line:{color,width},hoverinfo:'skip'}}
 function boxTrace(s){let [x,y,z]=s,p=[[0,0,0],[x,0,0],[x,y,0],[0,y,0],[0,0,0],[0,0,z],[x,0,z],[x,y,z],[0,y,z],[0,0,z],[null,null,null],[x,0,0],[x,0,z],[null,null,null],[x,y,0],[x,y,z],[null,null,null],[0,y,0],[0,y,z]];return lineTrace(p,'rgba(120,155,205,.48)',2)}
 const CUBE_FACES=[[0,1,2],[0,2,3],[4,6,5],[4,7,6],[0,4,5],[0,5,1],[1,5,6],[1,6,2],[2,6,7],[2,7,3],[3,7,4],[3,4,0]];
@@ -214,7 +279,12 @@ function replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius)
         if(tip<0)return;const hops=hopsFrom(tip);let current=start;
         for(let k=0;k<n+2&&current!==tip;k++){const next=adj[current].findIndex((edge,j)=>edge&&hops[j]===hops[current]-1);if(next<0)break;green.add(edgeKey(current,next));current=next}
     };
-    if(complete){traceTip(base,cb,t);traceTip(target,ct,b)}
+    if(complete){
+        if(D.manifest.allow_redundancy_reward){
+            const visit=(node,path,seen)=>{if(node===target){for(let i=1;i<path.length;i++)green.add(edgeKey(path[i-1],path[i]));return}for(let next=0;next<n+2;next++)if(adj[node][next]&&!seen.has(next)){seen.add(next);path.push(next);visit(next,path,seen);path.pop();seen.delete(next)}};
+            visit(base,[base],new Set([base]));
+        }else{traceTip(base,cb,t);traceTip(target,ct,b)}
+    }
     const blue='rgba(34,211,238,.35)',purple='rgba(167,139,250,.55)',pink='rgba(251,113,133,.65)',traces=[];
     for(let i=0;i<n+2;i++)for(let j=i+1;j<n+2;j++)if(adj[i][j]){
         const selected=complete&&green.has(edgeKey(i,j));let color=blue;
@@ -385,7 +455,7 @@ def inspector_html() -> str:
     return HTML.replace(external, f"<script>{get_plotlyjs()}</script>")
 
 
-def discover_replays(root: str | Path = "outputs") -> list[Path]:
+def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
     """Find completed replay manifests in the known replay folders.
 
     Replay artifacts use a fixed layout, so scanning only those folders avoids
@@ -403,7 +473,7 @@ def discover_replays(root: str | Path = "outputs") -> list[Path]:
         "*/artifacts/eval/*/replays",
         "*/artifacts/eval/*/eval_*/replays",
     ):
-        replay_dirs.update(path for path in root.glob(pattern) if path.is_dir())
+        replay_dirs.update(path for path in root.glob(pattern.removeprefix("*/") if single_run else pattern) if path.is_dir())
     for replay_dir in replay_dirs:
         for path in replay_dir.glob("*.json"):
             data_path: Path | None = None
@@ -425,8 +495,8 @@ def discover_replays(root: str | Path = "outputs") -> list[Path]:
     return sorted(set(manifests), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
-def discover_heatmaps(root: str | Path = "outputs") -> list[Path]:
-    """Find complete 3D evaluation CSVs in the standard artifact data folders."""
+def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
+    """Find single-pass and robust 3D heatmaps, excluding action-capture CSVs."""
     root = Path(root)
     if not root.exists():
         return []
@@ -436,12 +506,15 @@ def discover_heatmaps(root: str | Path = "outputs") -> list[Path]:
         "*/artifacts/eval/*/data",
         "*/artifacts/eval/*/eval_*/data",
     ):
-        data_dirs.update(path for path in root.glob(pattern) if path.is_dir())
+        data_dirs.update(path for path in root.glob(pattern.removeprefix("*/") if single_run else pattern) if path.is_dir())
     heatmaps: list[Path] = []
     for data_dir in data_dirs:
-        for filename_pattern in ("eval_info_*.csv", "eval_capture_info_*.csv"):
+        for filename_pattern in ("eval_info_*.csv",):
             for path in data_dir.glob(filename_pattern):
                 try:
+                    manifest = json.loads(path.with_suffix(".heatmap.json").read_text(encoding="utf-8"))
+                    if int(manifest.get("robustness_runs", 1)) < 1:
+                        continue
                     if load_eval_info_csv(path)["positions"].shape[-1] == 3:
                         heatmaps.append(path.resolve())
                 except (OSError, ValueError):
@@ -600,6 +673,45 @@ def make_handler(
     manifests_lock = threading.Lock()
     cached_sources: list[tuple[str, Path]] = [("replay", path) for path in resolved]
 
+    def source_id(kind: str, path: Path) -> str:
+        return hashlib.sha256(f"{kind}:{path}".encode()).hexdigest()
+
+    def run_directory(path: Path) -> Path:
+        for parent in path.parents:
+            if parent.name == "artifacts":
+                return parent.parent
+        return path.parent.parent if path.parent.name == "replays" else path.parent
+
+    def run_id(kind: str, path: Path) -> str:
+        # Roadmap artifacts retain their existing map-based grouping.
+        key = (str(path.parent) + ":" + roadmap_label(path).split("_[", 1)[0]
+               if kind == "roadmap" else str(run_directory(path)))
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    def refresh_run_sources(identifier: str) -> list[tuple[str, Path]]:
+        nonlocal cached_sources
+        with manifests_lock:
+            previous = [source for source in cached_sources if run_id(*source) == identifier]
+        if not previous:
+            raise ValueError("Unknown run")
+        kind, path = previous[0]
+        if kind == "roadmap":
+            current = [(kind, item) for item in discover_roadmap_tests(path.parent.parent)
+                       if run_id(kind, item) == identifier]
+        else:
+            directory = run_directory(path)
+            current = [("replay", item) for item in discover_replays(directory, single_run=True)]
+            current += [("heatmap", item) for item in discover_heatmaps(directory, single_run=True)]
+            # Explicitly supplied artifacts may live outside the standard folders.
+            current += [source for source in previous
+                        if source[1].is_file() and source not in current
+                        and source[1].parent.name != "replays"
+                        and "artifacts" not in source[1].parts]
+        current.sort(key=lambda source: source[1].stat().st_mtime_ns, reverse=True)
+        with manifests_lock:
+            cached_sources = [source for source in cached_sources if run_id(*source) != identifier] + current
+        return current
+
     def refresh_sources() -> list[tuple[str, Path]]:
         nonlocal cached_sources
         replays = discover_replays(replay_root) if replay_root is not None else list(resolved)
@@ -630,10 +742,16 @@ def make_handler(
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/replays":
-                current = refresh_sources()
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    current = refresh_run_sources(query["run"][0]) if "run" in query else refresh_sources()
+                except (ValueError, OSError):
+                    self.send_error(404, "Run not found")
+                    return
                 items = [
                     {
-                        "id": str(index),
+                        "id": source_id(kind, path),
+                        "run_id": run_id(kind, path),
                         "kind": kind,
                         "label": replay_label(path) if kind == "replay" else (
                             heatmap_label(path) if kind == "heatmap" else roadmap_label(path)
@@ -648,7 +766,12 @@ def make_handler(
             elif parsed.path == "/api/replay":
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
-                    kind, path = available_sources()[int(query.get("id", ["0"])[0])]
+                    identifier = query.get("id", [""])[0]
+                    source = next((source for source in available_sources()
+                                   if source_id(*source) == identifier), None)
+                    if source is None:
+                        raise ValueError("Unknown artifact")
+                    kind, path = source
                     if kind == "replay":
                         payload = replay_payload(path)
                     elif kind == "heatmap":

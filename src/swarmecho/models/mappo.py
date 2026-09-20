@@ -72,6 +72,7 @@ class MAPPOModel(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
+        critic_global_attention: bool = False,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -110,9 +111,11 @@ class MAPPOModel(nnx.Module):
             )
 
         if critic_memory:
+            # Compact 3D state uses the ordinary active-agent attention path;
+            # legacy privileged inputs encode a different adjacency layout.
             critic_cls = (
                 RecurrentPrivilegedAgentCentricCritic
-                if critic_type == "privileged"
+                if critic_type == "privileged" and not critic_global_attention
                 else RecurrentAgentCentricCritic
             )
             self.critic = critic_cls(
@@ -136,7 +139,8 @@ class MAPPOModel(nnx.Module):
 
     # ── Convenience wrappers ────────────────────────────────────────────────
 
-    def get_value(self, all_obs: jax.Array, deterministic: bool = True, critic_obs: jax.Array | None = None) -> jax.Array:
+    def get_value(self, all_obs: jax.Array, deterministic: bool = True, critic_obs: jax.Array | None = None,
+                  active: jax.Array | None = None) -> jax.Array:
         """
         Centralised value estimate.
 
@@ -151,6 +155,10 @@ class MAPPOModel(nnx.Module):
         critic_input = all_obs if critic_obs is None else critic_obs
         if self.critic_memory:
             hidden = self.initial_critic_hidden(critic_input.shape[:-2])
+            if getattr(self, "mask_inactive", False):
+                return self.get_value_recurrent(
+                    all_obs, hidden, None, deterministic=deterministic, critic_obs=critic_obs, active=active
+                )[1]
             _, values = self.critic(critic_input, hidden, deterministic=deterministic)
             return values
         return self.critic(critic_input, deterministic=deterministic)
@@ -178,12 +186,21 @@ class MAPPOModel(nnx.Module):
         resets:         jax.Array | None,
         deterministic:  bool = True,
         critic_obs:      jax.Array | None = None,
+        active:          jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array]:
         """Centralised value call that carries critic memory when enabled."""
         critic_input = all_obs if critic_obs is None else critic_obs
         if self.critic_memory:
             if critic_hidden is None:
                 critic_hidden = self.initial_critic_hidden(critic_input.shape[:-2])
+            if getattr(self, "mask_inactive", False):
+                hidden, values = self.critic(critic_input, critic_hidden, resets,
+                                             deterministic=deterministic, active=active)
+                if hasattr(self, "value_normalizer"):
+                    values = self.value_normalizer.denormalize(values)
+                if active is not None:
+                    values = jnp.where(active, values, 0.0)
+                return hidden, values
             return self.critic(critic_input, critic_hidden, resets, deterministic=deterministic)
         return critic_hidden, self.critic(critic_input, deterministic=deterministic)
 
@@ -241,6 +258,8 @@ class MAPPOModel(nnx.Module):
         The returned actions are pre-squash Gaussian samples, matching the
         feed-forward rollout contract.
         """
+        if getattr(self, "mask_inactive", False) and active is not None:
+            resets = resets | ~active
         if self.actor_memory:
             if actor_hidden is None:
                 actor_hidden = self.initial_actor_hidden(())
@@ -285,7 +304,16 @@ class MAPPOModel(nnx.Module):
             resets,
             deterministic=False,
             critic_obs=critic_obs,
+            active=active,
         )
+        if getattr(self, "mask_inactive", False) and active is not None:
+            actor_hidden = jnp.where(active[..., None], actor_hidden, 0.0)
+            if actor_signature is not None:
+                actor_signature = jnp.where(active[..., None], actor_signature, 0.0)
+            if actor_value is not None:
+                actor_value = jnp.where(active[..., None], actor_value, 0.0)
+            actions = jnp.where(active[..., None], actions, 0.0)
+            log_probs = jnp.where(active, log_probs, 0.0)
         return actor_hidden, actor_signature, actor_value, critic_hidden, actions, log_probs, value
 
 
