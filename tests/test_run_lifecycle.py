@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from omegaconf import OmegaConf
 
-from swarmecho.core.config import load_level_3d
+from swarmecho.core.config import load_level
 from swarmecho.training.run_lifecycle import (
     resolve_resume_state,
     resolve_run_layout,
@@ -12,7 +12,7 @@ from swarmecho.training.run_lifecycle import (
 
 
 def test_run_layout_is_identical_for_dictconfig_and_3d_dataclasses(tmp_path):
-    level = load_level_3d()
+    level = load_level()
     logging = replace(level.logging, run_name="shared", log_dir=str(tmp_path))
     evaluation = replace(level.evaluation, checkpoint_dir=None)
     typed = resolve_run_layout(logging, evaluation, media_dir="replays")
@@ -29,7 +29,7 @@ def test_run_layout_is_identical_for_dictconfig_and_3d_dataclasses(tmp_path):
 
 
 def test_resume_history_and_schedules_are_dimension_agnostic(tmp_path):
-    level = load_level_3d()
+    level = load_level()
     checkpoint = tmp_path / "run/checkpoints/ckpt_000020"
     checkpoint.mkdir(parents=True)
     (checkpoint / "step_history.json").write_text(
@@ -46,7 +46,7 @@ def test_resume_history_and_schedules_are_dimension_agnostic(tmp_path):
 
 
 def test_init_restores_weights_without_inheriting_parent_timeline(tmp_path):
-    level = load_level_3d()
+    level = load_level()
     checkpoint = tmp_path / "parent/checkpoints/ckpt_001250"
     checkpoint.mkdir(parents=True)
     (checkpoint / "step_history.json").write_text(

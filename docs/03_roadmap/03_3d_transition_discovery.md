@@ -1,5 +1,9 @@
 # 3D transition: discovery brief and first decision gate
 
+> Historical design/proposal document. References to the former runtime describe
+> the migration context, not supported commands. Use the current guides and
+> [removal audit](05_2d_removal_audit.md) for the implemented 3D-only state.
+
 Status: **discussion draft**, not an implementation specification. This brief
 records what is clear, identifies choices that materially affect architecture,
 and deliberately details only the first executable slice.

@@ -5,16 +5,16 @@ import numpy as np
 
 from swarmecho.training.artifacts import load_eval_info_csv
 from swarmecho.training.artifacts import save_eval_info_csv
-from swarmecho.training.evaluate3d import (
+from swarmecho.training.evaluate import (
     diverse_success_lanes,
-    run_parallel_evaluation_3d,
+    run_parallel_evaluation,
     select_eval_replay_lanes,
     select_eval_target_with_lane,
 )
 
 
 def test_replay_only_cli_has_progress_logging_and_no_subprocess_duplication():
-    source = Path("src/swarmecho/training/evaluate3d.py").read_text()
+    source = Path("src/swarmecho/training/evaluate.py").read_text()
     assert "def render_csv_replays(" in source
     assert "[REPLAY {replay_number + 1}/{replay_count}]" in source
     assert "subprocess.run" not in source
@@ -92,13 +92,13 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
         }
 
     monkeypatch.setattr(
-        "swarmecho.training.evaluate3d.evaluate_suite_3d",
+        "swarmecho.training.evaluate.evaluate_suite",
         fake_evaluate_suite,
     )
     run_dir = tmp_path / "run"
     checkpoint = run_dir / "checkpoints" / "ckpt_000001"
 
-    path = run_parallel_evaluation_3d(object(), level, checkpoint, run_dir)
+    path = run_parallel_evaluation(object(), level, checkpoint, run_dir)
     records = load_eval_info_csv(path)
 
     assert len(calls) == 5
@@ -138,7 +138,7 @@ def test_successful_replay_priority_uses_final_chain_length(tmp_path):
 
 
 def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch, capsys):
-    from swarmecho.training.train3d import _create_final_checkpoint_evaluation
+    from swarmecho.training.train import _create_final_checkpoint_evaluation
 
     info_path = tmp_path / "eval.csv"
     results = []
@@ -147,7 +147,7 @@ def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch
         lambda *args, **kwargs: tmp_path / "eval_run",
     )
     monkeypatch.setattr(
-        "swarmecho.training.evaluate3d.run_parallel_evaluation_3d",
+        "swarmecho.training.evaluate.run_parallel_evaluation",
         lambda *args, **kwargs: info_path,
     )
 
@@ -157,7 +157,7 @@ def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch
             raise ValueError("no successful lanes")
 
     monkeypatch.setattr(
-        "swarmecho.training.evaluate3d.render_csv_replays", fake_render
+        "swarmecho.training.evaluate.render_csv_replays", fake_render
     )
     _create_final_checkpoint_evaluation(
         object(), object(), tmp_path / "ckpt", tmp_path
@@ -170,18 +170,18 @@ def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch
 def test_final_checkpoint_evaluation_skips_replay_after_both_selections_fail(
     tmp_path, monkeypatch, capsys
 ):
-    from swarmecho.training.train3d import _create_final_checkpoint_evaluation
+    from swarmecho.training.train import _create_final_checkpoint_evaluation
 
     monkeypatch.setattr(
         "swarmecho.training.artifacts.create_eval_run_root",
         lambda *args, **kwargs: tmp_path / "eval_run",
     )
     monkeypatch.setattr(
-        "swarmecho.training.evaluate3d.run_parallel_evaluation_3d",
+        "swarmecho.training.evaluate.run_parallel_evaluation",
         lambda *args, **kwargs: tmp_path / "eval.csv",
     )
     monkeypatch.setattr(
-        "swarmecho.training.evaluate3d.render_csv_replays",
+        "swarmecho.training.evaluate.render_csv_replays",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no lanes")),
     )
 

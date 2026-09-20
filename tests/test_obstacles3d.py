@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from swarmecho.env.obstacles3d import (
+from swarmecho.env.obstacles import (
     free_space_distance,
     generate_obstacles,
     points_inside_aabbs,

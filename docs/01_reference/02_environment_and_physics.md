@@ -1,64 +1,56 @@
-# Environment & Physics
+# environment and physics
 
-The simulated geometric world of SwarmEcho relies on native JAX tensor operations optimized for rapid batching. Environment code resides in `src/swarmecho/env/`.
+`EnvState` stores XYZ positions and velocities, the base and target,
+agent activation, coverage voxels, visibility and connectivity, persistent
+target knowledge, chain progress, episode state, and obstacle geometry.
 
-## Action Space
-*(Found in `src/swarmecho/env/physics.py`)*
+## Motion and geometry
 
-Agents (drones) operate in a continuous 2D plane:
-$$a_t \in [-\text{max\_force}, \text{max\_force}]^2$$
-- Valid outputs are X and Y continuous force vectors.
-- Neural networks output a mean ($\mu$) and standard deviation ($\sigma$) to sample forces. 
-- Actions are strictly clipped before Euler integration (`Velocity = Velocity * Drag + Force * Timestep`).
-- The environment reflects velocity with the configured wall restitution if a drone path hits an occupancy-matrix wall.
+Actions contain three components. The environment clips normalized actions,
+scales them by maximum force, applies drag and the timestep, caps speed, and
+advances position. World bounds constrain motion. Segment checks against solid
+bounds expanded by the drone radius prevent crossing authored or generated
+obstacles. Collided velocity components are zeroed.
 
-## Permutation-Invariant Observation Space
-*(Found in `src/swarmecho/env/observations.py`)*
+Authored maps use `swarmecho-map/v1`, including world width, height, depth,
+building cells, tiles, walls, spawn settings, and target exclusions. All bundled
+maps are 3D. `obstacles.py` provides visibility checks and physical/geodesic
+route calculations.
 
-Each drone receives an ego-centric overview combining geometric awareness with
-spatial radar mapping, preventing ordering bias. The maintained M-series levels
-disable the three transitional odometry/coverage aids, so their default actor
-observation is **37 dimensions**. Enabling all three aids produces the older
-57-dimensional layout; that layout is retained only as a transitional option
-for early 3D work and is not the maintained 2D default.
+## Observations
 
-### A. Self/knowledge block (9 dimensions maximum; 5 in the maintained default)
-1. **Velocity (2D)**.
-2. **Relative Vector to Base (2D, transitional and disabled by maintained levels)**.
-3. **Connection Flags (2D)**: Am I touching the Base chain? Am I touching the Target chain?
-4. **Target Known Flag (1D)**: A persistent boolean stating if the target's location is unlocked via direct sight or multi-hop topological link (Gossip Protocol).
-5. **Relative Vector to Target (2D, transitional and disabled by maintained levels)**: Masked out (`[0,0]`) until the target is known.
-
-### B. Coverage Probes (16 Dims, transitional)
-Queries 16 radial points in a circle at `visual_radius + 1.0` (meter offset dynamically calculated from the visual range). If the coordinate in the occupancy grid has been "mapped" by the swarm historically, it returns `1.0` (else `0.0`). Acts as a navigational push toward undiscovered grid cells.
-
-### C. Unified Radar (32 Dims)
-*(Powered by `src/swarmecho/env/raycast.py`)*
-The continuous 360° vision is binned into 8 angular slices. For each slice, the closest signals degrade linearly via $\max(0, 1 - d / \text{radius})$ for 4 active channels (each normalized by its respective range limit):
-1. **Physical Walls**: Inverse distance to closest wall obstacle (normalized by `visual_radius`).
-2. **Nearest Teammate**: Inverse distance to any active teammate drone (normalized by `comm_radius`).
-3. **Teammate tethered implicitly to Target**: Inverse distance to target-chain connected drones (normalized by `comm_radius`).
-4. **Teammate tethered implicitly to Base**: Inverse distance to base-chain connected drones (normalized by `comm_radius`).
-
-The current default layout is therefore:
+The actor receives local information, with width given by
+`observation_dim(cfg)`:
 
 ```text
-5 self/knowledge dimensions + 32 radar dimensions = 37 dimensions
+6 + 4 * radar_bins
+  + 3 * observe_base_vector
+  + 3 * observe_target_vector
+  + radar_bins * observe_coverage_probe
+  + observe_chain_contributor
+  + observe_current_timestep
 ```
 
-The coverage grid is still used internally for exploration reward and
-evaluation heatmaps even when the local coverage-probe observation block is
-disabled. Base-vector, target-vector, and coverage-probe observations are
-documented as transitional aids in `assumptions.md`, not as required final
-features.
+The six mandatory self values are normalized XYZ velocity, connection to the
+base chain, connection to the target chain, and target knowledge. Spherical
+radar bins encode walls, nearby drones, target-connected drones, and
+base-connected drones. Target vectors are masked until the target is known.
+Inactive agents receive zero observations.
 
-## Environment state ownership
+Coverage is a voxel field. `coverage_voxel_size` may differ from the authoring
+cell size and must evenly divide all world dimensions.
 
-The runtime state is nested by responsibility rather than kept as one flat
-record. `PhysicsState` owns positions, velocities, activation, dimensions, and
-the episode clock. `CommunicationState` owns direct adjacency, visibility,
-connectivity summaries, and persistent target knowledge. `ExplorationState`
-owns the 2D coverage grid. `RelayTaskState` owns chain progress and the
-discrete 2D finder-path arrays. Collision and coverage deltas are retained as
-per-step diagnostic signals because rewards consume them. See
-`docs/01_reference/05_assumptions.md` for the architectural contract.
+## Relay task and rewards
+
+Communication depends on range and visibility. Target knowledge and delivery
+to the base persist within an episode. Reward settings govern exploration,
+collisions, discovery, delivery, chain success, gap shaping, idle termination,
+and optional redundancy/chain-efficiency bonuses.
+
+`chain_reward_system` supports `euclidean` and `obstacle_geodesic`.
+Authored buildings and generated obstacles share the planning machinery.
+Episode completion can depend on holding a chain, finding/delivering the target,
+idleness, or the episode length, according to the selected level.
+
+Authoritative behavior remains in `env/environment.py`, `env/obstacles.py`,
+and the chosen level YAML.

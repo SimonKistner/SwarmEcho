@@ -3,7 +3,7 @@ const {join} = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
-const source = readFileSync(join(__dirname, '../src/swarmecho/visualize/inspector3d.py'), 'utf8');
+const source = readFileSync(join(__dirname, '../src/swarmecho/visualize/inspector.py'), 'utf8');
 const script = source.split('</aside></div><script>')[1].split('</script></body>')[0];
 
 test('storey-filtered walls, transparency, height fade, floor grid and camera elevation', () => {
@@ -11,6 +11,7 @@ test('storey-filtered walls, transparency, height fade, floor grid and camera el
     function element() { return {checked:false,value:'0',options:[],style:{},children:[],classList:{toggle(){}},
         replaceChildren(){this.children=[]},append(...items){this.children.push(...items)},
         querySelectorAll(){return this.children},
+        setAttribute(name,value){this[name]=String(value)},
         appendChild(item){this.children.push(item)}}; }
     const context = vm.createContext({assert, fetch:()=>new Promise(()=>{}),
         document:{getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},
@@ -44,10 +45,14 @@ test('storey-filtered walls, transparency, height fade, floor grid and camera el
         $('heightFade').checked=false;$('wallTransparency').value='100';assert.equal(buildingTraces().length,0);
         renderReplayList([{id:'a',label:'run_[1M]_[Replay]'},{id:'b',label:'run_[2M]_[Replay]'},{id:'c',label:'other_[3M]_[Replay]'}]);
         assert.equal($('artifactMenu').children.length,2);
-        assert.equal($('artifactSubmenu').children.length,3);
+        const columns=$('artifactSubmenu').children.find(item=>item.className==='artifact-columns');
+        assert.ok(columns);
+        const replayButtons=columns.children.flatMap(item=>item.children).filter(item=>item.className==='artifact-entry');
+        assert.equal(replayButtons.length,2);
+        assert.equal(replayButtons.map(item=>item.textContent).sort().join('|'),'1M · Replay|2M · Replay');
         assert.equal(artifactParts('run_[2M]_[Replay]').detail,'2M · Replay');
         const e=DEFAULT_CAMERA.eye;
-        assert.ok(Math.abs(Math.atan2(e.z,Math.hypot(e.x,e.y))*180/Math.PI-25)<1e-9);
+        assert.ok(Math.abs(Math.atan2(e.z,Math.hypot(e.x,e.y))*180/Math.PI-45)<1e-9);
         D.building=null;setupBuildingVisibility();assert.equal(buildingTraces().length,0);
     `, context);
 });

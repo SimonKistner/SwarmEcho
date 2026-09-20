@@ -159,12 +159,12 @@ def test_runtime_authored_wall_blocks_motion_and_visibility():
     import jax
     import jax.numpy as jnp
 
-    from swarmecho.env.baseline3d import Baseline3DConfig, make_baseline_3d_fns
+    from swarmecho.env.environment import EnvConfig, make_env_fns
 
     document = _placed_document(2, 1, 2)
     document["x_walls"].append([1, 0, 0])
     building = compile_building(map_data_from_document(document))
-    cfg = Baseline3DConfig(
+    cfg = EnvConfig(
         num_agents=1,
         dt=1.0,
         drag=0.0,
@@ -176,7 +176,7 @@ def test_runtime_authored_wall_blocks_motion_and_visibility():
         target_spawn_buffer=0.0,
         coverage_voxel_size=5.0,
     )
-    reset, step, _, _ = make_baseline_3d_fns(building, cfg)
+    reset, step, _, _ = make_env_fns(building, cfg)
     state = reset(jax.random.PRNGKey(0), target_pos=jnp.asarray([7.5, 2.5, 2.5]))
     state = state._replace(
         pos=jnp.asarray([[4.0, 2.5, 2.5]]),

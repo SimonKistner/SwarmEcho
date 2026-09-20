@@ -8,16 +8,17 @@ import time
 from pathlib import Path
 
 import jax
+from swarmecho.core.config import MAP_DIR
 
-from swarmecho.env.baseline3d import (
-    Baseline3DConfig,
-    make_baseline_3d_fns,
+from swarmecho.env.environment import (
+    EnvConfig,
+    make_env_fns,
     maximum_chain_distance,
 )
 from swarmecho.env.buildings import load_building, make_cuboid_building
 
 
-DEFAULT_BUILDING = Path(__file__).parents[1] / "curriculum_config/maps/M00_no_maze_open_cuboid.yaml"
+DEFAULT_BUILDING = MAP_DIR / "M00_no_maze_open_cuboid.yaml"
 
 
 def run_benchmark(
@@ -31,8 +32,8 @@ def run_benchmark(
         if grid == (4, 4, 4)
         else make_cuboid_building(grid)
     )
-    cfg = Baseline3DConfig(radar_bins=radar_bins)
-    reset, step, observations, _ = make_baseline_3d_fns(building, cfg)
+    cfg = EnvConfig(radar_bins=radar_bins)
+    reset, step, observations, _ = make_env_fns(building, cfg)
     keys = jax.random.split(jax.random.PRNGKey(0), num_envs)
     actions = jax.random.uniform(
         jax.random.PRNGKey(1),

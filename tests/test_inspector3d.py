@@ -3,9 +3,9 @@ import json
 import jax
 import jax.numpy as jnp
 
-from swarmecho.core.config import load_level_3d
-from swarmecho.env.baseline3d import make_baseline_3d_fns
-from swarmecho.visualize.inspector3d import (
+from swarmecho.core.config import load_level
+from swarmecho.env.environment import make_env_fns
+from swarmecho.visualize.inspector import (
     HTML,
     discover_heatmaps,
     discover_replays,
@@ -17,12 +17,12 @@ from swarmecho.visualize.inspector3d import (
     building_geometry,
 )
 from swarmecho.training.artifacts import save_eval_info_csv
-from swarmecho.visualize.replay3d import write_replay
-from swarmecho.visualize.replay3d import building_snapshot
+from swarmecho.visualize.replay import write_replay
+from swarmecho.visualize.replay import building_snapshot
 
 
 def test_snapshot_geometry_survives_missing_original_map():
-    level = load_level_3d("B01_office")
+    level = load_level("B01b_office")
     snapshot = building_snapshot(level.building)
     geometry = building_geometry({"map_name": "does_not_exist", "building_snapshot": snapshot})
     assert geometry["source"] == "replay snapshot"
@@ -32,7 +32,7 @@ def test_snapshot_geometry_survives_missing_original_map():
 
 
 def test_legacy_office_visibility_bounds_match_runtime():
-    level = load_level_3d("B01_office")
+    level = load_level("B01b_office")
     geometry = building_geometry({"map_name": level.building_name})
     actual = sorted(tuple(lo + hi) for lo, hi in zip(geometry["solid_min"], geometry["solid_max"]))
     expected = sorted(tuple(lo.tolist() + hi.tolist()) for lo, hi in zip(level.building.solid_min_m, level.building.solid_max_m))
@@ -40,8 +40,8 @@ def test_legacy_office_visibility_bounds_match_runtime():
 
 
 def test_inspector_payload_and_controls(tmp_path):
-    level = load_level_3d()
-    reset, step, _, _ = make_baseline_3d_fns(level.building, level.env)
+    level = load_level()
+    reset, step, _, _ = make_env_fns(level.building, level.env)
     state = reset(jax.random.PRNGKey(0))
     states = [state, step(state, jnp.zeros((level.env.num_agents, 3)))]
     _, manifest = write_replay(

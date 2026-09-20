@@ -4,7 +4,7 @@ Run from the repository root, for example:
 
     python tests/visualize_radar_bins_3d.py --output radar_bins_3d.png
 
-The bin centres and assignment rule are imported from ``baseline3d`` so this
+The bin centres and assignment rule are imported from ``environment`` so this
 visualization stays aligned with the environment implementation:
 
     bin_index = argmax(unit_relative_direction @ directions.T)
@@ -29,7 +29,7 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from swarmecho.env.baseline3d import spherical_directions
+from swarmecho.env.environment import spherical_directions
 
 
 def _sphere_grid(
@@ -60,7 +60,7 @@ def render(output: Path, bin_counts: tuple[int, ...] = (8, 16, 32)) -> None:
     figure = plt.figure(figsize=(16, 5.5), constrained_layout=True)
 
     for subplot_index, bin_count in enumerate(bin_counts, start=1):
-        # These are the exact directions used by make_baseline_3d_fns().
+        # These are the exact directions used by make_env_fns().
         directions = np.asarray(spherical_directions(bin_count), dtype=np.float32)
 
         # This is the exact bin assignment used by the 3D radar observation:

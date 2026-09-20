@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from swarmecho.env.critic3d import assemble_privileged_observations_3d
+from swarmecho.env.critic import assemble_privileged_observations
 
 
 class RunningValueNormalizer(nnx.Module):
@@ -84,7 +84,7 @@ def replay(model, mb, key):
     active = mb["active_masks"]
     critic_obs = mb["critic_obs"]
     if getattr(model, "privileged_3d", False):
-        critic_obs = assemble_privileged_observations_3d(
+        critic_obs = assemble_privileged_observations(
             mb["obs"], mb["critic_agent_features"], mb["critic_global_features"], active,
             include_base_vector=model.privileged_3d_include_base_vector,
         )
@@ -156,7 +156,7 @@ def diagnostics(model, mb, key, target_mean):
     }
 
 
-class PPO3DTrainer:
+class PPOTrainer:
     def __init__(self, model, training):
         self.model = model
         self.num_epochs = training.num_epochs

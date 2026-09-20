@@ -1,7 +1,7 @@
 import yaml
 
 from swarmecho.core import config
-from swarmecho.visualize.inspector3d import building_geometry
+from swarmecho.visualize.inspector import building_geometry
 
 
 def test_authored_geometry_classifies_recessed_outer_walls_and_roofs(tmp_path, monkeypatch):

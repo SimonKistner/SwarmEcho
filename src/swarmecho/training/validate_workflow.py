@@ -1,4 +1,4 @@
-"""Small environment→MAPPO-update validation for the 3D migration path."""
+"""Small environment→MAPPO-update validation for the 3D runtime."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from swarmecho.core.config import load_level_3d
-from swarmecho.env.baseline3d import (
-    make_autoreset_3d_fns,
-    observation_dim_3d,
+from swarmecho.core.config import load_level
+from swarmecho.env.environment import (
+    make_autoreset_fns,
+    observation_dim,
 )
 from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.mappo_trainer import MAPPOTrainer
 
 
-def validate_3d_update(
+def validate_update(
     *,
     num_envs: int = 4,
     num_steps: int = 4,
@@ -27,12 +27,12 @@ def validate_3d_update(
     recurrent: bool = True,
 ) -> dict[str, float]:
     """Collect a real 3D rollout and complete one PPO update."""
-    level = load_level_3d()
+    level = load_level()
     cfg = replace(level.env, max_steps=max(2, num_steps - 1))
-    reset, step, observations, _ = make_autoreset_3d_fns(
+    reset, step, observations, _ = make_autoreset_fns(
         level.building, cfg, level.reward
     )
-    obs_dim = observation_dim_3d(cfg)
+    obs_dim = observation_dim(cfg)
     model = MAPPOModel(
         obs_dim=obs_dim,
         act_dim=3,
@@ -204,7 +204,7 @@ def validate_3d_update(
 
 
 def main() -> None:
-    stats = validate_3d_update()
+    stats = validate_update()
     print("3D environment → recurrent TarMAC MAPPO update validation passed.")
     for name, value in stats.items():
         print(f"  {name}: {value:.6f}")

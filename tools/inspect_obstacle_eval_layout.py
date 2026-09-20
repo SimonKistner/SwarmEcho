@@ -17,8 +17,8 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from swarmecho.core.config import load_level_3d  # noqa: E402
-from swarmecho.env.obstacles3d import roadmap_vertices, segments_blocked  # noqa: E402
+from swarmecho.core.config import load_level  # noqa: E402
+from swarmecho.env.obstacles import roadmap_vertices, segments_blocked  # noqa: E402
 
 
 def _shortest(adjacency, start, goal, banned):
@@ -38,7 +38,7 @@ def _shortest(adjacency, start, goal, banned):
 
 
 def generate(destination="outputs/testresults/static_eval_layout.roadmap.json") -> Path:
-    level = load_level_3d("M02_random_cuboid_obstacles_3D")
+    level = load_level("M02_random_cuboid_obstacles_3D")
     cfg, building = level.env, level.building
     bounds = np.asarray(EVAL_FIXED_OBSTACLE_BOUNDS, dtype=np.float32)
     if bounds.shape != (cfg.num_obstacles, 6):

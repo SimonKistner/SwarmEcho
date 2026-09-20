@@ -10,7 +10,7 @@ from typing import Iterable
 
 import numpy as np
 
-from swarmecho.env.baseline3d import Baseline3DState
+from swarmecho.env.environment import EnvState
 from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 
 
@@ -38,7 +38,7 @@ def building_snapshot(building: BuildingArrays) -> dict:
 
 def write_replay(
     output: str | Path,
-    states: Iterable[Baseline3DState],
+    states: Iterable[EnvState],
     *,
     map_name: str,
     dt: float,

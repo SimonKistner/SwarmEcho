@@ -10,10 +10,10 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from swarmecho.core.config import MAP_DIR, load_level_3d
-from swarmecho.env.baseline3d import Baseline3DConfig
+from swarmecho.core.config import MAP_DIR, load_level
+from swarmecho.env.environment import EnvConfig
 from swarmecho.env.buildings import load_building
-from swarmecho.env.obstacles3d import authored_roadmap_vertices, generate_obstacles, roadmap_vertices
+from swarmecho.env.obstacles import authored_roadmap_vertices, generate_obstacles, roadmap_vertices
 
 
 def _shortest(adjacency, start, goal, banned, banned_nodes=frozenset()):
@@ -79,10 +79,10 @@ def generate(destination=None, *, level_name=None, map_name=None, target=None,
     if path_count < 1 or (layout_count is not None and layout_count < 1):
         raise ValueError("Path and layout counts must be positive.")
     if level_name or not map_name:
-        level = load_level_3d(level_name or "M02_random_cuboid_obstacles_3D")
+        level = load_level(level_name or "M02_random_cuboid_obstacles_3D")
         cfg, building, name = level.env, level.building, level.building_name
     else:
-        cfg = Baseline3DConfig()
+        cfg = EnvConfig()
     if merge_walls is not None:
         cfg = replace(cfg, roadmap_merge_walls=merge_walls)
     if corner_bonus_m is not None:

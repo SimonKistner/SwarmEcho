@@ -10,7 +10,7 @@ Optional recurrent actor and critic paths are selected by config flags. When
 disabled, the architecture and call contract are the original feed-forward MAPPO.
 
 All heavy lifting (network definitions) lives in actor.py and critic.py.
-This file is the single construction point used by runner.py.
+The 3D trainer and workflow validator construct this shared model.
 
 CTDE contract
 -------------
@@ -27,9 +27,7 @@ from flax import nnx
 from swarmecho.models.actor import DecentralizedActor, RecurrentDecentralizedActor
 from swarmecho.models.critic import (
     AgentCentricCritic,
-    PrivilegedAgentCentricCritic,
     RecurrentAgentCentricCritic,
-    RecurrentPrivilegedAgentCentricCritic,
 )
 
 
@@ -72,7 +70,6 @@ class MAPPOModel(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
-        critic_global_attention: bool = False,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
@@ -111,26 +108,14 @@ class MAPPOModel(nnx.Module):
             )
 
         if critic_memory:
-            # Compact 3D state uses the ordinary active-agent attention path;
-            # legacy privileged inputs encode a different adjacency layout.
-            critic_cls = (
-                RecurrentPrivilegedAgentCentricCritic
-                if critic_type == "privileged" and not critic_global_attention
-                else RecurrentAgentCentricCritic
-            )
-            self.critic = critic_cls(
+            self.critic = RecurrentAgentCentricCritic(
                 obs_dim    = self.critic_input_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
                 rngs       = rngs,
             )
         else:
-            critic_cls = (
-                PrivilegedAgentCentricCritic
-                if critic_type == "privileged"
-                else AgentCentricCritic
-            )
-            self.critic = critic_cls(
+            self.critic = AgentCentricCritic(
                 obs_dim    = self.critic_input_dim,
                 hidden_dim = hidden_dim,
                 num_layers = num_layers,
@@ -315,77 +300,3 @@ class MAPPOModel(nnx.Module):
             actions = jnp.where(active[..., None], actions, 0.0)
             log_probs = jnp.where(active, log_probs, 0.0)
         return actor_hidden, actor_signature, actor_value, critic_hidden, actions, log_probs, value
-
-
-# ---------------------------------------------------------------------------
-# Self-test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    from swarmecho.core.config import (
-        compute_action_dim,
-        compute_obs_dim,
-        load_config,
-        validate_config,
-    )
-
-    print("── MAPPOModel Self-Test ─────────────────────────────────────")
-    cfg     = load_config(cli_overrides=False)
-    validate_config(cfg)
-    obs_dim = compute_obs_dim(cfg)
-    act_dim = compute_action_dim(cfg)
-    N       = int(cfg.env.num_agents)
-
-    print(f"  obs_dim        : {obs_dim}")
-    print(f"  act_dim        : {act_dim}")
-    print(f"  N              : {N}")
-    print(f"  actor_layers   : {cfg.network.actor_num_layers}")
-    print(f"  critic_layers  : {cfg.network.num_layers}")
-    print(f"  actor_memory   : {cfg.network.get('actor_memory', False)}")
-    print(f"  critic_memory  : {cfg.network.get('critic_memory', False)}")
-
-    rngs  = nnx.Rngs(0)
-    model = MAPPOModel(
-        obs_dim          = obs_dim,
-        act_dim          = act_dim,
-        num_agents       = N,
-        hidden_dim       = int(cfg.network.hidden_dim),
-        num_layers       = int(cfg.network.num_layers),
-        actor_num_layers = int(cfg.network.actor_num_layers),
-        actor_memory     = bool(cfg.network.get("actor_memory", False)),
-        critic_memory    = bool(cfg.network.get("critic_memory", False)),
-        rngs             = rngs,
-        memory_comm_enabled = bool(cfg.network.get("memory_comm_enabled", False)),
-        memory_comm_every_k_steps = int(cfg.network.get("memory_comm_every_k_steps", 5)),
-        tarmac_sig_dim = int(cfg.network.get("tarmac_sig_dim", 64)),
-        tarmac_val_dim = int(cfg.network.get("tarmac_val_dim", 128)),
-        tarmac_include_self = bool(cfg.network.get("tarmac_include_self", True)),
-    )
-
-    _, params = nnx.split(model)
-    n_params  = sum(x.size for x in jax.tree_util.tree_leaves(params))
-    print(f"  Total params   : {n_params:,}")
-
-    # rollout_step (single env)
-    import jax.numpy as jnp
-    obs   = jnp.zeros((N, obs_dim))
-    keys  = jax.random.split(jax.random.PRNGKey(0), N)
-    acts, lps, val = model.rollout_step(obs, keys)
-
-    assert acts.shape == (N, act_dim), f"actions shape {acts.shape}"
-    assert lps.shape  == (N,),         f"log_probs shape {lps.shape}"
-    assert val.shape == (N,), f"value shape {val.shape} (expected ({N},))"
-    print(f"  rollout_step : acts={acts.shape} lps={lps.shape} val={val.shape}  ✓")
-
-    # Action normalisation check — acts are pre-squash u; squashed = tanh(u) must be in (-1, 1)
-    squashed_acts = jnp.tanh(acts)
-    assert jnp.all(squashed_acts > -1.0) and jnp.all(squashed_acts < 1.0), "tanh(actions) out of (-1, 1)!"
-    print("  tanh(actions) in (-1, 1)  ✓")
-
-    # Batched get_value
-    obs_batch  = jnp.zeros((8, N, obs_dim))
-    vals_batch = model.get_value(obs_batch)
-    assert vals_batch.shape == (8, N), f"batched value shape {vals_batch.shape}"
-    print(f"  get_value batch: {vals_batch.shape}  ✓")
-
-    print("\nMAPPOModel self-test passed ✓")

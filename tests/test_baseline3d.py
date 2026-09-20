@@ -6,20 +6,20 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from swarmecho.env.baseline3d import (
-    Baseline3DConfig,
-    Baseline3DRewardConfig,
-    Baseline3DState,
-    chain_diagnostics_3d,
+from swarmecho.env.environment import (
+    EnvConfig,
+    RewardConfig,
+    EnvState,
+    chain_diagnostics,
     coverage_grid_geometry,
-    final_chain_length_3d,
-    make_autoreset_3d_fns,
-    make_baseline_3d_fns,
+    final_chain_length,
+    make_autoreset_fns,
+    make_env_fns,
     maximum_chain_distance,
     maximum_five_drone_chain_distance,
-    observation_dim_3d,
-    obstacle_chain_diagnostics_3d,
-    rewards_3d,
+    observation_dim,
+    obstacle_chain_diagnostics,
+    compute_rewards,
     spherical_directions,
 )
 from swarmecho.env.buildings import load_building
@@ -36,10 +36,10 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
         solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
         solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
     )
-    cfg = replace(Baseline3DConfig(), num_agents=1, visual_radius=1.,
+    cfg = replace(EnvConfig(), num_agents=1, visual_radius=1.,
                   comm_radius=1., comm_radius_base=1., max_steps=1)
-    reward_cfg = Baseline3DRewardConfig(chain_reward_system="obstacle_geodesic")
-    reset, step, _, _ = make_autoreset_3d_fns(building, cfg, reward_cfg)
+    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic")
+    reset, step, _, _ = make_autoreset_fns(building, cfg, reward_cfg)
     states = jax.jit(jax.vmap(reset))(jax.random.split(jax.random.PRNGKey(21), 2))
     assert states.obstacle_min.shape == (2, 0, 3)
     assert states.roadmap_distances.shape == (2, 0, 0)
@@ -49,7 +49,7 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
         is_conn_base=jnp.array([False]), is_conn_target=jnp.array([False]),
         fully_connected=jnp.bool_(False),
     )
-    gap = jax.jit(obstacle_chain_diagnostics_3d)(state)[0]
+    gap = jax.jit(obstacle_chain_diagnostics)(state)[0]
     assert 10. < float(gap) < 1e6
     next_states, _, done, _ = jax.jit(step.batched)(states, jnp.zeros((2, 1, 3)))
     assert np.all(done)
@@ -63,8 +63,8 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
         solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
         solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
     )
-    cfg = replace(Baseline3DConfig(), num_agents=1, num_obstacles=1)
-    reset, _, _, _ = make_baseline_3d_fns(building, cfg)
+    cfg = replace(EnvConfig(), num_agents=1, num_obstacles=1)
+    reset, _, _, _ = make_env_fns(building, cfg)
     lo, hi = jnp.array([[2., 2., 2.]]), jnp.array([[3., 3., 3.]])
     state = reset(jax.random.PRNGKey(4), target_pos=jnp.array([15., 10., 10.]),
                   obstacle_min=lo, obstacle_max=hi)
@@ -79,7 +79,7 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
         is_conn_base=jnp.array([False]), is_conn_target=jnp.array([False]),
         fully_connected=jnp.bool_(False),
     )
-    assert 10. < float(obstacle_chain_diagnostics_3d(query)[0]) < 1e6
+    assert 10. < float(obstacle_chain_diagnostics(query)[0]) < 1e6
     # Legacy generated-only graph arrays cannot bypass the authored walls.
     legacy = reset(jax.random.PRNGKey(5), obstacle_min=lo, obstacle_max=hi,
                    stored_vertices=jnp.zeros((8, 3)), stored_distances=jnp.zeros((8, 8)))
@@ -91,11 +91,11 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
 
 
 def test_combined_chain_query_preserves_original_frontier_selection():
-    from swarmecho.env.obstacles3d import free_space_distance
+    from swarmecho.env.obstacles import free_space_distance
 
-    cfg = replace(Baseline3DConfig(), num_agents=3, num_obstacles=1,
+    cfg = replace(EnvConfig(), num_agents=3, num_obstacles=1,
                   obstacle_spawn_layer_min=1, obstacle_spawn_layer_max=2)
-    reset, _, _, _ = make_baseline_3d_fns(BUILDING, cfg)
+    reset, _, _, _ = make_env_fns(BUILDING, cfg)
     state = reset(jax.random.PRNGKey(51), target_pos=jnp.array([15., 10., 5.]),
                   obstacle_min=jnp.array([[9., 5., 0.]]),
                   obstacle_max=jnp.array([[11., 15., 10.]]))
@@ -121,7 +121,7 @@ def test_combined_chain_query_preserves_original_frontier_selection():
     b, t = flat // score.shape[1], flat % score.shape[1]
     expected = (gaps[b,t], jnp.clip(100*(1-gaps[b,t]/jnp.maximum(mission,1e-6)),0,100),
                 excess[b,t], jnp.array([b-1,t-1]))
-    actual = jax.jit(obstacle_chain_diagnostics_3d)(state)
+    actual = jax.jit(obstacle_chain_diagnostics)(state)
     for got, want in zip(actual[:3], expected[:3]):
         np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
     np.testing.assert_array_equal(actual[3], expected[3])
@@ -133,8 +133,8 @@ def test_euclidean_factory_does_not_build_authored_or_dynamic_roadmaps():
         solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
         solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
     )
-    cfg = replace(Baseline3DConfig(), num_agents=1, num_obstacles=1)
-    reset, _, _, _ = make_baseline_3d_fns(building, cfg, plan_geodesic=False)
+    cfg = replace(EnvConfig(), num_agents=1, num_obstacles=1)
+    reset, _, _, _ = make_env_fns(building, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(4), target_pos=jnp.array([15., 10., 10.]),
                   obstacle_min=jnp.array([[2., 2., 2.]]),
                   obstacle_max=jnp.array([[3., 3., 3.]]))
@@ -144,8 +144,8 @@ def test_euclidean_factory_does_not_build_authored_or_dynamic_roadmaps():
 
 
 def _functions(**overrides):
-    cfg = replace(Baseline3DConfig(), **overrides)
-    return cfg, make_baseline_3d_fns(BUILDING, cfg)
+    cfg = replace(EnvConfig(), **overrides)
+    return cfg, make_env_fns(BUILDING, cfg)
 
 
 def test_octant_radar_and_configured_distance_contracts():
@@ -154,7 +154,7 @@ def test_octant_radar_and_configured_distance_contracts():
     assert len({tuple(np.sign(row)) for row in directions}) == 8
     np.testing.assert_allclose(np.linalg.norm(directions, axis=1), 1.0)
 
-    cfg = Baseline3DConfig()
+    cfg = EnvConfig()
     assert maximum_five_drone_chain_distance(cfg) == 30.0
     assert maximum_chain_distance(replace(cfg, num_agents=6)) == 35.0
 
@@ -167,7 +167,7 @@ def test_optional_observation_features_match_the_maintained_config_switches():
     )
     obs = observations(reset(jax.random.PRNGKey(7)))
 
-    assert obs.shape == (cfg.num_agents, observation_dim_3d(cfg))
+    assert obs.shape == (cfg.num_agents, observation_dim(cfg))
 
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
@@ -243,7 +243,7 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
     x = jnp.asarray([4.5, 7.0, 9.5, 12.0, 14.5])
     positions = jnp.stack([x, jnp.ones(5), jnp.ones(5)], axis=-1)
     target = jnp.asarray([16.0, 1.0, 1.0])
-    state = Baseline3DState(
+    state = EnvState(
         pos=positions,
         vel=jnp.zeros((5, 3)),
         base_pos=base,
@@ -274,7 +274,7 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
 
 def test_coverage_changes_across_height_layers():
     cfg, (_, step, _, _) = _functions()
-    state = Baseline3DState(
+    state = EnvState(
         pos=jnp.tile(jnp.asarray([[2.5, 2.5, 2.5]]), (cfg.num_agents, 1)),
         vel=jnp.zeros((cfg.num_agents, 3)),
         base_pos=jnp.asarray([2.5, 2.5, 2.5]),
@@ -313,19 +313,19 @@ def test_coverage_voxel_size_is_independent_of_building_cell_size():
     assert shape == (8, 8, 8)
     assert state.coverage.shape == shape
     assert next_state.coverage.shape == shape
-    assert observations(state).shape == (cfg.num_agents, observation_dim_3d(cfg))
+    assert observations(state).shape == (cfg.num_agents, observation_dim(cfg))
 
 
 def test_coverage_voxel_size_must_tile_the_building():
     with pytest.raises(ValueError, match="evenly divide"):
-        make_baseline_3d_fns(BUILDING, Baseline3DConfig(coverage_voxel_size=3.0))
+        make_env_fns(BUILDING, EnvConfig(coverage_voxel_size=3.0))
 
 
 def test_reward_terms_preserve_local_credit_and_shared_events():
     cfg, (reset, step, _, _) = _functions()
     previous = reset(jax.random.PRNGKey(7))
     current = step(previous, jnp.ones((cfg.num_agents, 3)))
-    reward, terms = rewards_3d(previous, current, Baseline3DRewardConfig(), cfg)
+    reward, terms = compute_rewards(previous, current, RewardConfig(), cfg)
     assert reward.shape == (cfg.num_agents,)
     assert terms["coverage"].shape == (cfg.num_agents,)
     assert terms["collision"].shape == (cfg.num_agents,)
@@ -338,7 +338,7 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
 
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     """3D must retain 2D's delivery milestone and resist finder farming."""
-    reward_cfg = Baseline3DRewardConfig(
+    reward_cfg = RewardConfig(
         target_found_requires_delivery=True,
         finder_bonus=50.0,
         target_found_bonus=100.0,
@@ -346,8 +346,8 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     )
     base = jnp.asarray([1.0, 1.0, 1.0])
     target = jnp.asarray([11.0, 1.0, 1.0])
-    env_cfg = Baseline3DConfig(num_agents=2, comm_radius_base=6.0)
-    previous = Baseline3DState(
+    env_cfg = EnvConfig(num_agents=2, comm_radius_base=6.0)
+    previous = EnvState(
         pos=jnp.asarray([[4.0, 1.0, 1.0], [8.0, 1.0, 1.0]]),
         vel=jnp.zeros((2, 3)),
         base_pos=base,
@@ -374,7 +374,7 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         fully_connected=jnp.bool_(True),
         base_target_known=jnp.bool_(True),
     )
-    _, delivered_terms = rewards_3d(previous, delivered, reward_cfg, env_cfg)
+    _, delivered_terms = compute_rewards(previous, delivered, reward_cfg, env_cfg)
     np.testing.assert_allclose(delivered_terms["target_found"], [50.0, 50.0])
     np.testing.assert_allclose(delivered_terms["finder"], [50.0, 0.0])
     np.testing.assert_allclose(delivered_terms["success"], [0.0, 0.0])
@@ -385,32 +385,32 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         directly_sees_target=jnp.asarray([False, True]),
         fully_connected=jnp.bool_(False),
     )
-    _, reentry_terms = rewards_3d(delivered, reentry, reward_cfg, env_cfg)
+    _, reentry_terms = compute_rewards(delivered, reentry, reward_cfg, env_cfg)
     np.testing.assert_allclose(reentry_terms["finder"], [0.0, 0.0])
     reconnected = reentry._replace(
         directly_sees_target=jnp.asarray([False, False]),
         fully_connected=jnp.bool_(True),
     )
-    _, reconnected_terms = rewards_3d(reentry, reconnected, reward_cfg, env_cfg)
+    _, reconnected_terms = compute_rewards(reentry, reconnected, reward_cfg, env_cfg)
     np.testing.assert_allclose(reconnected_terms["target_found"], [0.0, 0.0])
     np.testing.assert_allclose(reconnected_terms["finder"], [0.0, 0.0])
 
     succeeded = delivered._replace(success=jnp.bool_(True))
-    _, success_terms = rewards_3d(delivered, succeeded, reward_cfg, env_cfg)
+    _, success_terms = compute_rewards(delivered, succeeded, reward_cfg, env_cfg)
     np.testing.assert_allclose(success_terms["success"], [250.0, 250.0])
     np.testing.assert_allclose(success_terms["target_found"], [0.0, 0.0])
 
 
 def test_post_delivery_gap_credit_is_limited_to_relay_route():
     """Match 2D: non-route drones retain the maximum gap penalty."""
-    env_cfg = Baseline3DConfig(
+    env_cfg = EnvConfig(
         num_agents=4,
         comm_radius_base=4.0,
         comm_radius=4.0,
         visual_radius=4.0,
     )
-    reward_cfg = Baseline3DRewardConfig(max_gap_penalty=5.0)
-    state = Baseline3DState(
+    reward_cfg = RewardConfig(max_gap_penalty=5.0)
+    state = EnvState(
         pos=jnp.asarray(
             [[4.5, 1.0, 1.0], [8.5, 1.0, 1.0], [12.5, 1.0, 1.0], [1.0, 4.5, 1.0]]
         ),
@@ -433,14 +433,14 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         coverage_credit=jnp.zeros(4),
         base_target_known=jnp.bool_(True),
     )
-    _, terms = rewards_3d(state, state, reward_cfg, env_cfg)
+    _, terms = compute_rewards(state, state, reward_cfg, env_cfg)
     np.testing.assert_allclose(terms["chain_gap"][:3], 0.0)
     np.testing.assert_allclose(terms["chain_gap"][3], -1.25)
 
 
 def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
-    cfg = replace(Baseline3DConfig(), max_steps=1)
-    reset, autoreset_step, _, _ = make_autoreset_3d_fns(BUILDING, cfg)
+    cfg = replace(EnvConfig(), max_steps=1)
+    reset, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg)
     state = reset(jax.random.PRNGKey(99))
     next_state, reward, done, info = autoreset_step(
         state,
@@ -460,12 +460,12 @@ def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
 
 def test_idle_termination_applies_configured_penalty():
     cfg = replace(
-        Baseline3DConfig(),
+        EnvConfig(),
         num_agents=1,
         max_steps=10,
         no_movement_termination_steps=1,
     )
-    reward_cfg = Baseline3DRewardConfig(
+    reward_cfg = RewardConfig(
         exploration_bonus=0.0,
         collision_penalty=0.0,
         finder_bonus=0.0,
@@ -474,7 +474,7 @@ def test_idle_termination_applies_configured_penalty():
         success_bonus=0.0,
         no_movement_termination_penalty=-300.0,
     )
-    reset, autoreset_step, _, _ = make_autoreset_3d_fns(BUILDING, cfg, reward_cfg)
+    reset, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
     _, reward, done, info = autoreset_step(
         reset(jax.random.PRNGKey(101)),
         jnp.zeros((cfg.num_agents, 3)),
@@ -488,13 +488,13 @@ def test_idle_termination_applies_configured_penalty():
 
 @pytest.mark.parametrize("obstacles", [0, 1])
 def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
-    cfg = replace(Baseline3DConfig(), num_agents=1, max_steps=10,
+    cfg = replace(EnvConfig(), num_agents=1, max_steps=10,
                   no_movement_termination_steps=5, hold_chain_for=1,
                   num_obstacles=obstacles, obstacle_spawn_layer_min=1,
                   obstacle_spawn_layer_max=2)
-    reward_cfg = Baseline3DRewardConfig()
-    reset, plain_step, _, _ = make_baseline_3d_fns(BUILDING, cfg, plan_geodesic=False)
-    _, autoreset_step, _, _ = make_autoreset_3d_fns(BUILDING, cfg, reward_cfg)
+    reward_cfg = RewardConfig()
+    reset, plain_step, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    _, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(823), 4))
     # Ongoing, time limit, idle termination, successful chain respectively.
     states = states._replace(
@@ -520,7 +520,7 @@ def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
                 np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
             else:
                 np.testing.assert_array_equal(got, want)
-        expected_reward, _ = rewards_3d(previous, terminal, reward_cfg, cfg)
+        expected_reward, _ = compute_rewards(previous, terminal, reward_cfg, cfg)
         np.testing.assert_allclose(rewards[lane], expected_reward, rtol=1e-6, atol=1e-6)
         np.testing.assert_array_equal(info["terminal_target_pos"][lane], terminal.target_pos)
         np.testing.assert_array_equal(current.obstacle_min, previous.obstacle_min)
@@ -529,11 +529,11 @@ def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
 @pytest.mark.parametrize("terminal_count", [0, 1, 17, 18, 35])
 @pytest.mark.parametrize("geodesic", [False, True])
 def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(terminal_count, geodesic):
-    cfg = replace(Baseline3DConfig(), num_agents=1, max_steps=10,
+    cfg = replace(EnvConfig(), num_agents=1, max_steps=10,
                   no_movement_termination_steps=5, hold_chain_for=50,
                   num_obstacles=1, obstacle_spawn_layer_min=1, obstacle_spawn_layer_max=2)
-    reward_cfg = Baseline3DRewardConfig(chain_reward_system="obstacle_geodesic" if geodesic else "euclidean")
-    reset, step, _, _ = make_autoreset_3d_fns(BUILDING, cfg, reward_cfg)
+    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic" if geodesic else "euclidean")
+    reset, step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(436), 35))
     # Put terminal lanes at the end to exercise sparse gather/scatter indices.
     states = states._replace(step=jnp.where(jnp.arange(35) >= 35-terminal_count, 9, 0).astype(jnp.int32))
@@ -572,11 +572,11 @@ def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(termin
 
 
 def test_redundancy_and_efficiency_reward_modes():
-    from swarmecho.env.baseline3d import simple_chain_paths_3d, chain_path_efficiencies_3d
+    from swarmecho.env.environment import simple_chain_paths, chain_path_efficiencies
 
-    cfg = replace(Baseline3DConfig(), num_agents=4, comm_radius=2.3,
+    cfg = replace(EnvConfig(), num_agents=4, comm_radius=2.3,
                   comm_radius_base=2.1, visual_radius=2.3, observe_chain_contributor=True)
-    reset, _, _, _ = make_baseline_3d_fns(BUILDING, cfg, plan_geodesic=False)
+    reset, _, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(12))._replace(
         base_pos=jnp.array([1., 1., 2.]), target_pos=jnp.array([7., 1., 2.]),
         pos=jnp.array([[3., 1., 2.], [5., 2., 2.], [5., 0., 2.], [3., 3.3, 2.]]),
@@ -587,36 +587,36 @@ def test_redundancy_and_efficiency_reward_modes():
     )
     # D0 links the base to alternate relays D1/D2. D3 is only a dead-end
     # neighbour of D0; walking out to it and back must never count as a path.
-    paths = simple_chain_paths_3d(state, cfg)
+    paths = simple_chain_paths(state, cfg)
     assert int(jnp.sum(paths.counts)) == 4
     reference = jnp.zeros((6, 6)).at[0, 1].set(6.)
     expected = 6. / (2. + 2. * np.sqrt(5.))
-    np.testing.assert_allclose(jnp.max(chain_path_efficiencies_3d(paths, 6.)), expected)
+    np.testing.assert_allclose(jnp.max(chain_path_efficiencies(paths, 6.)), expected)
     for redundancy in (False, True):
         for efficiency in (False, True):
-            reward_cfg = Baseline3DRewardConfig(allow_redundancy_reward=redundancy,
+            reward_cfg = RewardConfig(allow_redundancy_reward=redundancy,
                                                enable_chain_efficiency_reward=efficiency)
-            reward, terms = rewards_3d(state, state, reward_cfg, cfg, reference)
+            reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
             np.testing.assert_allclose(terms["chain_gap"], [0., 0., 0. if redundancy else -1.25, -1.25])
             credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .5 / 4
             if efficiency:
                 np.testing.assert_allclose(terms["efficiency"], credit, rtol=1e-6)
-                _, disconnected = rewards_3d(state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference)
+                _, disconnected = compute_rewards(state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference)
                 np.testing.assert_array_equal(disconnected["efficiency"], np.zeros(4))
             else:
                 assert "efficiency" not in terms
                 credit = np.zeros(4)
             np.testing.assert_allclose(reward, terms["chain_gap"] + credit, rtol=1e-6)
-        _, _, observe, _ = make_baseline_3d_fns(BUILDING, cfg, plan_geodesic=False,
+        _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False,
                                               allow_redundancy_reward=redundancy)
         np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., float(redundancy), 0.])
     straight = state._replace(pos=state.pos.at[1].set(jnp.array([5., 1., 2.])))
-    np.testing.assert_allclose(jnp.max(chain_path_efficiencies_3d(simple_chain_paths_3d(straight, cfg), 6.)), 1.)
+    np.testing.assert_allclose(jnp.max(chain_path_efficiencies(simple_chain_paths(straight, cfg), 6.)), 1.)
 
 
 def test_autoreset_step_uses_the_configured_reward_terms():
-    cfg = replace(Baseline3DConfig(), max_steps=1)
-    zero_reward = Baseline3DRewardConfig(
+    cfg = replace(EnvConfig(), max_steps=1)
+    zero_reward = RewardConfig(
         exploration_bonus=0.0,
         collision_penalty=0.0,
         finder_bonus=0.0,
@@ -624,7 +624,7 @@ def test_autoreset_step_uses_the_configured_reward_terms():
         target_found_bonus=0.0,
         success_bonus=0.0,
     )
-    reset, autoreset_step, _, _ = make_autoreset_3d_fns(
+    reset, autoreset_step, _, _ = make_autoreset_fns(
         BUILDING, cfg, zero_reward
     )
     _, reward, _, _ = autoreset_step(
@@ -665,7 +665,7 @@ def test_any_agent_motion_resets_stationary_step_counter():
 
 
 def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain():
-    state = Baseline3DState(
+    state = EnvState(
         pos=jnp.asarray([[4.0, 1.0, 1.0], [8.0, 1.0, 1.0]]),
         vel=jnp.zeros((2, 3)),
         base_pos=jnp.asarray([1.0, 1.0, 1.0]),
@@ -685,8 +685,8 @@ def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain()
         collided=jnp.zeros(2, dtype=jnp.bool_),
         coverage_credit=jnp.zeros(2),
     )
-    gap, progress = chain_diagnostics_3d(state)
+    gap, progress = chain_diagnostics(state)
     assert gap == 0.0
     assert progress == 100.0
     state = state._replace(directly_sees_target=jnp.asarray([False, True]))
-    assert final_chain_length_3d(state, Baseline3DConfig(num_agents=2)) == pytest.approx(10.0)
+    assert final_chain_length(state, EnvConfig(num_agents=2)) == pytest.approx(10.0)

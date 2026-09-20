@@ -1,7 +1,7 @@
-# 3D PPO controls and diagnostics
+# PPO controls and diagnostics
 
-The 3D runtime uses `Training3DConfig` in `core/config.py` and
-`training/ppo3d.py`. The separate non-3D trainer is unchanged.
+The runtime uses `TrainingConfig` in `core/config.py` and
+`training/ppo.py`. The generic MAPPO trainer is retained for the workflow validator.
 
 ## Controls
 
@@ -17,7 +17,7 @@ env:
 ```
 
 `B01_office_find_only.yaml` enables `squashed`, `running`, and the timestep
-observation. Both clipping thresholds remain 0.2. Old 3D `clip_eps` overrides
+observation. Both clipping thresholds remain 0.2. Old `clip_eps` overrides
 must be replaced with the two explicit parameters.
 
 * Actor clipping applies to the probability ratio and the actor clip-fraction
@@ -39,7 +39,7 @@ must be replaced with the two explicit parameters.
 * Rewards and episode returns are not normalized. Advantage normalization uses
   only active samples, independently of the value-normalization setting.
 
-## Always-applied 3D corrections
+## Always-applied corrections
 
 Communication uses each environment's episode step, including across rollout
 boundaries, auto-resets, evaluation, and replay. `memory_comm_every_k_steps`
@@ -52,9 +52,8 @@ are divided among currently active agents, preserving team reward magnitude;
 inactive reward entries are zero. A newly spawned agent first acts using its
 next observation, rather than executing an action chosen while inactive.
 
-The reward defaults in `RewardConfig` are authoritative for their corresponding
-3D fields, including `no_movement_termination_penalty=-100000`. The previous
-duplicate 3D default of -300 is no longer used. Level overrides still win.
+The reward defaults live in `RewardConfig`, including
+`no_movement_termination_penalty=-1000`. Level overrides still win.
 The no-movement penalty is included in `rewards/no_movement_termination`.
 
 The task's `max_steps` deadline remains terminal (zero bootstrap), as requested.
@@ -80,7 +79,7 @@ model state. Existing `ppo/*` metrics remain update averages, weighted by active
 sample count. `ppo/value_loss` describes the objective in its configured units,
 not the raw RMSE. Compare the new RMSE metrics across normalization modes.
 
-## Optional privileged 3D critic
+## Optional privileged critic
 
 Set `network.critic_type: privileged` (or CLI `network.critic_type=privileged`)
 to enable the compact state input. The default `observation` keeps the existing
@@ -95,8 +94,8 @@ observed. Coordinates use the longest map dimension as their scale, consistent
 with actor base/target vectors. Coverage lookups clamp at grid boundaries.
 There is no inactivity counter, actor memory/message input, new raycast, path
 search, or full coverage-map copy. Actor observations and evaluation actions
-receive no privileged information. The legacy graph-masked privileged classes
-are not used by this 3D path.
+receive no privileged information. The removed graph-masked privileged classes
+are not used by this path.
 
 Rollouts store nine floats per agent and eight shared floats per environment
 (nine when episode progress is absent from actor observations). Shared data is

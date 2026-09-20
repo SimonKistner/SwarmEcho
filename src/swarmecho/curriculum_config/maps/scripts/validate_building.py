@@ -27,9 +27,9 @@ def validate_building_file(path: str | Path, *, runtime_smoke: bool = False) -> 
     if runtime_smoke:
         import jax
 
-        from swarmecho.env.baseline3d import Baseline3DConfig, make_baseline_3d_fns
+        from swarmecho.env.environment import EnvConfig, make_env_fns
 
-        cfg = Baseline3DConfig(
+        cfg = EnvConfig(
             num_agents=2,
             comm_radius_base=0.1,
             comm_radius=0.1,
@@ -38,7 +38,7 @@ def validate_building_file(path: str | Path, *, runtime_smoke: bool = False) -> 
             coverage_voxel_size=building.cell_size_m,
             max_steps=2,
         )
-        reset, step, observations, metrics = make_baseline_3d_fns(building, cfg)
+        reset, step, observations, metrics = make_env_fns(building, cfg)
         state = reset(jax.random.PRNGKey(0))
         observation = observations(state)
         next_state = step(state, np.zeros((cfg.num_agents, 3), dtype=np.float32))

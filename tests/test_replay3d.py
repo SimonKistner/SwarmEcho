@@ -5,17 +5,17 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from swarmecho.env.baseline3d import Baseline3DConfig, make_baseline_3d_fns
+from swarmecho.env.environment import EnvConfig, make_env_fns
 from swarmecho.env.buildings import load_building
-from swarmecho.visualize.replay3d import load_replay, write_replay
+from swarmecho.visualize.replay import load_replay, write_replay
 
 
 def test_replay_round_trip_and_atomic_manifest(tmp_path):
     building = load_building(
         "src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml"
     )
-    cfg = Baseline3DConfig()
-    reset, step, _, _ = make_baseline_3d_fns(building, cfg)
+    cfg = EnvConfig()
+    reset, step, _, _ = make_env_fns(building, cfg)
     state = reset(jax.random.PRNGKey(3))
     states = [state]
     for _ in range(3):

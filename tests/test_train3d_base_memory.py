@@ -3,14 +3,14 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 
-from swarmecho.core.config import load_level_3d
-from swarmecho.env.baseline3d import make_baseline_3d_fns
-from swarmecho.training.train3d import _communication_inputs, _update_base_memory
+from swarmecho.core.config import load_level
+from swarmecho.env.environment import make_env_fns
+from swarmecho.training.train import _communication_inputs, _update_base_memory
 
 
 def test_base_stores_first_reporter_replays_and_clears_on_reset():
-    level = load_level_3d()
-    reset, _, _, _ = make_baseline_3d_fns(level.building, level.env)
+    level = load_level()
+    reset, _, _, _ = make_env_fns(level.building, level.env)
     state = reset(jax.random.PRNGKey(0))
     state = state._replace(
         active=jnp.ones_like(state.active),
@@ -71,9 +71,9 @@ def test_base_stores_first_reporter_replays_and_clears_on_reset():
 
 
 def test_obstacle_blocks_tarmac_reporting_and_base_memory_replay():
-    level = load_level_3d()
+    level = load_level()
     cfg = replace(level.env, num_obstacles=1, comm_radius=10.0, comm_radius_base=10.0)
-    reset, _, _, _ = make_baseline_3d_fns(level.building, level.env)
+    reset, _, _, _ = make_env_fns(level.building, level.env)
     state = reset(jax.random.PRNGKey(1))._replace(
         pos=jnp.asarray([
             [2.0, 0.0, 1.0],

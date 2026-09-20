@@ -1,8 +1,4 @@
-"""3D building authoring contract and validation.
-
-This module deliberately does not alter the active 2D runtime.  It establishes
-the Sprint 0 file and array contracts that the 3D runtime will consume.
-"""
+"""3D building authoring contract, validation, and compiled geometry."""
 
 from __future__ import annotations
 

@@ -27,10 +27,10 @@ import pytest
 import yaml
 from flax import nnx
 
-from swarmecho.core.config import load_level_3d
-from swarmecho.env.baseline3d import make_baseline_3d_fns
+from swarmecho.core.config import load_level
+from swarmecho.env.environment import make_env_fns
 from swarmecho.training.checkpoints import restore_model_checkpoint
-from swarmecho.training.train3d import build_model_3d
+from swarmecho.training.train import build_model
 
 
 _DEFAULT_CHECKPOINT = Path("outputs/M00_tall_v1/checkpoints/ckpt_000351")
@@ -195,7 +195,7 @@ def _repeat_inputs(inputs: tuple[jax.Array, ...], batch_size: int):
 
 
 def _actual_initial_inputs(model, level) -> tuple[jax.Array, ...]:
-    reset, _, observations, _ = make_baseline_3d_fns(level.building, level.env)
+    reset, _, observations, _ = make_env_fns(level.building, level.env)
     state = reset(jax.random.PRNGKey(level.training.seed + 10_000))
     agents = level.env.num_agents
     delta = state.pos[:, None, :] - state.pos[None, :, :]
@@ -259,8 +259,8 @@ def test_identical_actor_inputs_are_batch_independent():
 
     checkpoint = _checkpoint()
     assert checkpoint.is_dir(), f"Checkpoint not found: {checkpoint}"
-    level = load_level_3d(_checkpoint_level(checkpoint))
-    model = build_model_3d(level)
+    level = load_level(_checkpoint_level(checkpoint))
+    model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
     assert model.actor.memory_comm_enabled, "This diagnostic expects the TarMAC actor."
     batch_size = int(

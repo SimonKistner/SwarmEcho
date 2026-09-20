@@ -9,12 +9,12 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from swarmecho.core.config import RewardConfig, Training3DConfig, load_level_3d
-from swarmecho.env.baseline3d import Baseline3DConfig, Baseline3DRewardConfig, observation_dim_3d
+from swarmecho.core.config import TrainingConfig, load_level
+from swarmecho.env.environment import EnvConfig, RewardConfig, observation_dim
 from swarmecho.models.critic import RecurrentAgentCentricCritic
 from swarmecho.training.checkpoints import validate_checkpoint_contract
-from swarmecho.training.ppo3d import RunningValueNormalizer, loss
-from swarmecho.training.train3d import communication_due_3d
+from swarmecho.training.ppo import RunningValueNormalizer, loss
+from swarmecho.training.train import communication_due
 
 
 class Actor(nnx.Module):
@@ -105,7 +105,7 @@ def test_value_normalizer_merges_moments_and_round_trips():
 
 def test_episode_clock_does_not_restart_at_rollout_boundary():
     steps = jnp.array([98, 99, 100, 101, 102, 0, 1])
-    np.testing.assert_array_equal(communication_due_3d(steps, 3), [False, True, False, False, True, True, False])
+    np.testing.assert_array_equal(communication_due(steps, 3), [False, True, False, False, True, True, False])
 
 
 def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
@@ -121,13 +121,16 @@ def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
 
 
 def test_3d_defaults_and_find_only_overrides():
-    defaults = Training3DConfig()
+    defaults = TrainingConfig()
     assert defaults.entropy_mode == "legacy" and defaults.value_normalization == "none"
-    assert Baseline3DRewardConfig().no_movement_termination_penalty == RewardConfig().no_movement_termination_penalty
-    cfg = Baseline3DConfig()
+    assert RewardConfig().no_movement_termination_penalty == -1000.0
+    cfg = EnvConfig()
     assert not cfg.observe_current_timestep
-    assert observation_dim_3d(replace(cfg, observe_current_timestep=True)) == observation_dim_3d(cfg) + 1
-    level = load_level_3d("B01_office_find_only", ["training.value_clip_eps=null"])
+    assert observation_dim(replace(cfg, observe_current_timestep=True)) == observation_dim(cfg) + 1
+    level = load_level("B01a_office_find_only", [
+        "training.value_clip_eps=null",
+        "reward.no_movement_termination_penalty=-100000.0",
+    ])
     assert level.training.value_clip_eps is None
     assert level.training.entropy_mode == "squashed" and level.training.value_normalization == "running"
     assert level.env.observe_current_timestep

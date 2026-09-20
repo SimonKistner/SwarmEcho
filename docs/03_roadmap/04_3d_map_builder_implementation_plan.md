@@ -1,5 +1,9 @@
 # 3D map builder: architecture and implementation plan
 
+> Historical design/proposal document. References to the former runtime describe
+> the migration context, not supported commands. Use the current guides and
+> [removal audit](05_2d_removal_audit.md) for the implemented 3D-only state.
+
 Status: **implementation proposal**. This document follows the completed 3D
 baseline rather than the pre-transition assumptions in the discovery brief. It
 defines the smallest path from the current sealed-cuboid maps to an optional,

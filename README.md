@@ -1,172 +1,73 @@
 # SwarmEcho
 
-<p align="center">
-  <img src="docs/05_assets/Preview_vid/demo_2x.gif" width="600" alt="SwarmEcho Behaviour Preview" />
-</p>
+Runtime modules, APIs, and commands use unsuffixed names (for example,
+`training/train.py`, `load_level`, and `swarmecho-train`). Existing map/level
+identifiers and saved artifact/checkpoint format markers retain their original
+names for compatibility. After updating this checkout, refresh installed CLI
+entry points with `uv sync` in the existing WSL environment.
 
-A **GPU-accelerated Multi-Agent Reinforcement Learning** environment built in JAX, training a drone swarm to explore a 2D environment and form a **delay-tolerant communication relay chain** between a base station and a discovered target.
+SwarmEcho trains drone swarms to explore **buildings and cuboid worlds** and
+form a communication relay between a base and a target. The runtime uses JAX,
+recurrent MAPPO, and optional TarMAC communication.
 
-Agents are trained using **MAPPO** (Multi-Agent PPO with a Centralised Critic).
-
----
-
-## Architecture
-
-The project uses a `src/swarmecho/` package with separate environment, model, training, analysis, visualization, and map-configuration modules.
-
-```
-SwarmEcho/
-├── docs/                     ← Technical reports & documentation
-├── src/
-│   └── swarmecho/
-│       ├── core/             ← Structured configuration & utilities
-│       ├── curriculum_config/← Retained levels, maps, and maze builder
-│       ├── env/               ← JAX physics, state, rewards, observations
-│       ├── models/             ← MAPPO actor, critic, and recurrent modules
-│       ├── training/           ← Rollouts, PPO, evaluation, and analysis jobs
-│       └── visualize/          ← OpenCV rendering and preview tooling
-└── README.md
-```
-
----
-
-## Installation
-
-**Prerequisites:** WSL2 with CUDA, `uv` package manager.
+Training runs in the project's existing WSL2/CUDA environment. From the repository
+root in that environment:
 
 ```bash
-# Clone the repo
-git clone https://github.com/yourname/SwarmEcho
-cd SwarmEcho
-
-# Install all dependencies (including JAX CUDA wheels)
 uv sync
-
-# The training banner reports the devices selected by JAX.
+uv run swarmecho-train level=M00_no_maze_open_cuboid_3D
 ```
 
----
-
-## Quick Start
-
-### 1. Run the Core Workflow Validation
-Run the minimal train-update-evaluate-checkpoint-render workflow.
-```bash
-uv run swarmecho-validate
-```
-
-### 1b. Run the 3D Baseline
-
-Train the strict 3D baseline with the recurrent MAPPO/TarMAC stack:
+Inspect replays and evaluation heatmaps, compare runs, or edit buildings:
 
 ```bash
-uv run swarmecho-train-3d level=M00_no_maze_open_cuboid_3D
-```
-
-All ordinary overrides use the maintained `key=value` form, for example
-`training.total_timesteps=400000 logging.run_name=inspector_smoke`.
-
-Cold-start the independent inspector and choose any discovered replay:
-
-```bash
-uv run swarmecho-inspect-3d
-```
-
-### 2. Start Curriculum Training
-Train the maintained default small-maze stage.
-```bash
-uv run swarmecho-curriculum
-```
-
-### 3. Training a Single Level
-```bash
-# Start small-maze training with its level settings
-uv run swarmecho-train level=M01_small_maze
-
-# Overriding parameters via CLI
-uv run swarmecho-train level=M01_small_maze training.num_envs=512 logging.wandb_mode=online
-```
-
-### 4. Multi-seed Training
-
-Run sequential, reproducible training runs. The command appends `_seed_N` to
-the supplied run name:
-
-```bash
-uv run swarmecho-multi-train level=M01_small_maze \
-  logging.run_name=small_maze_v1 seeds=3 base_seed=42
-```
-
-The equivalent 3D command is:
-
-```bash
-uv run swarmecho-multi-train-3d level=M00_no_maze_open_cuboid_tall_3D \
-  logging.run_name=tall_v1 logging.wandb_group=tall_v1 seeds=3 base_seed=9
-```
-
-Run a 3D curriculum by listing levels in the order they should execute. Each
-stage starts from the previous stage's final checkpoint:
-
-```bash
-uv run swarmecho-curriculum-3d \
-  levels=M00_no_maze_open_cuboid_3D,M00_no_maze_open_cuboid_tall_3D \
-  logging.run_name=tall_curriculum logging.wandb_group=tall_curriculum
-```
-
-### 5. 2D Grid Maze Builder
-Launch the browser-based grid editor to draw maze walls and target no-spawn cells.
-```bash
+uv run swarmecho-inspect
+uv run swarmecho-dashboard
 uv run swarmecho-maze-builder
 ```
 
+The general Streamlit run-analysis dashboard remains available for runs.
+The inspector opens on port 8765; the building editor uses port 8766.
+`swarmecho-eval-dashboard` and `swarmecho-artefacts` are aliases for the 3D
+inspector and accept its `key=value` options.
 
-### 6. Consolidated Map Preview & Renderer
-Render static blueprint images or simulated video/GIF rollouts of any map blueprint.
+## Training and evaluation
+
 ```bash
-uv run swarmecho-render M03_big_maze
+uv run swarmecho-multi-train level=M00_no_maze_open_cuboid_seeds=3 base_seed=42 logging.run_name=baseline
+uv run swarmecho-curriculum levels=M00_no_maze_open_cuboid_3D,M01_no_maze_open_cuboid_tall_logging.run_name=curriculum
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel replay_after=true replays=3
 ```
 
-### 7. Discovery & Analysis Dashboards
-Inspect training parameters, curriculum evolution, and evaluation videos across all runs.
-```bash
-uv run swarmecho-dashboard
-# Checkpoint-oriented evaluation artifacts:
-uv run swarmecho-eval-dashboard
-```
+Replace checkpoint placeholders with an existing checkpoint. Level files and
+`key=value` overrides control training, rewards, observations, evaluation, and
+logging. Existing command names, checkpoint contracts, maps, and levels are
+preserved.
 
----
+## Package layout
 
-## Documentation Directory
+- `src/swarmecho/env/`: state, physics, building geometry, roadmaps, and observations.
+- `src/swarmecho/models/`: actors, critics, and recurrent communication.
+- `src/swarmecho/training/`: training, PPO, checkpoints, evaluation, and validation.
+- `src/swarmecho/visualize/`: replay serialization and interactive inspector.
+- `src/swarmecho/analysis/`: the general run-analysis dashboard.
+- `src/swarmecho/curriculum_config/`: maps, levels, and the building editor.
 
-The deep-dive technical documentation is organized by topic in [`docs/`](docs/README.md):
+## Validation
 
-- [Reference](docs/01_reference/): current system architecture, environment, training, and assumptions.
-- [Guides](docs/02_guide/): configuration, commands, and analysis tooling.
-- [Roadmap](docs/03_roadmap/): cleanup work and future features.
-- [Archive](docs/04_archive/): historical and experimental context.
-
----
-
-## Output Structure
-
-Each training run creates its own directory:
-```
-outputs/
-└── {run_name}/
-    ├── checkpoints/
-    │   └── ckpt_001000/    ← Orbax checkpoint (Flax NNX state dict)
-    └── artifacts/
-        ├── train/          ← scheduled training-evaluation artifacts
-        └── eval/           ← checkpoint-scoped evaluation artifacts
-```
-
-Timestamp suffixes are used only when `logging.use_timestamp_postfix` is
-enabled. Curriculum runs use `outputs/curriculum/<curriculum_name>/`.
-
----
-
-## Core Workflow Validation
+Run these in the existing WSL environment:
 
 ```bash
 uv run swarmecho-validate
+uv run pytest tests
+node --test tests/test_3d_map_builder_ui.cjs tests/test_inspector3d_visibility.cjs
 ```
+
+The workflow validator exercises a small rollout and PPO update; it is not a
+substitute for checkpoint, training/resume, evaluation, and UI regression checks.
+The benchmark is available as `swarmecho-benchmark`.
+
+See the [documentation index](docs/README.md), [commands](docs/02_guide/03_commands.md),
+[PPO controls](docs/01_reference/05_3d_ppo_controls.md), and
+[removal audit](docs/03_roadmap/05_2d_removal_audit.md).
+Historical 2D material is retained only as explicitly labeled documentation.

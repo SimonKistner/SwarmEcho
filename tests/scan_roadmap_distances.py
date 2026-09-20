@@ -9,10 +9,10 @@ from pathlib import Path
 import numpy as np
 
 from generate_obstacle_roadmap_testresult import generate
-from swarmecho.core.config import MAP_DIR, load_level_3d
-from swarmecho.env.baseline3d import Baseline3DConfig, _target_spawn_boxes
+from swarmecho.core.config import MAP_DIR, load_level
+from swarmecho.env.environment import EnvConfig, _target_spawn_boxes
 from swarmecho.env.buildings import load_building
-from swarmecho.env.obstacles3d import shared_roadmap
+from swarmecho.env.obstacles import shared_roadmap
 
 
 def visible(start, ends, lower, upper):
@@ -36,8 +36,8 @@ def inside(points, lower, upper):
 
 
 def scan(args):
-    level = load_level_3d(args.level) if args.level else None
-    cfg = level.env if level else Baseline3DConfig()
+    level = load_level(args.level) if args.level else None
+    cfg = level.env if level else EnvConfig()
     if args.corner_bonus_m is not None:
         cfg = replace(cfg, roadmap_corner_bonus_m=args.corner_bonus_m)
     if not np.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:

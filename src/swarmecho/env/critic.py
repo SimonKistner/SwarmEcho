@@ -3,21 +3,21 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from swarmecho.env.baseline3d import coverage_grid_geometry, observation_dim_3d
+from swarmecho.env.environment import coverage_grid_geometry, observation_dim
 
 
-def privileged_global_dim_3d(cfg):
+def privileged_global_dim(cfg):
     # Base xyz, target xyz, holding progress, base knowledge, optional clock.
     return 8 + int(not cfg.observe_current_timestep)
 
 
-def privileged_input_dim_3d(cfg):
-    return (observation_dim_3d(cfg) + 9 + 3
+def privileged_input_dim(cfg):
+    return (observation_dim(cfg) + 9 + 3
             + 3 * int(not cfg.observe_base_vector)
-            + privileged_global_dim_3d(cfg) - 6)
+            + privileged_global_dim(cfg) - 6)
 
 
-def make_privileged_features_3d(building, cfg):
+def make_privileged_features(building, cfg):
     """Build a pure device-side collector; no rays, paths, or host callbacks.
 
     Agent packet: normalized position xyz and six adjacent coverage cells.
@@ -47,7 +47,7 @@ def make_privileged_features_3d(building, cfg):
     return collect
 
 
-def assemble_privileged_observations_3d(obs, agent, shared, active, *, include_base_vector):
+def assemble_privileged_observations(obs, agent, shared, active, *, include_base_vector):
     """Assemble per-agent tokens before encoding/GRU/attention, for any batch axes."""
     position = agent[..., :3]
     features = [obs, agent]

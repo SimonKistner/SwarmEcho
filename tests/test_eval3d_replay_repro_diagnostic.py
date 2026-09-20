@@ -1,7 +1,7 @@
 """Manual diagnostic for a parallel-evaluation versus selective-replay mismatch.
 
 This is deliberately opt-in: it restores a real CUDA checkpoint and runs the
-same 4,000-lane evaluation as ``swarmecho-evaluate-3d ... mode=parallel``.
+same 4,000-lane evaluation as ``swarmecho-evaluate ... mode=parallel``.
 It then runs the same selected target through the selective replay path and
 compares the two rollouts timestep by timestep.
 
@@ -32,12 +32,12 @@ import pytest
 import yaml
 from flax import nnx
 
-from swarmecho.core.config import load_level_3d
-from swarmecho.env.baseline3d import make_baseline_3d_fns
+from swarmecho.core.config import load_level
+from swarmecho.env.environment import make_env_fns
 from swarmecho.training.artifacts import evaluation_stage, load_eval_info_csv
 from swarmecho.training.checkpoints import restore_model_checkpoint
-from swarmecho.training.evaluate3d import run_parallel_evaluation_3d
-from swarmecho.training.train3d import build_model_3d, evaluate_model_3d
+from swarmecho.training.evaluate import run_parallel_evaluation
+from swarmecho.training.train import build_model, evaluate_model
 
 
 _DEFAULT_CHECKPOINT = Path("outputs/M00_tall_v1/checkpoints/ckpt_000351")
@@ -130,7 +130,7 @@ def _build_tracer(model, level):
     outputs at every step for comparison.
     """
     cfg = level.env
-    reset, step, observations, _ = make_baseline_3d_fns(level.building, cfg)
+    reset, step, observations, _ = make_env_fns(level.building, cfg)
     num_agents = cfg.num_agents
     cadence = int(model.memory_comm_every_k_steps)
 
@@ -333,7 +333,7 @@ def _print_outcome(label: str, trace: dict[str, np.ndarray]) -> None:
 def _first_production_state_difference(
     trace: dict[str, np.ndarray], states: list,
 ) -> tuple[int, str, float] | None:
-    """Compare the traced NNX path against ``evaluate_model_3d`` itself."""
+    """Compare the traced NNX path against ``evaluate_model`` itself."""
     fields = (
         ("position", "pos"),
         ("velocity", "vel"),
@@ -370,11 +370,11 @@ def test_parallel_success_replays_identically_step_by_step():
 
     checkpoint = _checkpoint()
     assert checkpoint.is_dir(), f"Checkpoint not found: {checkpoint}"
-    level = load_level_3d(_checkpoint_level(checkpoint))
+    level = load_level(_checkpoint_level(checkpoint))
     # Make the test's first operation identical to the user's parallel command.
-    model = build_model_3d(level)
+    model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
-    csv_path = run_parallel_evaluation_3d(model, level, checkpoint, checkpoint.parents[1])
+    csv_path = run_parallel_evaluation(model, level, checkpoint, checkpoint.parents[1])
     records = load_eval_info_csv(csv_path)
     lane = _success_zero_index(records)
     target = records["positions"][lane]
@@ -429,7 +429,7 @@ def test_parallel_success_replays_identically_step_by_step():
     # Finally call the production selective replay function, rather than only
     # its equivalent traced transition, and print exactly the stage the CLI
     # reports before making the diagnostic fail on any discrepancy.
-    replay_states, _ = evaluate_model_3d(model, level, target_position=target)
+    replay_states, _ = evaluate_model(model, level, target_position=target)
     final = replay_states[-1]
     final_stage = evaluation_stage(
         success=bool(np.asarray(final.success)),

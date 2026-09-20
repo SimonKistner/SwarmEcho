@@ -1,5 +1,9 @@
 # 3D map builder: architecture and implementation plan
 
+> Archived editor design proposal, retained for historical context.
+> See the current [tools guide](../02_guide/02_analysis_and_tools.md) for the
+> implemented building editor. This document is not an operational guide.
+
 Status: **implementation proposal**. This document follows the completed 3D
 baseline rather than the pre-transition assumptions in the discovery brief. It
 defines the smallest path from the current sealed-cuboid maps to an optional,

@@ -1,4 +1,4 @@
-"""Local web server for the SwarmEcho maze builder.
+"""Local web server for the SwarmEcho 3D building editor.
 
 Run from the repository root:
 
@@ -16,11 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core import (
-    create_map_and_level,
-    crop_canvas_payload,
-    normalize_machine_maze,
-)
 from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
     add_outer_walls,
     add_roof,
@@ -35,7 +30,7 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     validate_document,
 )
 from swarmecho.core.config import MAP_DIR
-from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core import validate_map_name
+from swarmecho.curriculum_config.maps.scripts.maze_builder.map_names import validate_map_name
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _INDEX = _SCRIPT_DIR / "index.html"
@@ -170,31 +165,19 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if path == "/api/export-machine":
-                machine = crop_canvas_payload(payload)
-                self._send_json(HTTPStatus.OK, {"ok": True, "machine_maze": machine})
-                return
-            if path == "/api/normalize-machine":
-                machine = normalize_machine_maze(payload)
-                self._send_json(HTTPStatus.OK, {"ok": True, "machine_maze": machine})
-                return
-            if path == "/api/create":
-                result = create_map_and_level(payload, overwrite=bool(payload.get("overwrite", False)))
-                self._send_json(HTTPStatus.OK, {"ok": True, **result})
-                return
             self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:  # return user-facing GUI error
             self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the SwarmEcho maze builder web UI.")
+    parser = argparse.ArgumentParser(description="Run the SwarmEcho 3D building editor web UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8766, help="Bind port (default: 8766)")
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), MazeBuilderHandler)
-    print(f"SwarmEcho maze builder running at http://{args.host}:{args.port}/")
+    print(f"SwarmEcho 3D building editor running at http://{args.host}:{args.port}/")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
