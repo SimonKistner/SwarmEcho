@@ -1,10 +1,10 @@
-# 3D map builder: architecture and implementation plan
+# volumetric map builder: architecture and implementation plan
 
 > Archived editor design proposal, retained for historical context.
 > See the current [tools guide](../02_guide/02_analysis_and_tools.md) for the
 > implemented building editor. This document is not an operational guide.
 
-Status: **implementation proposal**. This document follows the completed 3D
+Status: **implementation proposal**. This document follows the completed volumetric
 baseline rather than the pre-transition assumptions in the discovery brief. It
 defines the smallest path from the current sealed-cuboid maps to an optional,
 layer-oriented building editor without creating a second environment runtime.
@@ -27,7 +27,7 @@ The builder should make a building by editing a stack of square-cell plans:
 
 Tiles and walls are solid rectangular prisms. Their thickness is part of the
 map, is shown by the editor, and is used by collision and line-of-sight code.
-There is no separate “builder environment”: a builder map is an ordinary 3D
+There is no separate “builder environment”: a builder map is an ordinary volumetric
 map selected by a level.
 
 ### Deliberate first-release limits
@@ -45,12 +45,12 @@ The transition already established useful seams which should be retained:
 1. `BuildingArrays` is the level-facing map product. It already stores
    `(X,Y,Z+1)` tiles, `(X+1,Y,Z)` X walls, `(X,Y+1,Z)` Y walls, thicknesses,
    target exclusions, base position, and world size.
-2. `load_level_3d` selects exactly one map and compiles it before constructing
+2. `load_level` selects exactly one map and compiles it before constructing
    training functions. Map dimensions are consequently static for a compiled
    level, which is the right behavior for JAX batching.
 3. Target sampling already clips each cell's continuous volume against the six
    adjacent tile/wall prisms.
-4. The 3D environment already has reusable AABB segment tests for procedural
+4. The volumetric environment already has reusable AABB segment tests for procedural
    cuboids, and its collision, communication LOS, target visibility, coverage,
    radar, evaluation artifacts, and inspector all understand those cuboids.
 5. The old maze-builder server is a small local standard-library HTTP service.
@@ -61,7 +61,7 @@ The transition already established useful seams which should be retained:
 There is one important gap: authored interior `tiles`, `x_walls`, and
 `y_walls` currently affect target-spawn clearance only. Motion is bounded by
 one analytic outer cuboid, while collision and every LOS path only see the
-random AABBs in `Baseline3DState`. The inspector likewise renders the world
+random AABBs in `EnvState`. The inspector likewise renders the world
 box and procedural obstacles, not authored building prisms. Therefore an
 editor-only implementation would look correct but train on different
 geometry. Runtime geometry integration must precede the polished editor.
@@ -140,7 +140,7 @@ zeroes, except that editor creation commands explicitly materialize their
 defaults before validation. YAML output orders numeric layers ascending and
 always emits the grid and physical parameters, making diffs stable.
 
-The base remains a static point as decided for the 3D environment; selecting a
+The base remains a static point as decided for the volumetric environment; selecting a
 cell is the authoring convenience. Compilation places it at the horizontal
 cell center and immediately above that cell's lower tile. This removes the
 current possibility of manually placing the base inside a wall while retaining
@@ -272,7 +272,7 @@ Use a versioned API rather than extending the 2D maze payload:
 
 Reject traversal and invalid names, cap dimensions/body size, and write via a
 temporary file plus `Path.replace`. Creating a level is a separate opt-in
-action: it writes a small level copied from a selected 3D template and changes
+action: it writes a small level copied from a selected volumetric template and changes
 only `env.map_names`. The builder must never silently pick agent/radius/training
 values based on building size; it should display the ideal chain margin using
 the chosen level settings and warn if negative.
@@ -349,7 +349,7 @@ device memory, editor frame time, and replay payload/load time for at least:
 - the largest editor-supported dimensions.
 
 Only if the shared AABB scan misses the agreed throughput budget should it be
-replaced by 3D DDA over lattice faces or a spatial index. Preserve the geometry
+replaced by volumetric DDA over lattice faces or a spatial index. Preserve the geometry
 query interface so this is a kernel substitution, not another map format.
 
 ## Test matrix
@@ -392,7 +392,7 @@ query interface so this is a kernel substitution, not another map format.
 - Replays gain a map hash. Older replays without one continue to show their
   world box and stored procedural obstacles; this compatibility belongs in the
   out-of-process inspector, not in training.
-- The 2D builder can remain available during Phase 0/1, but after the 3D editor
+- The 2D builder can remain available during Phase 0/1, but after the volumetric editor
   can create the corridor acceptance map its CLI should be redirected to the
   new UI and the old converter removed in one cleanup change.
 - Checkpoints are compatible only when their observation/action/network shapes
@@ -424,7 +424,7 @@ query interface so this is a kernel substitution, not another map format.
 
 The feature is complete when a user can create either the corridor office or
 the tower entirely in the browser, validate and save it, select it from an
-otherwise ordinary 3D level, and observe identical solid geometry in physics,
+otherwise ordinary volumetric level, and observe identical solid geometry in physics,
 radio/vision, radar, coverage, replay, and the editor. Invalid exterior leaks
 must never reach training, and the existing named cuboid levels must continue
 to load after their one-time format migration.

@@ -1,4 +1,4 @@
-"""Versioned, renderer-independent 3D replay artifacts."""
+"""Versioned, renderer-independent replay artifacts."""
 
 from __future__ import annotations
 
@@ -17,23 +17,7 @@ from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 REPLAY_FORMAT = "swarmecho-replay/v1"
 
 
-def building_snapshot(building: BuildingArrays) -> dict:
-    """Freeze the actual runtime geometry, independent of later map edits."""
-    cols, rows, layers = building.interior_cells.shape
-    return {
-        "format": BUILDING_FORMAT,
-        "building_cell_grid": dict(cols=cols, rows=rows, layers=layers),
-        "cell_size_m": building.cell_size_m,
-        "wall_thickness_m": building.wall_thickness_m,
-        "tile_thickness_m": building.tile_thickness_m,
-        "interior_cells": np.argwhere(building.interior_cells).tolist(),
-        "target_exclusion_cells": np.argwhere(building.target_exclusion).tolist(),
-        "base_position_m": building.base_position_m.tolist(),
-        "geometry": {key: np.argwhere(getattr(building, key)).tolist()
-                     for key in ("tiles", "x_walls", "y_walls")},
-        "solid_min_m": building.solid_min_m.tolist(),
-        "solid_max_m": building.solid_max_m.tolist(),
-    }
+from swarmecho.env.buildings import building_snapshot
 
 
 def write_replay(

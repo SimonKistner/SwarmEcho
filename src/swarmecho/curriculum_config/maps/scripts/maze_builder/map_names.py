@@ -1,4 +1,4 @@
-"""Map filename validation shared by the 3D building API."""
+"""Map filename validation shared by the building API."""
 
 import re
 

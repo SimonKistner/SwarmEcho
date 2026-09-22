@@ -1,4 +1,4 @@
-"""Pure-JAX 3D environment, observations, relay rewards, and episode state."""
+"""Pure-JAX environment, observations, relay rewards, and episode state."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from swarmecho.env.obstacles import (
     segments_blocked,
     SharedRoadmap,
     shared_roadmap,
+    building_roadmap,
 )
 
 
@@ -61,6 +62,8 @@ class EnvState(NamedTuple):
     shared_geometry: SharedRoadmap | None = None
     spawn_pair_attempts: jax.Array = jnp.int32(1)
     roadmap_corner_distances: jax.Array = jnp.zeros((0, 0), dtype=jnp.float32)
+    map_id: jax.Array = jnp.int32(0)
+    building_bank: object = None
 
     @property
     def solid_min(self):
@@ -78,12 +81,16 @@ class EnvState(NamedTuple):
 
     @property
     def planning_vertices(self):
+        if self.building_bank is not None:
+            return self.building_bank.get("vertices", self.map_id)
         if self.shared_geometry is not None and self.obstacle_min.shape[0] == 0:
             return jnp.asarray(self.shared_geometry.vertices)
         return self.roadmap_vertices
 
     @property
     def planning_distances(self):
+        if self.building_bank is not None:
+            return self.building_bank.get("distances", self.map_id)
         if self.shared_geometry is not None and self.obstacle_min.shape[0] == 0:
             return jnp.asarray(self.shared_geometry.distances)
         return self.roadmap_distances
@@ -99,60 +106,7 @@ class EnvState(NamedTuple):
         return self.solid_max + margin
 
 
-@dataclass(frozen=True)
-class EnvConfig:
-    num_agents: int = 5
-    dt: float = 0.1
-    max_force: float = 15.0
-    max_speed: float = 5.0
-    drag: float = 0.85
-    drone_radius: float = 0.25
-    comm_radius_base: float = 6.0
-    comm_radius: float = 5.0
-    visual_radius: float = 4.0
-    target_spawn_buffer: float = 0.5  # Legacy config compatibility; no base-distance restriction.
-    target_wall_buffer_fraction: float = 0.1
-    radar_bins: int = 8
-    spawn_delay: int = 0
-    hold_chain_for: int = 50
-    max_steps: int = 700
-    no_movement_termination_steps: int = 50
-    success_when_target_found_or_delivered: bool = False
-    movement_epsilon: float = 1e-3
-    observe_target_vector: bool = False
-    observe_base_vector: bool = False
-    observe_coverage_probe: bool = False
-    observe_chain_contributor: bool = False
-    observe_current_timestep: bool = False  # Episode step / max_steps, in [0, 1].
-    coverage_voxel_size: float | None = None
-    num_obstacles: int = 0
-    obstacle_size_min_m: float = 2.0
-    obstacle_size_max_m: float = 4.0
-    obstacle_spawn_layer_min: int = 2
-    obstacle_spawn_layer_max: int = 5
-    obstacle_boundary_buffer_m: float = 0.5
-    obstacle_target_buffer_m: float = 0.5
-    obstacle_planning_clearance_m: float = 0.1
-    roadmap_merge_walls: bool = True
-    roadmap_corner_bonus_m: float = 8.0
-    obstacle_layout_version: str = "three_aabb_v1"
-
-
-@dataclass(frozen=True)
-class RewardConfig:
-    target_found_requires_delivery: bool = True
-    chain_reward_system: str = "euclidean"
-    exploration_bonus: float = 0.25
-    collision_penalty: float = 0.5
-    finder_bonus: float = 50.0
-    max_gap_penalty: float = 5.0
-    target_found_bonus: float = 100.0
-    success_bonus: float = 500.0
-    no_movement_termination_penalty: float = -1000.0
-    # Credit every drone on a simple base-target path, including alternate routes.
-    allow_redundancy_reward: bool = False
-    enable_chain_efficiency_reward: bool = False
-    chain_efficiency_bonus: float = 0.5
+from swarmecho.env.configs import EnvConfig, RewardConfig
 
 
 def build_obstacle_roadmap(obstacle_min, obstacle_max, cfg: EnvConfig):
@@ -214,7 +168,7 @@ def coverage_grid_geometry(
 
 
 def observation_dim(cfg: EnvConfig) -> int:
-    """Return the configured 3D actor observation width."""
+    """Return the configured actor observation width."""
     return (
         6
         + 3 * int(cfg.observe_base_vector)
@@ -509,7 +463,7 @@ def compute_rewards(
     geodesic_distances=None,
     chain_paths=None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Compute 3D relay rewards with persistent discovery and delivery events.
+    """Compute relay rewards with persistent discovery and delivery events.
 
     The local finder and target-found bonuses are one-shot events. The
     terminal success bonus is emitted when either the held chain succeeds or
@@ -603,51 +557,22 @@ def compute_rewards(
     return total, terms
 
 
-def _target_spawn_boxes(
-    building: BuildingArrays, cfg: EnvConfig, *, include_excluded: bool = False
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Return valid cell boxes and their volumes for continuous target sampling."""
-    dims = building.target_exclusion.shape
-    cells = np.stack(np.meshgrid(*[np.arange(size) for size in dims], indexing="ij"), axis=-1)
-    cells = cells.reshape(-1, 3)
-    excluded = building.target_exclusion[tuple(cells.T)] & (not include_excluded)
-    interior = building.interior_cells[tuple(cells.T)]
-    clearance = cfg.target_wall_buffer_fraction * building.cell_size_m
-    if not 0 <= cfg.target_wall_buffer_fraction < 0.5:
-        raise ValueError("target_wall_buffer_fraction must be in [0, 0.5).")
-    half_wall = building.wall_thickness_m / 2
-    half_tile = building.tile_thickness_m / 2
-    lower = cells.astype(np.float32) * building.cell_size_m
-    upper = lower + building.cell_size_m
-    for index, (x, y, z) in enumerate(cells):
-        if building.x_walls[x, y, z]:
-            lower[index, 0] += half_wall + clearance
-        if building.x_walls[x + 1, y, z]:
-            upper[index, 0] -= half_wall + clearance
-        if building.y_walls[x, y, z]:
-            lower[index, 1] += half_wall + clearance
-        if building.y_walls[x, y + 1, z]:
-            upper[index, 1] -= half_wall + clearance
-        if building.tiles[x, y, z]:
-            lower[index, 2] += half_tile + clearance
-        if building.tiles[x, y, z + 1]:
-            upper[index, 2] -= half_tile + clearance
-    volumes = np.prod(np.maximum(upper - lower, 0), axis=-1)
-    valid = interior & ~excluded & (volumes > 0)
-    if not np.any(valid):
-        raise ValueError("Building has no non-excluded target spawn volume.")
-    return tuple(
-        jnp.asarray(value[valid], dtype=jnp.float32)
-        for value in (lower, upper, volumes)
-    )
-
+def _target_spawn_boxes(building, cfg, *, include_excluded=False):
+    from swarmecho.env.buildings import target_spawn_boxes
+    return tuple(jnp.asarray(value) for value in target_spawn_boxes(building, cfg, include_excluded=include_excluded))
 
 def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: bool = True,
                        randomize_base: bool = False, minimum_geodesic_separation: bool = False,
                        minimum_geodesic_separation_multiplier: float = 2.0,
                        spawn_pair_max_attempts: int = 1024, allow_redundancy_reward: bool = False,
-                       target_found_requires_delivery: bool = True):
+                       target_found_requires_delivery: bool = True, building_bank=None):
     """Create pure reset, step, observation, and metric functions."""
+    from swarmecho.env.buildings import validate_feature_clearance
+    validate_feature_clearance(building, cfg.drone_radius + cfg.obstacle_planning_clearance_m)
+    if building_bank is not None:
+        if cfg.num_obstacles:
+            raise ValueError("Building banks cannot be combined with generated obstacles.")
+        building = building_bank.envelope
     if cfg.num_agents < 1:
         raise ValueError("num_agents must be positive.")
     if cfg.spawn_delay < 0:
@@ -714,15 +639,9 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     )
     authored_min = jnp.asarray(building.solid_min_m, dtype=jnp.float32)
     authored_max = jnp.asarray(building.solid_max_m, dtype=jnp.float32)
-    has_authored_solids = bool(building.solid_min_m.shape[0])
-    geometry = shared_roadmap(
-        building.solid_min_m, building.solid_max_m, np.asarray(lower), np.asarray(upper),
-        cfg.drone_radius + cfg.obstacle_planning_clearance_m,
-        plan=plan_geodesic and cfg.num_obstacles == 0,
-        merge_walls=cfg.roadmap_merge_walls, edge_spacing=building.cell_size_m,
-        corner_bonus_m=cfg.roadmap_corner_bonus_m if minimum_geodesic_separation else 0.0,
-        corner_merge_distance_m=corner_merge_distance,
-    )
+    has_authored_solids = bool(building.solid_min_m.shape[0]) or building_bank is not None
+    geometry = building_roadmap(building, cfg, plan=plan_geodesic and cfg.num_obstacles == 0,
+                               corner_bonus_m=cfg.roadmap_corner_bonus_m if minimum_geodesic_separation else 0.0)
     authored_vertices = jnp.asarray(geometry.vertices)
     if plan_geodesic and cfg.roadmap_merge_walls and cfg.num_obstacles:
         authored_vertices = jnp.asarray(authored_roadmap_vertices(
@@ -772,15 +691,19 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             distances = jnp.zeros((0, 0), dtype=jnp.float32)
         return obstacle_min, obstacle_max, vertices, distances
 
-    def sample_target(key, obstacle_min, obstacle_max):
+    def sample_target(key, obstacle_min, obstacle_max, map_id=0):
         """Sample allowed interior volume, rejecting buffered solid geometry."""
         solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
+        target_lower, target_upper, target_volumes = spawn_lower, spawn_upper, spawn_volumes
+        if building_bank is not None:
+            target_lower, target_upper, target_volumes = (building_bank.get("target_" + suffix, map_id)
+                                                         for suffix in ("lower", "upper", "volumes"))
 
         def draw(draw_key):
             box_key, point_key = jax.random.split(draw_key)
-            box = jax.random.categorical(box_key, jnp.log(spawn_volumes))
+            box = jax.random.categorical(box_key, jnp.log(target_volumes))
             return jax.random.uniform(
-                point_key, (3,), minval=spawn_lower[box], maxval=spawn_upper[box]
+                point_key, (3,), minval=target_lower[box], maxval=target_upper[box]
             )
 
         key, first_key = jax.random.split(key)
@@ -799,11 +722,12 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             return iteration + 1, retry_key, draw(draw_key)
 
         point = jax.lax.while_loop(condition, retry, (0, key, first))[2]
-        fallback_candidates = (spawn_lower + spawn_upper) / 2
+        fallback_candidates = (target_lower + target_upper) / 2
         fallback_valid = ~points_inside_aabbs(
             fallback_candidates, solid_min, solid_max,
             cfg.obstacle_target_buffer_m,
         )
+        fallback_valid &= target_volumes > 0
         fallback_index = jnp.argmax(
             jnp.where(fallback_valid, fallback_candidates[:, 2], -jnp.inf)
         )
@@ -873,6 +797,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         stored_vertices: jax.Array | None = None,
         stored_distances: jax.Array | None = None,
         stored_corner_distances: jax.Array | None = None,
+        map_id=0,
     ):
         """Reset an episode, optionally at one validated external target point.
 
@@ -881,7 +806,12 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         changing the normal keyed target sampler used for training.
         """
         layout_key, target_key, next_key = jax.random.split(key, 3)
-        if obstacle_min is None:
+        if building_bank is not None:
+            obstacle_min = building_bank.get("solid_min", map_id)
+            obstacle_max = building_bank.get("solid_max", map_id)
+            stored_vertices = jnp.zeros((0, 3), dtype=jnp.float32)
+            stored_distances = jnp.zeros((0, 0), dtype=jnp.float32)
+        elif obstacle_min is None:
             obstacle_min, obstacle_max, stored_vertices, stored_distances = build_layout(layout_key)
         elif obstacle_min.shape[0] and plan_geodesic:
             expected_vertices = (authored_vertices.shape[0] + 8 * obstacle_min.shape[0]
@@ -895,8 +825,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         else:
             stored_vertices = jnp.zeros((0, 3), dtype=jnp.float32)
             stored_distances = jnp.zeros((0, 0), dtype=jnp.float32)
-        target = sample_target(target_key, obstacle_min, obstacle_max) if target_pos is None else jnp.asarray(target_pos)
-        if minimum_geodesic_separation and obstacle_min.shape[0] and cfg.roadmap_corner_bonus_m:
+        target = sample_target(target_key, obstacle_min, obstacle_max, map_id) if target_pos is None else jnp.asarray(target_pos)
+        if minimum_geodesic_separation and obstacle_min.shape[0] and cfg.roadmap_corner_bonus_m and building_bank is None:
             if stored_corner_distances is None or stored_corner_distances.shape != stored_distances.shape:
                 solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
                 stored_corner_distances = roadmap_distances(
@@ -906,12 +836,22 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         else:
             stored_corner_distances = jnp.zeros((0, 0), dtype=jnp.float32)
         base_pos = jnp.asarray(building.base_position_m)
+        if building_bank is not None:
+            base_pos = building_bank.get("base_position", map_id)
         pair_attempts = jnp.int32(1)
         if randomize_base or minimum_geodesic_separation:
             solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
             vertices = jnp.asarray(geometry.vertices) if cfg.num_obstacles == 0 else stored_vertices
             distances = (jnp.asarray(geometry.corner_distances) if cfg.num_obstacles == 0 else
                          stored_corner_distances if minimum_geodesic_separation and cfg.roadmap_corner_bonus_m else stored_distances)
+            if building_bank is not None:
+                vertices = building_bank.get("vertices", map_id)
+                distances = building_bank.get("corner_distances", map_id)
+            if randomize_base:
+                pair_lower, pair_upper, pair_volumes = base_lower, base_upper, base_volumes
+                if building_bank is not None:
+                    pair_lower, pair_upper, pair_volumes = (building_bank.get("base_" + suffix, map_id)
+                                                           for suffix in ("lower", "upper", "volumes"))
             fixed_target = target
             if minimum_geodesic_separation:
                 margin = geometry.clearance - 1e-4
@@ -928,11 +868,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 base_key, point_key, target_key = jax.random.split(draw_key, 3)
                 base = base_pos
                 if randomize_base:
-                    box = jax.random.categorical(base_key, jnp.log(base_volumes))
-                    base = jax.random.uniform(point_key, (3,), minval=base_lower[box], maxval=base_upper[box])
+                    box = jax.random.categorical(base_key, jnp.log(pair_volumes))
+                    base = jax.random.uniform(point_key, (3,), minval=pair_lower[box], maxval=pair_upper[box])
                 # Randomized bases retry against the same episode target.
                 # With a fixed base, retry targets instead.
-                target = fixed_target if randomize_base else sample_target(target_key, obstacle_min, obstacle_max)
+                target = fixed_target if randomize_base else sample_target(target_key, obstacle_min, obstacle_max, map_id)
                 drone = base + jnp.asarray([0.0, 0.0, cfg.drone_radius])
                 valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
                          & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
@@ -1002,6 +942,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             shared_geometry=geometry,
             spawn_pair_attempts=pair_attempts,
             roadmap_corner_distances=stored_corner_distances,
+            map_id=jnp.asarray(map_id, dtype=jnp.int32),
+            building_bank=building_bank,
         )
 
     def step(state: EnvState, action: jax.Array):
@@ -1092,6 +1034,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             shared_geometry=state.shared_geometry,
             spawn_pair_attempts=state.spawn_pair_attempts,
             roadmap_corner_distances=state.roadmap_corner_distances,
+            map_id=state.map_id,
+            building_bank=state.building_bank,
         )
 
     def observations(state: EnvState):
@@ -1228,6 +1172,7 @@ def make_autoreset_fns(
     *, randomize_base: bool = False, minimum_geodesic_separation: bool = False,
     minimum_geodesic_separation_multiplier: float = 2.0,
     spawn_pair_max_attempts: int = 1024,
+    building_bank=None,
 ):
     """Return reset and terminal-aware step functions for batched training.
 
@@ -1245,6 +1190,7 @@ def make_autoreset_fns(
         spawn_pair_max_attempts=spawn_pair_max_attempts,
         allow_redundancy_reward=reward_cfg.allow_redundancy_reward,
         target_found_requires_delivery=reward_cfg.target_found_requires_delivery,
+        building_bank=building_bank,
     )
 
     def transition(state: EnvState, action: jax.Array):
@@ -1291,7 +1237,7 @@ def make_autoreset_fns(
     def reset_persisted(state):
         return reset(state.key, obstacle_min=state.obstacle_min, obstacle_max=state.obstacle_max,
                      stored_vertices=state.roadmap_vertices, stored_distances=state.roadmap_distances,
-                     stored_corner_distances=state.roadmap_corner_distances)
+                     stored_corner_distances=state.roadmap_corner_distances, map_id=state.map_id)
 
     def autoreset_step(state: EnvState, action: jax.Array):
         """Original scalar API retained as the dense equivalence reference."""
@@ -1324,7 +1270,7 @@ def make_autoreset_fns(
                 # Layout and roadmap are invariant across episode reset. Avoid
                 # scattering potentially large matrices back into their copies.
                 unchanged = {"obstacle_min", "obstacle_max", "roadmap_vertices", "roadmap_corner_distances",
-                             "roadmap_distances", "shared_geometry"}
+                             "roadmap_distances", "shared_geometry", "building_bank", "map_id"}
                 return result._replace(**{
                     field: getattr(result, field).at[lanes].set(getattr(fresh, field), mode="drop")
                     for field in result._fields if field not in unchanged

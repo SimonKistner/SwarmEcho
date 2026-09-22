@@ -20,7 +20,7 @@ uv run swarmecho-inspect root=outputs/RUN port=8765 open=false
 
 The inspector discovers replay manifests and evaluation heatmaps. It provides
 building visibility controls, replay inspection, target selection, and a
-command for generating a replay at the selected XYZ position. Existing 3D
+command for generating a replay at the selected XYZ position. Existing spatial
 artifacts and compatibility fallbacks remain supported.
 
 `swarmecho-eval-dashboard` and `swarmecho-artefacts` now launch the same
@@ -39,7 +39,7 @@ checkpoint evaluation groups artifacts beneath its checkpoint directory.
 uv run swarmecho-maze-builder --host 127.0.0.1 --port 8766
 ```
 
-The historical command name is retained. The server serves the existing 3D
+The historical command name is retained. The server serves the existing spatial
 editor and `/api/buildings` routes for listing, loading, authoring, validation,
 and saving. Map-name validation retains the same filename rules.
 
@@ -47,7 +47,7 @@ Create and edit storeys, walls, tiles, exclusions, roof geometry, and spawn
 settings, then validate the saved YAML:
 
 ```bash
-uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_3d_building.yaml
+uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_building.yaml
 ```
 
 The optional `--runtime-smoke` flag also constructs and resets the environment.

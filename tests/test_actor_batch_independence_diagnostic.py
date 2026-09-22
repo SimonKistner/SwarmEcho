@@ -1,9 +1,9 @@
-"""Manual, layer-by-layer batch-independence diagnostic for the 3D actor.
+"""Manual, layer-by-layer batch-independence diagnostic for the actor.
 
 Run in WSL only:
 
     SWARMECHO_RUN_ACTOR_BATCH_DIAGNOSTIC=1 \
-      uv run pytest -q -s --tb=short tests/test_actor3d_batch_independence_diagnostic.py
+      uv run pytest -q -s --tb=short tests/test_actor_batch_independence_diagnostic.py
 
 The test repeats *identical* actor inputs into every batch lane and compares
 lane zero with direct single-lane inference.  It intentionally does not run a

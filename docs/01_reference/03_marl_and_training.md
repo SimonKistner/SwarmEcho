@@ -20,7 +20,7 @@ replays the corresponding sequences.
 ## Optimization and checkpoints
 
 Actor clipping, value clipping, entropy mode, value normalization, and
-diagnostics are documented in [PPO controls](05_3d_ppo_controls.md). The
+diagnostics are documented in [PPO controls](05_ppo_controls.md). The
 `legacy` entropy option remains a supported objective; its name is not a
 separate spatial runtime.
 

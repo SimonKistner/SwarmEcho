@@ -1,21 +1,21 @@
-# 3D transition: discovery brief and first decision gate
+# volumetric transition: discovery brief and first decision gate
 
 > Historical design/proposal document. References to the former runtime describe
 > the migration context, not supported commands. Use the current guides and
-> [removal audit](05_2d_removal_audit.md) for the implemented 3D-only state.
+> [removal audit](05_2d_removal_audit.md) for the implemented volumetric-only state.
 
 Status: **discussion draft**, not an implementation specification. This brief
 records what is clear, identifies choices that materially affect architecture,
 and deliberately details only the first executable slice.
 
-## What is actually different in 3D
+## What is actually different in volumetric
 
 The training lifecycle is not dimension-specific. Run naming and directories,
 configuration overrides, W&B, checkpoint history and branch/resume behavior,
 evaluation/checkpoint schedules, early exit, artifact suffixes, and finalization
 must remain shared. They now live in the canonical configuration module and the
 dimension-agnostic `training/run_lifecycle.py` helpers used by maintained
-training and the 3D adapter.
+training and the volumetric adapter.
 
 Only these adapters fundamentally differ:
 
@@ -27,9 +27,9 @@ Only these adapters fundamentally differ:
    three-dimensional Euclidean space.
 3. **Rollout/evaluation collection:** recurrent MAPPO, the rollout buffer, GAE,
    and the PPO trainer remain shared, while the environment callback consumes
-   3D state and three-component actions.
+   volumetric state and three-component actions.
 4. **Inspection media:** a fixed-camera MP4 is insufficient for volumetric
-   behavior. Its corresponding artifact is a recorded 3D replay inspected by a
+   behavior. Its corresponding artifact is a recorded volumetric replay inspected by a
    rotatable browser viewer; scheduling, naming, and directories remain shared.
 5. **Spatial evaluation artifacts:** positions and coverage are XYZ/voxel data,
    so 2D heatmap rendering cannot be reused verbatim. Evaluation summaries and
@@ -39,7 +39,7 @@ The map builder is intentionally excluded from this lifecycle refactor.
 
 ## Outcome and non-goals
 
-SwarmEcho will become 3D-only. Positions, forces, collision, communication,
+SwarmEcho will become volumetric-only. Positions, forces, collision, communication,
 visibility, coverage, spawn volumes, relay paths, observations, maps,
 evaluation, and replay data must all have a real third axis. The transition
 should preserve the project's strongest property: thousands of fixed-shape
@@ -51,7 +51,7 @@ without testing relay learning.
 
 ## Clear product decisions
 
-- **3D only:** no dimension flag or retained 2D runtime.
+- **volumetric only:** no dimension flag or retained 2D runtime.
 - **Grid-authored buildings:** cubic cells have solid floor/roof tiles and solid
   vertical walls with configurable thickness; editing happens one storey at a time.
 - **Closed-map invariant:** every reachable free-space component is sealed from
@@ -67,20 +67,20 @@ without testing relay learning.
 
 This is not a mechanical `2 -> 3` edit.
 
-| Area | Current assumption | Required 3D equivalent |
+| Area | Current assumption | Required volumetric equivalent |
 |---|---|---|
 | Map | width/height, XY zones and line walls | XYZ lattice, solid tiles/walls, exclusion cells |
 | Compilation | 2D occupancy raster | validated tile/wall arrays and optional voxels |
 | State/action | `(N,2)` position, velocity, force | `(N,3)` and world extent `(3,)` |
 | Collision | 2D Euler sweep | swept sphere against solid tiles and walls |
-| Visibility | 2D raster DDA | analytic baseline test; 3D voxel DDA for buildings |
-| Communication | 2D distance and LOS | 3D distance/LOS; graph logic stays reusable |
+| Visibility | 2D raster DDA | analytic baseline test; volumetric voxel DDA for buildings |
+| Communication | 2D distance and LOS | volumetric distance/LOS; graph logic stays reusable |
 | Radar | circle angle bins | approximately equal-solid-angle directions |
 | Coverage | 2D boolean raster/circular probes | voxel field/spherical probes |
 | Finder path | XY cells, four neighbours | XYZ cells, six neighbours |
 | Critic | XY geometry, four quadrants | XYZ geometry, octants or pooled voxels |
 | Models | actor output fixed at 2 | action width 3; recalculate observation contract |
-| Rewards | reusable semantics, 2D spatial inputs | same semantics over 3D primitives |
+| Rewards | reusable semantics, 2D spatial inputs | same semantics over volumetric primitives |
 | Evaluation | heatmaps and frame video | voxel metrics and interactive replay |
 | UI | 2D HTML editor and OpenCV/SVG | WebGL editor/replay with layer controls |
 
@@ -93,7 +93,7 @@ or artifact contracts change.
 ### Recommendation: retain native JAX for the baseline
 
 Keep the pure-function/JIT/VMAP architecture and replace its spatial kernel
-with a small 3D kernel. Model drones as spheres (or points with inflated
+with a small volumetric kernel. Model drones as spheres (or points with inflated
 obstacles), integrate XYZ velocity, and collide with the cuboid's tiles and walls.
 JAX has no 2D restriction; today's restriction is in SwarmEcho's shapes and
 algorithms. The first empty cuboid has analytic boundary collision and internal
@@ -217,9 +217,9 @@ available accelerator.
 actionable messages; compiled arrays have documented static shapes; the 2D
 runtime is not yet left half-converted.
 
-### Sprint 1 — minimum 3D environment
+### Sprint 1 — minimum volumetric environment
 
-Replace the spatial core with XYZ state/action, analytic cuboid collision, 3D
+Replace the spatial core with XYZ state/action, analytic cuboid collision, volumetric
 distance communication, unobstructed internal LOS, volumetric target spawning
 outside the base exclusion, spherical radar, and voxel coverage. Add a
 deterministic scripted rollout and random-policy batched rollout. Do not build
@@ -238,7 +238,7 @@ exceeds radius; targets never spawn in exclusion; high-speed sphere collision
 stays in bounds; coverage grows across Z; JIT/VMAP and throughput checks pass;
 one replay opens in a minimal orbitable browser scene.
 
-Interior tiles/walls and 3D DDA, the complete editor, MAPPO baseline,
+Interior tiles/walls and volumetric DDA, the complete editor, MAPPO baseline,
 analytics, templates, and cleanup should only be detailed after Sprint 1 measurements.
 
 ## Confirmed owner decisions

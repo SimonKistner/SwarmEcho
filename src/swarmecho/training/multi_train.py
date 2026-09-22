@@ -1,4 +1,4 @@
-"""Sequential multi-seed training entry point for the 3D trainer."""
+"""Sequential multi-seed training entry point for the trainer."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from swarmecho.training.train import train
 
 
 def main() -> None:
-    """Train one 3D level sequentially across reproducible random seeds."""
+    """Train one level sequentially across reproducible random seeds."""
     raw_args = sys.argv[1:]
     count, raw_args = pop_arg(raw_args, "seeds", 3)
     base_seed, raw_args = pop_arg(raw_args, "base_seed", 42)
@@ -25,7 +25,7 @@ def main() -> None:
     explicit_group = explicit_override(raw_args, "logging.wandb_group")
 
     print("\n" + "=" * 60)
-    print("  SwarmEcho 3D multi-train")
+    print("  SwarmEcho multi-train")
     print("=" * 60)
     print(f"  level      : {base_level.name}")
     print(f"  num_runs   : {count}")
@@ -47,7 +47,7 @@ def main() -> None:
         print(f"\n  Run {run_index}/{count} | seed={seed} | name={run_name}")
         train(level)
 
-    print(f"\n3D multi-train complete: {count} run(s) finished.")
+    print(f"\nmulti-train complete: {count} run(s) finished.")
 
 
 if __name__ == "__main__":

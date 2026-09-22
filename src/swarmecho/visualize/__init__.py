@@ -1,3 +1,3 @@
-"""3D replay serialization and the independent interactive inspector."""
+"""replay serialization and the independent interactive inspector."""
 
 

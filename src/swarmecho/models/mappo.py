@@ -10,7 +10,7 @@ Optional recurrent actor and critic paths are selected by config flags. When
 disabled, the architecture and call contract are the original feed-forward MAPPO.
 
 All heavy lifting (network definitions) lives in actor.py and critic.py.
-The 3D trainer and workflow validator construct this shared model.
+The trainer and workflow validator construct this shared model.
 
 CTDE contract
 -------------
@@ -42,7 +42,7 @@ class MAPPOModel(nnx.Module):
     Parameters
     ----------
     obs_dim          : per-agent observation dimension
-    act_dim          : action dimension (3 for the 3D SwarmEcho runtime)
+    act_dim          : action dimension (3 for the SwarmEcho runtime)
     num_agents       : N — swarm size (used for shape assertions only)
     hidden_dim       : hidden layer width (shared by actor and critic)
     num_layers       : number of hidden layers in the CRITIC

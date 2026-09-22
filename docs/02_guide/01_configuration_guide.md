@@ -26,8 +26,8 @@ Use a level name or an existing YAML path:
 uv run swarmecho-train level=B01a_office_find_only logging.run_name=office
 ```
 
-The supported M-series names are `M00_no_maze_open_cuboid_3D`,
-`M01_no_maze_open_cuboid_tall_3D`, and `M02_random_cuboid_obstacles_3D`.
+The supported M-series names are `M00_no_maze_open_cuboid`,
+`M01_no_maze_open_cuboid_tall`, and `M02_random_cuboid_obstacles`.
 The B-series names are `B00_test`, `B01a_office_find_only`, and `B01b_office`.
 
 Building cell size controls authoring geometry. `env.coverage_voxel_size`
@@ -46,7 +46,7 @@ continues run accounting, `branch` carries cumulative progress into another run,
 and `init` loads weights with fresh accounting. Use compatible architecture,
 observation settings, critic type, and normalization.
 
-See [PPO controls](../01_reference/05_3d_ppo_controls.md) for clipping, entropy,
+See [PPO controls](../01_reference/05_ppo_controls.md) for clipping, entropy,
 normalization, and privileged critics. Training action perturbations use
 `training.training_noise` and `training.noise_level`.
 

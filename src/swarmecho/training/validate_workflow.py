@@ -1,4 +1,4 @@
-"""Small environment→MAPPO-update validation for the 3D runtime."""
+"""Small environment→MAPPO-update validation for the runtime."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def validate_update(
     hidden_dim: int = 32,
     recurrent: bool = True,
 ) -> dict[str, float]:
-    """Collect a real 3D rollout and complete one PPO update."""
+    """Collect a real rollout and complete one PPO update."""
     level = load_level()
     cfg = replace(level.env, max_steps=max(2, num_steps - 1))
     reset, step, observations, _ = make_autoreset_fns(
@@ -199,13 +199,13 @@ def validate_update(
     )
     stats = trainer.update(minibatches)
     if not all(np.isfinite(value) for value in stats.values()):
-        raise FloatingPointError(f"Non-finite 3D PPO update statistics: {stats}")
+        raise FloatingPointError(f"Non-finite PPO update statistics: {stats}")
     return stats
 
 
 def main() -> None:
     stats = validate_update()
-    print("3D environment → recurrent TarMAC MAPPO update validation passed.")
+    print("environment → recurrent TarMAC MAPPO update validation passed.")
     for name, value in stats.items():
         print(f"  {name}: {value:.6f}")
 

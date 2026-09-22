@@ -1,8 +1,8 @@
-"""Render the actual 3D radar-bin partition for 8, 16, and 32 bins.
+"""Render the actual radar-bin partition for 8, 16, and 32 bins.
 
 Run from the repository root, for example:
 
-    python tests/visualize_radar_bins_3d.py --output radar_bins_3d.png
+    python tests/visualize_radar_bins.py --output radar_bins.png
 
 The bin centres and assignment rule are imported from ``environment`` so this
 visualization stays aligned with the environment implementation:
@@ -63,7 +63,7 @@ def render(output: Path, bin_counts: tuple[int, ...] = (8, 16, 32)) -> None:
         # These are the exact directions used by make_env_fns().
         directions = np.asarray(spherical_directions(bin_count), dtype=np.float32)
 
-        # This is the exact bin assignment used by the 3D radar observation:
+        # This is the exact bin assignment used by the radar observation:
         # rel_norm @ directions.T followed by argmax over the bin dimension.
         assigned_bins = np.argmax(points @ directions.T, axis=-1)
         colours = _bin_colours(bin_count)[assigned_bins].reshape(*x.shape, 3)
@@ -111,7 +111,7 @@ def render(output: Path, bin_counts: tuple[int, ...] = (8, 16, 32)) -> None:
         axis.view_init(elev=22, azim=-55)
 
     figure.suptitle(
-        "3D radar bins: coloured Voronoi regions from argmax(direction · bin centre)\n"
+        "radar bins: coloured Voronoi regions from argmax(direction · bin centre)\n"
         "black arrows/dots = the exact spherical bin centres",
         fontsize=12,
     )
@@ -126,8 +126,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("radar_bins_3d.png"),
-        help="PNG output path (default: radar_bins_3d.png)",
+        default=Path("radar_bins.png"),
+        help="PNG output path (default: radar_bins.png)",
     )
     args = parser.parse_args()
     render(args.output)

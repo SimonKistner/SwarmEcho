@@ -1,4 +1,4 @@
-"""Local web server for the SwarmEcho 3D building editor.
+"""Local web server for the SwarmEcho building editor.
 
 Run from the repository root:
 
@@ -28,6 +28,8 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     expand_document,
     save_document,
     validate_document,
+    template_document,
+    document_from_map_data,
 )
 from swarmecho.core.config import MAP_DIR
 from swarmecho.curriculum_config.maps.scripts.maze_builder.map_names import validate_map_name
@@ -59,13 +61,16 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib API
         path = urlparse(self.path).path
         if path == "/api/buildings":
-            self._send_json(HTTPStatus.OK, {"ok": True, "maps": list(available_maps())})
+            self._send_json(HTTPStatus.OK, {"ok": True, "maps": list(available_maps(MAP_DIR))})
             return
         if path == "/api/buildings/new":
             self._send_json(HTTPStatus.OK, {"ok": True, "document": new_document()})
             return
         if path.startswith("/api/buildings/"):
             try:
+                if path.startswith("/api/buildings/template/"):
+                    self._send_json(HTTPStatus.OK, {"ok": True, "document": template_document(path.rsplit("/", 1)[1])})
+                    return
                 name = validate_map_name(path.removeprefix("/api/buildings/"))
                 self._send_json(
                     HTTPStatus.OK,
@@ -88,6 +93,10 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/api/buildings/import":
+                import yaml
+                self._send_json(HTTPStatus.OK, {"ok": True, "document": document_from_map_data(yaml.safe_load(payload["yaml"]))})
+                return
             if path == "/api/buildings/new":
                 self._send_json(
                     HTTPStatus.OK,
@@ -171,13 +180,17 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the SwarmEcho 3D building editor web UI.")
+    parser = argparse.ArgumentParser(description="Run the SwarmEcho building editor web UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8766, help="Bind port (default: 8766)")
+    parser.add_argument("--map-dir", type=Path, help="Open/save maps in this folder, e.g. an inspection export")
     args = parser.parse_args()
+    global MAP_DIR
+    if args.map_dir is not None:
+        MAP_DIR = args.map_dir.resolve()
 
     server = ThreadingHTTPServer((args.host, args.port), MazeBuilderHandler)
-    print(f"SwarmEcho 3D building editor running at http://{args.host}:{args.port}/")
+    print(f"SwarmEcho building editor running at http://{args.host}:{args.port}/")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

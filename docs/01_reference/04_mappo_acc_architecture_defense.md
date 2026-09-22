@@ -2,7 +2,7 @@
 
 > Design rationale for the observation-based critic. The current runtime also
 > supports an optional compact privileged critic; see
-> [PPO controls](05_3d_ppo_controls.md). This rationale does not restrict that option.
+> [PPO controls](05_ppo_controls.md). This rationale does not restrict that option.
 
 ## Position
 

@@ -1,4 +1,4 @@
-"""Checkpoint evaluation and target-selected replay entry point for 3D."""
+"""Checkpoint evaluation and target-selected replay entry point for the environment."""
 
 from __future__ import annotations
 
@@ -99,9 +99,9 @@ def _heatmap_manifest(
     obstacle_max: np.ndarray | None = None,
     eval_name: str | None = None,
 ) -> None:
-    """Write the small inspector metadata sidecar for one 3D eval CSV."""
+    """Write the small inspector metadata sidecar for one eval CSV."""
     manifest = {
-        "format": "swarmecho-3d-eval-heatmap/v1",
+        "format": "swarmecho-eval-heatmap/v1",
         "data_file": info_path.name,
         "map_name": level.building_name, "building_snapshot": building_snapshot(level.building),
         "world_size_m": level.building.world_size_m.tolist(),
@@ -286,7 +286,7 @@ def run_action_capturing_evaluation(
     level = resolve_evaluation_level(level)
     episodes = level.evaluation.eval_parallel_envs
     terminal_print(
-        f"[EVAL] evaluating {episodes} deterministic 3D episodes while capturing "
+        f"[EVAL] evaluating {episodes} deterministic episodes while capturing "
         "executed actions...",
         flush=True,
     )
@@ -393,7 +393,7 @@ def select_eval_target_with_lane(
     records = load_eval_info_csv(info_path)
     positions = records["positions"]
     if positions.shape[-1] != 3:
-        raise ValueError(f"Expected a 3D evaluation CSV, got {info_path}.")
+        raise ValueError(f"Expected a evaluation CSV, got {info_path}.")
     normalized = result.lower()
     if normalized in {"success", "successful"}:
         candidate_lanes, label = np.flatnonzero(records["stages"] == "chain_success"), "SUCCESS"
@@ -581,6 +581,7 @@ def main() -> None:
     selection_argument_seen = False
     target_argument_seen = False
     config_arguments: list[str] = []
+    random_eval_map_id = None
     for argument in sys.argv[1:]:
         if "=" not in argument:
             raise ValueError(
@@ -624,6 +625,8 @@ def main() -> None:
             explicit_target = np.asarray(coordinates, dtype=np.float32)
         elif key == "replay_execution":
             replay_execution = value.lower()
+        elif key == "random_eval_map_id":
+            random_eval_map_id = value
         else:
             config_arguments.append(argument)
     if checkpoint is None:
@@ -657,9 +660,34 @@ def main() -> None:
     if checkpoint_level is not None:
         config_arguments.insert(0, f"level={checkpoint_level}")
     level = load_level_cli(config_arguments)
+    if random_eval_map_id is not None:
+        import re
+        from dataclasses import replace
+        from swarmecho.env.buildings import load_building
+        if not re.fullmatch(r"random_eval_\d{4,}", random_eval_map_id):
+            raise ValueError("random_eval_map_id must be an ID such as random_eval_0000.")
+        saved_map = run_dir / "random_eval_maps" / f"{random_eval_map_id}.yaml"
+        level = replace(level, building=load_building(saved_map), map_names=[random_eval_map_id],
+                        random_buildings=replace(level.random_buildings, enabled=False),
+                        evaluation=replace(level.evaluation, random_eval=False, training_robustness=False,
+                                           eval_differes_from_training_map=False, eval_map=None))
+    elif level.evaluation.random_eval and mode != "parallel":
+        raise ValueError("Choose random_eval_map_id=random_eval_0000 (or another persistent eval ID) for a selected-map replay.")
     terminal_print(f"[EVAL] using level: {level.name}", flush=True)
     model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
+    if (level.evaluation.random_eval or random_eval_map_id is not None) and mode == "parallel":
+        from swarmecho.training.random_evaluation import prepare_evaluation_maps, evaluate_random_maps
+        levels = ([level] if random_eval_map_id is not None else
+                  prepare_evaluation_maps(level, run_dir / "random_eval_maps", log=terminal_print))
+        # Same frozen maps as training, with no robust/noise ensemble.
+        root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
+        from swarmecho.training.artifacts import parse_checkpoint_update, steps_for_update
+        update = parse_checkpoint_update(checkpoint) or 0
+        evaluate_random_maps(model, levels, run_dir, update=update, steps=steps_for_update(update, level),
+                             replay_due=replay_after and level.evaluation.eval_video,
+                             artifact_root=root, scope="eval", checkpoint=checkpoint, eval_name=eval_name)
+        return
     eval_run_root = create_eval_run_root(
         run_dir, checkpoint, level, eval_name=eval_name
     )

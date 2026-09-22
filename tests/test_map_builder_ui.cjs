@@ -1,4 +1,4 @@
-// Run with: node --test tests/test_3d_map_builder_ui.cjs (no Python environment).
+// Run with: node --test tests/test_map_builder_ui.cjs (no Python environment).
 const {readFileSync} = require('node:fs');
 const {join} = require('node:path');
 const vm = require('node:vm');

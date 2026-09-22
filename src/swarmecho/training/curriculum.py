@@ -1,4 +1,4 @@
-"""Sequential checkpoint-inheriting curriculum entry point for 3D."""
+"""Sequential checkpoint-inheriting curriculum entry point for the environment."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from swarmecho.training.train import train
 
 
 def main() -> None:
-    """Train the requested 3D levels in order, handing off final weights."""
+    """Train the requested levels in order, handing off final weights."""
     levels, shared_args = split_levels(
-        sys.argv[1:], "M00_no_maze_open_cuboid_3D"
+        sys.argv[1:], "M00_no_maze_open_cuboid"
     )
     base_level = load_level_cli(shared_args)
     base_run_name = base_level.logging.run_name
@@ -35,7 +35,7 @@ def main() -> None:
         curriculum_id = f"curriculum_{timestamp}"
 
     # Keep each curriculum stage in the same flat run layout as an ordinary
-    # 3D run.  The prefix preserves curriculum provenance without requiring
+    # run.  The prefix preserves curriculum provenance without requiring
     # consumers such as the inspector to understand a special nested root.
     output_root = Path(base_level.logging.log_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -55,7 +55,7 @@ def main() -> None:
     )
 
     print("\n" + "=" * 60)
-    print("  SwarmEcho 3D curriculum")
+    print("  SwarmEcho curriculum")
     print(f"  output : {output_root}")
     print(f"  levels : {', '.join(levels)}")
     print("=" * 60)
@@ -101,7 +101,7 @@ def main() -> None:
         final_checkpoint, _ = train(level)
         if index < len(levels) and final_checkpoint is None:
             raise RuntimeError(
-                f"3D curriculum stage {level.name} produced no final checkpoint; "
+                f"curriculum stage {level.name} produced no final checkpoint; "
                 "set evaluation.save_model=true for checkpoint handoff."
             )
         if final_checkpoint is not None:
@@ -114,7 +114,7 @@ def main() -> None:
             print(f"  [curriculum] stage complete: {final_checkpoint}")
         time.sleep(2)
 
-    print(f"\n3D curriculum complete: {output_root}")
+    print(f"\ncurriculum complete: {output_root}")
 
 
 if __name__ == "__main__":

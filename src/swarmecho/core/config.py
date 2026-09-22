@@ -1,10 +1,12 @@
-"""Strict 3D level configuration and key=value CLI overrides."""
+"""Strict level configuration and key=value CLI overrides."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
 import warnings
+from swarmecho.core.compatibility import canonical_level_name, canonical_map_name, resolve_level_file, resolve_map_file
+from swarmecho.env.random_buildings import RandomBuildingConfig
 
 from omegaconf import OmegaConf
 
@@ -23,7 +25,7 @@ class NetworkConfig:
     actor_num_layers: int = 3
     actor_memory: bool = True
     critic_memory: bool = True
-    critic_type: str = "observation"  # observation (unchanged) | privileged (compact 3D state)
+    critic_type: str = "observation"  # observation (unchanged) | privileged (compact state)
     memory_comm_enabled: bool = True
     memory_comm_every_k_steps: int = 5
     tarmac_sig_dim: int = 16
@@ -68,6 +70,9 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class EvaluationConfig:
+    random_eval: bool = False
+    random_eval_envs: int = 5
+    random_eval_maps: tuple[str, ...] | None = None
     eval_freq: int = 20
     eval_offset: int = 1
     eval_min_train_success: float = 0.0
@@ -97,7 +102,7 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class LoggingConfig:
-    run_name: str | None = "M00_no_maze_open_cuboid_3D"
+    run_name: str | None = "M00_no_maze_open_cuboid"
     use_timestamp_postfix: bool = False
     log_dir: str = "outputs"
     wandb_mode: str = "online"
@@ -121,6 +126,7 @@ class Level:
     network: NetworkConfig
     evaluation: EvaluationConfig
     logging: LoggingConfig
+    random_buildings: RandomBuildingConfig = RandomBuildingConfig()
 
     @property
     def building_name(self) -> str:
@@ -152,15 +158,14 @@ def resolve_evaluation_level(level: Level) -> Level:
 
     from swarmecho.env.buildings import load_building
 
-    requested = Path(evaluation.eval_map)
-    source = requested if requested.exists() else MAP_DIR / f"{requested.stem}.yaml"
+    source = resolve_map_file(evaluation.eval_map, MAP_DIR)
     if not source.exists():
         raise FileNotFoundError(
             f"Evaluation map not found: {evaluation.eval_map!r}. "
             f"Expected a map name in {MAP_DIR} or an existing path."
         )
-    map_name = source.stem
-    if map_name == Path(level.building_name).stem:
+    map_name = canonical_map_name(source.stem)
+    if map_name == canonical_map_name(Path(level.building_name).stem):
         return level
     return replace(
         level,
@@ -178,40 +183,53 @@ def _strict_dataclass(cls, values: object, label: str):
     return cls(**values)
 
 
-def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", overrides: list[str] | None = None) -> Level:
-    """Load a strict 3D level through the canonical config module."""
+def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: list[str] | None = None) -> Level:
+    """Load a strict level through the canonical config module."""
     from swarmecho.env.environment import EnvConfig, RewardConfig
     from swarmecho.env.buildings import load_building
 
-    source = Path(name_or_path)
+    source = resolve_level_file(name_or_path, LEVEL_DIR)
     if not source.exists():
-        source = LEVEL_DIR / f"{source.stem}.yaml"
-    if not source.exists():
-        raise FileNotFoundError(f"3D level not found: {name_or_path}")
+        raise FileNotFoundError(f"level not found: {name_or_path}")
     data = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
     if overrides:
         data = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(data), OmegaConf.from_dotlist(overrides)), resolve=True)
-    allowed = {"env", "reward", "training", "network", "evaluation", "logging"}
+    allowed = {"env", "reward", "training", "network", "evaluation", "logging", "random_buildings"}
     unknown = set(data) - allowed
     if unknown:
-        raise ValueError(f"Unknown 3D config sections: {', '.join(sorted(unknown))}.")
+        raise ValueError(f"Unknown config sections: {', '.join(sorted(unknown))}.")
     env_data = dict(data.get("env", {}))
     map_names = env_data.pop("map_names", None)
-    if not isinstance(map_names, list) or len(map_names) != 1:
-        raise ValueError("3D env.map_names must select exactly one map.")
+    generation = _strict_dataclass(RandomBuildingConfig, data.get("random_buildings", {}), "random_buildings")
+    env = _strict_dataclass(EnvConfig, env_data, "env")
+    training = _strict_dataclass(TrainingConfig, data.get("training", {}), "training")
+    if generation.enabled:
+        if map_names not in (None, [], ["random"]):
+            raise ValueError("random_buildings.enabled requires env.map_names: [] (or [random]); authored maps cannot be specified.")
+        if env.num_obstacles:
+            raise ValueError("Random buildings and random obstacles are mutually exclusive.")
+        from swarmecho.env.random_buildings import generate_building, map_seed
+        _, building = generate_building(generation, map_seed(training.seed, 0), name="map_0000",
+                                        drone_clearance=env.drone_radius + env.obstacle_planning_clearance_m)
+        map_names = ["random_buildings"]
+    else:
+        if not isinstance(map_names, list) or len(map_names) != 1:
+            raise ValueError("env.map_names must select exactly one map.")
+        building = load_building(resolve_map_file(MAP_DIR / f"{Path(map_names[0]).stem}.yaml", MAP_DIR))
     level = Level(
-        name=source.stem,
-        map_names=[str(map_names[0])],
-        building=load_building(MAP_DIR / f"{Path(map_names[0]).stem}.yaml"),
-        env=_strict_dataclass(EnvConfig, env_data, "env"),
+        name=canonical_level_name(source.stem),
+        map_names=[canonical_map_name(str(map_names[0]))],
+        building=building,
+        env=env,
         reward=_strict_dataclass(RewardConfig, data.get("reward", {}), "reward"),
-        training=_strict_dataclass(TrainingConfig, data.get("training", {}), "training"),
+        training=training,
         network=_strict_dataclass(NetworkConfig, data.get("network", {}), "network"),
         evaluation=_strict_dataclass(EvaluationConfig, data.get("evaluation", {}), "evaluation"),
         logging=_strict_dataclass(LoggingConfig, data.get("logging", {}), "logging"),
+        random_buildings=generation,
     )
     if level.ideal_chain_margin_m < 0:
-        raise ValueError(f"3D level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
+        raise ValueError(f"level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
     if level.training.num_epochs < 1 or level.training.num_minibatches < 1:
         raise ValueError("PPO epoch and minibatch counts must be positive.")
     if level.training.num_envs % level.training.num_minibatches:
@@ -232,6 +250,24 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", override
         raise ValueError("training.noise_level must be non-negative.")
     if level.evaluation.eval_parallel_envs < 1:
         raise ValueError("evaluation.eval_parallel_envs must be positive.")
+    ev = level.evaluation
+    if type(ev.random_eval) is not bool or type(ev.random_eval_envs) is not int or ev.random_eval_envs < 1:
+        raise ValueError("random_eval must be boolean and random_eval_envs a positive integer.")
+    if ev.random_eval:
+        if ev.training_robustness:
+            raise ValueError("random_eval requires training_robustness=false (robust evaluation off).")
+        if ev.eval_differes_from_training_map or ev.eval_map or ev.eval_fixed_obstacle_bounds or env.num_obstacles:
+            raise ValueError("random_eval cannot be combined with eval_map overrides or random/fixed obstacles.")
+        if ev.random_eval_maps is not None:
+            if not isinstance(ev.random_eval_maps, (list, tuple)) or len(ev.random_eval_maps) != ev.random_eval_envs:
+                raise ValueError("random_eval_maps must contain exactly random_eval_envs map paths.")
+            for item in ev.random_eval_maps:
+                if not isinstance(item, str):
+                    raise ValueError("random_eval_maps entries must be map names or paths.")
+                # Resolve during suite initialization, which first checks the
+                # run's frozen copy. Replays must survive source-map removal.
+        else:
+            generation.grid()
     if type(level.logging.terminal_logging_frequency) is not int or level.logging.terminal_logging_frequency < 1:
         raise ValueError("logging.terminal_logging_frequency must be a positive integer.")
     if type(level.logging.terminal_log_warmup) is not bool:
@@ -273,15 +309,15 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid_3D", override
     if level.logging.wandb_mode not in {"disabled", "offline", "online"}:
         raise ValueError("logging.wandb_mode must be disabled, offline, or online.")
     if level.reward.chain_reward_system not in {"euclidean", "obstacle_geodesic"}:
-        raise ValueError("3D reward.chain_reward_system must be euclidean or obstacle_geodesic.")
+        raise ValueError("reward.chain_reward_system must be euclidean or obstacle_geodesic.")
     if level.env.num_obstacles and level.env.obstacle_spawn_layer_max <= level.env.obstacle_spawn_layer_min:
-        raise ValueError("The 3D obstacle spawn layer range must have positive height.")
+        raise ValueError("The obstacle spawn layer range must have positive height.")
     return level
 
 
 def load_level_cli(arguments: list[str]) -> Level:
-    """Load a 3D level with the same key=value CLI contract as training."""
-    level_name = "M00_no_maze_open_cuboid_3D"
+    """Load a level with the same key=value CLI contract as training."""
+    level_name = "M00_no_maze_open_cuboid"
     overrides = []
     for argument in arguments:
         if "=" not in argument:

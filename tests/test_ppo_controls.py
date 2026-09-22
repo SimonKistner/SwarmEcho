@@ -1,4 +1,4 @@
-"""Focused regression checks for the 3D PPO controls. No training jobs required."""
+"""Focused regression checks for the PPO controls. No training jobs required."""
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -120,7 +120,7 @@ def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
     np.testing.assert_array_equal(values, 0.0)
 
 
-def test_3d_defaults_and_find_only_overrides():
+def test_defaults_and_find_only_overrides():
     defaults = TrainingConfig()
     assert defaults.entropy_mode == "legacy" and defaults.value_normalization == "none"
     assert RewardConfig().no_movement_termination_penalty == -1000.0

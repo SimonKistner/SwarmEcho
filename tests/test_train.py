@@ -7,7 +7,7 @@ from swarmecho.training.train import build_model, evaluate_model, train
 from swarmecho.visualize.replay import load_replay
 
 
-def test_tiny_3d_training_creates_checkpoint_metrics_and_replay(tmp_path):
+def test_tiny_training_creates_checkpoint_metrics_and_replay(tmp_path):
     level = load_level()
     level = replace(
         level,

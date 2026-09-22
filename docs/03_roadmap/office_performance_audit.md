@@ -2,7 +2,7 @@
 
 ## Reset dependency audit
 
-The dense reference `make_autoreset_3d_fns.autoreset_step` computes the terminal transition,
+The dense reference `make_autoreset_fns.autoreset_step` computes the terminal transition,
 rewards and diagnostic fields first, calls `reset` unconditionally, then selects
 the reset state only when that lane is terminal.
 
@@ -82,7 +82,7 @@ Approximate geodesics or radar are separate compromises requiring discussion.
 ## Baseline command (activated WSL environment)
 
 ```bash
-uv run swarmecho-train-3d level=B01_office reward.chain_reward_system=obstacle_geodesic training.total_timesteps=4000000 training.profile_timing=true evaluation.save_model=true evaluation.eval_video=false evaluation.early_exit=false logging.wandb_mode=disabled logging.run_name=B01_perf_before
+uv run swarmecho-train level=B01_office reward.chain_reward_system=obstacle_geodesic training.total_timesteps=4000000 training.profile_timing=true evaluation.save_model=true evaluation.eval_video=false evaluation.early_exit=false logging.wandb_mode=disabled logging.run_name=B01_perf_before
 ```
 
 This runs ten updates with the existing 4,000 environments and 100-step rollout.
@@ -104,7 +104,7 @@ The old `B01_chunked` run had saving disabled and contains no checkpoint. After
 the baseline finishes, its new checkpoint can be evaluated with:
 
 ```bash
-uv run swarmecho-evaluate-3d level=B01_office checkpoint=outputs/B01_perf_before/checkpoints/ckpt_000010 mode=parallel replay_after=false eval_name=spawn_check evaluation.eval_robustness_runs=1
+uv run swarmecho-evaluate level=B01_office checkpoint=outputs/B01_perf_before/checkpoints/ckpt_000010 mode=parallel replay_after=false eval_name=spawn_check evaluation.eval_robustness_runs=1
 ```
 
 This checkpoint is from the short benchmark, not the lost nine-hour run. Its

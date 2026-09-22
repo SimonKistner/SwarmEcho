@@ -337,7 +337,7 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
 
 
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
-    """3D must retain 2D's delivery milestone and resist finder farming."""
+    """must retain 2D's delivery milestone and resist finder farming."""
     reward_cfg = RewardConfig(
         target_found_requires_delivery=True,
         finder_bonus=50.0,

@@ -1,4 +1,4 @@
-"""Edit EVAL_FIXED_OBSTACLE_BOUNDS, run this file, then open the 3D inspector."""
+"""Edit EVAL_FIXED_OBSTACLE_BOUNDS, run this file, then open the inspector."""
 
 # M02 YAML (copy these exact rows under evaluation):
 #   eval_fixed_obstacle_bounds:
@@ -38,7 +38,7 @@ def _shortest(adjacency, start, goal, banned):
 
 
 def generate(destination="outputs/testresults/static_eval_layout.roadmap.json") -> Path:
-    level = load_level("M02_random_cuboid_obstacles_3D")
+    level = load_level("M02_random_cuboid_obstacles")
     cfg, building = level.env, level.building
     bounds = np.asarray(EVAL_FIXED_OBSTACLE_BOUNDS, dtype=np.float32)
     if bounds.shape != (cfg.num_obstacles, 6):

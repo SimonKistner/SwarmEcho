@@ -14,7 +14,7 @@ from swarmecho.training.artifacts import (
 
 def test_baseline_level_is_strict_and_solvable():
     level = load_level()
-    assert level.name == "M00_no_maze_open_cuboid_3D"
+    assert level.name == "M00_no_maze_open_cuboid"
     assert level.env.radar_bins == 16
     assert level.env.num_agents == 4
     assert level.env.max_steps == 700
@@ -37,7 +37,7 @@ def test_baseline_level_is_strict_and_solvable():
 
 
 def test_tall_level_adds_two_solvable_spawn_layers():
-    level = load_level("M01_no_maze_open_cuboid_tall_3D")
+    level = load_level("M01_no_maze_open_cuboid_tall")
     assert level.building.target_exclusion.shape == (4, 4, 6)
     assert level.building.target_exclusion[:, :, :2].all()
     assert not level.building.target_exclusion[:, :, 2:].any()
@@ -47,8 +47,8 @@ def test_tall_level_adds_two_solvable_spawn_layers():
 
 
 def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
-    open_level = load_level("M01_no_maze_open_cuboid_tall_3D")
-    obstacle_level = load_level("M02_random_cuboid_obstacles_3D")
+    open_level = load_level("M01_no_maze_open_cuboid_tall")
+    obstacle_level = load_level("M02_random_cuboid_obstacles")
     assert open_level.env.num_obstacles == 0
     assert open_level.reward.chain_reward_system == "euclidean"
     assert obstacle_level.env.num_obstacles == 3
@@ -57,8 +57,8 @@ def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
     assert len(obstacle_level.evaluation.eval_fixed_obstacle_bounds) == 3
 
 
-def test_unknown_3d_environment_parameter_is_rejected(tmp_path):
-    source = "src/swarmecho/curriculum_config/levels/M00_no_maze_open_cuboid_3D.yaml"
+def test_unknown_environment_parameter_is_rejected(tmp_path):
+    source = "src/swarmecho/curriculum_config/levels/M00_no_maze_open_cuboid.yaml"
     data = yaml.safe_load(open(source, encoding="utf-8"))
     data = deepcopy(data)
     data["env"]["typo_parameter"] = 1
@@ -78,10 +78,10 @@ def test_geodesic_reward_does_not_require_generated_obstacles():
     assert level.reward.chain_reward_system == "obstacle_geodesic"
 
 
-def test_3d_cli_accepts_dotlist_overrides():
+def test_cli_accepts_dotlist_overrides():
     level = load_level_cli(
         [
-            "level=M00_no_maze_open_cuboid_3D",
+            "level=M00_no_maze_open_cuboid",
             "training.total_timesteps=400000",
             "logging.run_name=inspector_smoke",
             "env.radar_bins=16",
@@ -96,10 +96,10 @@ def test_3d_cli_accepts_dotlist_overrides():
     assert level.num_updates == 1
 
 
-def test_3d_cli_can_enable_training_only_action_noise():
+def test_cli_can_enable_training_only_action_noise():
     level = load_level_cli(
         [
-            "level=M00_no_maze_open_cuboid_3D",
+            "level=M00_no_maze_open_cuboid",
             "training.training_noise=true",
             "training.noise_level=0.02",
         ]
@@ -113,7 +113,7 @@ def test_3d_cli_can_enable_training_only_action_noise():
     assert not level.evaluation.training_heatmap_creation
 
 
-def test_3d_replays_use_the_maintained_artifact_hierarchy(tmp_path):
+def test_replays_use_the_maintained_artifact_hierarchy(tmp_path):
     level = load_level()
     checkpoint = tmp_path / "checkpoints/ckpt_000050"
 

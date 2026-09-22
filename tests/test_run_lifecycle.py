@@ -11,7 +11,7 @@ from swarmecho.training.run_lifecycle import (
 )
 
 
-def test_run_layout_is_identical_for_dictconfig_and_3d_dataclasses(tmp_path):
+def test_run_layout_is_identical_for_dictconfig_and_dataclasses(tmp_path):
     level = load_level()
     logging = replace(level.logging, run_name="shared", log_dir=str(tmp_path))
     evaluation = replace(level.evaluation, checkpoint_dir=None)

@@ -1,10 +1,10 @@
-# 3D map builder: architecture and implementation plan
+# volumetric map builder: architecture and implementation plan
 
 > Historical design/proposal document. References to the former runtime describe
 > the migration context, not supported commands. Use the current guides and
-> [removal audit](05_2d_removal_audit.md) for the implemented 3D-only state.
+> [removal audit](05_2d_removal_audit.md) for the implemented volumetric-only state.
 
-Status: **implementation proposal**. This document follows the completed 3D
+Status: **implementation proposal**. This document follows the completed volumetric
 baseline rather than the pre-transition assumptions in the discovery brief. It
 defines the smallest path from the current sealed-cuboid maps to an optional,
 layer-oriented building editor without creating a second environment runtime.
@@ -29,7 +29,7 @@ The builder should make a building by editing a stack of square-cell plans:
 
 Tiles and walls are solid rectangular prisms. Their thickness is part of the
 map, is shown by the editor, and is used by collision and line-of-sight code.
-There is no separate “builder environment”: a builder map is an ordinary 3D
+There is no separate “builder environment”: a builder map is an ordinary volumetric
 map selected by a level.
 
 ### Deliberate first-release limits
@@ -47,12 +47,12 @@ The transition already established useful seams which should be retained:
 1. `BuildingArrays` is the level-facing map product. It already stores
    `(X,Y,Z+1)` tiles, `(X+1,Y,Z)` X walls, `(X,Y+1,Z)` Y walls, thicknesses,
    target exclusions, base position, and world size.
-2. `load_level_3d` selects exactly one map and compiles it before constructing
+2. `load_level` selects exactly one map and compiles it before constructing
    training functions. Map dimensions are consequently static for a compiled
    level, which is the right behavior for JAX batching.
 3. Target sampling already clips each cell's continuous volume against the six
    adjacent tile/wall prisms.
-4. The 3D environment already has reusable AABB segment tests for procedural
+4. The volumetric environment already has reusable AABB segment tests for procedural
    cuboids, and its collision, communication LOS, target visibility, coverage,
    radar, evaluation artifacts, and inspector all understand those cuboids.
 5. The old maze-builder server is a small local standard-library HTTP service.
@@ -63,7 +63,7 @@ The transition already established useful seams which should be retained:
 There is one important gap: authored interior `tiles`, `x_walls`, and
 `y_walls` currently affect target-spawn clearance only. Motion is bounded by
 one analytic outer cuboid, while collision and every LOS path only see the
-random AABBs in `Baseline3DState`. The inspector likewise renders the world
+random AABBs in `EnvState`. The inspector likewise renders the world
 box and procedural obstacles, not authored building prisms. Therefore an
 editor-only implementation would look correct but train on different
 geometry. Runtime geometry integration must precede the polished editor.
@@ -159,7 +159,7 @@ continues to accept the existing `building_cell_grid`, `width`, `height`,
 interior, and cell-selection fields in the sketch are optional v1 extensions;
 they do not replace or reinterpret the existing fields.
 
-The base remains a static point as decided for the 3D environment; selecting a
+The base remains a static point as decided for the volumetric environment; selecting a
 cell is the authoring convenience for new or edited maps. Compilation places
 `base_cell` at the horizontal cell center and immediately above that cell's
 lower tile. An existing `base_position_m` retains its exact coordinate until
@@ -217,7 +217,7 @@ openings. It previews the tile count, changes no walls, and is undoable.
 ### 4. Optimization opportunities after direct migration
 
 There is no known architectural blocker to the MVP. Once authored tiles and
-walls are compiled into the same solid queries already used for 3D obstacles,
+walls are compiled into the same solid queries already used for volumetric obstacles,
 the existing collision, LOS, visibility, radar, coverage, communication, and
 reward systems can support training in a sealed building. The first baseline
 should therefore migrate those systems directly and prove that agents can
@@ -231,8 +231,8 @@ return ideas are omitted.
 
 | Optimization concern | How this is currently done | Would a direct migration still work for the first building MVP? | Suggested replacement if measurements justify it | Benefit | Expected impact on final training |
 |---|---|---|---|---|---|
-| Repeated solid scans for LOS, coverage, and radar | Every query is tested against the procedural AABB set; radar additionally bisects an any-hit ray to estimate distance. A direct migration would include every authored tile/wall AABB in those scans. | **Yes.** It is geometrically valid and should train on small and moderate maps, especially after merging adjacent coplanar solids. | Use 3D DDA through authored lattice faces, while retaining direct AABB tests for the small procedural-obstacle set. Return the nearest DDA hit directly for radar. | Makes cost depend on cells crossed by a ray rather than total building detail. This matters because coverage emits many agent-to-voxel rays and radar repeats queries every step. | **High** if detailed maps make the direct scan dominate step time; otherwise no behavioral change. |
-| Cuboid-corner roadmap scaling and route quality | Each cuboid contributes eight clearance-expanded corner nodes, followed by a full visibility graph and Floyd–Warshall. A literal migration would treat authored prisms as many cuboids. | **Yes for core training with Euclidean rewards**, because the roadmap is not required for collision, sensing, communication, or chain formation. **Only for small maps** when obstacle-geodesic/finder-path rewards require this roadmap. | For those route-aware rewards, use a clearance-aware 3D free-space grid with 26-neighbor A* and Theta*-style LOS shortcutting; precompute static authored-map distance products. Keep the current roadmap for a few procedural cuboids. | Avoids cubic growth and corner-restricted routes while supporting corridors, shafts, and later voxelized non-cuboid structures. | **High** when route-aware rewards are enabled; negligible when training uses Euclidean rewards. |
+| Repeated solid scans for LOS, coverage, and radar | Every query is tested against the procedural AABB set; radar additionally bisects an any-hit ray to estimate distance. A direct migration would include every authored tile/wall AABB in those scans. | **Yes.** It is geometrically valid and should train on small and moderate maps, especially after merging adjacent coplanar solids. | Use volumetric DDA through authored lattice faces, while retaining direct AABB tests for the small procedural-obstacle set. Return the nearest DDA hit directly for radar. | Makes cost depend on cells crossed by a ray rather than total building detail. This matters because coverage emits many agent-to-voxel rays and radar repeats queries every step. | **High** if detailed maps make the direct scan dominate step time; otherwise no behavioral change. |
+| Cuboid-corner roadmap scaling and route quality | Each cuboid contributes eight clearance-expanded corner nodes, followed by a full visibility graph and Floyd–Warshall. A literal migration would treat authored prisms as many cuboids. | **Yes for core training with Euclidean rewards**, because the roadmap is not required for collision, sensing, communication, or chain formation. **Only for small maps** when obstacle-geodesic/finder-path rewards require this roadmap. | For those route-aware rewards, use a clearance-aware volumetric free-space grid with 26-neighbor A* and Theta*-style LOS shortcutting; precompute static authored-map distance products. Keep the current roadmap for a few procedural cuboids. | Avoids cubic growth and corner-restricted routes while supporting corridors, shafts, and later voxelized non-cuboid structures. | **High** when route-aware rewards are enabled; negligible when training uses Euclidean rewards. |
 | Rollback collision response in tight layouts | An obstacle hit rolls back the complete move and zeros velocity instead of resolving the first contact. | **Yes.** It already prevents crossing inflated AABBs and is adequate to establish an MVP. | Retain AABB solids but compute earliest swept-sphere contact and project the remaining motion along the contacted surface. | Reduces artificial sticking and dead transitions near door frames, corridor corners, floors, and ceilings. | **Mid**, rising if narrow passages are common or collision-induced idle termination is observed. |
 
 #### Recommended staged combination
@@ -324,7 +324,7 @@ Use a versioned API rather than extending the 2D maze payload:
 
 Reject traversal and invalid names, cap dimensions/body size, and write via a
 temporary file plus `Path.replace`. Creating a level is a separate opt-in
-action: it writes a small level copied from a selected 3D template and changes
+action: it writes a small level copied from a selected volumetric template and changes
 only `env.map_names`. The builder must never silently pick agent/radius/training
 values based on building size. Map validation and saving deliberately ignore
 the level's base-distance/ideal-chain rule because the map is authored first.
@@ -406,7 +406,7 @@ device memory, editor frame time, and replay payload/load time for at least:
 - 12 x 12 x 8 room-heavy building; and
 - the largest editor-supported dimensions.
 
-Compare the MVP's merged-AABB scan with 3D DDA over lattice faces. Adopt DDA
+Compare the MVP's merged-AABB scan with volumetric DDA over lattice faces. Adopt DDA
 for authored LOS, radar, and coverage unless measurement shows no meaningful
 benefit at supported map sizes; retain swept AABBs for collision and optional
 procedural cuboids. Preserve the geometry-query interface so this remains a
@@ -459,7 +459,7 @@ Euclidean-reward MVP.
 - Replays gain a map hash. Older replays without one continue to show their
   world box and stored procedural obstacles; this compatibility belongs in the
   out-of-process inspector, not in training.
-- The 2D builder can remain available during Phase 0/1, but after the 3D editor
+- The 2D builder can remain available during Phase 0/1, but after the volumetric editor
   can create the corridor acceptance map its CLI should be redirected to the
   new UI and the old converter removed in one cleanup change.
 - Checkpoints are compatible only when their observation/action/network shapes
@@ -492,7 +492,7 @@ Euclidean-reward MVP.
 
 The feature is complete when a user can create either the corridor office or
 the tower entirely in the browser, validate and save it, select it from an
-otherwise ordinary 3D level, and observe identical solid geometry in physics,
+otherwise ordinary volumetric level, and observe identical solid geometry in physics,
 radio/vision, radar, coverage, replay, and the editor. Invalid exterior leaks
 must never reach training, and the existing named cuboid maps must continue to
 load without a format migration.

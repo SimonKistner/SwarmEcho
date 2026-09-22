@@ -1,3 +1,3 @@
-"""JAX 3D environment, building geometry, observations, and relay rewards."""
+"""JAX environment, building geometry, observations, and relay rewards."""
 
 

@@ -1,6 +1,6 @@
 # Maximum base-to-top-corner distance: 119.253 m
 format: swarmecho-map/v1
-name: custom_3d_building
+name: custom_building
 width: 45.0
 height: 100.0
 depth: 65.0

@@ -3,7 +3,7 @@ Train:
 uv run swarmecho-train level=B00_test logging.run_name=B00_test_v1 logging.wandb_mode=disabled
 
 uv run swarmecho-curriculum \
-  levels=M00_no_maze_open_cuboid_3D,M02_random_cuboid_obstacles_\
+  levels=M00_no_maze_open_cuboid,M02_random_cuboid_obstacles \
   logging.run_name=7agents
 
 

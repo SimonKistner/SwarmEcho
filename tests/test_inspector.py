@@ -121,17 +121,17 @@ def test_inspector_payload_and_controls(tmp_path):
 
 
 def test_replay_label_uses_run_name_before_artifacts(tmp_path):
-    manifest = tmp_path / "M00_3d_baseline" / "artifacts" / "train" / "replays" / "eval.json"
-    assert replay_label(manifest) == "M00_3d_baseline_[unknown]_[Replay]"
+    manifest = tmp_path / "M00_baseline" / "artifacts" / "train" / "replays" / "eval.json"
+    assert replay_label(manifest) == "M00_baseline_[unknown]_[Replay]"
 
 
 def test_replay_label_adds_unpadded_training_steps(tmp_path):
-    manifest = tmp_path / "M00_3d_baseline_v2" / "artifacts" / "train" / "replays" / "eval_u000061_s00024M.json"
-    assert replay_label(manifest) == "M00_3d_baseline_v2_[24M]_[Replay]"
+    manifest = tmp_path / "M00_baseline_v2" / "artifacts" / "train" / "replays" / "eval_u000061_s00024M.json"
+    assert replay_label(manifest) == "M00_baseline_v2_[24M]_[Replay]"
 
 
 def test_heatmap_labels_distinguish_training_and_standalone_evaluation(tmp_path):
-    run = tmp_path / "M00_3d_baseline"
+    run = tmp_path / "M00_baseline"
     train_heatmap = (
         run / "artifacts/train/data/eval_info_u000061_s00024M.csv"
     )
@@ -142,15 +142,15 @@ def test_heatmap_labels_distinguish_training_and_standalone_evaluation(tmp_path)
     )
 
     assert heatmap_label(train_heatmap) == (
-        "M00_3d_baseline_[24M]_[TRAIN Heatmap]"
+        "M00_baseline_[24M]_[TRAIN Heatmap]"
     )
     assert heatmap_label(eval_heatmap) == (
-        "M00_3d_baseline_[140M]_[EVAL Heatmap]"
+        "M00_baseline_[140M]_[EVAL Heatmap]"
     )
 
 
 def test_inspector_discovers_new_eval_runs_and_hides_timestamps_in_labels(tmp_path):
-    run = tmp_path / "M00_3d_baseline"
+    run = tmp_path / "M00_baseline"
     eval_run = (
         run
         / "artifacts/eval/ckpt_u000351_s00140M/"
@@ -202,10 +202,10 @@ def test_inspector_discovers_new_eval_runs_and_hides_timestamps_in_labels(tmp_pa
     assert discover_heatmaps(tmp_path) == [info_path.resolve()]
     assert discover_replays(tmp_path) == [replay_manifest.resolve()]
     assert heatmap_label(info_path) == (
-        "M00_3d_baseline_[140M]_[EVAL Heatmap]_[agents7]"
+        "M00_baseline_[140M]_[EVAL Heatmap]_[agents7]"
     )
     assert replay_label(replay_manifest) == (
-        "M00_3d_baseline_[140M]_[Replay]_[agents7]"
+        "M00_baseline_[140M]_[Replay]_[agents7]"
     )
     assert "20260815" not in heatmap_label(info_path)
     assert "20260815" not in replay_label(replay_manifest)

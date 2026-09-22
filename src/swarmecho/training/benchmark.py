@@ -1,4 +1,4 @@
-"""CPU/CUDA benchmark and verification harness for the minimum 3D environment."""
+"""CPU/CUDA benchmark and verification harness for the minimum environment."""
 
 from __future__ import annotations
 

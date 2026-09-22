@@ -14,7 +14,7 @@ obstacles. Collided velocity components are zeroed.
 
 Authored maps use `swarmecho-map/v1`, including world width, height, depth,
 building cells, tiles, walls, spawn settings, and target exclusions. All bundled
-maps are 3D. `obstacles.py` provides visibility checks and physical/geodesic
+maps use volumetric geometry. `obstacles.py` provides visibility checks and physical/geodesic
 route calculations.
 
 ## Observations

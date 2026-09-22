@@ -1,4 +1,4 @@
-"""Validate a builder map with the same contracts consumed by 3D training."""
+"""Validate a builder map with the same contracts consumed by training."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from swarmecho.env.buildings import load_building
 
 
 def validate_building_file(path: str | Path, *, runtime_smoke: bool = False) -> dict[str, object]:
-    """Load a map and optionally construct/reset the CPU 3D runtime."""
+    """Load a map and optionally construct/reset the CPU runtime."""
     source = Path(path)
     building = load_building(source)
     report: dict[str, object] = {
@@ -66,7 +66,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     report = validate_building_file(args.map, runtime_smoke=args.runtime_smoke)
-    print("VALID 3D BUILDING")
+    print("VALID BUILDING")
     for key, value in report.items():
         print(f"  {key}: {value}")
 

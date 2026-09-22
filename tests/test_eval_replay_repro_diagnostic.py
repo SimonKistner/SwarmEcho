@@ -8,7 +8,7 @@ compares the two rollouts timestep by timestep.
 Run in WSL only:
 
     SWARMECHO_RUN_REPLAY_DIAGNOSTIC=1 \
-      uv run pytest -s tests/test_eval3d_replay_repro_diagnostic.py
+      uv run pytest -s tests/test_eval_replay_repro_diagnostic.py
 
 Set ``SWARMECHO_DIAGNOSTIC_CHECKPOINT`` to diagnose another checkpoint.
 """

@@ -119,5 +119,5 @@ Older checkpoints without metadata warn in raw mode and are rejected in running
 mode to avoid silently reinterpreting their critic output. No optimizer-state
 checkpointing or automatic architecture/unit conversion is added.
 
-Focused regression checks are in `tests/test_ppo3d_controls.py`; they were added
+Focused regression checks are in `tests/test_ppo_controls.py`; they were added
 without executing training or tests during implementation.

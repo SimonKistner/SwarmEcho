@@ -33,8 +33,8 @@ class MAPPOTransition(NamedTuple):
     base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
     critic_obs: Optional[np.ndarray] = None  # (E, N, P), privileged critic only
-    critic_agent_features: Optional[np.ndarray] = None  # (E, N, P), compact 3D extras
-    critic_global_features: Optional[np.ndarray] = None  # (E, G), shared 3D extras
+    critic_agent_features: Optional[np.ndarray] = None  # (E, N, P), compact extras
+    critic_global_features: Optional[np.ndarray] = None  # (E, G), shared extras
 
 
 class MAPPORolloutBuffer:
@@ -89,7 +89,7 @@ class MAPPORolloutBuffer:
         self.critic_obs_dim = critic_obs_dim
         self.mask_inactive = mask_inactive
         if (critic_agent_dim or critic_global_dim) and not recurrent:
-            raise ValueError("Compact 3D critic features require recurrent minibatches.")
+            raise ValueError("Compact critic features require recurrent minibatches.")
         self._critic_agent_features = (np.zeros((self.T, self.E, self.N, critic_agent_dim),
                                               dtype=np.float32) if critic_agent_dim else None)
         self._critic_global_features = (np.zeros((self.T, self.E, critic_global_dim),

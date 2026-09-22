@@ -1,4 +1,4 @@
-"""Recurrent 3D PPO: explicit value units, active agents, and fixed-target diagnostics.
+"""Recurrent PPO: explicit value units, active agents, and fixed-target diagnostics.
 
 Rewards and buffer values/returns are raw. Only critic regression uses normalized
 units. Diagnostic RNGs never consume rollout or optimizer entropy RNGs.
@@ -83,10 +83,10 @@ def replay(model, mb, key):
     squashed = gaussian + correction(sampled)
     active = mb["active_masks"]
     critic_obs = mb["critic_obs"]
-    if getattr(model, "privileged_3d", False):
+    if getattr(model, "privileged_inputs", False):
         critic_obs = assemble_privileged_observations(
             mb["obs"], mb["critic_agent_features"], mb["critic_global_features"], active,
-            include_base_vector=model.privileged_3d_include_base_vector,
+            include_base_vector=model.privileged_include_base_vector,
         )
     _, values = model.critic.values_sequence(
         critic_obs, mb["initial_critic_h"], mb["rnn_resets"] | ~active,

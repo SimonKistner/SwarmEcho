@@ -1,4 +1,4 @@
-"""Compact, pre-action privileged inputs for the 3D critic only."""
+"""Compact, pre-action privileged inputs for the critic only."""
 from __future__ import annotations
 
 import jax.numpy as jnp

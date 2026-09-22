@@ -14,7 +14,7 @@ The feature was removed because enabling it did not make agents learn to spread
 faster. The coverage probe was later disabled in the maintained 2D levels,
 which removed the main reason for keeping this special reset behavior. The
 probe implementation itself remains temporarily available as a learning
-scaffold for early 3D development.
+scaffold for early volumetric development.
 
 ## Memory T-maze diagnostic suite
 
@@ -75,7 +75,7 @@ custom wall segments, and rectangular spawn zones.
 It was removed because its output path no longer preserved the current target
 exclusion fields and it duplicated map-authoring tooling. The browser-based
 2D grid maze builder remains because it supports the maintained core maze
-workflow and provides a useful reference for future 3D tooling.
+workflow and provides a useful reference for future volumetric tooling.
 
 ## Legacy configuration compatibility aliases
 
@@ -227,9 +227,9 @@ rendered colored failure clusters, outliers, and one representative target
 position per cluster.
 
 The feature was removed because it duplicated substantial analysis code and
-was not useful enough to justify maintaining it during the 3D transition.
+was not useful enough to justify maintaining it during the volumetric transition.
 Evaluation CSVs and ordinary failure heatmaps remain. Spatial clustering may
-be reconsidered after the 3D workflow is working, using the maintained CSV as
+be reconsidered after the volumetric workflow is working, using the maintained CSV as
 its input rather than coupling clustering to simulation.
 
 ## Legacy M-series map alternatives
@@ -253,7 +253,7 @@ training banner used a similar constant to print an estimated allocation.
 These checks were removed because memory use also depends on agent and
 observation dimensions, network architecture, recurrent state, optimizer
 state, and compiled execution details. The constants described one historical
-setup rather than a generally valid 2D or future 3D limit. Minibatch count is
+setup rather than a generally valid 2D or future volumetric limit. Minibatch count is
 now explicit; real peak-memory measurements and CUDA out-of-memory errors are
 the authority when tuning a new workload.
 

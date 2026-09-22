@@ -5,10 +5,10 @@ Run Python/ML commands in the existing WSL environment from the repository root.
 ## Train
 
 ```bash
-uv run swarmecho-train level=M00_no_maze_open_cuboid_3D
+uv run swarmecho-train level=M00_no_maze_open_cuboid
 uv run swarmecho-train level=B01a_office_find_only logging.run_name=office logging.wandb_mode=disabled
-uv run swarmecho-multi-train level=M00_no_maze_open_cuboid_seeds=3 base_seed=42 logging.run_name=baseline
-uv run swarmecho-curriculum levels=M00_no_maze_open_cuboid_3D,M01_no_maze_open_cuboid_tall_logging.run_name=curriculum
+uv run swarmecho-multi-train level=M00_no_maze_open_cuboid seeds=3 base_seed=42 logging.run_name=baseline
+uv run swarmecho-curriculum levels=M00_no_maze_open_cuboid,M01_no_maze_open_cuboid_tall logging.run_name=curriculum
 ```
 
 Resume compatible weights and run accounting:
@@ -61,7 +61,7 @@ uv run swarmecho-dashboard
 
 ```bash
 uv run swarmecho-maze-builder --port 8766
-uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_3d_building.yaml
+uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_building.yaml
 ```
 
 The builder command serves the building editor.
@@ -72,7 +72,7 @@ The builder command serves the building editor.
 uv run swarmecho-validate
 uv run swarmecho-benchmark num_envs=64 steps=64 radar_bins=8
 uv run pytest tests
-node --test tests/test_3d_map_builder_ui.cjs tests/test_inspector3d_visibility.cjs
+node --test tests/test_map_builder_ui.cjs tests/test_inspector_visibility.cjs
 ```
 
 Validation and benchmark implementations are packaged under

@@ -1,4 +1,4 @@
-"""Standalone browser inspector for completed 3D replay artifacts."""
+"""Standalone browser inspector for completed replay artifacts."""
 
 from __future__ import annotations
 
@@ -14,13 +14,14 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from swarmecho.core.compatibility import canonical_marker, resolve_map_file
 
 from swarmecho.training.artifacts import load_eval_info_csv, parse_checkpoint_update
 from swarmecho.visualize.replay import load_replay
 
 
 HTML = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>SwarmEcho 3D Inspector</title>
+<html><head><meta charset="utf-8"><title>SwarmEcho Inspector</title>
 <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
 <style>
 :root{color-scheme:dark;--bg:#090e18;--panel:#111a2a;--line:#26344d;--cyan:#22d3ee;--text:#e5eefc;--muted:#91a4c3}
@@ -54,7 +55,7 @@ button:disabled{opacity:.35;cursor:default}button:disabled:hover{border-color:#3
 @media(max-width:1200px){.header-selection{gap:10px}#replayName{display:none}.artifact-popover{grid-template-columns:minmax(0,1fr) 410px}.header-refresh{gap:6px;padding:0 12px}}
 </style></head><body>
 <header>
-<h1><span class="tag">SwarmEcho</span> 3D Inspector</h1>
+<h1><span class="tag">SwarmEcho</span> Inspector</h1>
 <div class="header-selection"><select id="replaySelect" hidden aria-hidden="true"></select><details id="artifactPicker"><summary id="artifactPickerButton">Choose a run…</summary><div class="artifact-popover"><div id="artifactMenu"></div><div id="artifactSubmenu"><p class="meta">Select a run to see its artifacts.</p></div></div></details><span id="replayName" class="meta"></span></div>
 <div class="header-refresh"><button id="refreshRun" type="button" title="Look for new entries only in the selected run">Refresh run</button><button id="refreshReplays" type="button" title="Look for new runs and entries in all runs">Refresh all</button></div>
 <span class="header-help">Drag to orbit · scroll to zoom</span>
@@ -76,11 +77,11 @@ function sceneLayout(revision){return {bgcolor:'#090e18',uirevision:revision,asp
 function renderPlot(traces,revision,extra={}){renderQueue=renderQueue.catch(()=>{}).then(()=>{if(camera)rememberCamera();rendering=true;return Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',scene:sceneLayout(revision),...extra},{responsive:true,displaylogo:false}).then(captureCamera).finally(()=>{rendering=false;rotationTime=null})});return renderQueue}
 function setLoading(active,message){$('loading').classList.toggle('hidden',!active);$('replayDiscovery').classList.toggle('hidden',active);if(active)$('loadingText').textContent=message}
 function setMode(nextMode){mode=nextMode;$('buildingPanel').style.visibility=(mode==='replay'||mode==='heatmap')?'visible':'hidden';playing=false;clearTimeout(timer);$('play').textContent='▶ Play';let replayCards=[$('timeline').closest('.card'),$('status').closest('.card'),$('showCoverage').closest('.card')];replayCards.forEach(card=>card.classList.toggle('hidden',mode!=='replay'));$('replayLegend').classList.toggle('hidden',mode!=='replay');$('heatmapControls').classList.toggle('hidden',mode!=='heatmap');$('heatmapLegend').classList.toggle('hidden',mode!=='heatmap');if($('roadmapControls'))$('roadmapControls').classList.toggle('hidden',mode!=='roadmap');if(mode==='heatmap'){ensureHeatmapUi();$('heatmapStats').classList.remove('hidden');renderHeatmapAgreementButtons();updateHeatmapStats()}else if($('heatmapStats'))$('heatmapStats').classList.add('hidden')}
-function loadReplay(id,keepCamera=false){setLoading(true,'Loading artifact...');let url='/api/replay?id='+encodeURIComponent(id)+'&_='+Date.now();return fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('Artifact failed to load');return r.json()}).then(d=>{if(!keepCamera)camera=null;if(d.kind==='roadmap'){D=d;H=null;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'3D evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);return draw(0)}).finally(()=>setLoading(false))}
+function loadReplay(id,keepCamera=false){setLoading(true,'Loading artifact...');let url='/api/replay?id='+encodeURIComponent(id)+'&_='+Date.now();return fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('Artifact failed to load');return r.json()}).then(d=>{if(!keepCamera)camera=null;if(d.kind==='roadmap'){D=d;H=null;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);return draw(0)}).finally(()=>setLoading(false))}
 let artifactItems=[],artifactBusy=false;
 let artifactStars=new Set();try{artifactStars=new Set(JSON.parse(localStorage.getItem('swarmecho.inspector.stars')||'[]'))}catch{}
 function artifactParts(label){const start=label.indexOf('_[');return {run:start<0?label:label.slice(0,start),detail:start<0?'Open artifact':label.slice(start+2).replace(/\]_\[/g,' · ').replace(/\]$/,'')}}
-function artifactDetail(item){const duplicates=artifactItems.filter(other=>artifactRun(other)===artifactRun(item)&&other.label===item.label);return artifactParts(item.label).detail+(duplicates.length>1?' · '+(duplicates.indexOf(item)+1):'')}
+function artifactDetail(item){if(item.random_eval_map_id)return artifactParts(item.label).detail+' · '+item.random_eval_map_id;const duplicates=artifactItems.filter(other=>artifactRun(other)===artifactRun(item)&&other.label===item.label);return artifactParts(item.label).detail+(duplicates.length>1?' · '+(duplicates.indexOf(item)+1):'')}
 function artifactKind(item){return item.kind||(/Heatmap/i.test(item.label)?'heatmap':'replay')}
 function artifactRun(item){return item.run_id||artifactParts(item.label).run}
 function artifactSteps(item){const match=artifactParts(item.label).detail.match(/^(\d+(?:\.\d+)?)\s*([MkG])?(?:\s|$)/i);return match?Number(match[1])*({m:1e6,k:1e3,g:1e9}[(match[2]||'').toLowerCase()]||1):null}
@@ -88,7 +89,7 @@ function currentArtifact(){return artifactItems.find(item=>String(item.id)===$('
 function runItems(item){return item?artifactItems.filter(other=>artifactRun(other)===artifactRun(item)):[]}
 function columnItems(group,kind){return group.filter(item=>artifactKind(item)===kind).sort((a,b)=>(artifactSteps(b)??-1)-(artifactSteps(a)??-1)||(kind==='heatmap'?Number(/EVAL Heatmap/i.test(b.label))-Number(/EVAL Heatmap/i.test(a.label)):0))}
 function navigationItems(item){return columnItems(runItems(item),artifactKind(item)).slice().reverse()}
-function counterpart(item,kind){return columnItems(runItems(item),kind).reduce((best,other)=>{const distance=value=>artifactSteps(item)===null||artifactSteps(value)===null?Infinity:Math.abs(artifactSteps(value)-artifactSteps(item));return !best||distance(other)<distance(best)?other:best},null)}
+function counterpart(item,kind){return columnItems(runItems(item),kind).filter(other=>!item.random_eval_map_id||other.random_eval_map_id===item.random_eval_map_id).reduce((best,other)=>{const distance=value=>artifactSteps(item)===null||artifactSteps(value)===null?Infinity:Math.abs(artifactSteps(value)-artifactSteps(item));return !best||distance(other)<distance(best)?other:best},null)}
 function updateArtifactNavigation(){const item=currentArtifact(),entries=item?navigationItems(item):[],index=entries.indexOf(item);$('previousArtifact').disabled=artifactBusy||index<=0;$('nextArtifact').disabled=artifactBusy||index<0||index>=entries.length-1;for(const kind of ['heatmap','replay']){const button=$(kind+'Mode');button.setAttribute('aria-pressed',String(!!item&&artifactKind(item)===kind));button.disabled=artifactBusy||!item||!counterpart(item,kind)}$('refreshRun').disabled=artifactBusy||!item;$('refreshReplays').disabled=artifactBusy;if(item){$('artifactPickerButton').textContent=artifactParts(item.label).run+' · '+artifactDetail(item);$('artifactPickerButton').title=item.label}else $('artifactPickerButton').textContent='No artifacts found'}
 async function chooseArtifact(item,keepCamera=false){if(artifactBusy)return;const previous=currentArtifact();$('replaySelect').value=item.id;$('artifactPicker').open=false;artifactBusy=true;updateArtifactNavigation();try{await loadReplay(item.id,keepCamera)}catch(error){if(previous)$('replaySelect').value=previous.id;$('replayDiscovery').textContent=error.message}finally{artifactBusy=false;renderReplayList(artifactItems,$('replaySelect').value)}}
 function moveArtifact(direction){const item=currentArtifact();if(!item||artifactBusy)return;const entries=navigationItems(item),next=entries[entries.indexOf(item)+direction];if(next)chooseArtifact(next,true)}
@@ -100,7 +101,8 @@ function openArtifactSubmenu(group,anchor){
     const columns=document.createElement('div');columns.className='artifact-columns';panel.appendChild(columns);
     for(const title of ['Heatmaps','Replays']){const label=document.createElement('div');label.className='label artifact-column-title';label.textContent=title;columns.appendChild(label)}
     const addItem=(item,parent)=>{const cell=document.createElement('div');cell.className='artifact-cell';parent.appendChild(cell);if(!item)return;const button=document.createElement('button');button.type='button';button.className='artifact-entry';button.textContent=artifactDetail(item);button.title=item.label;button.classList.toggle('selected',String(item.id)===$('replaySelect').value);button.onclick=()=>chooseArtifact(item);cell.appendChild(button);if(['heatmap','replay'].includes(artifactKind(item))){const star=document.createElement('button');star.type='button';const starred=artifactStars.has(item.id);star.className='artifact-star'+(starred?' starred':'');star.textContent=starred?'★':'☆';star.title=starred?'Unstar item':'Star item';star.setAttribute('aria-label',star.title+': '+button.textContent);star.setAttribute('aria-pressed',String(starred));star.onclick=()=>{if(starred)artifactStars.delete(item.id);else artifactStars.add(item.id);try{localStorage.setItem('swarmecho.inspector.stars',JSON.stringify([...artifactStars]))}catch{$('replayDiscovery').textContent='Stars saved for this session only'}renderReplayList(artifactItems,$('replaySelect').value,artifactRun(item))};cell.appendChild(star)}};
-    artifactRows(group).forEach(row=>row.forEach(item=>addItem(item,columns)));
+    const collapsed=[],seen=new Set();for(const item of group){const key=item.random_eval_group?artifactKind(item)+':'+item.random_eval_group:null;if(key&&seen.has(key))continue;if(key)seen.add(key);collapsed.push(item)}
+    artifactRows(collapsed).forEach(row=>row.forEach(item=>{if(item?.random_eval_group){const siblings=group.filter(other=>other.random_eval_group===item.random_eval_group&&artifactKind(other)===artifactKind(item));const cell=document.createElement('div');cell.className='artifact-cell';const select=document.createElement('select');select.setAttribute('aria-label','Random evaluation map');siblings.sort((a,b)=>a.random_eval_map_id.localeCompare(b.random_eval_map_id));for(const entry of siblings){const option=new Option(entry.random_eval_map_id,entry.id);select.add(option)}const current=currentArtifact();if(siblings.includes(current))select.value=current.id;const button=document.createElement('button');button.className='artifact-entry';button.textContent=artifactParts(item.label).detail+' · Random maps ('+siblings.length+')';button.onclick=()=>chooseArtifact(siblings.find(v=>String(v.id)===select.value)||item);select.onchange=()=>chooseArtifact(siblings.find(v=>String(v.id)===select.value));cell.append(button,select);columns.appendChild(cell)}else addItem(item,columns)}));
     group.filter(item=>!['heatmap','replay'].includes(artifactKind(item))).forEach(item=>addItem(item,panel));
 }
 function renderReplayList(items,preferredId,openRun){
@@ -152,7 +154,7 @@ function ensureHeatmapUi(){let panel=$('heatmapControls'),selectedLabel=$('selec
 let heatmapAgreementData=null;
 function renderHeatmapAgreementButtons(){ensureHeatmapUi();let buttons=$('heatmapAgreementButtons');buttons.replaceChildren();let total=Number(H?.manifest?.robustness_runs)||1;if(heatmapAgreementData!==H){heatmapAgreementData=H;heatmapAgreement=total}for(let agreement=1;agreement<=total;agreement++){let button=document.createElement('button');button.type='button';button.textContent=agreement+'/'+total;button.classList.toggle('selected',agreement===heatmapAgreement);button.onclick=()=>{heatmapAgreement=agreement;renderHeatmapAgreementButtons();updateHeatmapStats();drawHeatmap()};buttons.appendChild(button)}}
 function updateHeatmapStats(){ensureHeatmapUi();let counts={chain_success:0,found_and_delivered:0,visually_found:0,not_found:0};H.positions.forEach((_,index)=>counts[heatmapStage(index)]++);let total=H.positions.length||1,chain=counts.chain_success/total,delivered=(counts.chain_success+counts.found_and_delivered)/total,visual=(counts.chain_success+counts.found_and_delivered+counts.visually_found)/total,percent=value=>Math.round(value*100)+'%',delta=value=>(value>=0?'+':'')+Math.round(value*100)+'%';$('heatmapStatChain').textContent=percent(chain);$('heatmapStatDelivered').textContent=percent(delivered);$('heatmapStatDeliveredDelta').textContent='('+delta(delivered-chain)+')';$('heatmapStatVisual').textContent=percent(visual);$('heatmapStatVisualDelta').textContent='('+delta(visual-chain)+')';$('heatmapStatNotFound').textContent=percent(counts.not_found/total)}
-function showHeatmapCommand(point,stage){let checkpoint=H.manifest.checkpoint||'<checkpoint-path>';let coords=point.map(value=>Number(value).toPrecision(9)).join(',');let command='uv run swarmecho-evaluate checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords;$('selectedPoint').textContent=stage+' · ('+coords+')';$('heatmapCommand').value=command}
+function showHeatmapCommand(point,stage){let checkpoint=H.manifest.checkpoint||'<checkpoint-path>';let coords=point.map(value=>Number(value).toPrecision(9)).join(',');let command='uv run swarmecho-evaluate checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords+(H.manifest.random_eval_map_id?' random_eval_map_id='+H.manifest.random_eval_map_id:'');$('selectedPoint').textContent=stage+' · ('+coords+')';$('heatmapCommand').value=command}
 function heatmapStage(index){if(!H.stage_rates)return H.stages[index];let total=Number(H.manifest.robustness_runs)||1,confidence=Math.min(total,Math.max(1,heatmapAgreement))/total,epsilon=1e-9;if(H.stage_rates.chain_success[index]+epsilon>=confidence)return 'chain_success';if(H.stage_rates.found_and_delivered[index]+epsilon>=confidence)return 'found_and_delivered';if(H.stage_rates.visually_found[index]+epsilon>=confidence)return 'visually_found';return 'not_found'}
 function drawHeatmap(){let traces=buildingTraces(),groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]};H.positions.forEach((point,index)=>{let stage=heatmapStage(index),rates=H.stage_rates?{chain:H.stage_rates.chain_success[index],delivered:H.stage_rates.found_and_delivered[index],visual:H.stage_rates.visually_found[index]}:{chain:Number(stage==='chain_success'),delivered:Number(stage==='chain_success'||stage==='found_and_delivered'),visual:Number(stage!=='not_found')};(groups[stage]||groups.not_found).push({point,stage,rates})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));if(H.obstacle_min?.length&&H.manifest.obstacle_layout_mode==='fixed')H.obstacle_min[0].forEach((lo,i)=>{traces.push(cuboidMesh(lo,H.obstacle_max[0][i]));traces.push(cuboidLines(lo,H.obstacle_max[0][i],'rgba(255,190,100,.8)'))});Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length||!$(HEATMAP_CATEGORY_CONTROLS[stage]).checked)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage,entry.rates.chain,entry.rates.delivered,entry.rates.visual,(H.final_chain_length||[])[H.positions.indexOf(entry.point)]||0]),marker:{size:8,color,opacity:.55,line:{color:'#e5eefc',width:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>chain success=%{customdata[2]:.0%}<br>found and delivered=%{customdata[3]:.0%}<br>visually found=%{customdata[4]:.0%}<br>final chain length=%{customdata[5]:.2f}m<extra>Click to create replay command</extra>'})});return renderPlot(traces,'heatmap-camera',{uirevision:'heatmap-camera',showlegend:false})}
 function updateElevation(){let eye=(camera||DEFAULT_CAMERA).eye,angle=Math.round(Math.atan2(eye.z,Math.hypot(eye.x,eye.y))*180/Math.PI);$('cameraElevation').value=angle;$('cameraElevationValue').textContent=angle+'°'}
@@ -313,7 +315,7 @@ def building_geometry(manifest: dict) -> dict | None:
     from swarmecho.core.config import MAP_DIR
 
     name = Path(str(manifest.get("map_name", ""))).stem
-    path = MAP_DIR / f"{name}.yaml"
+    path = resolve_map_file(MAP_DIR / f"{name}.yaml", MAP_DIR)
     data = manifest.get("building_snapshot")
     source = "replay snapshot" if data is not None else "current map (legacy artifact)"
     if data is None:
@@ -330,8 +332,13 @@ def building_geometry(manifest: dict) -> dict | None:
         [x, y, z] for x in range(cols) for y in range(rows) for z in range(layers)
     ])}
     walls, roofs, floors, solid_min, solid_max = [], [], [], [], []
+    special = data["geometry"]
+    openings = {axis: {tuple(v) for suffix in ("doors", "windows") for v in special.get(f"{axis}_{suffix}", [])}
+                for axis in ("x", "y")}
     for axis, key in ((0, "x_walls"), (1, "y_walls")):
         for x, y, z in data["geometry"][key]:
+            if (x, y, z) in openings["xy"[axis]]:
+                continue
             lo = [x * cell, y * cell, z * cell]
             hi = [(x + 1) * cell, (y + 1) * cell, (z + 1) * cell]
             lo[axis] -= wall_half
@@ -354,6 +361,15 @@ def building_geometry(manifest: dict) -> dict | None:
         if (x, y, z - 1) in interior and (x, y, z) not in interior:
             roofs.append({"lo": [x * cell, y * cell, z * cell - tile_half],
                           "hi": [(x + 1) * cell, (y + 1) * cell, z * cell + tile_half]})
+    if any(openings.values()) or special.get("stairs"):
+        from swarmecho.env.buildings import compile_building
+        compiled = compile_building({**data, "width": cols * cell, "height": rows * cell, "depth": layers * cell})
+        box_key = lambda lo, hi: tuple(np.round(np.r_[lo, hi], 4))
+        existing = {box_key(lo, hi) for lo, hi in zip(solid_min, solid_max)}
+        for lo, hi in zip(compiled.solid_min_m.tolist(), compiled.solid_max_m.tolist()):
+            if box_key(lo, hi) not in existing:
+                walls.append({"lo": lo, "hi": hi, "storey": max(0, int(lo[2] / cell)), "outer": False})
+        solid_min, solid_max = compiled.solid_min_m.tolist(), compiled.solid_max_m.tolist()
     return {"layers": layers, "walls": walls, "roofs": roofs, "floors": floors,
             "source": source,
             "solid_min": data.get("solid_min_m", solid_min),
@@ -371,13 +387,13 @@ def replay_payload(manifest_path: str | Path) -> dict:
 
 
 def heatmap_payload(info_path: str | Path) -> dict:
-    """Load a 3D evaluation CSV and its optional inspector metadata sidecar."""
+    """Load an evaluation CSV and its optional inspector metadata sidecar."""
     path = Path(info_path)
     records = load_eval_info_csv(path)
     if records["positions"].shape[-1] != 3:
-        raise ValueError(f"3D heatmaps require x,y,z coordinates: {path}")
+        raise ValueError(f"heatmaps require x,y,z coordinates: {path}")
     manifest = {
-        "format": "swarmecho-3d-eval-heatmap/v1",
+        "format": "swarmecho-eval-heatmap/v1",
         "data_file": path.name,
         "map_name": path.stem,
     }
@@ -387,6 +403,7 @@ def heatmap_payload(info_path: str | Path) -> dict:
             manifest.update(json.loads(sidecar.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             pass
+    manifest["format"] = canonical_marker(manifest["format"])
     checkpoint = _nearest_heatmap_checkpoint(path, manifest)
     if checkpoint is not None:
         manifest["checkpoint"] = str(checkpoint)
@@ -496,7 +513,7 @@ def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) 
 
 
 def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
-    """Find single-pass and robust 3D heatmaps, excluding action-capture CSVs."""
+    """Find single-pass and robust heatmaps, excluding action-capture CSVs."""
     root = Path(root)
     if not root.exists():
         return []
@@ -528,7 +545,7 @@ def discover_roadmap_tests(root: str | Path = "outputs") -> list[Path]:
     if not root.exists():
         return []
     results = []
-    for path in root.glob("testresults/*.roadmap.json"):
+    for path in root.glob("testresults/**/*.roadmap.json"):
         try:
             if json.loads(path.read_text(encoding="utf-8")).get("format") == "swarmecho-roadmap-test/v1":
                 results.append(path.resolve())
@@ -546,10 +563,22 @@ def roadmap_label(path: Path) -> str:
         name = None
     if not name:
         return f"{stem}_[Roadmap]"
+    display_name = f"{path.parent.name}__{name}" if path.parent.name.startswith("random_buildings_") else name
     if stem.startswith(name + "_["):
         return f"{stem}_[Roadmap]"
     detail = stem[len(name):].lstrip("_") if stem.startswith(name + "_") else stem
-    return f"{name}_[{detail}]_[Roadmap]" if detail and detail != name else f"{name}_[Roadmap]"
+    return f"{display_name}_[{detail}]_[Roadmap]" if detail and detail != name else f"{display_name}_[Roadmap]"
+
+
+def random_eval_metadata(kind, path):
+    if kind not in {"heatmap", "replay"}:
+        return {}
+    sidecar = path.with_suffix(".heatmap.json") if kind == "heatmap" else path
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {key: data[key] for key in ("random_eval_map_id", "random_eval_group") if key in data}
 
 
 _REPLAY_STEPS = re.compile(r"(?:^|_)s0*(\d+)([Mk])(?:$|[._])", re.IGNORECASE)
@@ -696,7 +725,7 @@ def make_handler(
             raise ValueError("Unknown run")
         kind, path = previous[0]
         if kind == "roadmap":
-            current = [(kind, item) for item in discover_roadmap_tests(path.parent.parent)
+            current = [(kind, item) for item in discover_roadmap_tests(replay_root or path.parent.parent)
                        if run_id(kind, item) == identifier]
         else:
             directory = run_directory(path)
@@ -753,6 +782,7 @@ def make_handler(
                         "id": source_id(kind, path),
                         "run_id": run_id(kind, path),
                         "kind": kind,
+                        **random_eval_metadata(kind, path),
                         "label": replay_label(path) if kind == "replay" else (
                             heatmap_label(path) if kind == "heatmap" else roadmap_label(path)
                         ),
@@ -835,7 +865,7 @@ def main() -> None:
         (host, port), make_handler(manifests, manifest, root=root)
     )
     url = f"http://{host}:{port}"
-    print(f"SwarmEcho 3D Inspector: {url}")
+    print(f"SwarmEcho Inspector: {url}")
     print(f"Replay root: {root.resolve()}")
     print("Press Ctrl+C to stop. Training is not coupled to this process.")
     if open_browser:

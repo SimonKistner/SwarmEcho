@@ -1,6 +1,6 @@
 # SwarmEcho documentation
 
-The [repository README](../README.md) is the entry point for the 3D-only runtime.
+The [repository README](../README.md) is the entry point for the current runtime.
 
 ## Current reference
 
@@ -9,7 +9,7 @@ The [repository README](../README.md) is the entry point for the 3D-only runtime
 - [MARL and training](01_reference/03_marl_and_training.md)
 - [Agent-centric critic design rationale](01_reference/04_mappo_acc_architecture_defense.md)
 - [Maintained assumptions](01_reference/05_assumptions.md)
-- [3D PPO controls](01_reference/05_3d_ppo_controls.md)
+- [PPO controls](01_reference/05_ppo_controls.md)
 
 ## Operational guides
 
@@ -17,8 +17,8 @@ The [repository README](../README.md) is the entry point for the 3D-only runtime
 - [Analysis and tools](02_guide/02_analysis_and_tools.md)
 - [Commands](02_guide/03_commands.md)
 
-The general run-analysis dashboard remains available for 3D runs.
-The separate 3D inspector handles replay and evaluation visualization.
+The general run-analysis dashboard remains available for runs.
+The separate inspector handles replay and evaluation visualization.
 
 ## Status, proposals, and history
 
@@ -26,8 +26,8 @@ The separate 3D inspector handles replay and evaluation visualization.
 - [Future features](03_roadmap/02_future_features.md)
 - [Office performance audit](03_roadmap/office_performance_audit.md)
 - [Historical cleanup plan](03_roadmap/01_cleanup_plan.md)
-- [Historical 3D transition discovery](03_roadmap/03_3d_transition_discovery.md)
-- [Building-editor design proposal](03_roadmap/04_3d_map_builder_implementation_plan.md)
+- [Historical transition discovery](03_roadmap/03_environment_transition_discovery.md)
+- [Building-editor design proposal](03_roadmap/04_map_builder_implementation_plan.md)
 - [Archived editor plan](04_archive/03_building_editor_plan.md)
 - [Idea archive](04_archive/01_idea_archive.md)
 - [Experimental setup archive](04_archive/02_rl_experimental_setup.md)

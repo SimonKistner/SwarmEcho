@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from swarmecho.core.compatibility import canonical_marker
 
 
 EVAL_STAGES = (
@@ -106,7 +107,7 @@ def train_artifact_root(run_dir: str | Path) -> Path:
 
 
 def train_replay_root(run_dir: str | Path) -> Path:
-    """Return the 3D equivalent of the maintained training-video directory."""
+    """Return the equivalent of the maintained training-video directory."""
     return train_artifact_root(run_dir) / "replays"
 
 
@@ -117,7 +118,7 @@ def eval_checkpoint_artifact_root(run_dir: str | Path, checkpoint_path: str | Pa
 def eval_checkpoint_replay_root(
     run_dir: str | Path, checkpoint_path: str | Path, cfg: Any
 ) -> Path:
-    """Return the replay directory for one checkpoint-scoped 3D evaluation."""
+    """Return the replay directory for one checkpoint-scoped evaluation."""
     return eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg) / "replays"
 
 
@@ -180,7 +181,7 @@ def save_eval_layout(path: str | Path, obstacle_min: Any, obstacle_max: Any) -> 
         raise ValueError("Evaluation layout bounds must have shape (obstacles, 3).")
     output = Path(path)
     write_manifest(output, {
-        "format": "swarmecho-3d-obstacle-layout/v1",
+        "format": "swarmecho-obstacle-layout/v1",
         "obstacle_min": lower.tolist(),
         "obstacle_max": upper.tolist(),
     })
@@ -189,7 +190,7 @@ def save_eval_layout(path: str | Path, obstacle_min: Any, obstacle_max: Any) -> 
 
 def load_eval_layout(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("format") != "swarmecho-3d-obstacle-layout/v1":
+    if canonical_marker(payload.get("format")) != "swarmecho-obstacle-layout/v1":
         raise ValueError(f"Unsupported obstacle layout: {path}")
     return (
         np.asarray(payload["obstacle_min"], dtype=np.float32),

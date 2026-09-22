@@ -1,4 +1,4 @@
-"""Config-driven recurrent MAPPO training runner for the 3D baseline."""
+"""Config-driven recurrent MAPPO training runner for the baseline."""
 
 from __future__ import annotations
 
@@ -75,10 +75,10 @@ def communication_due(episode_step, every_k_steps):
 
 
 def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
-    """Construct the canonical recurrent 3D MAPPO/TarMAC model."""
+    """Construct the canonical recurrent MAPPO/TarMAC model."""
     cfg = level.env
     if not level.network.actor_memory or not level.network.critic_memory:
-        raise ValueError("The 3D runtime requires recurrent actor and critic memory.")
+        raise ValueError("The runtime requires recurrent actor and critic memory.")
     if level.network.critic_type not in {"observation", "privileged"}:
         raise ValueError("network.critic_type must be 'observation' or 'privileged'.")
     privileged = level.network.critic_type == "privileged"
@@ -103,8 +103,8 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
     model.mask_inactive = True
     model.actor.mask_inactive = True
     if privileged:
-        model.privileged_3d = True
-        model.privileged_3d_include_base_vector = not cfg.observe_base_vector
+        model.privileged_inputs = True
+        model.privileged_include_base_vector = not cfg.observe_base_vector
     if level.training.value_normalization == "running":
         model.value_normalizer = RunningValueNormalizer()
     # Static metadata; the numerical normalizer state is saved inside the model.
@@ -127,7 +127,7 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "gae_lambda": level.training.gae_lambda,
         "communication_clock": "episode",
         "inactive_agents": "excluded",
-        **({"critic_type": "privileged", "privileged_layout": "compact_3d_v1",
+        **({"critic_type": "privileged", "privileged_layout": "compact_v1",
             "critic_input_dim": privileged_input_dim(cfg)} if privileged else {}),
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
            if field.name.startswith("observe_") or field.name == "radar_bins"},
@@ -165,7 +165,7 @@ def _evaluation_env_fns(level: Level):
                 allow_redundancy_reward=level.reward.allow_redundancy_reward,
                 target_found_requires_delivery=level.reward.target_found_requires_delivery,
             )
-        if len(_EVALUATION_ENV_CACHE) > 8:
+        if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.random_eval_envs):
             _EVALUATION_ENV_CACHE.popitem(last=False)
     _EVALUATION_ENV_CACHE.move_to_end(key)
     return _EVALUATION_ENV_CACHE[key]
@@ -369,7 +369,7 @@ def train(
     output_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
 ) -> tuple[Path | None, dict[str, float]]:
-    """Train the strict 3D level and return its final checkpoint and metrics."""
+    """Train the strict level and return its final checkpoint and metrics."""
     init_started = init_previous = time.perf_counter()
 
     def init_log(message):
@@ -405,6 +405,24 @@ def train(
     checkpoint_dir = layout.checkpoint_dir if output_dir is None else destination / "checkpoints"
     replay_dir = train_replay_root(destination)
     cfg = level.env
+    building_bank = None
+    if level.random_buildings.enabled:
+        from swarmecho.env.random_buildings import generate_maps
+        from swarmecho.env.building_bank import prepare_bank
+        init_log(f"Generating {training.num_envs} persistent random buildings...")
+        buildings, generation_manifest = generate_maps(
+            level.random_buildings, training.seed, training.num_envs,
+            directory=destination / "generated_maps" if level.random_buildings.save_training_maps else None,
+            log=init_log, drone_clearance=cfg.drone_radius + cfg.obstacle_planning_clearance_m)
+        write_manifest(destination / "random_buildings.json", generation_manifest)
+        building_bank = prepare_bank(buildings, cfg,
+            plan=level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward,
+            corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
+        del buildings
+    random_eval_levels = None
+    if evaluation.random_eval:
+        from swarmecho.training.random_evaluation import prepare_evaluation_maps
+        random_eval_levels = prepare_evaluation_maps(level, destination / "random_eval_maps", log=init_log)
     init_log("Initializing JAX devices...")
     devices = jax.devices()
     init_log(f"JAX devices ready: {devices}")
@@ -422,6 +440,7 @@ def train(
             minimum_geodesic_separation=training.minimum_geodesic_separation,
             minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
             spawn_pair_max_attempts=training.spawn_pair_max_attempts,
+            building_bank=building_bank,
         )
     obs_dim = observation_dim(cfg)
     sig_dim = network.tarmac_sig_dim
@@ -458,13 +477,17 @@ def train(
     )
     init_log("Optimizer and buffer prepared. Initial batched environment reset...")
     keys = jax.random.split(jax.random.PRNGKey(training.seed + 1), training.num_envs)
-    if training.randomize_base or training.minimum_geodesic_separation:
+    if training.randomize_base or training.minimum_geodesic_separation or building_bank is not None:
         reset_batch_size = min(32, training.num_envs)
         reset_batch_count = (training.num_envs + reset_batch_size - 1) // reset_batch_size
         reset_padded_count = reset_batch_count * reset_batch_size
         reset_keys = jnp.concatenate((keys, jnp.repeat(keys[-1:], reset_padded_count - training.num_envs, axis=0)))
         reset_keys = reset_keys.reshape((reset_batch_count, reset_batch_size) + keys.shape[1:])
-        reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
+        if building_bank is not None:
+            ids = jnp.minimum(jnp.arange(reset_padded_count), training.num_envs - 1).reshape(reset_batch_count, reset_batch_size)
+            reset_batches = jax.lax.map(lambda pair: jax.vmap(lambda key, index: reset(key, map_id=index))(*pair), (reset_keys, ids))
+        else:
+            reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
         # Explicit dimensions avoid lax.map(batch_size=...)'s inferred -1
         # reshape, which fails for legitimate zero-sized geometry leaves.
         states = jax.tree_util.tree_map(
@@ -538,6 +561,7 @@ def train(
         "training": asdict(training),
         "network": asdict(network),
         "evaluation": asdict(evaluation),
+        "random_buildings": asdict(level.random_buildings),
         "logging": asdict(logging),
     }
     (destination / "config.yaml").write_text(
@@ -551,18 +575,21 @@ def train(
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
     total_steps = num_updates * training.num_envs * training.num_steps
     terminal_print("\n══════════════════════════════════════════════════════")
-    terminal_print("  SwarmEcho 3D — Recurrent MAPPO + TarMAC")
+    terminal_print("  SwarmEcho — Recurrent MAPPO + TarMAC")
     terminal_print("══════════════════════════════════════════════════════")
     terminal_print(f"  level / building : {level.name} / {level.building_name}")
     terminal_print(f"  devices          : {jax.devices()}")
     terminal_print(f"  agents           : {cfg.num_agents}")
     terminal_print(f"  observation      : {obs_dim}  (radar bins: {cfg.radar_bins})")
-    terminal_print("  action           : 3D continuous force")
+    terminal_print("  action           : XYZ continuous force")
     terminal_print(f"  model parameters : {parameter_count:,}")
     terminal_print(f"  environments     : {training.num_envs:,}")
     terminal_print(f"  rollout / updates: {training.num_steps} / {num_updates}")
     terminal_print(f"  eval map         : {evaluation_level.building_name}")
-    terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}")
+    if evaluation.random_eval:
+        terminal_print(f"  eval mode        : {evaluation.random_eval_envs} persistent maps, sequential, no action noise")
+    else:
+        terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}")
     terminal_print(f"  terminal logging : every {logging.terminal_logging_frequency}; warmup={logging.terminal_log_warmup}; init={logging.terminal_log_init}")
     terminal_print(f"  PPO critic units : {training.value_normalization}; actor/value clip "
           f"{training.actor_clip_eps}/{training.value_clip_eps}; entropy {training.entropy_mode}")
@@ -1087,10 +1114,17 @@ def train(
                     total=num_updates, episodes=evaluation.eval_parallel_envs,
                 )
             # Replay-only updates do not create metrics or advance the hold.
-            eval_metrics, evaluation_result, stop_training = _evaluate_training_metrics(
-                model, evaluation_level, eval_hold,
-                eval_due=eval_due, on_run=report_run,
-            )
+            if random_eval_levels is not None:
+                from swarmecho.training.random_evaluation import evaluate_random_maps
+                eval_metrics = evaluate_random_maps(model, random_eval_levels, destination,
+                    update=update, steps=steps_done, eval_due=eval_due, replay_due=replay_due, on_run=report_run)
+                evaluation_result = None
+                stop_training = bool(eval_metrics is not None and evaluation.early_exit and eval_hold.observe(eval_metrics["eval_success"]))
+            else:
+                eval_metrics, evaluation_result, stop_training = _evaluate_training_metrics(
+                    model, evaluation_level, eval_hold,
+                    eval_due=eval_due, on_run=report_run,
+                )
             eval_wandb_logs = {}
             if eval_metrics is not None:
                 latest_stats.update(eval_metrics)
@@ -1102,7 +1136,7 @@ def train(
                 )
                 if stop_training:
                     terminal_print("[EARLY-STOP]")
-            if eval_metrics is not None and (is_final_update or stop_training):
+            if eval_metrics is not None and (is_final_update or stop_training) and random_eval_levels is None:
                 if evaluation_result is None or int(evaluation_result[0]["eval_robustness_runs"]) == 1:
                     from swarmecho.training.evaluate import collect_robust_evaluation
                     evaluation_result = collect_robust_evaluation(
@@ -1141,7 +1175,7 @@ def train(
                 write_manifest(
                     info_path.with_suffix(".heatmap.json"),
                     {
-                        "format": "swarmecho-3d-eval-heatmap/v1",
+                        "format": "swarmecho-eval-heatmap/v1",
                         "data_file": info_path.name,
                         "map_name": evaluation_level.building_name, "building_snapshot": building_snapshot(evaluation_level.building),
                         "world_size_m": evaluation_level.building.world_size_m.tolist(),
@@ -1157,7 +1191,7 @@ def train(
                 write_manifest(
                     destination / "artifacts" / "train" / "manifests" / f"eval_{suffix}.json",
                     {
-                        "type": "3d_evaluation",
+                        "type": "evaluation",
                         "update": update,
                         "steps": steps_done,
                         "episodes": evaluation.eval_parallel_envs,
@@ -1165,7 +1199,7 @@ def train(
                         **artifact_metrics,
                     },
                 )
-            if replay_due and not stop_training:
+            if replay_due and not stop_training and random_eval_levels is None:
                 replay_started = time.perf_counter()
                 replay_bounds = evaluation.eval_fixed_obstacle_bounds
                 eval_states, eval_rewards = evaluate_model(
@@ -1238,9 +1272,10 @@ def train(
             num_steps=training.num_steps,
             prior_history=resume.prior_history,
         )
-        _create_final_checkpoint_evaluation(
-            model, level, checkpoint, destination, result=final_robust_result,
-        )
+        if random_eval_levels is None:
+            _create_final_checkpoint_evaluation(
+                model, level, checkpoint, destination, result=final_robust_result,
+            )
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"
     )
@@ -1535,7 +1570,7 @@ def _run_parallel_evaluation_jit(
     fixed_roadmap_vertices: jax.Array | None = None,
     fixed_roadmap_distances: jax.Array | None = None,
 ):
-    """Run deterministic 3D metrics and optionally retain one lane's actions."""
+    """Run deterministic metrics and optionally retain one lane's actions."""
     env_keys = jax.random.split(key, num_envs)
     env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
@@ -1748,7 +1783,7 @@ def evaluate_suite(
     layout_mode: str | None = None,
     layout_seed_offset: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
-    """Evaluate a deterministic 3D batch without collecting replay frames."""
+    """Evaluate a deterministic batch without collecting replay frames."""
     level = resolve_evaluation_level(level)
     cfg = level.env
     reset, step, observations, _ = _evaluation_env_fns(level)

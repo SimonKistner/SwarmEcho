@@ -133,7 +133,7 @@ class DecentralizedActor(nnx.Module):
     Parameters
     ----------
     obs_dim          : observation dimension
-    act_dim          : action dimension (3 for the 3D SwarmEcho runtime)
+    act_dim          : action dimension (3 for the SwarmEcho runtime)
     hidden_dim       : hidden layer width
     actor_num_layers : number of hidden layers (recommended: 2)
     rngs             : Flax NNX RNG state
