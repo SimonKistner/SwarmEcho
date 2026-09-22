@@ -15,36 +15,30 @@ dependencies = [
     "omegaconf>=2.3.0", # Hierarchical YAML config with dot-notation + CLI overrides
     "pyyaml>=6.0.0",
     # Map loading and preprocessing
-    "pillow>=10.3.0",
     "scipy>=1.13.0",
     # Logging & visualization
     "wandb>=0.18.0",
-    "opencv-python-headless>=4.9.0", # Fast OpenCV renderer
-    "imageio[ffmpeg]>=2.35.0", # Video writing (no system ffmpeg dep needed)
     "pandas>=2.2.0",
     # Checkpointing
     "orbax-checkpoint>=0.10.0", # Modern JAX checkpoint standard (DeepMind)
     "tqdm>=4.66.0",
     "streamlit>=1.56.0",
     "plotly>=6.0.0",
-    "python-fasthtml>=0.14.3",
 ]
 
 [project.scripts]
+swarmecho-maze-builder = "swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_server:main"
+swarmecho-validate-building = "swarmecho.curriculum_config.maps.scripts.validate_building:main"
+swarmecho-dashboard = "swarmecho.analysis.launch:dashboard_main"
+swarmecho-eval-dashboard = "swarmecho.visualize.inspector:main"
+swarmecho-artefacts = "swarmecho.visualize.inspector:main"
+swarmecho-benchmark = "swarmecho.training.benchmark:main"
+swarmecho-validate = "swarmecho.training.validate_workflow:main"
 swarmecho-train = "swarmecho.training.train:main"
 swarmecho-multi-train = "swarmecho.training.multi_train:main"
-swarmecho-curriculum = "swarmecho.training.curriculum:run_curriculum"
+swarmecho-curriculum = "swarmecho.training.curriculum:main"
 swarmecho-evaluate = "swarmecho.training.evaluate:main"
-swarmecho-evaluate-pipeline = "swarmecho.training.evaluate_pipeline:main"
-swarmecho-grid-search = "swarmecho.training.grid_search:main"
-swarmecho-render = "swarmecho.visualize.render_preview:main"
-swarmecho-validate = "swarmecho.training.validate_core_workflow:main"
-swarmecho-verify-connectivity = "swarmecho.training.verify_connectivity:main"
-swarmecho-maze-builder = "swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_server:main"
-swarmecho-verify-maze = "swarmecho.curriculum_config.maps.scripts.verify_chain_maze:main"
-swarmecho-dashboard = "swarmecho.analysis.launch:dashboard_main"
-swarmecho-eval-dashboard = "swarmecho.analysis.launch:eval_dashboard_main"
-swarmecho-artefacts = "swarmecho.analysis.artefacts.server:main"
+swarmecho-inspect = "swarmecho.visualize.inspector:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -58,6 +52,12 @@ required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_6
 
 [tool.uv.pip]
 system = false  # always use the project's venv
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.11.1",
+    "pytest>=9.1.1",
+]
 
 # ---------------------------------------------------------------------------
 # Development / linting extras (optional, not required for training)

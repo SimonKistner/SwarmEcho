@@ -1,0 +1,141 @@
+from copy import deepcopy
+
+import pytest
+import yaml
+
+from swarmecho.core.config import load_level, load_level_cli
+from swarmecho.training.artifacts import (
+    checkpoint_artifact_suffix,
+    create_eval_run_root,
+    eval_checkpoint_replay_root,
+    train_replay_root,
+)
+
+
+def test_baseline_level_is_strict_and_solvable():
+    level = load_level()
+    assert level.name == "M00_no_maze_open_cuboid"
+    assert level.env.radar_bins == 16
+    assert level.env.num_agents == 4
+    assert level.env.max_steps == 700
+    assert level.env.coverage_voxel_size == 2.5
+    assert level.map_names == ["M00_no_maze_open_cuboid"]
+    assert level.training.total_timesteps == 400_000_000
+    assert level.training.num_envs == 4000
+    assert level.training.num_steps == 100
+    assert level.training.num_epochs == 4
+    assert level.training.num_minibatches == 20
+    assert level.training.training_noise
+    assert level.training.noise_level == 0.015
+    assert level.network.actor_memory
+    assert level.evaluation.eval_parallel_envs == 4000
+    assert level.evaluation.eval_robustness_runs == 5
+    assert level.evaluation.eval_action_noise_max == 0.011
+    assert not level.evaluation.training_heatmap_creation
+    assert level.logging.wandb_mode == "online"
+    assert level.ideal_chain_margin_m > 0
+
+
+def test_tall_level_adds_two_solvable_spawn_layers():
+    level = load_level("M01_no_maze_open_cuboid_tall")
+    assert level.building.target_exclusion.shape == (4, 4, 6)
+    assert level.building.target_exclusion[:, :, :2].all()
+    assert not level.building.target_exclusion[:, :, 2:].any()
+    assert level.env.num_agents == 4
+    assert level.env.max_steps == 700
+    assert level.ideal_chain_margin_m > 0
+
+
+def test_m02_is_the_randomized_obstacle_level_and_m01_remains_open():
+    open_level = load_level("M01_no_maze_open_cuboid_tall")
+    obstacle_level = load_level("M02_random_cuboid_obstacles")
+    assert open_level.env.num_obstacles == 0
+    assert open_level.reward.chain_reward_system == "euclidean"
+    assert obstacle_level.env.num_obstacles == 3
+    assert obstacle_level.reward.chain_reward_system == "obstacle_geodesic"
+    assert obstacle_level.env.obstacle_layout_version == "three_aabb_v1"
+    assert len(obstacle_level.evaluation.eval_fixed_obstacle_bounds) == 3
+
+
+def test_unknown_environment_parameter_is_rejected(tmp_path):
+    source = "src/swarmecho/curriculum_config/levels/M00_no_maze_open_cuboid.yaml"
+    data = yaml.safe_load(open(source, encoding="utf-8"))
+    data = deepcopy(data)
+    data["env"]["typo_parameter"] = 1
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unknown env fields: typo_parameter"):
+        load_level(path)
+
+
+def test_geodesic_reward_does_not_require_generated_obstacles():
+    level = load_level_cli([
+        "level=B01b_office", "reward.chain_reward_system=obstacle_geodesic",
+        "env.num_obstacles=0",
+    ])
+    assert level.env.num_obstacles == 0
+    assert level.building.solid_min_m.shape[0] > 0
+    assert level.reward.chain_reward_system == "obstacle_geodesic"
+
+
+def test_cli_accepts_dotlist_overrides():
+    level = load_level_cli(
+        [
+            "level=M00_no_maze_open_cuboid",
+            "training.total_timesteps=400000",
+            "logging.run_name=inspector_smoke",
+            "env.radar_bins=16",
+            "env.coverage_voxel_size=2.5",
+        ]
+    )
+
+    assert level.training.total_timesteps == 400_000
+    assert level.logging.run_name == "inspector_smoke"
+    assert level.env.radar_bins == 16
+    assert level.env.coverage_voxel_size == 2.5
+    assert level.num_updates == 1
+
+
+def test_cli_can_enable_training_only_action_noise():
+    level = load_level_cli(
+        [
+            "level=M00_no_maze_open_cuboid",
+            "training.training_noise=true",
+            "training.noise_level=0.02",
+        ]
+    )
+
+    assert level.training.training_noise
+    assert level.training.noise_level == 0.02
+    # This setting is solely consumed by the training rollout; it must not
+    # alter the standalone robust-evaluation configuration.
+    assert level.evaluation.eval_action_noise_max == 0.011
+    assert not level.evaluation.training_heatmap_creation
+
+
+def test_replays_use_the_maintained_artifact_hierarchy(tmp_path):
+    level = load_level()
+    checkpoint = tmp_path / "checkpoints/ckpt_000050"
+
+    assert train_replay_root(tmp_path) == tmp_path / "artifacts/train/replays"
+    assert checkpoint_artifact_suffix(checkpoint, level) == "u000050_s00020M"
+    assert eval_checkpoint_replay_root(tmp_path, checkpoint, level) == (
+        tmp_path / "artifacts/eval/ckpt_u000050_s00020M/replays"
+    )
+
+
+def test_manual_evaluations_use_unique_named_run_folders(tmp_path):
+    level = load_level()
+    checkpoint = tmp_path / "checkpoints/ckpt_000050"
+    timestamp_ns = 1_725_000_000_123_456_789
+
+    named = create_eval_run_root(
+        tmp_path, checkpoint, level, eval_name="agents7", timestamp_ns=timestamp_ns
+    )
+    collision_safe = create_eval_run_root(
+        tmp_path, checkpoint, level, eval_name="agents7", timestamp_ns=timestamp_ns
+    )
+
+    assert named.name == "eval_agents7_20240830T064000_123456789Z"
+    assert collision_safe.name == f"{named.name}_1"
+    assert named.parent == tmp_path / "artifacts/eval/ckpt_u000050_s00020M"

@@ -1,5 +1,9 @@
 # SwarmEcho Cleanup Plan
 
+> Historical design/proposal document. References to the former runtime describe
+> the migration context, not supported commands. Use the current guides and
+> [removal audit](05_2d_removal_audit.md) for the implemented volumetric-only state.
+
 | Section | Job count |
 |---|---:|
 | Confirmed-to-do queue | 0 |
@@ -15,14 +19,14 @@
 
 If the FastHTML interface remains, split its HTML construction, routes,
 media service, session state, and queue control rather than retaining one large
-server module. This is not denied, but it is not relevant to the 3D transition
+server module. This is not denied, but it is not relevant to the volumetric transition
 or performance-preparation work now.
 
 ## Denied proposals
 
-### D01 — Build a heavy maintained invariant suite before 3D
+### D01 — Build a heavy maintained invariant suite before volumetric
 
-Denied for now. The project may change substantially during the 3D transition,
+Denied for now. The project may change substantially during the volumetric transition,
 so the investment is not justified at this stage. A normal maintained training
 run remains the integration test. This does not deny adding targeted tests
 later when the post-transition architecture stabilizes.

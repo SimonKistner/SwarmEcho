@@ -1,0 +1,27 @@
+Train:
+
+uv run swarmecho-train level=B00_test logging.run_name=B00_test_v1 logging.wandb_mode=disabled
+
+uv run swarmecho-curriculum \
+  levels=M00_no_maze_open_cuboid,M02_random_cuboid_obstacles \
+  logging.run_name=7agents
+
+
+
+Eval
+
+uv run swarmecho-evaluate mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_random_obstacles_5a_M02\checkpoints\ckpt_000351'
+
+uv run swarmecho-evaluate eval_name=trained_agents7 mode=parallel replay_after=true result=success offset=0 checkpoint='Q:\_0_Projects\000_SwarmEcho\SwarmEcho\outputs\curr_7agents_M02_3k\checkpoints\ckpt_000451'
+
+
+Analyse
+
+Roadmap gen:
+uv run python tests/generate_obstacle_roadmap_testresult.py --map office_mirrored --target 2.5 92.5 2.5 --paths 5
+
+
+
+uv run swarmecho-dashboard
+
+uv run swarmecho-inspect root=outputs

@@ -4,10 +4,59 @@ from __future__ import annotations
 
 import json
 import shutil
+import warnings
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print, display_path
 from typing import Any
 
 from flax import nnx
+from swarmecho.core.compatibility import canonical_marker
+
+
+def validate_checkpoint_contract(model: Any, path: Path) -> None:
+    """Reject incompatible value units/input meanings before restoring tensors."""
+    if not hasattr(model, "checkpoint_contract"):
+        return
+    expected = dict(model.checkpoint_contract)
+    source = path / "training_contract.json"
+    if not source.exists():
+        if expected.get("critic_type", "observation") == "privileged":
+            raise ValueError("Privileged critics require checkpoint input-layout metadata; "
+                             "an observation critic checkpoint cannot be restored into this architecture.")
+        if expected["value_normalization"] != "none":
+            raise ValueError(
+                "Checkpoint has no value-normalization metadata. It cannot be loaded as a "
+                "running-normalized critic. Use the original raw-value settings or an explicitly "
+                "converted checkpoint; changing the flag alone changes critic units."
+            )
+        warnings.warn("Checkpoint has no training contract; input semantics cannot be verified. "
+                      "Communication timing and inactive-agent handling now use corrected behavior.",
+                      stacklevel=2)
+        return
+    actual = json.loads(source.read_text(encoding="utf-8"))
+    for contract in (expected, actual):
+        if "privileged_layout" in contract:
+            contract["privileged_layout"] = canonical_marker(contract["privileged_layout"])
+    if actual.get("critic_type", "observation") != expected.get("critic_type", "observation"):
+        raise ValueError("Incompatible checkpoint critic_type: observation and privileged "
+                         "critics have different input architectures.")
+    if actual.get("format") != expected["format"]:
+        raise ValueError("Unsupported checkpoint training-contract version.")
+    critical = {
+        "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
+        "tarmac_val_dim", "memory_comm_enabled", "value_normalization", "radar_bins",
+        "critic_type", "privileged_layout", "critic_input_dim",
+        *[name for name in expected if name.startswith("observe_")],
+    }
+    critical.intersection_update(expected)
+    mismatches = [f"{name}: checkpoint={actual.get(name)!r}, level={expected[name]!r}"
+                  for name in sorted(critical) if actual.get(name) != expected[name]]
+    if mismatches:
+        raise ValueError("Incompatible checkpoint settings: " + "; ".join(mismatches))
+    changed = [name for name in expected if name not in critical and actual.get(name) != expected[name]]
+    if changed:
+        warnings.warn("Checkpoint loaded with changed training behavior: " + ", ".join(changed),
+                      stacklevel=2)
 
 
 def restore_model_checkpoint(model: Any, checkpoint_path: str | Path) -> Path:
@@ -17,6 +66,7 @@ def restore_model_checkpoint(model: Any, checkpoint_path: str | Path) -> Path:
     path = Path(str(checkpoint_path).replace("\\", "/")).absolute()
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
+    validate_checkpoint_contract(model, path)
 
     _, empty_state = nnx.split(model)
     checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
@@ -54,7 +104,7 @@ def save_checkpoint_history(
             )
         )
     except Exception as exc:
-        print(f"  [checkpoint-history] Failed to save step_history.json to {path}: {exc}")
+        terminal_print(f"[checkpoint-history] Failed to save step_history.json to {display_path(path)}: {exc}")
 
 
 def save_model_checkpoint(
@@ -77,6 +127,10 @@ def save_model_checkpoint(
     _, state_dict = nnx.split(model)
     checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
     checkpointer.save(str(path), args=ocp.args.StandardSave(state_dict))
+    if hasattr(model, "checkpoint_contract"):
+        (path / "training_contract.json").write_text(
+            json.dumps(dict(model.checkpoint_contract), indent=2) + "\n", encoding="utf-8"
+        )
     save_checkpoint_history(
         path,
         run_name=run_name,

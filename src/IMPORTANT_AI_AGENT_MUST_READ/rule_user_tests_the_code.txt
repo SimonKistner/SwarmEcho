@@ -1,0 +1,1 @@
+Dont concern yourself with testing the ML code like running trainings or evaluations. you cant do that since the project is WLS based and you dont have access to WLS. instead assume the user will test the code and your job is done by providing the testing command.

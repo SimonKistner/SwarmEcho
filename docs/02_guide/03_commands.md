@@ -1,94 +1,81 @@
-# SwarmEcho Command Reference
+# Supported commands
 
-This document serves as a cheat sheet for all common execution commands in the SwarmEcho project, organized by the logical workflow of designing, testing, training, and analyzing.
+Run Python/ML commands in the existing WSL environment from the repository root.
 
-Unless noted otherwise, run all commands from the project root directory.
+## Train
 
----
-
-## Environment Setup & Smoke Tests
-
-### 1. Activate Virtual Environment
-If you prefer to work inside the virtual environment rather than prefixing commands with `uv run`:
 ```bash
-source .venv/bin/activate
+uv run swarmecho-train level=M00_no_maze_open_cuboid
+uv run swarmecho-train level=B01a_office_find_only logging.run_name=office logging.wandb_mode=disabled
+uv run swarmecho-multi-train level=M00_no_maze_open_cuboid seeds=3 base_seed=42 logging.run_name=baseline
+uv run swarmecho-curriculum levels=M00_no_maze_open_cuboid,M01_no_maze_open_cuboid_tall logging.run_name=curriculum
 ```
 
----
+Resume compatible weights and run accounting:
 
-## Map Design & Analysis Dashboard
-
-### 2D Grid Maze Builder
-Launch the browser-based editor to draw grid mazes and target no-spawn cells:
 ```bash
-uv run swarmecho-maze-builder
+uv run swarmecho-train level=M00_no_maze_open_cuboid_training.checkpoint_path=outputs/RUN/checkpoints/ckpt_000050 training.ckpt_loading_mode=resume
 ```
 
-### Discovery & Analysis Dashboard
-Launch the Streamlit visualization tool to check run stats, compare parameters, and view evaluation/rendering videos:
+Replace RUN and checkpoint placeholders with real paths. Use `branch` for
+cumulative handoff or `init` for weights with fresh counters.
+
+## Evaluate and generate replays
+
+Parallel evaluation:
+
 ```bash
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel
+```
+
+Parallel evaluation followed by selected successful replays:
+
+```bash
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel replay_after=true result=success replays=3 offset=0 eval_name=review
+```
+
+Select from an existing evaluation, or request an XYZ position:
+
+```bash
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=selective_auto_pick result=fail replays=1
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=selective_manual_pick target_position=7.5,12.5,7.5
+```
+
+Manual positions must be valid for the checkpoint's map. The evaluator infers
+the level where checkpoint metadata permits; an explicit `level=...` takes
+precedence. Other configuration overrides remain available.
+`replay_execution=parallel_capture` selects the action-capturing replay path.
+
+## Inspect and analyze
+
+```bash
+uv run swarmecho-inspect root=outputs
+uv run swarmecho-inspect root=outputs/RUN port=8765 open=false
 uv run swarmecho-dashboard
 ```
 
-### Consolidated Map Preview & Renderer
-Render static images or short video/GIF rollouts (always simulated) of any map blueprint. All outputs are automatically saved to `outputs/map_previews/`:
+`swarmecho-eval-dashboard` and `swarmecho-artefacts` are aliases for
+`swarmecho-inspect` with identical options.
+
+## Build maps
+
 ```bash
-# Render default static PNG blueprint image (showing spawn zones and real spawn positions)
-uv run swarmecho-render M03_big_maze
-
-# Render a simulated video rollout (MP4, 10 frames, 3 drones, 1 target, 1 base)
-uv run swarmecho-render M03_big_maze --mode video
-
-# Render a clean architectural SVG blueprint without spawns or zones
-uv run swarmecho-render M03_big_maze --format svg --no-spawns --no-zones
-
-# Render a snappy simulated GIF preview using a specific level config
-uv run swarmecho-render M01_small_maze --mode gif --level M01_small_maze
+uv run swarmecho-maze-builder --port 8766
+uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_building.yaml
 ```
 
----
+The builder command serves the building editor.
 
-## Drone Swarm Training
+## Validate and benchmark
 
-### Single Run Training
-Train a drone swarm on a specific level:
 ```bash
-uv run swarmecho-train level=M01_small_maze logging.run_name=maze01_v1 logging.wandb_mode=disabled
+uv run swarmecho-validate
+uv run swarmecho-benchmark num_envs=64 steps=64 radar_bins=8
+uv run pytest tests
+node --test tests/test_map_builder_ui.cjs tests/test_inspector_visibility.cjs
 ```
 
-### Multi-Seed Sequential Training
-Run multiple training iterations with the same configuration, utilizing different random seeds. The run name will automatically receive a `_seed_N` suffix:
-```bash
-uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5 base_seed=99
-```
-
-### General Grid Search
-Sweep arbitrary configuration values for one level. Repeat `--grid` for each
-parameter axis and use `--set` for overrides shared by every run:
-```bash
-uv run swarmecho-grid-search M01_small_maze \
-  --grid training.lr=0.0001,0.0003 \
-  --grid training.ent_coef=0.0,0.01 \
-  --set evaluation.eval_video=false
-```
-
-### Curriculum Training
-Train through sequential levels (inheriting checkpoint weights from the previous level) either with default stages or custom levels:
-```bash
-# Run the maintained default small-maze stage
-uv run swarmecho-curriculum
-
-# Run a custom sequence of levels
-uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_maze,M01_small_maze
-```
-
----
-
-## Spatial Failure Analysis Pipeline
-
-### Run Evaluation Sweep & Generate Heatmaps
-Simulate the configured parallel evaluation batch, save comprehensive target/outcome/distance data, and generate heatmaps (failed chain targets, and found-and-delivered or split target-not-found heatmaps):
-```bash
-uv run swarmecho-evaluate-pipeline checkpoint=outputs/my_run/checkpoints/ckpt_001000
-```
-
+Validation and benchmark implementations are packaged under
+`src/swarmecho/training/`, matching their console entry points.
+The validator checks one small update; the full tests and ordinary
+training/resume/evaluation workflows provide broader coverage.

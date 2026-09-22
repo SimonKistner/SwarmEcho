@@ -133,7 +133,7 @@ class DecentralizedActor(nnx.Module):
     Parameters
     ----------
     obs_dim          : observation dimension
-    act_dim          : action dimension (2 for SwarmEcho)
+    act_dim          : action dimension (3 for the SwarmEcho runtime)
     hidden_dim       : hidden layer width
     actor_num_layers : number of hidden layers (recommended: 2)
     rngs             : Flax NNX RNG state
@@ -379,6 +379,11 @@ class RecurrentDecentralizedActor(nnx.Module):
             signature = jnp.where(reset[..., None], jnp.zeros_like(signature), signature)
             value = jnp.where(reset[..., None], jnp.zeros_like(value), value)
         prev_hidden = hidden
+        if getattr(self, "mask_inactive", False) and active is not None:
+            prev_hidden = jnp.where(active[..., None], prev_hidden, 0.0)
+            signature = jnp.where(active[..., None], signature, 0.0)
+            value = jnp.where(active[..., None], value, 0.0)
+            obs = jnp.where(active[..., None], obs, 0.0)
         encoded = self.encoder(obs)
         if self.memory_comm_enabled:
             comm_context = self._tarmac_context(
@@ -389,11 +394,18 @@ class RecurrentDecentralizedActor(nnx.Module):
         else:
             gru_input = encoded
         hidden = self.gru(prev_hidden, gru_input)
+        if getattr(self, "mask_inactive", False) and active is not None:
+            hidden = jnp.where(active[..., None], hidden, 0.0)
         signature = self.tarmac_signature(hidden) if self.memory_comm_enabled else signature
         value = self.tarmac_value(hidden) if self.memory_comm_enabled else value
         feat = self.policy_trunk(hidden)
         mu = self.mu_head(feat)
         log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
+        if getattr(self, "mask_inactive", False) and active is not None:
+            signature = jnp.where(active[..., None], signature, 0.0)
+            value = jnp.where(active[..., None], value, 0.0)
+            mu = jnp.where(active[..., None], mu, 0.0)
+            log_std = jnp.where(active[..., None], log_std, 0.0)
         return hidden, signature, value, mu, log_std
 
     def act_team(
@@ -421,6 +433,10 @@ class RecurrentDecentralizedActor(nnx.Module):
         ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
         jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
         entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
+        if getattr(self, "mask_inactive", False) and active is not None:
+            u = jnp.where(active[..., None], u, 0.0)
+            log_prob = jnp.where(active, log_prob, 0.0)
+            entropy = jnp.where(active, entropy, 0.0)
         return hidden, signature, value, u, log_prob, entropy
 
     def __call__(

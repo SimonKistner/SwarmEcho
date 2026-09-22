@@ -1,0 +1,85 @@
+from copy import deepcopy
+from pathlib import Path
+
+import numpy as np
+import pytest
+import yaml
+
+from swarmecho.env.buildings import (
+    BuildingValidationError,
+    compile_building,
+    load_building,
+    make_cuboid_building,
+)
+
+
+BUILDING_PATH = Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")
+
+
+def _data():
+    return yaml.safe_load(BUILDING_PATH.read_text(encoding="utf-8"))
+
+
+def test_baseline_building_compiles_to_static_arrays():
+    source = _data()
+    assert source["name"].startswith("M00_")
+    assert source["building_cell_grid"] == {"cols": 4, "rows": 4, "layers": 4}
+    building = load_building(BUILDING_PATH)
+
+    assert building.tiles.shape == (4, 4, 5)
+    assert building.x_walls.shape == (5, 4, 4)
+    assert building.y_walls.shape == (4, 5, 4)
+    assert building.target_exclusion.shape == (4, 4, 4)
+    np.testing.assert_allclose(building.base_position_m, [10.0, 10.0, 0.125])
+    assert building.tile_thickness_m == 0.25
+    assert building.wall_thickness_m == 0.25
+    assert building.max_base_to_top_corner_m == pytest.approx(24.393, abs=0.001)
+
+
+@pytest.mark.parametrize(
+    ("collection", "coordinate", "message"),
+    [
+        ("tiles", [0, 0, 0], "bottom floor and top roof"),
+        ("x_walls", [0, 0, 0], "outer X walls"),
+        ("y_walls", [0, 0, 0], "outer Y walls"),
+    ],
+)
+def test_missing_shell_geometry_is_rejected(collection, coordinate, message):
+    data = deepcopy(_data())
+    data["geometry"][collection].remove(coordinate)
+
+    with pytest.raises(BuildingValidationError, match=message):
+        compile_building(data)
+
+
+def test_intermediate_tile_holes_are_allowed():
+    building = compile_building(_data())
+
+    assert not building.tiles[:, :, 1:-1].any()
+
+
+def test_out_of_bounds_target_exclusion_is_rejected():
+    data = deepcopy(_data())
+    data["target_exclusion_cells"].append([4, 0, 0])
+
+    with pytest.raises(BuildingValidationError, match="outside valid bounds"):
+        compile_building(data)
+
+
+def test_base_is_an_explicit_coordinate_not_a_cell():
+    data = deepcopy(_data())
+    np.testing.assert_allclose(compile_building(data).base_position_m, [10.0, 10.0, 0.125])
+
+    data["base_position_m"] = [10.0, 10.0, 20.1]
+    with pytest.raises(BuildingValidationError, match="inside the building bounds"):
+        compile_building(data)
+
+
+def test_generated_cuboid_has_closed_shell_and_central_base():
+    building = make_cuboid_building((6, 4, 3))
+    assert building.tiles[:, :, 0].all()
+    assert building.tiles[:, :, -1].all()
+    assert building.x_walls[0].all() and building.x_walls[-1].all()
+    assert building.y_walls[:, 0].all() and building.y_walls[:, -1].all()
+    np.testing.assert_allclose(building.base_position_m, [15.0, 10.0, 0.125])
+    assert building.target_exclusion.sum() == 1

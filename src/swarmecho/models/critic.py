@@ -178,6 +178,7 @@ class RecurrentAgentCentricCritic(nnx.Module):
         hidden:        jax.Array,
         resets:        jax.Array | None = None,
         deterministic: bool = True,
+        active:        jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array]:
         """
         obs (..., N, obs_dim), hidden (..., N, H) -> hidden, values (..., N).
@@ -187,21 +188,36 @@ class RecurrentAgentCentricCritic(nnx.Module):
         if resets is not None:
             hidden = jnp.where(resets[..., None], jnp.zeros_like(hidden), hidden)
 
+        if active is not None:
+            obs = jnp.where(active[..., None], obs, 0.0)
+            hidden = jnp.where(active[..., None], hidden, 0.0)
         e = self.encoder(obs)
         hidden = self.gru(hidden, e)
+        if active is not None:
+            e = jnp.where(active[..., None], e, 0.0)
+            hidden = jnp.where(active[..., None], hidden, 0.0)
         token = jnp.concatenate([e, hidden], axis=-1)
 
         mask = ~jnp.eye(N, dtype=bool)
+        if active is not None:
+            mask = mask & active[..., :, None] & active[..., None, :]
+            has_other = jnp.any(mask, axis=-1, keepdims=True)
+            # A dummy key prevents all-masked softmax; its output is discarded.
+            mask = mask | (~has_other & (jnp.arange(N) == 0))
         x = self.attention(
             token,
             token,
-            mask          = mask,
+            mask          = mask[..., None, :, :] if active is not None else mask,
             decode        = False,
             deterministic = deterministic,
         )
 
+        if active is not None:
+            x = jnp.where(has_other, x, 0.0)
         combined = jnp.concatenate([token, x], axis=-1)
         values = self.value_head(combined).squeeze(-1)
+        if active is not None:
+            values = jnp.where(active, values, 0.0)
         return hidden, values
 
     def values_sequence(
@@ -210,67 +226,19 @@ class RecurrentAgentCentricCritic(nnx.Module):
         init_hidden:   jax.Array,  # (B, N, H)
         resets:        jax.Array,  # (T, B, N)
         deterministic: bool = True,
+        active:        jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array]:
         """Replay a critic sequence for recurrent PPO updates."""
 
         def _step(hidden, xs):
-            obs_t, reset_t = xs
-            hidden, values = self(obs_t, hidden, reset_t, deterministic=deterministic)
+            obs_t, reset_t, active_t = xs
+            hidden, values = self(obs_t, hidden, reset_t, deterministic=deterministic,
+                                  **({"active": active_t} if active is not None else {}))
             return hidden, values
 
         final_hidden, values = jax.lax.scan(
             _step,
             init_hidden,
-            (obs, resets),
+            (obs, resets, jnp.ones_like(resets, dtype=bool) if active is None else active),
         )
         return final_hidden, values
-
-
-class PrivilegedAgentCentricCritic(AgentCentricCritic):
-    """Privileged critic whose attention follows the exact communication graph."""
-
-    _ADJACENCY_OFFSET = 17
-
-    def __call__(self, state: jax.Array, deterministic: bool = True) -> jax.Array:
-        n = state.shape[-2]
-        adjacency = state[..., :, self._ADJACENCY_OFFSET:self._ADJACENCY_OFFSET + n] > 0.5
-        # Agent columns define relations, not ordered token features.  Masking
-        # them out before the MLP preserves permutation equivariance; the final
-        # base-station column remains a meaningful per-agent scalar feature.
-        encoder_state = state.at[
-            ..., :, self._ADJACENCY_OFFSET:self._ADJACENCY_OFFSET + n
-        ].set(0.0)
-        e = self.encoder(encoder_state)
-        mask = (adjacency & ~jnp.eye(n, dtype=bool))[..., None, :, :]
-        x = self.attention(e, e, mask=mask, decode=False, deterministic=deterministic)
-        return self.value_head(jnp.concatenate([e, x], axis=-1)).squeeze(-1)
-
-
-class RecurrentPrivilegedAgentCentricCritic(RecurrentAgentCentricCritic):
-    """Recurrent privileged critic with graph-masked information propagation."""
-
-    _ADJACENCY_OFFSET = 17
-
-    def __call__(
-        self,
-        state: jax.Array,
-        hidden: jax.Array,
-        resets: jax.Array | None = None,
-        deterministic: bool = True,
-    ) -> tuple[jax.Array, jax.Array]:
-        n = state.shape[-2]
-        if resets is not None:
-            hidden = jnp.where(resets[..., None], jnp.zeros_like(hidden), hidden)
-        adjacency = state[..., :, self._ADJACENCY_OFFSET:self._ADJACENCY_OFFSET + n] > 0.5
-        encoder_state = state.at[
-            ..., :, self._ADJACENCY_OFFSET:self._ADJACENCY_OFFSET + n
-        ].set(0.0)
-        e = self.encoder(encoder_state)
-        hidden = self.gru(hidden, e)
-        token = jnp.concatenate([e, hidden], axis=-1)
-        mask = (adjacency & ~jnp.eye(n, dtype=bool))[..., None, :, :]
-        x = self.attention(
-            token, token, mask=mask, decode=False, deterministic=deterministic
-        )
-        values = self.value_head(jnp.concatenate([token, x], axis=-1)).squeeze(-1)
-        return hidden, values

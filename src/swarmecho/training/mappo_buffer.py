@@ -33,6 +33,8 @@ class MAPPOTransition(NamedTuple):
     base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
     critic_obs: Optional[np.ndarray] = None  # (E, N, P), privileged critic only
+    critic_agent_features: Optional[np.ndarray] = None  # (E, N, P), compact extras
+    critic_global_features: Optional[np.ndarray] = None  # (E, G), shared extras
 
 
 class MAPPORolloutBuffer:
@@ -67,6 +69,9 @@ class MAPPORolloutBuffer:
         actor_memory:  bool = False,
         critic_memory: bool = False,
         critic_obs_dim: int = 0,
+        mask_inactive: bool = False,
+        critic_agent_dim: int = 0,
+        critic_global_dim: int = 0,
     ) -> None:
         self.T          = num_steps
         self.E          = num_envs
@@ -82,6 +87,13 @@ class MAPPORolloutBuffer:
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
         self.critic_obs_dim = critic_obs_dim
+        self.mask_inactive = mask_inactive
+        if (critic_agent_dim or critic_global_dim) and not recurrent:
+            raise ValueError("Compact critic features require recurrent minibatches.")
+        self._critic_agent_features = (np.zeros((self.T, self.E, self.N, critic_agent_dim),
+                                              dtype=np.float32) if critic_agent_dim else None)
+        self._critic_global_features = (np.zeros((self.T, self.E, critic_global_dim),
+                                               dtype=np.float32) if critic_global_dim else None)
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
         self._critic_obs = (
@@ -123,6 +135,12 @@ class MAPPORolloutBuffer:
     def add(self, tr: MAPPOTransition) -> None:
         assert self._ptr < self.T, "Buffer full — call reset() first."
         self._obs[self._ptr]       = np.asarray(tr.obs)
+        if self._critic_agent_features is not None:
+            assert tr.critic_agent_features is not None
+            self._critic_agent_features[self._ptr] = np.asarray(tr.critic_agent_features)
+        if self._critic_global_features is not None:
+            assert tr.critic_global_features is not None
+            self._critic_global_features[self._ptr] = np.asarray(tr.critic_global_features)
         if self._critic_obs is not None:
             assert tr.critic_obs is not None
             self._critic_obs[self._ptr] = np.asarray(tr.critic_obs)
@@ -194,6 +212,8 @@ class MAPPORolloutBuffer:
                 - self._values[t]
             )
             gae = delta + self.gamma * self.gae_lambda * next_nonterminal * gae
+            if self.mask_inactive:
+                gae = np.where(self._active_masks[t], gae, 0.0)
             advantages[t] = gae
 
         returns = advantages + self._values
@@ -272,7 +292,13 @@ class MAPPORolloutBuffer:
         """
         assert self.E % n_minibatches == 0, "num_envs must divide num_minibatches for recurrent MAPPO."
 
-        adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.mask_inactive:
+            selected = advantages[self._active_masks]
+            mean = selected.mean() if selected.size else 0.0
+            std = selected.std() if selected.size else 1.0
+            adv = np.where(self._active_masks, (advantages - mean) / (std + 1e-8), 0.0)
+        else:
+            adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         perm = np.array(jax.random.permutation(key, self.E))
         mb_envs = self.E // n_minibatches
 
@@ -313,4 +339,8 @@ class MAPPORolloutBuffer:
                 "base_values":      jnp.array(self._base_values[:, idx]),
                 "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
             })
+            if self._critic_agent_features is not None:
+                minibatches[-1]["critic_agent_features"] = jnp.array(self._critic_agent_features[:, idx])
+            if self._critic_global_features is not None:
+                minibatches[-1]["critic_global_features"] = jnp.array(self._critic_global_features[:, idx])
         return minibatches

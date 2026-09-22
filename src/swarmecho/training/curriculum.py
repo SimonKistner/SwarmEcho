@@ -1,153 +1,121 @@
-"""
-training/curriculum.py
-=======================
-Orchestrates a sequence of training runs (L0 -> L1 -> ...) where each
-stage inherits weights from the previous level's final checkpoint.
+"""Sequential checkpoint-inheriting curriculum entry point for the environment."""
 
-Level naming convention
------------------------
-Levels use a prefix string followed by an underscore and a description:
-  M01_small_maze
+from __future__ import annotations
 
-The curriculum list uses an exact name or unique prefix (for example
-"M01_small_maze"), resolved by the same loader used for solo training.
-
-Evaluation-based transitions
-----------------------------
-If a level enables `evaluation.early_exit`, the trainer advances after the
-parallel evaluation success rate reaches `evaluation.early_exit_threshold`.
-Otherwise the level runs for its configured timestep budget.
-
-Usage
------
-    uv run swarmecho-curriculum logging.run_name=stage1_full
-    uv run swarmecho-curriculum levels=M00_no_maze_open_square,M03_big_maze,M02_mid_maze,M01_small_maze
-"""
-
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import sys
 import time
 
-from omegaconf import OmegaConf
+from swarmecho.core.config import load_level_cli
+from swarmecho.training.orchestration import (
+    checkpoint_total_steps,
+    explicit_override,
+    split_levels,
+)
+from swarmecho.training.train import train
 
-from swarmecho.core.config import load_config, validate_config
-from swarmecho.training.runner import train
 
-
-# ---------------------------------------------------------------------------
-# Main curriculum runner
-# ---------------------------------------------------------------------------
-
-def run_curriculum():
-    # Parse levels from sys.argv if present (e.g. levels=M00_no_maze_open_square,...)
-    levels = ["M01_small_maze"]
-    filtered_args = []
-    for arg in sys.argv[1:]:
-        if arg.startswith("levels="):
-            val = arg.split("levels=", 1)[1]
-            levels = [lvl.strip() for lvl in val.split(",")]
-        else:
-            filtered_args.append(arg)
-
-    # Load the base config once for global settings (comm_radius etc.)
-    global_cfg = load_config(cli_overrides=True, overrides=filtered_args)
-
-    # ---- Shared run identity ----------------------------------------------
+def main() -> None:
+    """Train the requested levels in order, handing off final weights."""
+    levels, shared_args = split_levels(
+        sys.argv[1:], "M00_no_maze_open_cuboid"
+    )
+    base_level = load_level_cli(shared_args)
+    base_run_name = base_level.logging.run_name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_run_name = global_cfg.logging.get("run_name", None)
-    use_ts = global_cfg.logging.get("use_timestamp_postfix", False)
-
-    if not base_run_name:
-        curriculum_id = f"curriculum_{timestamp}"
-    else:
-        curriculum_id = f"{base_run_name}_{timestamp}" if use_ts else base_run_name
-
-    curriculum_root = Path("outputs") / "curriculum" / curriculum_id
-    curriculum_root.mkdir(parents=True, exist_ok=True)
-
-    print("\n" + "="*60)
-    print(f"  STARTING CURRICULUM: {base_run_name}")
-    print(f"  Root Dir: {curriculum_root}")
-    print(f"  Levels:   {', '.join(levels)}")
-    print("="*60)
-
-    last_checkpoint = global_cfg.training.get("checkpoint_path", None)
-
-    # Track cumulative step offset across curriculum stages
-    cumulative_steps = 0
-    if last_checkpoint:
-        try:
-            import re
-            path_name = Path(last_checkpoint).name
-            match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
-            if match:
-                val = int(match.group(1))
-                E = int(global_cfg.training.num_envs)
-                T = int(global_cfg.training.num_steps)
-                cumulative_steps = val * E * T
-                print(f"  [curriculum] Parsed initial step offset from starting checkpoint: {cumulative_steps:,} steps")
-        except Exception as e:
-            print(f"  [curriculum] Failed to parse initial checkpoint steps: {e}")
-
-    for idx, level_id in enumerate(levels):
-        level_name = f"L{level_id}"
-        print(f"\n  [LEVEL {idx+1}/{len(levels)}] Starting {level_name}...")
-
-        # 1. Resolve and load this stage through the same path as solo training.
-        cfg = load_config(
-            cli_overrides=True,
-            overrides=[f"level={level_id}", *filtered_args],
+    if base_run_name:
+        curriculum_id = (
+            f"{base_run_name}_{timestamp}"
+            if base_level.logging.use_timestamp_postfix
+            else str(base_run_name)
         )
+    else:
+        curriculum_id = f"curriculum_{timestamp}"
 
-        # 2. Apply curriculum-owned handoff and output policy.
-        OmegaConf.set_readonly(cfg, False)
-        cfg.training.checkpoint_path = last_checkpoint
+    # Keep each curriculum stage in the same flat run layout as an ordinary
+    # run.  The prefix preserves curriculum provenance without requiring
+    # consumers such as the inspector to understand a special nested root.
+    output_root = Path(base_level.logging.log_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    explicit_group = explicit_override(shared_args, "logging.wandb_group")
+    group_name = explicit_group or curriculum_id
+
+    last_checkpoint = base_level.training.checkpoint_path
+    initial_checkpoint_mode = str(base_level.training.ckpt_loading_mode).lower()
+    if initial_checkpoint_mode not in {"resume", "branch", "init"}:
+        raise ValueError(
+            "training.ckpt_loading_mode must be resume, branch, or init."
+        )
+    cumulative_steps = checkpoint_total_steps(
+        last_checkpoint,
+        num_envs=base_level.training.num_envs,
+        num_steps=base_level.training.num_steps,
+    )
+
+    print("\n" + "=" * 60)
+    print("  SwarmEcho curriculum")
+    print(f"  output : {output_root}")
+    print(f"  levels : {', '.join(levels)}")
+    print("=" * 60)
+
+    for index, level_name in enumerate(levels, start=1):
+        level = load_level_cli([f"level={level_name}", *shared_args])
+        level_short = level.name.split("_", 1)[0]
+        stage_name = f"curr_{curriculum_id}_{level_short}"
+        training = level.training
         if last_checkpoint:
-            cfg.training.ckpt_loading_mode = "branch"
-            cfg.training.checkpoint_step_offset = cumulative_steps
-            print(f"  [curriculum] Loading weights from: {last_checkpoint}")
-            print(f"  [curriculum] Continuing with step offset: {cumulative_steps:,} steps")
+            # An explicitly supplied initial checkpoint may either resume the
+            # interrupted stage, branch with cumulative history, or initialize
+            # a clean new stage from weights only. Subsequent stages always
+            # branch from the preceding stage's final checkpoint.
+            handoff_mode = (
+                initial_checkpoint_mode if index == 1 else "branch"
+            )
+            handoff_overrides = {
+                "checkpoint_path": str(last_checkpoint),
+                "ckpt_loading_mode": handoff_mode,
+            }
+            if handoff_mode == "branch":
+                handoff_overrides["checkpoint_step_offset"] = cumulative_steps
+            training = replace(
+                training,
+                **handoff_overrides,
+            )
+            print(f"  [curriculum] loading weights from: {last_checkpoint}")
+            print(f"  [curriculum] handoff mode: {handoff_mode}")
+            print(f"  [curriculum] cumulative steps: {cumulative_steps:,}")
 
-        # 3. Wire logging into the curriculum directory
-        cfg.logging.log_dir = str(curriculum_root)
-        cfg.logging.run_name = f"{curriculum_id}_{level_id}"
+        logging = replace(
+            level.logging,
+            log_dir=str(output_root),
+            run_name=stage_name,
+            wandb_group=(
+                group_name if level.logging.wandb_mode != "disabled" else explicit_group
+            ),
+        )
+        level = replace(level, training=training, logging=logging)
 
-        OmegaConf.set_readonly(cfg, True)
-        validate_config(cfg)
+        print(f"\n  [LEVEL {index}/{len(levels)}] {level.name}")
+        final_checkpoint, _ = train(level)
+        if index < len(levels) and final_checkpoint is None:
+            raise RuntimeError(
+                f"curriculum stage {level.name} produced no final checkpoint; "
+                "set evaluation.save_model=true for checkpoint handoff."
+            )
+        if final_checkpoint is not None:
+            last_checkpoint = final_checkpoint
+            cumulative_steps = checkpoint_total_steps(
+                final_checkpoint,
+                num_envs=level.training.num_envs,
+                num_steps=level.training.num_steps,
+            )
+            print(f"  [curriculum] stage complete: {final_checkpoint}")
+        time.sleep(2)
 
-        # 4. Run training. It returns after the timestep budget or configured
-        # evaluation early exit; either result advances to the next level.
-        final_ckpt_path = train(cfg)
-
-        # 5. Update cumulative steps based on updates completed in this stage
-        if final_ckpt_path:
-            try:
-                import re
-                path_name = Path(final_ckpt_path).name
-                match = re.search(r'ckpt_(?:early_|final_)?(\d+)', path_name, re.IGNORECASE)
-                if match:
-                    local_updates = int(match.group(1))
-                    E = int(cfg.training.num_envs)
-                    T = int(cfg.training.num_steps)
-                    steps_taken = local_updates * E * T
-                    cumulative_steps += steps_taken
-                    print(f"  [curriculum] Stage completed {local_updates} updates ({steps_taken:,} steps). "
-                          f"New cumulative step offset: {cumulative_steps:,}")
-            except Exception as e:
-                print(f"  [curriculum] Failed to parse completed stage steps from '{final_ckpt_path}': {e}")
-
-        # 6. Pass checkpoint to the next stage
-        last_checkpoint = final_ckpt_path
-        print(f"  Stage {level_name} complete.")
-
-        time.sleep(2)  # Brief cooldown for GPU/W&B sync
-
-    print("\n" + "="*60)
-    print(f"  CURRICULUM FINISHED SUCCESSFULLY!")
-    print(f"  Results: {curriculum_root}")
-    print("="*60)
+    print(f"\ncurriculum complete: {output_root}")
 
 
 if __name__ == "__main__":
-    run_curriculum()
+    main()

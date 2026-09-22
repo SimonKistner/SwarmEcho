@@ -1,3 +1,3 @@
-"""visualize — CPU-side video renderer for JAX environment states."""
+"""replay serialization and the independent interactive inspector."""
 
 

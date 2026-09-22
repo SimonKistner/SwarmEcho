@@ -19,6 +19,3 @@ def dashboard_main() -> None:
     _run_streamlit("dashboard.py")
 
 
-def eval_dashboard_main() -> None:
-    """Launch the checkpoint-oriented evaluation dashboard."""
-    _run_streamlit("eval_dashboard.py")
