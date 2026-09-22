@@ -1,3 +1,3 @@
-"""env — JAX environment: state, physics, observations, rewards."""
+"""JAX environment, building geometry, observations, and relay rewards."""
 
 

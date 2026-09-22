@@ -1,223 +1,856 @@
-"""Evaluate one checkpoint with the maintained parallel evaluator.
-
-Usage:
-    uv run swarmecho-evaluate checkpoint=outputs/run/checkpoints/ckpt_001000
-    uv run swarmecho-evaluate checkpoint=... video=false
-    uv run swarmecho-evaluate checkpoint=... target_pos=40,25
-"""
+"""Checkpoint evaluation and target-selected replay entry point for the environment."""
 
 from __future__ import annotations
 
-import gc
+import os
+import re
 import sys
 from pathlib import Path
+from swarmecho.core.terminal import terminal_print, display_path, evaluation_row
 
-import jax
-import jax.numpy as jnp
+# These must be configured before importing Flax/JAX.  ``checkpoints`` imports
+# Flax below, so relying on train.py to set them is too late for this entry
+# point and XLA backend diagnostics leak to stderr during replay compilation.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "0")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
 import numpy as np
+import yaml
 
-from swarmecho.core.config import load_config, validate_config
+from swarmecho.core.config import load_level_cli, resolve_evaluation_level
+from swarmecho.core.paths import normalize_wsl_path
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
-    eval_checkpoint_artifact_root,
+    create_eval_run_root,
+    evaluation_stage,
+    load_eval_info_csv,
+    load_eval_layout,
     parse_checkpoint_update,
     save_eval_info_csv,
-    steps_for_update,
+    save_eval_layout,
     write_manifest,
 )
-from swarmecho.training.evaluation import (
-    collect_video_episode,
-    evaluate_parallel,
-    release_video_evaluation_trajectory,
+from swarmecho.training.checkpoints import restore_model_checkpoint
+from swarmecho.training.train import (
+    build_model,
+    evaluate_model,
+    evaluate_suite_with_action_capture,
+    evaluate_suite,
+    replay_recorded_actions,
 )
-from swarmecho.training.runtime import build_evaluation_runtime
-from swarmecho.training.video_worker import render_eval_video
+from swarmecho.visualize.replay import building_snapshot, write_replay
 
 
-def _parse_args():
-    checkpoint_path = None
-    save_video = True
-    target_pos = None
-    overrides = []
-
-    for arg in sys.argv[1:]:
-        if arg.startswith("checkpoint="):
-            checkpoint_path = Path(arg.split("=", 1)[1].replace("\\", "/"))
-        elif arg.lower() in ("video=false", "--no-video"):
-            save_video = False
-        elif arg.startswith("target_pos="):
-            x, y = arg.split("=", 1)[1].split(",", 1)
-            target_pos = (float(x), float(y))
-        elif arg.lower() in (
-            "connectivity=true",
-            "conn_matrix=true",
-            "--connectivity",
-            "--conn-matrix",
-        ):
-            overrides.append("visualize.render_conn_matrix=true")
-        elif arg.lower() in (
-            "connectivity=false",
-            "conn_matrix=false",
-            "--no-connectivity",
-            "--no-conn-matrix",
-        ):
-            overrides.append("visualize.render_conn_matrix=false")
-        else:
-            overrides.append(arg)
-
-    if checkpoint_path is None:
-        raise ValueError("Specify checkpoint=<path>.")
-    return checkpoint_path, save_video, target_pos, overrides
+_EVAL_INFO_UPDATE = re.compile(r"eval_info_u(\d+)_")
+_EVAL_MODES = {"parallel", "selective_auto_pick", "selective_manual_pick"}
+_REPLAY_EXECUTIONS = {"single", "parallel_capture"}
 
 
-def resolve_run_dir(checkpoint_path: Path) -> Path | None:
-    """Resolve the owning training run for a standard checkpoint path."""
-    if checkpoint_path.parent.name == "checkpoints":
-        return checkpoint_path.parents[1]
+def _as_bool(value: str) -> bool:
+    if value.lower() in {"true", "1", "yes"}:
+        return True
+    if value.lower() in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"Expected a boolean value, got {value!r}.")
+
+
+def _replay_stage_label(stage: str) -> str:
+    """Render the canonical replay outcome as one compact console label."""
+    return {
+        "chain_success": "SUCCESS",
+        "found_and_delivered": "FOUND_&_DELIVERED",
+        "visually_found": "VISUALLY_FOUND",
+        "not_found": "NOT_FOUND",
+    }[stage]
+
+
+def _target_artifact_suffix(target: np.ndarray) -> str:
+    """Encode a manual target into a filesystem-safe, collision-resistant name."""
+    encoded: list[str] = []
+    for axis, value in zip("xyz", target, strict=True):
+        coordinate = f"{float(value):.6f}".replace("-", "m").replace(".", "p")
+        encoded.append(f"{axis}{coordinate}")
+    return "TARGET-REPLAY_" + "_".join(encoded)
+
+
+def _checkpoint_level_name(checkpoint: Path) -> str | None:
+    """Read the level name saved alongside a training run's checkpoint."""
+    config_path = checkpoint.parents[1] / "config.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    level_name = config.get("name")
+    if isinstance(level_name, str) and level_name:
+        return level_name
     return None
 
 
-def evaluate_checkpoint(
-    cfg,
-    checkpoint_path: str | Path,
+def _heatmap_manifest(
+    info_path: Path,
+    level,
     *,
-    run_dir: str | Path | None = None,
-    save_video: bool = True,
-    target_pos: tuple[float, float] | None = None,
-) -> Path:
-    """Restore and evaluate a checkpoint through the public runtime services."""
-    checkpoint_path = Path(checkpoint_path).absolute()
-    resolved_run_dir = (
-        Path(run_dir).absolute()
-        if run_dir is not None
-        else resolve_run_dir(checkpoint_path)
-    )
-    if resolved_run_dir is None:
-        resolved_run_dir = Path(
-            cfg.logging.get("log_dir", "outputs")
-        ).absolute()
+    checkpoint: Path,
+    robustness_runs: int | None = None,
+    action_noise_max: float | None = None,
+    obstacle_min: np.ndarray | None = None,
+    obstacle_max: np.ndarray | None = None,
+    eval_name: str | None = None,
+) -> None:
+    """Write the small inspector metadata sidecar for one eval CSV."""
+    manifest = {
+        "format": "swarmecho-eval-heatmap/v1",
+        "data_file": info_path.name,
+        "map_name": level.building_name, "building_snapshot": building_snapshot(level.building),
+        "world_size_m": level.building.world_size_m.tolist(),
+        "checkpoint": str(checkpoint),
+        "artifact_scope": "eval",
+    }
+    if robustness_runs is not None:
+        manifest["robustness_runs"] = int(robustness_runs)
+    if action_noise_max is not None:
+        manifest["action_noise_max"] = float(action_noise_max)
+    if eval_name is not None:
+        manifest["eval_name"] = eval_name
+    if obstacle_min is not None and np.asarray(obstacle_min).shape[-2] > 0:
+        layout_path = save_eval_layout(
+            info_path.with_suffix(".layout.json"), obstacle_min, obstacle_max
+        )
+        manifest["obstacle_layout_mode"] = "fixed"
+        manifest["layout_file"] = layout_path.name
+    write_manifest(info_path.with_suffix(".heatmap.json"), manifest)
 
-    runtime = build_evaluation_runtime(cfg, checkpoint_path, rng_seed=0)
-    model = runtime.model
-    environment = runtime.environment
-    eval_reset = environment.reset
 
-    if target_pos is not None:
-        target_x, target_y = target_pos
-
-        def eval_reset(key):
-            state = environment.reset(key)
-            return state.replace(
-                physics=state.physics.replace(
-                    target_pos=jnp.array(
-                        [target_x, target_y],
-                        dtype=jnp.float32,
-                    ),
-                ),
+def collect_robust_evaluation(
+    model,
+    level,
+    *,
+    on_run=None,
+) -> tuple[dict[str, float], dict]:
+    """Collect unanimous outcomes and ensemble means without writing artifacts."""
+    level = resolve_evaluation_level(level)
+    episodes = level.evaluation.eval_parallel_envs
+    robustness_runs = level.evaluation.eval_robustness_runs
+    if robustness_runs < 2:
+        raise ValueError("Robust evaluation requires at least two runs.")
+    action_noise_max = level.evaluation.eval_action_noise_max
+    layout_mode = "fixed" if getattr(getattr(level, "env", None), "num_obstacles", 0) else None
+    metric_runs: list[dict[str, float]] = []
+    success_runs: list[np.ndarray] = []
+    delivered_runs: list[np.ndarray] = []
+    visually_found_runs: list[np.ndarray] = []
+    reference_targets: np.ndarray | None = None
+    reference_bases: np.ndarray | None = None
+    reference_chain_lengths: np.ndarray | None = None
+    reference_obstacle_min: np.ndarray | None = None
+    reference_obstacle_max: np.ndarray | None = None
+    for run_index in range(robustness_runs):
+        metrics, episode_info = evaluate_suite(
+            model,
+            level,
+            episodes=episodes,
+            return_episode_info=True,
+            action_noise_max=action_noise_max,
+            action_noise_seed=level.training.seed + 20_000 + run_index,
+            layout_mode=layout_mode,
+        )
+        if on_run is not None:
+            on_run(metrics, run_index + 1, robustness_runs)
+        else:
+            evaluation_row(
+                metrics, label=f"[EVAL {run_index + 1}/{robustness_runs}]",
+                update=0, total=0, episodes=episodes,
+            )
+        targets = np.asarray(episode_info["target_positions"])
+        bases = np.asarray(episode_info["base_positions"])
+        chain_lengths = np.asarray(episode_info["final_chain_lengths"])
+        obstacle_min = np.asarray(episode_info["obstacle_min"])
+        obstacle_max = np.asarray(episode_info["obstacle_max"])
+        if reference_targets is None:
+            reference_targets = targets
+            reference_bases = bases
+            reference_chain_lengths = chain_lengths
+            reference_obstacle_min = obstacle_min
+            reference_obstacle_max = obstacle_max
+        elif not (
+            np.array_equal(targets, reference_targets)
+            and np.array_equal(bases, reference_bases)
+            and np.array_equal(obstacle_min, reference_obstacle_min)
+            and np.array_equal(obstacle_max, reference_obstacle_max)
+        ):
+            raise RuntimeError(
+                "Robust evaluation reset provenance changed between runs; "
+                "target and base positions must be identical."
             )
 
-    key = jax.random.PRNGKey(0)
-    _, metrics_key, video_key = jax.random.split(key, 3)
-    num_envs = int(cfg.evaluation.eval_parallel_envs)
-    result = evaluate_parallel(
-        model,
-        eval_reset,
-        environment.env_step,
-        environment.compute_obs,
-        environment.compute_reward,
-        cfg,
-        metrics_key,
-        num_envs=num_envs,
-    )
+        successes = np.asarray(episode_info["successes"], dtype=bool)
+        delivered = (
+            np.asarray(episode_info["delivered"], dtype=bool) | successes
+        )
+        visually_found = (
+            np.asarray(episode_info["visually_found"], dtype=bool) | delivered
+        )
+        metric_runs.append(metrics)
+        success_runs.append(successes)
+        delivered_runs.append(delivered)
+        visually_found_runs.append(visually_found)
 
-    print(f"\nEvaluation over {num_envs} parallel episodes")
-    print(f"  mean_return:  {float(jnp.mean(result.returns)):.2f}")
-    print(f"  mean_length:  {float(jnp.mean(result.lengths)):.1f}")
-    print(
-        f"  chain_prog:   "
-        f"{float(jnp.mean(result.chain_progress)):.1f}%"
+    assert reference_targets is not None and reference_bases is not None
+    assert reference_chain_lengths is not None
+    chain_success_rate = np.mean(np.stack(success_runs), axis=0)
+    found_and_delivered_rate = np.mean(np.stack(delivered_runs), axis=0)
+    visually_found_rate = np.mean(np.stack(visually_found_runs), axis=0)
+    metrics = {
+        key: float(np.mean([run[key] for run in metric_runs]))
+        for key in metric_runs[0]
+    }
+    metrics.update(
+        eval_success=float(np.mean(chain_success_rate == 1.0)),
+        eval_target_found_rate=float(np.mean(found_and_delivered_rate == 1.0)),
+        eval_visually_found_rate=float(np.mean(visually_found_rate == 1.0)),
+        eval_robustness_runs=robustness_runs,
     )
-    print(f"  chain_gap:    {float(jnp.mean(result.chain_gaps)):.1f} m")
-    print(f"  success_rate: {float(jnp.mean(result.successes)):.1%}")
-    print(f"  target_found: {float(jnp.mean(result.target_found)):.1%}")
+    return metrics, {
+        "target_positions": reference_targets,
+        "base_positions": reference_bases,
+        "final_chain_lengths": reference_chain_lengths,
+        "obstacle_min": reference_obstacle_min,
+        "obstacle_max": reference_obstacle_max,
+        "stage_rates": {
+            "chain_success": chain_success_rate,
+            "found_and_delivered": found_and_delivered_rate,
+            "visually_found": visually_found_rate,
+        },
+    }
 
-    artifact_root = eval_checkpoint_artifact_root(
-        resolved_run_dir, checkpoint_path, cfg
+
+def run_parallel_evaluation(
+    model,
+    level,
+    checkpoint: Path,
+    run_dir: Path,
+    *,
+    eval_run_root: Path | None = None,
+    eval_name: str | None = None,
+    result: tuple[dict[str, float], dict] | None = None,
+) -> Path:
+    """Save a robust ensemble, optionally reusing the final training evaluation."""
+    level = resolve_evaluation_level(level)
+    metrics, info = result if result is not None else collect_robust_evaluation(model, level)
+    if result is None:
+        evaluation_row(metrics, label="[EVAL UNAN]", update=0, total=0,
+                       episodes=level.evaluation.eval_parallel_envs)
+    artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
+    eval_run_root = eval_run_root or create_eval_run_root(
+        run_dir, checkpoint, level, eval_name=eval_name
     )
-    artifact_tag = checkpoint_artifact_suffix(checkpoint_path, cfg)
-    manifest_dir = artifact_root / "manifests"
-
     info_path = save_eval_info_csv(
-        artifact_root / "data" / f"eval_info_{artifact_tag}.csv",
-        target_positions=np.asarray(result.final_state.physics.target_pos),
-        base_positions=np.asarray(result.final_state.physics.base_pos),
-        successes=np.asarray(result.final_successes),
-        delivered=np.asarray(result.final_delivered),
-        visually_found=np.asarray(result.final_visually_found),
+        eval_run_root / "data" / f"eval_info_{artifact_tag}.csv",
+        target_positions=info["target_positions"],
+        base_positions=info["base_positions"],
+        stage_rates=info["stage_rates"],
+        final_chain_lengths=info["final_chain_lengths"],
     )
-    print(f"  eval_csv:     {info_path}")
+    _heatmap_manifest(
+        info_path,
+        level,
+        checkpoint=checkpoint,
+        robustness_runs=level.evaluation.eval_robustness_runs,
+        action_noise_max=level.evaluation.eval_action_noise_max,
+        obstacle_min=info["obstacle_min"],
+        obstacle_max=info["obstacle_max"],
+        eval_name=eval_name,
+    )
+    terminal_print(
+        f"[EVAL ARTIFACTS] saved {display_path(info_path)}",
+        flush=True,
+    )
+    return info_path
 
-    del result
-    gc.collect()
-    jax.clear_caches()
 
-    if save_video and bool(cfg.evaluation.get("eval_video", True)):
-        states, rewards, metrics = collect_video_episode(
-            model,
-            jax.jit(eval_reset),
-            jax.jit(environment.env_step),
-            jax.jit(environment.compute_obs),
-            jax.jit(environment.compute_reward),
-            cfg,
-            video_key,
+def run_action_capturing_evaluation(
+    model,
+    level,
+    checkpoint: Path,
+    run_dir: Path,
+    *,
+    result: str,
+    offset: int,
+    max_steps: int | None = None,
+    eval_run_root: Path | None = None,
+    eval_name: str | None = None,
+) -> tuple[Path, np.ndarray, str, int, list, np.ndarray]:
+    """Evaluate, select, and replay actions originating in the same actor run."""
+    level = resolve_evaluation_level(level)
+    episodes = level.evaluation.eval_parallel_envs
+    terminal_print(
+        f"[EVAL] evaluating {episodes} deterministic episodes while capturing "
+        "executed actions...",
+        flush=True,
+    )
+    metrics, episode_info, capture = evaluate_suite_with_action_capture(
+        model,
+        level,
+        episodes=episodes,
+        result=result,
+        offset=offset,
+        max_steps=max_steps,
+    )
+    artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
+    eval_run_root = eval_run_root or create_eval_run_root(
+        run_dir, checkpoint, level, eval_name=eval_name
+    )
+    info_path = save_eval_info_csv(
+        eval_run_root / "data" / f"eval_capture_info_{artifact_tag}.csv",
+        target_positions=episode_info["target_positions"],
+        base_positions=episode_info["base_positions"],
+        successes=episode_info["successes"],
+        delivered=episode_info["delivered"],
+        visually_found=episode_info["visually_found"],
+        final_chain_lengths=episode_info["final_chain_lengths"],
+    )
+    # Action capture is replay provenance, not a 1/1 heatmap. Retain only the
+    # layout sidecar needed to reconstruct and validate the selected replay.
+    if episode_info["obstacle_min"].shape[-2] > 0:
+        save_eval_layout(
+            info_path.with_suffix(".layout.json"),
+            episode_info["obstacle_min"], episode_info["obstacle_max"],
         )
-        stem = f"eval_{artifact_tag}"
-        video_path = render_eval_video(
-            ep_states=states[0],
-            ep_rewards=rewards[0],
-            ep_metrics=metrics[0],
-            cfg=cfg,
-            out_dir=artifact_root / "vids",
-            filename_stem=stem,
+    lane = int(capture["lane"])
+    selected_target, replay_tag, csv_lane = select_eval_target_with_lane(
+        info_path, result=result, offset=offset
+    )
+    if csv_lane != lane:
+        raise RuntimeError(
+            f"On-device action selection chose lane {lane}, but the saved CSV "
+            f"selected lane {csv_lane}."
         )
-        update = parse_checkpoint_update(checkpoint_path) or 0
-        write_manifest(
-            manifest_dir / f"{stem}.video.json",
-            {
-                "type": "video",
-                "checkpoint": str(checkpoint_path),
-                "checkpoint_name": checkpoint_path.name,
-                "update": update,
-                "steps": steps_for_update(update, cfg),
-                "video_path": str(video_path),
+    terminal_print("[REPLAY] selected target for replay rendering", flush=True)
+    states, rewards = replay_recorded_actions(
+        level,
+        capture["actions"],
+        capture_lane=lane,
+        batch_size=episodes,
+        max_steps=max_steps,
+    )
+    reconstructed_success = bool(np.asarray(states[-1].success))
+    expected_success = result.lower() in {"success", "successful"}
+    if reconstructed_success != expected_success:
+        raise RuntimeError(
+            "The actor-free replay reconstructed a different success result "
+            "from the action-capturing evaluation; no misleading archive was written."
+        )
+    if not np.array_equal(np.asarray(states[0].target_pos), selected_target):
+        raise RuntimeError(
+            "The action replay's initial target differs from its captured CSV lane."
+        )
+    selected_records = load_eval_info_csv(info_path)
+    recorded_min, _ = eval_layout_for_csv(info_path)
+    if recorded_min is None:
+        recorded_min = selected_records["obstacle_min"][lane]
+    if not np.array_equal(
+        np.asarray(states[0].obstacle_min), recorded_min
+    ):
+        raise RuntimeError(
+            "The action replay's obstacle layout differs from its captured CSV lane."
+        )
+    return info_path, selected_target, replay_tag, lane, states, rewards
+
+
+def find_nearest_eval_info_csv(run_dir: Path, checkpoint: Path, level) -> Path | None:
+    """Find the closest training/checkpoint eval CSV by PPO update number."""
+    expected = f"eval_info_{checkpoint_artifact_suffix(checkpoint, level)}.csv"
+    candidates: list[Path] = []
+    for path in (run_dir / "artifacts").glob("**/data/eval_info_*.csv"):
+        try:
+            if load_eval_info_csv(path)["positions"].shape[-1] == 3:
+                candidates.append(path)
+        except (OSError, ValueError):
+            continue
+    if not candidates:
+        return None
+    exact = [path for path in candidates if path.name == expected]
+    if exact:
+        return sorted(exact, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+    checkpoint_update = parse_checkpoint_update(checkpoint) or 0
+
+    def rank(path: Path) -> tuple[int, float]:
+        match = _EVAL_INFO_UPDATE.search(path.name)
+        update = int(match.group(1)) if match else 0
+        return abs(update - checkpoint_update), -path.stat().st_mtime
+
+    return min(candidates, key=rank)
+
+
+def select_eval_target_with_lane(
+    info_path: Path, *, result: str, offset: int
+) -> tuple[np.ndarray, str, int]:
+    """Select a replay target together with its immutable evaluation lane."""
+    if offset < 0:
+        raise ValueError("offset must be non-negative.")
+    records = load_eval_info_csv(info_path)
+    positions = records["positions"]
+    if positions.shape[-1] != 3:
+        raise ValueError(f"Expected a evaluation CSV, got {info_path}.")
+    normalized = result.lower()
+    if normalized in {"success", "successful"}:
+        candidate_lanes, label = np.flatnonzero(records["stages"] == "chain_success"), "SUCCESS"
+    elif normalized in {"fail", "failure", "failed"}:
+        candidate_lanes, label = np.flatnonzero(records["stages"] != "chain_success"), "FAIL"
+    else:
+        raise ValueError("result must be success or fail.")
+    if label == "SUCCESS":
+        candidate_lanes = diverse_success_lanes(
+            records, candidate_lanes, limit=offset + 1
+        )
+    if offset >= len(candidate_lanes):
+        raise ValueError(
+            f"Requested {label}_{offset}, but {info_path.name} contains only "
+            f"{len(candidate_lanes)} matching targets."
+        )
+    lane = int(candidate_lanes[offset])
+    return positions[lane], f"{label}_{offset}", lane
+
+
+def select_eval_replay_lanes(
+    records: dict[str, np.ndarray], *, result: str, count: int, start_offset: int = 0
+) -> tuple[np.ndarray, str]:
+    """Select replay configurations using only persisted CSV metrics."""
+    normalized = result.lower()
+    if normalized in {"success", "successful"}:
+        lanes = np.flatnonzero(records["stages"] == "chain_success")
+        label = "SUCCESS"
+        lanes = diverse_success_lanes(
+            records, lanes, limit=min(len(lanes), start_offset + count)
+        )
+    elif normalized in {"fail", "failure", "failed"}:
+        lanes = np.flatnonzero(records["stages"] != "chain_success")
+        label = "FAIL"
+    else:
+        raise ValueError("result must be success or fail.")
+    selected = lanes[start_offset:start_offset + count]
+    if len(selected) != count:
+        raise ValueError(
+            f"Requested {count} {label} replay(s) starting at {start_offset}, "
+            f"but only {len(lanes)} matching CSV rows exist."
+        )
+    return selected, label
+
+
+def eval_layout_for_csv(info_path: Path) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Load a heatmap layout or the layout-only sidecar of an action capture."""
+    sidecar = info_path.with_suffix(".heatmap.json")
+    if not sidecar.exists():
+        layout = info_path.with_suffix(".layout.json")
+        return load_eval_layout(layout) if layout.exists() else (None, None)
+    import json
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    layout_file = metadata.get("layout_file")
+    return load_eval_layout(info_path.parent / layout_file) if layout_file else (None, None)
+
+
+def diverse_success_lanes(
+    records: dict[str, np.ndarray], lanes: np.ndarray, *, limit: int | None = None
+) -> np.ndarray:
+    """Select at most ``limit`` long, spatially distinct representatives."""
+    lanes = np.asarray(lanes, dtype=np.int64)
+    selection_count = min(len(lanes), len(lanes) if limit is None else limit)
+    if selection_count == 0:
+        return lanes
+    positions = records["positions"][lanes]
+    lengths = records["final_chain_length"][lanes]
+    length_span = float(np.ptp(lengths))
+    length_score = ((lengths - np.min(lengths)) / length_span) if length_span else np.ones(len(lanes))
+    world_span = float(np.linalg.norm(np.ptp(positions, axis=0))) or 1.0
+    selected = [int(np.argmax(length_score))]
+    if selection_count == 1:
+        return lanes[np.asarray(selected)]
+    available = np.ones(len(lanes), dtype=bool)
+    available[selected[0]] = False
+    nearest_separation = np.linalg.norm(
+        positions - positions[selected[0]], axis=1
+    ) / world_span
+    while len(selected) < selection_count:
+        score = 0.35 * length_score + 0.65 * nearest_separation
+        choice = int(np.argmax(np.where(available, score, -np.inf)))
+        selected.append(choice)
+        available[choice] = False
+        nearest_separation = np.minimum(
+            nearest_separation,
+            np.linalg.norm(positions - positions[choice], axis=1) / world_span,
+        )
+    return lanes[np.asarray(selected)]
+
+
+def render_csv_replays(
+    model, level, checkpoint: Path, run_dir: Path, *, result: str,
+    replay_count: int,
+    start_offset: int = 0,
+    max_steps: int | None = None,
+    source_csv: Path | None = None,
+    eval_run_root: Path | None = None,
+    eval_name: str | None = None,
+) -> None:
+    """Render selected CSV lanes without retaining the 4k evaluation batch."""
+    level = resolve_evaluation_level(level)
+    source_csv = source_csv or find_nearest_eval_info_csv(run_dir, checkpoint, level)
+    if source_csv is None:
+        raise FileNotFoundError(
+            "No evaluation CSV was found. Run mode=parallel before replay-only mode."
+        )
+    records = load_eval_info_csv(source_csv)
+    shared_min, shared_max = eval_layout_for_csv(source_csv)
+    artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
+    eval_run_root = eval_run_root or create_eval_run_root(
+        run_dir, checkpoint, level, eval_name=eval_name
+    )
+    selected_lanes, label = select_eval_replay_lanes(
+        records, result=result, count=replay_count, start_offset=start_offset
+    )
+    terminal_print("[REPLAY] selected target for replay rendering", flush=True)
+    for replay_number, lane_value in enumerate(selected_lanes):
+        lane = int(lane_value)
+        selection_offset = start_offset + replay_number
+        target = records["positions"][lane]
+        replay_tag = f"{label}_{selection_offset}"
+        obstacle_min, obstacle_max = shared_min, shared_max
+        if obstacle_min is None and records["obstacle_min"].shape[1]:
+            obstacle_min = records["obstacle_min"][lane]
+            obstacle_max = records["obstacle_max"][lane]
+        states, rewards = evaluate_model(
+            model, level, max_steps=max_steps, target_position=target,
+            obstacle_min=obstacle_min, obstacle_max=obstacle_max,
+        )
+        final_state = states[-1]
+        final_stage = _replay_stage_label(evaluation_stage(
+            success=bool(np.asarray(final_state.success)),
+            delivered=bool(np.asarray(final_state.base_target_known)),
+            visually_found=bool(np.any(np.asarray(final_state.target_known))),
+        ))
+        terminal_print(
+            f"[REPLAY {replay_number + 1}/{replay_count}] {final_stage} with "
+            f"target=({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}); "
+            f"len: {len(states) - 1} steps",
+            flush=True,
+        )
+        output = eval_run_root / "replays" / (
+            f"eval_{artifact_tag}_{replay_tag}"
+        )
+        write_replay(
+            output, states, map_name=level.building_name, building=level.building, dt=level.env.dt,
+            reward_terms=rewards,
+            progress=False,
+            metadata={
+                "world_size_m": level.building.world_size_m.tolist(),
+                "cell_size_m": level.building.cell_size_m,
+                "coverage_voxel_size_m": level.building.cell_size_m
+                if level.env.coverage_voxel_size is None
+                else level.env.coverage_voxel_size,
+                "comm_radius_m": level.env.comm_radius,
+                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                "comm_radius_base_m": level.env.comm_radius_base,
+                "visual_radius_m": level.env.visual_radius,
+                "checkpoint": str(checkpoint),
+                "target_source_csv": str(source_csv),
+                "target_selection": replay_tag,
+                "replay_execution": "single",
+                "replay_source_lane": lane,
+                "selected_target_position": target.tolist(),
+                "artifact_scope": "eval",
+                **({"eval_name": eval_name} if eval_name is not None else {}),
             },
         )
-        release_video_evaluation_trajectory()
-        print(f"  video:        {video_path}")
-
-    return artifact_root
 
 
 def main() -> None:
-    checkpoint_path, save_video, target_pos, overrides = _parse_args()
-    run_dir = resolve_run_dir(checkpoint_path)
-    run_config = run_dir / "config.yaml" if run_dir is not None else None
-    cfg = load_config(
-        config_path=(
-            run_config
-            if run_config is not None and run_config.exists()
-            else None
-        ),
-        cli_overrides=True,
-        overrides=overrides,
+    checkpoint: Path | None = None
+    output: Path | None = None
+    max_steps: int | None = None
+    mode = "parallel"
+    mode_explicit = False
+    result = "success"
+    offset = 0
+    replay_after = False
+    replay_count = 1
+    target_mode = "csv"
+    replay_execution = "single"
+    eval_name: str | None = None
+    explicit_target: np.ndarray | None = None
+    selection_argument_seen = False
+    target_argument_seen = False
+    config_arguments: list[str] = []
+    random_eval_map_id = None
+    for argument in sys.argv[1:]:
+        if "=" not in argument:
+            raise ValueError(
+                "Use checkpoint=<path>, mode=parallel|selective_auto_pick|"
+                "selective_manual_pick, result=success|fail, offset=<n>, "
+                "replay_after=true|false, replays=<positive count>, "
+                "eval_name=<label>, "
+                "target_position=x,y,z, replay_execution=single|"
+                "parallel_capture, and "
+                "key=value overrides."
+            )
+        key, value = argument.split("=", 1)
+        if key == "checkpoint":
+            checkpoint = normalize_wsl_path(value).absolute()
+        elif key == "output":
+            output = Path(value)
+        elif key == "max_steps":
+            max_steps = int(value)
+        elif key == "mode":
+            mode = value.lower()
+            mode_explicit = True
+        elif key in {"result", "target_result"}:
+            result = value
+            selection_argument_seen = True
+        elif key == "offset":
+            offset = int(value)
+            selection_argument_seen = True
+        elif key == "replay_after":
+            replay_after = _as_bool(value)
+        elif key == "replays":
+            replay_count = int(value)
+        elif key == "eval_name":
+            eval_name = value
+        elif key == "target":
+            target_mode = value.lower()
+            target_argument_seen = True
+        elif key == "target_position":
+            coordinates = tuple(float(part) for part in value.split(","))
+            if len(coordinates) != 3:
+                raise ValueError("target_position must be x,y,z.")
+            explicit_target = np.asarray(coordinates, dtype=np.float32)
+        elif key == "replay_execution":
+            replay_execution = value.lower()
+        elif key == "random_eval_map_id":
+            random_eval_map_id = value
+        else:
+            config_arguments.append(argument)
+    if checkpoint is None:
+        raise ValueError("Specify checkpoint=<path>.")
+    if mode not in _EVAL_MODES:
+        raise ValueError(
+            "mode must be parallel, selective_auto_pick, or "
+            "selective_manual_pick."
+        )
+    if replay_execution not in _REPLAY_EXECUTIONS:
+        raise ValueError("replay_execution must be single or parallel_capture.")
+    if replay_count < 1:
+        raise ValueError("replays must be positive.")
+
+    if not mode_explicit:
+        # Existing inspector/manual commands omitted mode. Preserve their
+        # effective behavior while making an argument-free invocation parallel.
+        if explicit_target is not None:
+            mode = "selective_manual_pick"
+        elif selection_argument_seen or target_argument_seen:
+            mode = "selective_auto_pick"
+
+    if target_mode not in {"csv", "random"}:
+        raise ValueError("target must be csv or random.")
+
+    run_dir = checkpoint.parents[1]
+    explicit_level = any(
+        argument.split("=", 1)[0] == "level" for argument in config_arguments
     )
-    validate_config(cfg)
-    evaluate_checkpoint(
-        cfg,
-        checkpoint_path,
-        run_dir=run_dir,
-        save_video=save_video,
-        target_pos=target_pos,
+    checkpoint_level = None if explicit_level else _checkpoint_level_name(checkpoint)
+    if checkpoint_level is not None:
+        config_arguments.insert(0, f"level={checkpoint_level}")
+    level = load_level_cli(config_arguments)
+    if random_eval_map_id is not None:
+        import re
+        from dataclasses import replace
+        from swarmecho.env.buildings import load_building
+        if not re.fullmatch(r"random_eval_\d{4,}", random_eval_map_id):
+            raise ValueError("random_eval_map_id must be an ID such as random_eval_0000.")
+        saved_map = run_dir / "random_eval_maps" / f"{random_eval_map_id}.yaml"
+        level = replace(level, building=load_building(saved_map), map_names=[random_eval_map_id],
+                        random_buildings=replace(level.random_buildings, enabled=False),
+                        evaluation=replace(level.evaluation, random_eval=False, training_robustness=False,
+                                           eval_differes_from_training_map=False, eval_map=None))
+    elif level.evaluation.random_eval and mode != "parallel":
+        raise ValueError("Choose random_eval_map_id=random_eval_0000 (or another persistent eval ID) for a selected-map replay.")
+    terminal_print(f"[EVAL] using level: {level.name}", flush=True)
+    model = build_model(level)
+    restore_model_checkpoint(model, checkpoint)
+    if (level.evaluation.random_eval or random_eval_map_id is not None) and mode == "parallel":
+        from swarmecho.training.random_evaluation import prepare_evaluation_maps, evaluate_random_maps
+        levels = ([level] if random_eval_map_id is not None else
+                  prepare_evaluation_maps(level, run_dir / "random_eval_maps", log=terminal_print))
+        # Same frozen maps as training, with no robust/noise ensemble.
+        root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
+        from swarmecho.training.artifacts import parse_checkpoint_update, steps_for_update
+        update = parse_checkpoint_update(checkpoint) or 0
+        evaluate_random_maps(model, levels, run_dir, update=update, steps=steps_for_update(update, level),
+                             replay_due=replay_after and level.evaluation.eval_video,
+                             artifact_root=root, scope="eval", checkpoint=checkpoint, eval_name=eval_name)
+        return
+    eval_run_root = create_eval_run_root(
+        run_dir, checkpoint, level, eval_name=eval_name
+    )
+    if mode == "parallel":
+        info_path = run_parallel_evaluation(
+            model,
+            level,
+            checkpoint,
+            run_dir,
+            eval_run_root=eval_run_root,
+            eval_name=eval_name,
+        )
+        # Parallel mode is independent of selective arguments unless
+        # replay_after=true requests the combined workflow.
+        if replay_after:
+            render_csv_replays(
+                model, level, checkpoint, run_dir, result=result,
+                replay_count=replay_count, start_offset=offset, max_steps=max_steps,
+                source_csv=info_path, eval_run_root=eval_run_root, eval_name=eval_name,
+            )
+            return
+        else:
+            return
+
+    if mode == "selective_auto_pick" and replay_execution == "single":
+        render_csv_replays(
+            model, level, checkpoint, run_dir, result=result,
+            replay_count=replay_count, start_offset=offset, max_steps=max_steps,
+            eval_run_root=eval_run_root, eval_name=eval_name,
+        )
+        return
+
+    selected_target: np.ndarray | None = None
+    selected_obstacle_min: np.ndarray | None = None
+    selected_obstacle_max: np.ndarray | None = None
+    selected_lane: int | None = None
+    replay_tag = "RANDOM"
+    source_csv: Path | None = None
+    captured_states: list | None = None
+    captured_rewards: np.ndarray | None = None
+    if mode == "selective_manual_pick" and explicit_target is None:
+        raise ValueError(
+            "mode=selective_manual_pick requires target_position=x,y,z."
+        )
+
+    if mode == "selective_auto_pick" and replay_execution == "parallel_capture":
+        (
+            source_csv,
+            selected_target,
+            replay_tag,
+            selected_lane,
+            captured_states,
+            captured_rewards,
+        ) = run_action_capturing_evaluation(
+            model,
+            level,
+            checkpoint,
+            run_dir,
+            result=result,
+            offset=offset,
+            max_steps=max_steps,
+            eval_run_root=eval_run_root,
+            eval_name=eval_name,
+        )
+    elif mode == "selective_manual_pick":
+        selected_target = explicit_target
+        replay_tag = "TARGET"
+        terminal_print("[REPLAY] selected target for replay rendering", flush=True)
+    elif (
+        mode == "selective_auto_pick"
+    ):
+        source_csv = find_nearest_eval_info_csv(run_dir, checkpoint, level)
+        if source_csv is None:
+            raise FileNotFoundError(
+                "No evaluation CSV was found for this run. Run again with "
+                "mode=parallel to create checkpoint-scoped target data."
+            )
+        selected_target, replay_tag, selected_lane = select_eval_target_with_lane(
+            source_csv, result=result, offset=offset
+        )
+        selected_records = load_eval_info_csv(source_csv)
+        selected_obstacle_min, selected_obstacle_max = eval_layout_for_csv(source_csv)
+        if selected_obstacle_min is None and selected_records["obstacle_min"].shape[1]:
+            selected_obstacle_min = selected_records["obstacle_min"][selected_lane]
+            selected_obstacle_max = selected_records["obstacle_max"][selected_lane]
+        terminal_print("[REPLAY] selected target for replay rendering", flush=True)
+    artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
+    output = eval_run_root / "replays" / (
+        output.name if output is not None else f"eval_{artifact_tag}"
+    )
+    artifact_replay_tag = replay_tag
+    if replay_tag == "TARGET" and selected_target is not None:
+        artifact_replay_tag = _target_artifact_suffix(selected_target)
+    if replay_execution == "parallel_capture" and selected_lane is None:
+        raise ValueError(
+            "replay_execution=parallel_capture requires mode=selective_auto_pick "
+            "with a CSV-selected target."
+        )
+    if replay_execution == "parallel_capture":
+        artifact_replay_tag = f"{artifact_replay_tag}_PARALLEL-CAPTURE"
+    output = output.with_name(f"{output.name}_{artifact_replay_tag}")
+    if replay_execution == "parallel_capture":
+        replay_batch_size = level.evaluation.eval_parallel_envs
+    else:
+        replay_batch_size = None
+    if replay_execution == "parallel_capture":
+        if captured_states is None or captured_rewards is None:
+            raise RuntimeError("The action-capturing evaluation produced no replay data.")
+        states, rewards = captured_states, captured_rewards
+    else:
+        states, rewards = evaluate_model(
+            model,
+            level,
+            max_steps=max_steps,
+            target_position=selected_target,
+            obstacle_min=selected_obstacle_min,
+            obstacle_max=selected_obstacle_max,
+        )
+    final_state = states[-1]
+    final_stage = _replay_stage_label(evaluation_stage(
+        success=bool(np.asarray(final_state.success)),
+        delivered=bool(np.asarray(final_state.base_target_known)),
+        visually_found=bool(np.any(np.asarray(final_state.target_known))),
+    ))
+    terminal_print(
+        f"[REPLAY 1/1] {final_stage} with target="
+        f"({selected_target[0]:.2f}, {selected_target[1]:.2f}, "
+        f"{selected_target[2]:.2f}); len: {len(states) - 1} steps",
+        flush=True,
+    )
+    write_replay(
+        output,
+        states,
+        map_name=level.building_name, building=level.building,
+        dt=level.env.dt,
+        reward_terms=rewards,
+        progress=False,
+        metadata={
+            "world_size_m": level.building.world_size_m.tolist(),
+            "cell_size_m": level.building.cell_size_m,
+            "coverage_voxel_size_m": (
+                level.building.cell_size_m
+                if level.env.coverage_voxel_size is None
+                else level.env.coverage_voxel_size
+            ),
+            "comm_radius_m": level.env.comm_radius,
+            "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+            "comm_radius_base_m": level.env.comm_radius_base,
+            "visual_radius_m": level.env.visual_radius,
+            "checkpoint": str(checkpoint),
+            "target_source_csv": None if source_csv is None else str(source_csv),
+            "target_selection": replay_tag,
+            "replay_execution": replay_execution,
+            "replay_batch_size": replay_batch_size,
+            "replay_source_lane": selected_lane,
+            "selected_target_position": (
+                None
+                if selected_target is None
+                else [float(value) for value in selected_target]
+            ),
+            "artifact_scope": "eval",
+            **({"eval_name": eval_name} if eval_name is not None else {}),
+        },
     )
 
 

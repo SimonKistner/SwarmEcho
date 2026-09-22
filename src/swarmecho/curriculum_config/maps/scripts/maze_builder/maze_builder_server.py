@@ -1,4 +1,4 @@
-"""Local web server for the SwarmEcho maze builder.
+"""Local web server for the SwarmEcho building editor.
 
 Run from the repository root:
 
@@ -16,11 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core import (
-    create_map_and_level,
-    crop_canvas_payload,
-    normalize_machine_maze,
-)
 from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
     add_outer_walls,
     add_roof,
@@ -33,9 +28,11 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     expand_document,
     save_document,
     validate_document,
+    template_document,
+    document_from_map_data,
 )
 from swarmecho.core.config import MAP_DIR
-from swarmecho.curriculum_config.maps.scripts.maze_builder.maze_builder_core import validate_map_name
+from swarmecho.curriculum_config.maps.scripts.maze_builder.map_names import validate_map_name
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _INDEX = _SCRIPT_DIR / "index.html"
@@ -64,13 +61,16 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib API
         path = urlparse(self.path).path
         if path == "/api/buildings":
-            self._send_json(HTTPStatus.OK, {"ok": True, "maps": list(available_maps())})
+            self._send_json(HTTPStatus.OK, {"ok": True, "maps": list(available_maps(MAP_DIR))})
             return
         if path == "/api/buildings/new":
             self._send_json(HTTPStatus.OK, {"ok": True, "document": new_document()})
             return
         if path.startswith("/api/buildings/"):
             try:
+                if path.startswith("/api/buildings/template/"):
+                    self._send_json(HTTPStatus.OK, {"ok": True, "document": template_document(path.rsplit("/", 1)[1])})
+                    return
                 name = validate_map_name(path.removeprefix("/api/buildings/"))
                 self._send_json(
                     HTTPStatus.OK,
@@ -93,6 +93,10 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/api/buildings/import":
+                import yaml
+                self._send_json(HTTPStatus.OK, {"ok": True, "document": document_from_map_data(yaml.safe_load(payload["yaml"]))})
+                return
             if path == "/api/buildings/new":
                 self._send_json(
                     HTTPStatus.OK,
@@ -170,31 +174,23 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if path == "/api/export-machine":
-                machine = crop_canvas_payload(payload)
-                self._send_json(HTTPStatus.OK, {"ok": True, "machine_maze": machine})
-                return
-            if path == "/api/normalize-machine":
-                machine = normalize_machine_maze(payload)
-                self._send_json(HTTPStatus.OK, {"ok": True, "machine_maze": machine})
-                return
-            if path == "/api/create":
-                result = create_map_and_level(payload, overwrite=bool(payload.get("overwrite", False)))
-                self._send_json(HTTPStatus.OK, {"ok": True, **result})
-                return
             self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:  # return user-facing GUI error
             self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the SwarmEcho maze builder web UI.")
+    parser = argparse.ArgumentParser(description="Run the SwarmEcho building editor web UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8766, help="Bind port (default: 8766)")
+    parser.add_argument("--map-dir", type=Path, help="Open/save maps in this folder, e.g. an inspection export")
     args = parser.parse_args()
+    global MAP_DIR
+    if args.map_dir is not None:
+        MAP_DIR = args.map_dir.resolve()
 
     server = ThreadingHTTPServer((args.host, args.port), MazeBuilderHandler)
-    print(f"SwarmEcho maze builder running at http://{args.host}:{args.port}/")
+    print(f"SwarmEcho building editor running at http://{args.host}:{args.port}/")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

@@ -1,4 +1,4 @@
-"""Document helpers for the layered 3D building editor."""
+"""Document helpers for the layered building editor."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
-import yaml
 
 from swarmecho.env.buildings import BUILDING_FORMAT, compile_building, distance_comment
 
@@ -14,6 +13,7 @@ DEFAULT_CELL_SIZE_M = 5.0
 DEFAULT_TILE_THICKNESS_M = 0.25
 DEFAULT_WALL_THICKNESS_M = 0.25
 MAX_GRID_AXIS = 120
+OPENING_KEYS = ("x_doors", "x_windows", "y_doors", "y_windows")
 MAP_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -63,7 +63,7 @@ def new_document(cols: int = 6, rows: int = 4, layers: int = 1) -> dict[str, Any
     ]
     return {
         "format": BUILDING_FORMAT,
-        "name": "custom_3d_building",
+        "name": "custom_building",
         "cols": cols,
         "rows": rows,
         "layers": layers,
@@ -99,7 +99,7 @@ def normalize_document(data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"base_cell {base} is outside {cell_shape}.")
     result = {
         "format": BUILDING_FORMAT,
-        "name": str(data.get("name") or "custom_3d_building").strip(),
+        "name": str(data.get("name") or "custom_building").strip(),
         "cols": cols,
         "rows": rows,
         "layers": layers,
@@ -134,6 +134,17 @@ def normalize_document(data: dict[str, Any]) -> dict[str, Any]:
         result["base_position_m"] = [float(value) for value in position]
     if result["cell_size_m"] <= 0:
         raise ValueError("cell_size_m must be positive.")
+    for key in OPENING_KEYS:
+        values = _coordinates(data.get(key, []), key, x_wall_shape if key.startswith("x") else y_wall_shape)
+        existing = {tuple(v) for v in result[key[0] + "_walls"]}
+        result[key] = [v for v in values if tuple(v) in existing]
+    stairs = deepcopy(data.get("stairs", []))
+    if not isinstance(stairs, list) or any(not isinstance(v, list) or len(v) != 4
+            or any(type(i) is not int for i in v) or v[3] not in range(4) for v in stairs):
+        raise ValueError("stairs must contain [x,y,z,direction] with direction 0..3.")
+    result["stairs"] = stairs
+    # Editing invalidates generated navigation hints. Geometry remains the
+    # authoritative source; saved manual edits get the normal visibility graph.
     return result
 
 
@@ -145,11 +156,13 @@ def _reflect_map_y(data: dict[str, Any]) -> dict[str, Any]:
         if key in result:
             result[key] = [[x, rows - 1 - y, z] for x, y, z in result[key]]
     geometry = result.get("geometry", {})
-    for key in ("tiles", "x_walls", "y_walls"):
+    for key in ("tiles", "x_walls", "y_walls", *OPENING_KEYS):
         # Y walls lie on row boundaries; other coordinates index cells.
-        limit = rows if key == "y_walls" else rows - 1
+        limit = rows if key.startswith("y_") else rows - 1
         if key in geometry:
             geometry[key] = [[x, limit - y, z] for x, y, z in geometry[key]]
+    if "stairs" in geometry:
+        geometry["stairs"] = [[x, rows - 1 - y, z, {1: 3, 3: 1}.get(d, d)] for x, y, z, d in geometry["stairs"]]
     if result.get("base_position_m") is not None:
         x, y, z = result["base_position_m"]
         result["base_position_m"] = [x, rows * float(data["cell_size_m"]) - y, z]
@@ -195,6 +208,7 @@ def document_from_map_data(data: dict[str, Any]) -> dict[str, Any]:
             "base_cell": base_cell,
             **({"base_position_m": base_position} if base_position is not None else {}),
             "target_exclusion_cells": data.get("target_exclusion_cells", []),
+            **{key: geometry.get(key, []) for key in (*OPENING_KEYS, "stairs")},
         }
     )
 
@@ -227,6 +241,7 @@ def map_data_from_document(document: dict[str, Any]) -> dict[str, Any]:
             "tiles": doc["tiles"],
             "x_walls": doc["x_walls"],
             "y_walls": doc["y_walls"],
+            **{key: doc[key] for key in (*OPENING_KEYS, "stairs")},
         },
         "base_position_m": doc.get(
             "base_position_m",
@@ -346,6 +361,8 @@ def add_layer(document: dict[str, Any]) -> dict[str, Any]:
     doc["y_walls"].extend(
         [[x, y, new_layer] for x, y, z in doc["y_walls"] if z == source_layer]
     )
+    for key in OPENING_KEYS:
+        doc[key].extend([[x, y, new_layer] for x, y, z in list(doc[key]) if z == source_layer])
     doc["target_exclusion_cells"].extend(
         [
             [x, y, new_layer]
@@ -368,12 +385,14 @@ def delete_layer(document: dict[str, Any], layer: int) -> dict[str, Any]:
     if doc["layers"] == 1:
         raise ValueError("A building must retain at least one storey.")
 
-    for key in ("interior_cells", "target_exclusion_cells", "x_walls", "y_walls"):
+    for key in ("interior_cells", "target_exclusion_cells", "x_walls", "y_walls", *OPENING_KEYS):
         doc[key] = [
             [x, y, z - 1 if z > layer else z]
             for x, y, z in doc[key]
             if z != layer
         ]
+    doc["stairs"] = [[x, y, z - 1 if z > layer else z, d] for x, y, z, d in doc["stairs"]
+                     if z not in (layer - 1, layer)]
     doc["tiles"] = [
         [x, y, z - 1 if z > layer + 1 else z]
         for x, y, z in doc["tiles"]
@@ -390,7 +409,7 @@ def delete_layer(document: dict[str, Any], layer: int) -> dict[str, Any]:
     return normalize_document(doc)
 
 
-def expand_document(
+def _expand_document(
     document: dict[str, Any], direction: str, delta: int = 1
 ) -> dict[str, Any]:
     """Resize one horizontal edge, copying its neighbor when growing."""
@@ -504,13 +523,62 @@ def expand_document(
     return normalize_document(doc)
 
 
+def expand_document(document, direction, delta=1):
+    """Resize existing geometry and its shared-face annotations together."""
+    original = normalize_document(document)
+    plain = deepcopy(original)
+    for key in (*OPENING_KEYS, "stairs"):
+        plain[key] = []
+    result = _expand_document(plain, direction, delta)
+    axis = 0 if direction in {"west", "east"} else 1
+    prepend = direction in {"west", "north"}
+    old = original["cols" if axis == 0 else "rows"]
+    for key in (*OPENING_KEYS, "stairs"):
+        coords = []
+        for value in original[key]:
+            v = value.copy()
+            boundary = key.startswith("xy"[axis] + "_")
+            if delta == -1 and v[axis] == (0 if prepend else old - 1) and not boundary:
+                continue
+            if prepend:
+                v[axis] += delta
+            limit = result["cols" if axis == 0 else "rows"]
+            if not (0 <= v[axis] < limit + int(boundary)):
+                continue
+            if boundary and v[axis] in (0, limit):
+                continue
+            coords.append(v)
+            if delta == 1 and not boundary and key != "stairs" and value[axis] == (0 if prepend else old - 1):
+                copy = v.copy(); copy[axis] = 0 if prepend else old
+                coords.append(copy)
+        result[key] = coords
+    return normalize_document(result)
+
+
+def template_document(kind):
+    """Small editable examples built from the exact runtime primitives."""
+    if kind not in {"door", "window", "staircase"}:
+        raise ValueError("Unknown template.")
+    doc = new_document(2, 2, 2 if kind == "staircase" else 1)
+    doc["name"] = f"template_{kind}"
+    doc["base_cell"] = [1, 1, 0]
+    if kind == "staircase":
+        doc["tiles"].extend([[x, y, 1] for x in range(2) for y in range(2) if (x, y) != (0, 0)])
+        doc["stairs"] = [[0, 0, 0, 0]]
+    else:
+        doc["x_walls"].extend([[1, y, 0] for y in range(2)])
+        doc["x_doors" if kind == "door" else "x_windows"] = [[1, 0, 0]]
+    return normalize_document(doc)
+
+
 def document_yaml(document: dict[str, Any]) -> str:
     """Return exactly the normalized map payload consumed by validation/save."""
+    import yaml
     return yaml.safe_dump(map_data_from_document(document), sort_keys=False)
 
 
 def validate_document(document: dict[str, Any]) -> dict[str, Any]:
-    """Run the same map compiler used by 3D level loading."""
+    """Run the same map compiler used by level loading."""
     data = map_data_from_document(document)
     building = compile_building(data)
     return {
@@ -526,13 +594,16 @@ def validate_document(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_document(path: str | Path) -> dict[str, Any]:
-    source = Path(path)
+    import yaml
+    from swarmecho.core.compatibility import resolve_map_file
+    source = resolve_map_file(path, Path(path).parent)
     return document_from_map_data(yaml.safe_load(source.read_text(encoding="utf-8")))
 
 
 def save_document(document: dict[str, Any], path: str | Path) -> Path:
     """Validate and atomically save one v1 map."""
     target = Path(path)
+    import yaml
     data = map_data_from_document(document)
     building = compile_building(data)
     text = distance_comment(building) + "\n" + yaml.safe_dump(data, sort_keys=False)
@@ -544,6 +615,7 @@ def save_document(document: dict[str, Any], path: str | Path) -> Path:
 
 
 def available_maps(directory: Path = MAP_DIR) -> Iterable[str]:
+    import yaml
     for path in sorted(directory.glob("*.yaml")):
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))

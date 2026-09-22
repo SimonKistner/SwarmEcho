@@ -37,7 +37,7 @@ def test_visibility_blocks_crossings_but_allows_parallel_clear_paths():
 
 def test_obstacles_default_off_even_for_an_obstacle_level(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from swarmecho.env.baseline3d import Baseline3DConfig
+    from swarmecho.env.environment import EnvConfig
 
     building = SimpleNamespace(
         world_size_m=np.array([10., 10., 10.]), base_position_m=np.array([1., 1., 1.]),
@@ -45,8 +45,8 @@ def test_obstacles_default_off_even_for_an_obstacle_level(tmp_path, monkeypatch)
         wall_thickness_m=.25, tile_thickness_m=.25,
         solid_min_m=np.zeros((0, 3)), solid_max_m=np.zeros((0, 3)),
     )
-    level = SimpleNamespace(env=Baseline3DConfig(num_obstacles=3), building=building, building_name="test")
-    monkeypatch.setattr(generator, "load_level_3d", lambda _: level)
+    level = SimpleNamespace(env=EnvConfig(num_obstacles=3), building=building, building_name="test")
+    monkeypatch.setattr(generator, "load_level", lambda _: level)
     def unexpected(*args, **kwargs):
         raise AssertionError("Random obstacles must be opt-in")
     monkeypatch.setattr(generator, "generate_obstacles", unexpected)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from swarmecho.core.compatibility import canonical_marker
 
 
 EVAL_STAGES = (
@@ -106,7 +107,7 @@ def train_artifact_root(run_dir: str | Path) -> Path:
 
 
 def train_replay_root(run_dir: str | Path) -> Path:
-    """Return the 3D equivalent of the maintained training-video directory."""
+    """Return the equivalent of the maintained training-video directory."""
     return train_artifact_root(run_dir) / "replays"
 
 
@@ -117,7 +118,7 @@ def eval_checkpoint_artifact_root(run_dir: str | Path, checkpoint_path: str | Pa
 def eval_checkpoint_replay_root(
     run_dir: str | Path, checkpoint_path: str | Path, cfg: Any
 ) -> Path:
-    """Return the replay directory for one checkpoint-scoped 3D evaluation."""
+    """Return the replay directory for one checkpoint-scoped evaluation."""
     return eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg) / "replays"
 
 
@@ -180,7 +181,7 @@ def save_eval_layout(path: str | Path, obstacle_min: Any, obstacle_max: Any) -> 
         raise ValueError("Evaluation layout bounds must have shape (obstacles, 3).")
     output = Path(path)
     write_manifest(output, {
-        "format": "swarmecho-3d-obstacle-layout/v1",
+        "format": "swarmecho-obstacle-layout/v1",
         "obstacle_min": lower.tolist(),
         "obstacle_max": upper.tolist(),
     })
@@ -189,7 +190,7 @@ def save_eval_layout(path: str | Path, obstacle_min: Any, obstacle_max: Any) -> 
 
 def load_eval_layout(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("format") != "swarmecho-3d-obstacle-layout/v1":
+    if canonical_marker(payload.get("format")) != "swarmecho-obstacle-layout/v1":
         raise ValueError(f"Unsupported obstacle layout: {path}")
     return (
         np.asarray(payload["obstacle_min"], dtype=np.float32),
@@ -212,8 +213,8 @@ def save_eval_info_csv(
 ) -> Path:
     """Save the canonical per-episode result of a parallel evaluation."""
     targets = np.asarray(target_positions, dtype=np.float32)
-    if targets.ndim != 2 or targets.shape[-1] not in {2, 3}:
-        raise ValueError("Evaluation targets must have shape (episodes, 2) or (episodes, 3).")
+    if targets.ndim != 2 or targets.shape[-1] != 3:
+        raise ValueError("Evaluation targets must have shape (episodes, 3).")
     dimensions = targets.shape[-1]
     bases = np.asarray(base_positions, dtype=np.float32)
     if bases.shape == (dimensions,):
@@ -327,7 +328,7 @@ def save_eval_info_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        coordinates = ["x", "y"] + (["z"] if dimensions == 3 else [])
+        coordinates = ["x", "y", "z"]
         if robust_rates is None:
             writer.writerow([*coordinates, "stage", "distance_to_base", "final_chain_length", *obstacle_columns])
             writer.writerows(
@@ -388,7 +389,7 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
     with path.open("r", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
         fields = set(reader.fieldnames or [])
-        base_required = {"x", "y", "distance_to_base"}
+        base_required = {"x", "y", "z", "distance_to_base"}
         rate_required = {
             "visually_found_rate",
             "found_and_delivered_rate",
@@ -427,9 +428,7 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
                     stage in {"found_and_delivered", "chain_success"}
                 )
                 visual_rate = float(stage != "not_found")
-            point = (float(row["x"]), float(row["y"]))
-            if "z" in (reader.fieldnames or []):
-                point += (float(row["z"]),)
+            point = (float(row["x"]), float(row["y"]), float(row["z"]))
             positions.append(point)
             stages.append(stage)
             chain_success_rates.append(chain_rate)
@@ -461,7 +460,7 @@ def load_eval_info_csv(path: str | Path) -> dict[str, np.ndarray]:
 
     return {
         "positions": np.asarray(positions, dtype=np.float32).reshape(
-            (-1, 3 if positions and len(positions[0]) == 3 else 2)
+            (-1, 3)
         ),
         "stages": np.asarray(stages, dtype="<U21"),
         "chain_success_rate": np.asarray(chain_success_rates, dtype=np.float32),

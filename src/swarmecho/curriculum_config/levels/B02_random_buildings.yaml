@@ -1,0 +1,41 @@
+env:
+  map_names: []
+  num_agents: 5
+  comm_radius: 15.0
+  comm_radius_base: 15.0
+  visual_radius: 5.0
+  radar_bins: 16
+  coverage_voxel_size: 2.5
+  num_obstacles: 0
+  max_steps: 1000
+  spawn_delay: 5
+random_buildings:
+  enabled: true
+  length_m: 30.0
+  width_m: 30.0
+  stories: 3
+  cell_size_m: 5.0
+  rooms_per_story_min: 4
+  rooms_per_story_max: 8
+  staircase_max: 1
+  shaft_max: 1
+  save_training_maps: false
+reward:
+  chain_reward_system: obstacle_geodesic
+training:
+  num_envs: 4000
+  num_minibatches: 20
+  seed: 42
+  minimum_geodesic_separation: false
+evaluation:
+  random_eval: true
+  random_eval_envs: 5
+  random_eval_maps: null
+  training_robustness: false
+  eval_parallel_envs: 4000
+  training_heatmap_creation: true
+  eval_video: true
+logging:
+  run_name: B02_random_buildings
+  use_timestamp_postfix: true
+  terminal_log_init: true

@@ -1,131 +1,53 @@
-"""
-training/multi_train.py
-=======================
-Run the same training config sequentially across N different random seeds.
+"""Sequential multi-seed training entry point for the trainer."""
 
-Each run gets a unique, non-overlapping seed and a run-name postfix of
-``_seed_1``, ``_seed_2``, ... ``_seed_N`` (where the number is the run
-index, NOT the actual seed value).
+from __future__ import annotations
 
-Usage
------
-    uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5
-
-    # Specify the base seed used to generate the per-run seeds:
-    uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze01_v2 seeds=5 base_seed=42
-
-    # Any other training/env overrides work as usual:
-    uv run swarmecho-multi-train level=M01_small_maze logging.run_name=maze seeds=3 \\
-        training.total_timesteps=30000000 logging.wandb_mode=offline
-
-Notes
------
-- ``seeds=N``      — how many sequential runs to launch (default: 3).
-- ``base_seed=N``  — seed for the seed-generator itself (default: 42).
-  Controls which batch of per-run seeds is produced.  Changing this gives
-  you a completely different, reproducible set of seeds.
-- Seeds are drawn from a shared random pool, guaranteed unique within the
-  batch.  They are printed at startup so results are always reproducible.
-- ``logging.run_name`` is required.  If not supplied, a default of
-  ``multi_run`` is used.
-- ``base_seed`` is a multi_train-only argument and does NOT appear in any
-  individual run's config or checkpoint.
-"""
-
-import random
 import sys
 
-from swarmecho.core.config import load_config, validate_config
-from swarmecho.training.runner import train
+from swarmecho.core.config import load_level_cli
+from swarmecho.training.orchestration import (
+    explicit_override,
+    generate_unique_seeds,
+    pop_arg,
+)
+from swarmecho.training.train import train
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _pop_arg(args: list[str], key: str, default):
-    """Remove ``key=value`` from args list and return (value, remaining_args)."""
-    value = default
-    remaining = []
-    for arg in args:
-        if arg.startswith(f"{key}="):
-            try:
-                value = type(default)(arg.split("=", 1)[1])
-            except (ValueError, TypeError):
-                value = arg.split("=", 1)[1]
-        else:
-            remaining.append(arg)
-    return value, remaining
-
-
-def _generate_unique_seeds(n: int, base_seed: int) -> list[int]:
-    """
-    Draw N unique integers in [1, 2**31 - 1] using Python's random module
-    seeded by *base_seed*, so the sequence is itself reproducible.
-    """
-    rng = random.Random(base_seed)
-    seeds = set()
-    while len(seeds) < n:
-        seeds.add(rng.randint(1, 2**31 - 1))
-    # Deterministic ordering: sort so the sequence is stable
-    return sorted(seeds)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Train one level sequentially across reproducible random seeds."""
     raw_args = sys.argv[1:]
+    count, raw_args = pop_arg(raw_args, "seeds", 3)
+    base_seed, raw_args = pop_arg(raw_args, "base_seed", 42)
 
-    # --- Pull out multi_train-specific args before passing to load_config ---
-    num_seeds, raw_args = _pop_arg(raw_args, "seeds", 3)
-    base_seed, raw_args = _pop_arg(raw_args, "base_seed", 42)
+    base_level = load_level_cli(raw_args)
+    base_run_name = base_level.logging.run_name or "multi_run"
+    seeds = generate_unique_seeds(count, base_seed)
+    explicit_group = explicit_override(raw_args, "logging.wandb_group")
 
-    # Load config once (without per-run overrides) to read the base run_name
-    # and validate level= etc.  base_seed is already resolved above.
-    print("\n══════════════════════════════════════════════════════")
-    print("  SwarmEcho — multi_train  (loading base config)")
-    print("══════════════════════════════════════════════════════")
-    base_cfg = load_config(cli_overrides=True, overrides=raw_args)
-    validate_config(base_cfg)
+    print("\n" + "=" * 60)
+    print("  SwarmEcho multi-train")
+    print("=" * 60)
+    print(f"  level      : {base_level.name}")
+    print(f"  num_runs   : {count}")
+    print(f"  base_seed  : {base_seed}")
+    print(f"  run seeds  : {seeds}")
+    print(f"  base name  : {base_run_name}")
+    print("=" * 60)
 
-    base_run_name = str(base_cfg.logging.run_name) if base_cfg.logging.run_name else "multi_run"
-
-    seeds = _generate_unique_seeds(num_seeds, base_seed)
-
-    print(f"  Multi-run config:")
-    print(f"    num_runs   : {num_seeds}")
-    print(f"    base_seed  : {base_seed}  (seed-generator seed — set via base_seed=N)")
-    print(f"    run seeds  : {seeds}")
-    print(f"    base name  : {base_run_name}")
-    print()
-
-    # --- Sequential runs ---------------------------------------------------
-    for run_idx, seed in enumerate(seeds, start=1):
-        run_name = f"{base_run_name}_seed_{run_idx}"
-
-        print(f"\n{'═'*54}")
-        print(f"  Run {run_idx}/{num_seeds}  |  seed={seed}  |  name={run_name}")
-        print(f"{'═'*54}\n")
-
-        # Build a fresh config for this run by re-loading with the seed and
-        # run_name injected as extra overrides.  This guarantees each call to
-        # train() receives a completely independent, readonly config object.
+    for run_index, seed in enumerate(seeds, start=1):
+        run_name = f"{base_run_name}_seed_{run_index}"
         run_overrides = raw_args + [
             f"training.seed={seed}",
             f"logging.run_name={run_name}",
         ]
-        if base_cfg.logging.get("wandb_mode", "disabled") != "disabled":
+        if base_level.logging.wandb_mode != "disabled" and explicit_group is None:
             run_overrides.append(f"logging.wandb_group={base_run_name}")
-        cfg = load_config(cli_overrides=True, overrides=run_overrides)
-        validate_config(cfg)
+        level = load_level_cli(run_overrides)
 
-        train(cfg)
+        print(f"\n  Run {run_index}/{count} | seed={seed} | name={run_name}")
+        train(level)
 
-    print(f"\n{'═'*54}")
-    print(f"  multi_train complete — {num_seeds} run(s) finished.")
-    print(f"{'═'*54}\n")
+    print(f"\nmulti-train complete: {count} run(s) finished.")
 
 
 if __name__ == "__main__":
