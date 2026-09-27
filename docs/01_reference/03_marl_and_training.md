@@ -5,10 +5,8 @@ The maintained trainer is `training/train.py`, using `PPOTrainer` from
 memory. A shared decentralized actor emits three pre-squash action components;
 tanh produces the normalized forces supplied to the environment.
 
-The agent-centric critic produces one value per agent. Its observation mode
-attends over team observations. Its optional privileged mode uses compact
-features assembled in `env/critic.py`, retaining the active-agent attention
-path. The actor's inputs do not acquire privileged state.
+The agent-centric critic produces one value per agent and attends over team
+observations. `network.critic_type` currently accepts only `observation`.
 
 ## Recurrent communication
 

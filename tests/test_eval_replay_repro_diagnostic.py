@@ -33,11 +33,11 @@ import yaml
 from flax import nnx
 
 from swarmecho.core.config import load_level
-from swarmecho.env.environment import make_env_fns
+from swarmecho.env.obstacles import segments_blocked
 from swarmecho.training.artifacts import evaluation_stage, load_eval_info_csv
 from swarmecho.training.checkpoints import restore_model_checkpoint
 from swarmecho.training.evaluate import run_parallel_evaluation
-from swarmecho.training.train import build_model, evaluate_model
+from swarmecho.training.train import _evaluation_env_fns, build_model, evaluate_model
 
 
 _DEFAULT_CHECKPOINT = Path("outputs/M00_tall_v1/checkpoints/ckpt_000351")
@@ -130,7 +130,7 @@ def _build_tracer(model, level):
     outputs at every step for comparison.
     """
     cfg = level.env
-    reset, step, observations, _ = make_env_fns(level.building, cfg)
+    reset, step, observations, _ = _evaluation_env_fns(level)
     num_agents = cfg.num_agents
     cadence = int(model.memory_comm_every_k_steps)
 
@@ -155,6 +155,15 @@ def _build_tracer(model, level):
             jnp.linalg.norm(state.pos - state.base_pos[None, :], axis=-1)
             <= cfg.comm_radius_base
         ) & state.active
+        if state.solid_min.shape[0]:
+            comm_mask &= ~segments_blocked(
+                state.pos[:, None, :], state.pos[None, :, :],
+                state.solid_min, state.solid_max,
+            )
+            in_base_range &= ~segments_blocked(
+                state.pos, state.base_pos,
+                state.solid_min, state.solid_max,
+            )
         share_now = (step_index % cadence) == 0
         observation = observations(state)
         (
@@ -176,7 +185,8 @@ def _build_tracer(model, level):
             base_memory_mask=(
                 base_memory_valid
                 & in_base_range
-                & ~state.target_known
+                & (jnp.ones_like(state.target_known) if cfg.base_keeps_informing
+                   else ~state.target_known)
                 & share_now
             ),
             deterministic=True,
@@ -184,7 +194,7 @@ def _build_tracer(model, level):
         next_state = step(state, jnp.tanh(means))
         reporters = state.target_known & in_base_range
         reporter_index = jnp.argmax(reporters.astype(jnp.int32))
-        should_store = ~base_memory_valid & jnp.any(reporters)
+        should_store = ~base_memory_valid & jnp.any(reporters) & share_now
         next_base_signature = jnp.where(
             should_store, emitted_signature[reporter_index], base_signature
         )

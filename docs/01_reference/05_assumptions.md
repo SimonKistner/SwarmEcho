@@ -6,8 +6,8 @@
 - Config files are strict: unknown sections or fields are rejected.
 - Each level selects one building map through `env.map_names`.
 - All bundled map and level files remain available.
-- The actor uses local observations and configured communication; privileged
-  critic features affect training only.
+- The actor uses local observations and configured communication; the critic
+  attends over team observations.
 - Reward defaults and every bundled level's values are preserved through the
   removal of the old environment.
 - Checkpoint architecture, observation, and value-normalization contracts remain

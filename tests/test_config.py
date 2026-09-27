@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -76,6 +77,56 @@ def test_geodesic_reward_does_not_require_generated_obstacles():
     assert level.env.num_obstacles == 0
     assert level.building.solid_min_m.shape[0] > 0
     assert level.reward.chain_reward_system == "obstacle_geodesic"
+
+
+def test_b02_evaluation_uses_its_training_separation_with_a_fixed_base(monkeypatch):
+    from swarmecho.training import train as train_module
+
+    for name in (
+        "B02a_random_buildings_find_only",
+        "B02b_random_buildings_deliver",
+        "B02c_random_buildings",
+        "B02y_random_buildings_test",
+    ):
+        with open(f"src/swarmecho/curriculum_config/levels/{name}.yaml", encoding="utf-8") as source:
+            assert yaml.safe_load(source)["evaluation"]["apply_trainings_min_geo_separation"]
+
+    level = load_level("M00_no_maze_open_cuboid")
+    level = replace(
+        level,
+        training=replace(
+            level.training, minimum_geodesic_separation=True,
+            minimum_geodesic_separation_multiplier=2.0,
+            skip_on_no_pair_found=True, spawn_pair_max_attempts=7,
+        ),
+        evaluation=replace(level.evaluation, apply_trainings_min_geo_separation=True),
+    )
+    calls = []
+    sentinel = object()
+
+    def fake_make_env_fns(*args, **kwargs):
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(train_module, "make_env_fns", fake_make_env_fns)
+    train_module._EVALUATION_ENV_CACHE.clear()
+    try:
+        assert train_module._evaluation_env_fns(level) is sentinel
+        assert calls[-1]["minimum_geodesic_separation"] is True
+        assert calls[-1]["minimum_geodesic_separation_multiplier"] == 2.0
+        assert "skip_on_no_pair_found" not in calls[-1]
+        assert calls[-1]["spawn_pair_max_attempts"] == 7
+        assert calls[-1]["memory_comm_every_k_steps"] == level.network.memory_comm_every_k_steps
+        assert "randomize_base" not in calls[-1]
+
+        disabled = replace(
+            level,
+            evaluation=replace(level.evaluation, apply_trainings_min_geo_separation=False),
+        )
+        train_module._evaluation_env_fns(disabled)
+        assert calls[-1]["minimum_geodesic_separation"] is False
+    finally:
+        train_module._EVALUATION_ENV_CACHE.clear()
 
 
 def test_cli_accepts_dotlist_overrides():

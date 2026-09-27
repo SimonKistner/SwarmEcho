@@ -116,3 +116,49 @@ def test_obstacle_blocks_tarmac_reporting_and_base_memory_replay():
     _, _, memory_mask, _, _ = communication(states, valid)
     assert not memory_mask[0, 1]  # Base memory cannot replay through the cuboid.
     assert memory_mask[0, 2]  # An unobstructed drone can receive base memory.
+
+
+def test_base_keeps_informing_replays_to_already_informed_agents():
+    level = load_level()
+    reset, _, _, _ = make_env_fns(level.building, level.env)
+    state = reset(jax.random.PRNGKey(19))._replace(
+        active=jnp.ones(level.env.num_agents, dtype=jnp.bool_),
+        target_known=jnp.ones(level.env.num_agents, dtype=jnp.bool_),
+    )
+    states = jax.tree_util.tree_map(lambda item: item[None], state)
+    valid = jnp.asarray([True])
+    signature = jnp.zeros((1, 4))
+    value = jnp.zeros((1, 3))
+    _, in_base, default_mask, _, _ = _communication_inputs(
+        states, level.env, valid, signature, value,
+    )
+    _, _, repeated_mask, _, _ = _communication_inputs(
+        states, replace(level.env, base_keeps_informing=True),
+        valid, signature, value,
+    )
+    assert not default_mask.any()
+    assert in_base.any()
+    assert jnp.array_equal(repeated_mask, in_base[0][None, :])
+
+
+def test_base_stores_report_only_on_a_communication_tick():
+    level = load_level()
+    reset, _, _, _ = make_env_fns(level.building, level.env)
+    state = reset(jax.random.PRNGKey(20))._replace(
+        active=jnp.ones(level.env.num_agents, dtype=jnp.bool_),
+        target_known=jnp.ones(level.env.num_agents, dtype=jnp.bool_),
+    )
+    states = jax.tree_util.tree_map(lambda item: item[None], state)
+    _, in_base, _, _, _ = _communication_inputs(
+        states, level.env, jnp.asarray([False]),
+        jnp.zeros((1, 4)), jnp.zeros((1, 3)),
+    )
+    emitted_signature = jnp.ones((1, level.env.num_agents, 4))
+    emitted_value = jnp.ones((1, level.env.num_agents, 3))
+    saved = _update_base_memory(
+        states, in_base, emitted_signature, emitted_value,
+        jnp.asarray([False]), jnp.zeros((1, 4)), jnp.zeros((1, 3)),
+        jnp.asarray([False]), share_now=jnp.asarray([False]),
+    )
+    assert not saved[0][0]
+    assert not saved[1].any()

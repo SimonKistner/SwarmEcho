@@ -28,6 +28,7 @@ IMPORTANT_AI-AGENT_MUST_READ/
 
 # Outputs — large binary artifacts, never commit
 outputs/
+src/swarmecho/curriculum_config/maps/random_building_bank/pools/
 *.mp4
 *.gif
 

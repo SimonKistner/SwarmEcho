@@ -48,6 +48,22 @@ collisions, discovery, delivery, chain success, gap shaping, idle termination,
 and optional redundancy/chain-efficiency bonuses.
 
 `chain_reward_system` supports `euclidean` and `obstacle_geodesic`.
+For a partial chain, `euclidean` chooses the base-connected drone closest in
+straight-line distance to the target and the target-connected drone closest to
+the base. `obstacle_geodesic` jointly selects both leaders by the smallest
+free-space roadmap gap. The team pays `time_penalty_per_step` on every step,
+divided equally among active drones. For a target mission, after the required
+target knowledge reaches the base, each contributing drone receives
+`gap_reduction_meter_bonus * max(L - gap, 0)` per step,
+where `L` is the selected system's base-to-target distance. In obstacle mode,
+both `L` and the gap use the free-space roadmap. The bonus scales with the
+actual route length and reaches its maximum at zero gap, including during the
+chain hold. Only drones on the shortest communication paths from the respective
+endpoint to its selected leader receive the bonus. When redundancy reward is
+enabled and the chain is complete, all drones on a valid complete path can
+receive it. Coverage missions have no gap bonus or chain-gap computation. The optional
+chain-contributor observation uses the same mode-specific selection once a
+complete chain exists.
 Authored buildings and generated obstacles share the planning machinery.
 Episode completion can depend on holding a chain, finding/delivering the target,
 idleness, or the episode length, according to the selected level.

@@ -79,35 +79,12 @@ model state. Existing `ppo/*` metrics remain update averages, weighted by active
 sample count. `ppo/value_loss` describes the objective in its configured units,
 not the raw RMSE. Compare the new RMSE metrics across normalization modes.
 
-## Optional privileged critic
+## Critic input
 
-Set `network.critic_type: privileged` (or CLI `network.critic_type=privileged`)
-to enable the compact state input. The default `observation` keeps the existing
-critic network, inputs, initialization, and PPO calculation; no privileged
-features are collected or stored. Level defaults are not changed.
-
-Before the critic encoder, GRU and all-active-agent attention, each agent receives
-its existing observation plus normalized position, six adjacent coverage cells,
-the true relative target vector, a relative base vector unless already observed,
-chain-holding progress, base target knowledge, and episode progress unless already
-observed. Coordinates use the longest map dimension as their scale, consistent
-with actor base/target vectors. Coverage lookups clamp at grid boundaries.
-There is no inactivity counter, actor memory/message input, new raycast, path
-search, or full coverage-map copy. Actor observations and evaluation actions
-receive no privileged information. The removed graph-masked privileged classes
-are not used by this path.
-
-Rollouts store nine floats per agent and eight shared floats per environment
-(nine when episode progress is absent from actor observations). Shared data is
-broadcast only during critic computation; existing observations are not copied
-into a separate privileged buffer. Collection uses pre-action state, with the
-same feature assembly for PPO replay and final-state bootstrapping. Inactive
-agent tokens are zeroed and excluded from attention and losses as before.
-
-Privileged checkpoints record their input layout. Switching critic types requires
-a compatible checkpoint or a fresh run; older observation checkpoints still load
-under the original observation settings. No throughput guarantee is made without
-a matched benchmark.
+`network.critic_type: observation` is the only supported setting. It remains
+explicit in configuration so a future critic experiment can add another input
+type without changing the setting name. The critic attends over the agents'
+observations, using the same observation width across the B02 curriculum.
 
 ## Checkpoint persistence
 

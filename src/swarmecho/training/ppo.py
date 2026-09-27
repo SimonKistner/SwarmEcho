@@ -13,9 +13,6 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from swarmecho.env.critic import assemble_privileged_observations
-
-
 class RunningValueNormalizer(nnx.Module):
     """Pooled running target moments (parallel variance merge), checkpointed by NNX."""
 
@@ -82,14 +79,8 @@ def replay(model, mb, key):
     sampled = mu + std * jax.random.normal(key, mu.shape)
     squashed = gaussian + correction(sampled)
     active = mb["active_masks"]
-    critic_obs = mb["critic_obs"]
-    if getattr(model, "privileged_inputs", False):
-        critic_obs = assemble_privileged_observations(
-            mb["obs"], mb["critic_agent_features"], mb["critic_global_features"], active,
-            include_base_vector=model.privileged_include_base_vector,
-        )
     _, values = model.critic.values_sequence(
-        critic_obs, mb["initial_critic_h"], mb["rnn_resets"] | ~active,
+        mb["obs"], mb["initial_critic_h"], mb["rnn_resets"] | ~active,
         deterministic=False, active=active,
     )
     return values, log_probs, legacy, gaussian, squashed

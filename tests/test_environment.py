@@ -30,12 +30,22 @@ BUILDING = load_building(
 )
 
 
-def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
-    building = replace(
+def _partial_wall_building():
+    """Keep the authored wall grid and its solid prism in agreement."""
+    x_walls = BUILDING.x_walls.copy()
+    x_walls[2, 1:3, :] = True
+    half_width = BUILDING.wall_thickness_m / 2
+    return replace(
         BUILDING,
-        solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
-        solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
+        x_walls=x_walls,
+        solid_min_m=np.array([[10. - half_width, 5., 0.]], dtype=np.float32),
+        solid_max_m=np.array([[10. + half_width, 15., 20.]], dtype=np.float32),
+        wall_solid_range=(0, 1),
     )
+
+
+def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
+    building = _partial_wall_building()
     cfg = replace(EnvConfig(), num_agents=1, visual_radius=1.,
                   comm_radius=1., comm_radius_base=1., max_steps=1)
     reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic")
@@ -58,11 +68,7 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
 
 
 def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
-    building = replace(
-        BUILDING,
-        solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
-        solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
-    )
+    building = _partial_wall_building()
     cfg = replace(EnvConfig(), num_agents=1, num_obstacles=1)
     reset, _, _, _ = make_env_fns(building, cfg)
     lo, hi = jnp.array([[2., 2., 2.]]), jnp.array([[3., 3., 3.]])
@@ -148,6 +154,108 @@ def _functions(**overrides):
     return cfg, make_env_fns(BUILDING, cfg)
 
 
+def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base():
+    cfg = replace(
+        EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=1.5,
+        comm_radius_base=1.5, visual_radius=1.0, max_steps=20,
+        no_movement_termination_steps=20, hold_chain_for=20,
+        success_condition="delivery",
+    )
+    reset, step, _, _ = make_env_fns(
+        BUILDING, cfg, target_found_requires_delivery=True,
+        memory_comm_every_k_steps=3,
+    )
+    state = reset(jax.random.PRNGKey(91), target_pos=jnp.array([17., 17., 12.]))
+    state = state._replace(
+        pos=jnp.array([[10., 10., 2.], [11., 10., 2.], [12.4, 10., 2.]]),
+        vel=jnp.zeros((3, 3)), base_pos=jnp.array([2., 2., 2.]),
+        active=jnp.ones(3, dtype=jnp.bool_),
+        target_known=jnp.array([True, False, False]),
+        base_target_known=jnp.bool_(False),
+    )
+    action = jnp.zeros((3, 3))
+    state = step(state, action)  # Tick 0: A informs B, but B cannot relay yet.
+    np.testing.assert_array_equal(state.target_known, [True, True, False])
+    assert not state.base_target_known
+    state = step(step(state, action), action)  # No sharing on ticks 1 and 2.
+    np.testing.assert_array_equal(state.target_known, [True, True, False])
+    state = step(state, action)  # Tick 3: B informs C without a target sighting.
+    np.testing.assert_array_equal(state.target_known, [True, True, True])
+    assert not state.fully_connected
+
+    # B can report the remembered target after moving out of the original group.
+    state = state._replace(
+        pos=state.pos.at[1].set(jnp.array([3., 2., 2.])),
+        vel=jnp.zeros((3, 3)),
+    )
+    state = step(step(state, action), action)
+    assert not state.base_target_known
+    state = step(state, action)  # Tick 6.
+    assert state.base_target_known
+    assert state.success
+    assert not state.fully_connected
+
+
+def test_informed_base_broadcasts_remembered_target_on_a_later_tick():
+    cfg = replace(
+        EnvConfig(), num_agents=2, spawn_delay=0, comm_radius=1.5,
+        comm_radius_base=1.5, visual_radius=1.0, max_steps=20,
+        no_movement_termination_steps=20, hold_chain_for=20,
+    )
+    reset, step, _, _ = make_env_fns(
+        BUILDING, cfg, memory_comm_every_k_steps=3,
+    )
+    state = reset(jax.random.PRNGKey(92), target_pos=jnp.array([17., 17., 12.]))
+    state = state._replace(
+        pos=jnp.array([[3., 2., 2.], [5., 2., 2.]]),
+        vel=jnp.zeros((2, 3)), base_pos=jnp.array([2., 2., 2.]),
+        active=jnp.ones(2, dtype=jnp.bool_),
+        target_known=jnp.array([False, False]),
+        base_target_known=jnp.bool_(True),
+    )
+    action = jnp.zeros((2, 3))
+    state = step(state, action)  # Base informs only the drone in range.
+    np.testing.assert_array_equal(state.target_known, [True, False])
+    state = step(step(state, action), action)
+    np.testing.assert_array_equal(state.target_known, [True, False])
+    state = state._replace(pos=state.pos.at[1].set(jnp.array([4., 2., 2.])))
+    state = step(state, action)  # Next tick: the newly informed drone can relay.
+    np.testing.assert_array_equal(state.target_known, [True, True])
+
+
+def test_target_knowledge_respects_line_of_sight():
+    cfg = replace(
+        EnvConfig(), num_agents=2, spawn_delay=0, num_obstacles=1,
+        comm_radius=3.0, comm_radius_base=1.0, visual_radius=1.0,
+        no_movement_termination_steps=20,
+    )
+    reset, step, _, _ = make_env_fns(BUILDING, cfg)
+    state = reset(
+        jax.random.PRNGKey(93), target_pos=jnp.array([17., 17., 12.]),
+        obstacle_min=jnp.array([[10.45, 9., 1.]]),
+        obstacle_max=jnp.array([[10.55, 11., 3.]]),
+    )._replace(
+        pos=jnp.array([[10., 10., 2.], [11., 10., 2.]]),
+        vel=jnp.zeros((2, 3)), base_pos=jnp.array([2., 2., 2.]),
+        active=jnp.ones(2, dtype=jnp.bool_),
+        target_known=jnp.array([True, False]),
+    )
+    next_state = step(state, jnp.zeros((2, 3)))
+    np.testing.assert_array_equal(next_state.target_known, [True, False])
+
+
+def test_fixed_base_separation_sampling_is_bounded_without_target_skipping():
+    cfg = replace(EnvConfig(), num_agents=1)
+    reset, _, _, _ = make_env_fns(
+        BUILDING, cfg, minimum_geodesic_separation=True,
+        minimum_geodesic_separation_multiplier=100.0,
+        skip_on_no_pair_found=True, spawn_pair_max_attempts=2,
+    )
+    state = reset(jax.random.PRNGKey(94))
+    np.testing.assert_allclose(state.base_pos, BUILDING.base_position_m)
+    assert int(state.spawn_pair_attempts) == 0
+
+
 def test_octant_radar_and_configured_distance_contracts():
     directions = spherical_directions(8)
     assert directions.shape == (8, 3)
@@ -202,7 +310,7 @@ def test_target_sampling_is_independent_of_communication_ranges():
     keys = jax.random.split(jax.random.PRNGKey(41), 32)
     _, (reset, _, _, _) = _functions()
     _, (wide_reset, _, _, _) = _functions(
-        comm_radius_base=500., comm_radius=500., target_spawn_buffer=500.
+        comm_radius_base=500., comm_radius=500.
     )
     targets = jax.vmap(reset)(keys).target_pos
     wide_targets = jax.vmap(wide_reset)(keys).target_pos
@@ -237,6 +345,7 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
         comm_radius_base=4.0,
         comm_radius=3.0,
         visual_radius=2.0,
+        spawn_delay=0,
     )
     base = jnp.asarray([1.0, 1.0, 1.0])
     # 3.5 base hop, four 2.5 communication hops, then a 1.5 visual hop.
@@ -329,11 +438,34 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
     assert reward.shape == (cfg.num_agents,)
     assert terms["coverage"].shape == (cfg.num_agents,)
     assert terms["collision"].shape == (cfg.num_agents,)
-    assert terms["chain_gap"].shape == (cfg.num_agents,)
+    assert terms["time_penalty"].shape == (cfg.num_agents,)
+    assert terms["gap_reduction"].shape == (cfg.num_agents,)
     assert jnp.isfinite(reward).all()
     assert jnp.sum(current.coverage_credit) == pytest.approx(
         jnp.sum(current.coverage & ~previous.coverage), abs=1e-5
     )
+
+
+def test_coverage_pays_time_cost_without_chain_gap_computation(monkeypatch):
+    cfg = replace(EnvConfig(), success_condition="coverage", num_agents=2)
+    reset, _, _, _ = make_env_fns(BUILDING, cfg)
+    state = reset(jax.random.PRNGKey(8))
+    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic")
+
+    def unexpected_gap_calculation(*_args, **_kwargs):
+        raise AssertionError("Coverage must not calculate a target-chain gap")
+
+    monkeypatch.setattr("swarmecho.env.environment.chain_distance_matrix", unexpected_gap_calculation)
+    monkeypatch.setattr("swarmecho.env.environment.obstacle_chain_diagnostics", unexpected_gap_calculation)
+    _, terms = compute_rewards(state, state, reward_cfg, cfg)
+    np.testing.assert_allclose(jnp.sum(terms["time_penalty"]), -5.0)
+    assert jnp.all(terms["time_penalty"][~state.active] == 0.0)
+    np.testing.assert_array_equal(terms["gap_reduction"], [0., 0.])
+
+    both_active = state._replace(active=jnp.ones(2, dtype=jnp.bool_))
+    _, terms = compute_rewards(both_active, both_active, reward_cfg, cfg)
+    np.testing.assert_allclose(terms["time_penalty"], [-2.5, -2.5])
+    np.testing.assert_array_equal(terms["gap_reduction"], [0., 0.])
 
 
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
@@ -402,14 +534,14 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
 
 
 def test_post_delivery_gap_credit_is_limited_to_relay_route():
-    """Match 2D: non-route drones retain the maximum gap penalty."""
+    """A completed route keeps paying its relay drones during the hold."""
     env_cfg = EnvConfig(
         num_agents=4,
         comm_radius_base=4.0,
         comm_radius=4.0,
         visual_radius=4.0,
     )
-    reward_cfg = RewardConfig(max_gap_penalty=5.0)
+    reward_cfg = RewardConfig(time_penalty_per_step=5.0, gap_reduction_meter_bonus=0.125)
     state = EnvState(
         pos=jnp.asarray(
             [[4.5, 1.0, 1.0], [8.5, 1.0, 1.0], [12.5, 1.0, 1.0], [1.0, 4.5, 1.0]]
@@ -434,8 +566,83 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         base_target_known=jnp.bool_(True),
     )
     _, terms = compute_rewards(state, state, reward_cfg, env_cfg)
-    np.testing.assert_allclose(terms["chain_gap"][:3], 0.0)
-    np.testing.assert_allclose(terms["chain_gap"][3], -1.25)
+    np.testing.assert_allclose(terms["time_penalty"], [-1.25] * 4)
+    np.testing.assert_allclose(terms["gap_reduction"], [1.75] * 3 + [0.0])
+
+
+def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
+    """Training reward must trace to the same leaders used to measure its gap."""
+    env_cfg = EnvConfig(num_agents=5, comm_radius_base=5., comm_radius=5., visual_radius=5.)
+    state = EnvState(
+        pos=jnp.array([[4., 0., 0.], [4., 4., 0.], [16., 0., 0.],
+                       [16., 4., 0.], [0., -4., 0.]]),
+        vel=jnp.zeros((5, 3)),
+        base_pos=jnp.array([0., 0., 0.]),
+        target_pos=jnp.array([20., 0., 0.]),
+        active=jnp.ones(5, dtype=bool),
+        coverage=jnp.zeros(BUILDING.target_exclusion.shape, dtype=bool),
+        step=jnp.int32(1),
+        key=jax.random.PRNGKey(0),
+        directly_sees_target=jnp.array([False, False, True, False, False]),
+        is_conn_base=jnp.array([True, True, False, False, True]),
+        is_conn_target=jnp.array([False, False, True, True, False]),
+        target_known=jnp.ones(5, dtype=bool),
+        success=jnp.bool_(False),
+        fully_connected=jnp.bool_(False),
+        chain_held_steps=jnp.int32(0),
+        done=jnp.bool_(False),
+        collided=jnp.zeros(5, dtype=bool),
+        coverage_credit=jnp.zeros(5),
+        base_target_known=jnp.bool_(True),
+    )
+    # A corridor detour makes D1/D3 the roadmap leaders, while straight-line
+    # distance to the opposite endpoint makes D0/D2 the Euclidean tips.
+    route_positions = jnp.array([0., 28., 4., 8., 24., 20., -4.])
+    roadmap_distances = jnp.abs(route_positions[:, None] - route_positions[None, :])
+    gap, _, _, leaders = obstacle_chain_diagnostics(state, roadmap_distances)
+    np.testing.assert_array_equal(leaders, [1, 3])
+    np.testing.assert_allclose(gap, 12.)
+
+    obstacle_cfg = RewardConfig(chain_reward_system="obstacle_geodesic",
+                                allow_redundancy_reward=True)
+    _, obstacle_terms = compute_rewards(
+        state, state, obstacle_cfg, env_cfg, roadmap_distances,
+    )
+    np.testing.assert_allclose(obstacle_terms["time_penalty"], [-1.] * 5)
+    np.testing.assert_allclose(obstacle_terms["gap_reduction"],
+                               [2., 2., 2., 2., 0.], rtol=1e-6)
+    _, longer_terms = compute_rewards(
+        state, state, obstacle_cfg, env_cfg, roadmap_distances * 2.,
+    )
+    np.testing.assert_allclose(longer_terms["gap_reduction"],
+                               [4., 4., 4., 4., 0.], rtol=1e-6)
+    _, unknown_terms = compute_rewards(
+        state._replace(base_target_known=jnp.bool_(False)),
+        state._replace(base_target_known=jnp.bool_(False)),
+        obstacle_cfg, env_cfg, roadmap_distances,
+    )
+    np.testing.assert_array_equal(unknown_terms["gap_reduction"], [0.] * 5)
+    np.testing.assert_allclose(unknown_terms["time_penalty"], [-1.] * 5)
+
+    # With no target-connected drone, the target endpoint is leader -1.
+    # Only the route from the base to D1 earns the partial-chain bonus.
+    no_target_front = state._replace(
+        directly_sees_target=jnp.zeros(5, dtype=bool),
+        is_conn_target=jnp.zeros(5, dtype=bool),
+    )
+    _, _, _, leaders = obstacle_chain_diagnostics(no_target_front, roadmap_distances)
+    np.testing.assert_array_equal(leaders, [1, -1])
+    _, endpoint_terms = compute_rewards(
+        no_target_front, no_target_front, obstacle_cfg, env_cfg, roadmap_distances,
+    )
+    np.testing.assert_allclose(endpoint_terms["gap_reduction"],
+                               [1., 1., 0., 0., 0.], rtol=1e-6)
+
+    euclidean_cfg = RewardConfig(chain_reward_system="euclidean",
+                                 allow_redundancy_reward=True)
+    _, euclidean_terms = compute_rewards(state, state, euclidean_cfg, env_cfg)
+    np.testing.assert_allclose(euclidean_terms["gap_reduction"],
+                               [1., 0., 1., 0., 0.], rtol=1e-6)
 
 
 def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
@@ -452,6 +659,8 @@ def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
     assert info["global_target_found"].shape == ()
     assert info["chain_gap_dist"].shape == ()
     assert info["chain_progress_pct"].shape == ()
+    assert info["time_penalty"].shape == (cfg.num_agents,)
+    assert info["gap_reduction"].shape == (cfg.num_agents,)
     assert info["global_coverage"].shape == ()
     assert reward.shape == (cfg.num_agents,)
     assert next_state.step == 0
@@ -469,7 +678,8 @@ def test_idle_termination_applies_configured_penalty():
         exploration_bonus=0.0,
         collision_penalty=0.0,
         finder_bonus=0.0,
-        max_gap_penalty=0.0,
+        time_penalty_per_step=0.0,
+        gap_reduction_meter_bonus=0.0,
         target_found_bonus=0.0,
         success_bonus=0.0,
         no_movement_termination_penalty=-300.0,
@@ -597,7 +807,9 @@ def test_redundancy_and_efficiency_reward_modes():
             reward_cfg = RewardConfig(allow_redundancy_reward=redundancy,
                                                enable_chain_efficiency_reward=efficiency)
             reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
-            np.testing.assert_allclose(terms["chain_gap"], [0., 0., 0. if redundancy else -1.25, -1.25])
+            np.testing.assert_allclose(terms["time_penalty"], [-1.25] * 4)
+            np.testing.assert_allclose(terms["gap_reduction"],
+                                       [.75, .75, .75 if redundancy else 0., 0.])
             credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .5 / 4
             if efficiency:
                 np.testing.assert_allclose(terms["efficiency"], credit, rtol=1e-6)
@@ -606,7 +818,7 @@ def test_redundancy_and_efficiency_reward_modes():
             else:
                 assert "efficiency" not in terms
                 credit = np.zeros(4)
-            np.testing.assert_allclose(reward, terms["chain_gap"] + credit, rtol=1e-6)
+            np.testing.assert_allclose(reward, terms["time_penalty"] + terms["gap_reduction"] + credit, rtol=1e-6)
         _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False,
                                               allow_redundancy_reward=redundancy)
         np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., float(redundancy), 0.])
@@ -620,7 +832,8 @@ def test_autoreset_step_uses_the_configured_reward_terms():
         exploration_bonus=0.0,
         collision_penalty=0.0,
         finder_bonus=0.0,
-        max_gap_penalty=0.0,
+        time_penalty_per_step=0.0,
+        gap_reduction_meter_bonus=0.0,
         target_found_bonus=0.0,
         success_bonus=0.0,
     )

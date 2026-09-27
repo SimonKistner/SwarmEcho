@@ -55,14 +55,17 @@ def _as_bool(value: str) -> bool:
     raise ValueError(f"Expected a boolean value, got {value!r}.")
 
 
-def _replay_stage_label(stage: str) -> str:
-    """Render the canonical replay outcome as one compact console label."""
-    return {
-        "chain_success": "SUCCESS",
-        "found_and_delivered": "FOUND_&_DELIVERED",
-        "visually_found": "VISUALLY_FOUND",
-        "not_found": "NOT_FOUND",
-    }[stage]
+def _replay_stage_label(stage: str, success_condition: str) -> str:
+    """Render the achieved stage and whether it meets this evaluation goal."""
+    goal_stage = {"discovery": "visually_found", "delivery": "found_and_delivered",
+                  "chain_held": "chain_success", "coverage": "coverage"}[success_condition]
+    rank = {"not_found": 0, "visually_found": 1, "found_and_delivered": 2,
+            "chain_success": 3, "coverage": 1}
+    if rank[stage] >= rank[goal_stage]:
+        return {"discovery": "SUCCESS: VISUALLY FOUND", "delivery": "SUCCESS: DELIVERED",
+                "chain_held": "SUCCESS: CHAIN HELD", "coverage": "SUCCESS: COVERAGE"}[success_condition]
+    return {"chain_success": "CHAIN HELD", "found_and_delivered": "DELIVERED",
+            "visually_found": "VISUALLY FOUND", "not_found": "NOT FOUND"}[stage]
 
 
 def _target_artifact_suffix(target: np.ndarray) -> str:
@@ -107,6 +110,7 @@ def _heatmap_manifest(
         "world_size_m": level.building.world_size_m.tolist(),
         "checkpoint": str(checkpoint),
         "artifact_scope": "eval",
+        "success_condition": resolve_evaluation_level(level).env.success_condition,
     }
     if robustness_runs is not None:
         manifest["robustness_runs"] = int(robustness_runs)
@@ -139,6 +143,8 @@ def collect_robust_evaluation(
     layout_mode = "fixed" if getattr(getattr(level, "env", None), "num_obstacles", 0) else None
     metric_runs: list[dict[str, float]] = []
     success_runs: list[np.ndarray] = []
+    length_runs: list[np.ndarray] = []
+    chain_runs: list[np.ndarray] = []
     delivered_runs: list[np.ndarray] = []
     visually_found_runs: list[np.ndarray] = []
     reference_targets: np.ndarray | None = None
@@ -186,30 +192,40 @@ def collect_robust_evaluation(
             )
 
         successes = np.asarray(episode_info["successes"], dtype=bool)
-        delivered = (
-            np.asarray(episode_info["delivered"], dtype=bool) | successes
-        )
+        chain_successes = successes & (level.env.success_condition == "chain_held")
+        delivered = np.asarray(episode_info["delivered"], dtype=bool) | chain_successes
         visually_found = (
             np.asarray(episode_info["visually_found"], dtype=bool) | delivered
         )
         metric_runs.append(metrics)
         success_runs.append(successes)
+        length_runs.append(np.asarray(episode_info["lengths"]))
+        chain_runs.append(chain_successes)
         delivered_runs.append(delivered)
         visually_found_runs.append(visually_found)
 
     assert reference_targets is not None and reference_bases is not None
     assert reference_chain_lengths is not None
-    chain_success_rate = np.mean(np.stack(success_runs), axis=0)
+    success_rate = np.mean(np.stack(success_runs), axis=0)
+    chain_success_rate = np.mean(np.stack(chain_runs), axis=0)
     found_and_delivered_rate = np.mean(np.stack(delivered_runs), axis=0)
     visually_found_rate = np.mean(np.stack(visually_found_runs), axis=0)
     metrics = {
         key: float(np.mean([run[key] for run in metric_runs]))
         for key in metric_runs[0]
     }
+    all_successes = np.stack(success_runs)
+    all_lengths = np.stack(length_runs)
+    successful_length = (float(np.mean(all_lengths[all_successes])) if np.any(all_successes)
+                         else float(level.env.max_steps))
     metrics.update(
-        eval_success=float(np.mean(chain_success_rate == 1.0)),
-        eval_target_found_rate=float(np.mean(found_and_delivered_rate == 1.0)),
+        eval_success=float(np.mean(success_rate == 1.0)),
+        eval_target_found_rate=float(np.mean((found_and_delivered_rate if level.reward.target_found_requires_delivery
+                                               else visually_found_rate) == 1.0)),
         eval_visually_found_rate=float(np.mean(visually_found_rate == 1.0)),
+        eval_success_episode_length=successful_length,
+        eval_success_episode_count=int(np.count_nonzero(all_successes)),
+        eval_success_length_reduction=1.0 - successful_length / level.env.max_steps,
         eval_robustness_runs=robustness_runs,
     )
     return metrics, {
@@ -310,6 +326,7 @@ def run_action_capturing_evaluation(
         delivered=episode_info["delivered"],
         visually_found=episode_info["visually_found"],
         final_chain_lengths=episode_info["final_chain_lengths"],
+        success_condition=level.env.success_condition,
     )
     # Action capture is replay provenance, not a 1/1 heatmap. Retain only the
     # layout sidecar needed to reconstruct and validate the selected replay.
@@ -320,7 +337,7 @@ def run_action_capturing_evaluation(
         )
     lane = int(capture["lane"])
     selected_target, replay_tag, csv_lane = select_eval_target_with_lane(
-        info_path, result=result, offset=offset
+        info_path, result=result, offset=offset, success_condition=level.env.success_condition
     )
     if csv_lane != lane:
         raise RuntimeError(
@@ -384,8 +401,16 @@ def find_nearest_eval_info_csv(run_dir: Path, checkpoint: Path, level) -> Path |
     return min(candidates, key=rank)
 
 
+def _successful_stage_mask(stages: np.ndarray, success_condition: str) -> np.ndarray:
+    """Match persisted physical stages against the configured target goal."""
+    stage_rank = {"not_found": 0, "visually_found": 1,
+                  "found_and_delivered": 2, "chain_success": 3}
+    required_rank = {"discovery": 1, "delivery": 2, "chain_held": 3}[success_condition]
+    return np.asarray([stage_rank[stage] >= required_rank for stage in stages])
+
+
 def select_eval_target_with_lane(
-    info_path: Path, *, result: str, offset: int
+    info_path: Path, *, result: str, offset: int, success_condition: str = "chain_held"
 ) -> tuple[np.ndarray, str, int]:
     """Select a replay target together with its immutable evaluation lane."""
     if offset < 0:
@@ -395,10 +420,11 @@ def select_eval_target_with_lane(
     if positions.shape[-1] != 3:
         raise ValueError(f"Expected a evaluation CSV, got {info_path}.")
     normalized = result.lower()
+    successful = _successful_stage_mask(records["stages"], success_condition)
     if normalized in {"success", "successful"}:
-        candidate_lanes, label = np.flatnonzero(records["stages"] == "chain_success"), "SUCCESS"
+        candidate_lanes, label = np.flatnonzero(successful), "SUCCESS"
     elif normalized in {"fail", "failure", "failed"}:
-        candidate_lanes, label = np.flatnonzero(records["stages"] != "chain_success"), "FAIL"
+        candidate_lanes, label = np.flatnonzero(~successful), "FAIL"
     else:
         raise ValueError("result must be success or fail.")
     if label == "SUCCESS":
@@ -415,18 +441,20 @@ def select_eval_target_with_lane(
 
 
 def select_eval_replay_lanes(
-    records: dict[str, np.ndarray], *, result: str, count: int, start_offset: int = 0
+    records: dict[str, np.ndarray], *, result: str, count: int, start_offset: int = 0,
+    success_condition: str = "chain_held",
 ) -> tuple[np.ndarray, str]:
     """Select replay configurations using only persisted CSV metrics."""
     normalized = result.lower()
+    successful = _successful_stage_mask(records["stages"], success_condition)
     if normalized in {"success", "successful"}:
-        lanes = np.flatnonzero(records["stages"] == "chain_success")
+        lanes = np.flatnonzero(successful)
         label = "SUCCESS"
         lanes = diverse_success_lanes(
             records, lanes, limit=min(len(lanes), start_offset + count)
         )
     elif normalized in {"fail", "failure", "failed"}:
-        lanes = np.flatnonzero(records["stages"] != "chain_success")
+        lanes = np.flatnonzero(~successful)
         label = "FAIL"
     else:
         raise ValueError("result must be success or fail.")
@@ -507,7 +535,8 @@ def render_csv_replays(
         run_dir, checkpoint, level, eval_name=eval_name
     )
     selected_lanes, label = select_eval_replay_lanes(
-        records, result=result, count=replay_count, start_offset=start_offset
+        records, result=result, count=replay_count, start_offset=start_offset,
+        success_condition=level.env.success_condition,
     )
     terminal_print("[REPLAY] selected target for replay rendering", flush=True)
     for replay_number, lane_value in enumerate(selected_lanes):
@@ -525,10 +554,10 @@ def render_csv_replays(
         )
         final_state = states[-1]
         final_stage = _replay_stage_label(evaluation_stage(
-            success=bool(np.asarray(final_state.success)),
+            success=bool(np.asarray(final_state.success)) and level.env.success_condition == "chain_held",
             delivered=bool(np.asarray(final_state.base_target_known)),
             visually_found=bool(np.any(np.asarray(final_state.target_known))),
-        ))
+        ), level.env.success_condition)
         terminal_print(
             f"[REPLAY {replay_number + 1}/{replay_count}] {final_stage} with "
             f"target=({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}); "
@@ -552,6 +581,7 @@ def render_csv_replays(
                 "allow_redundancy_reward": level.reward.allow_redundancy_reward,
                 "comm_radius_base_m": level.env.comm_radius_base,
                 "visual_radius_m": level.env.visual_radius,
+                "success_condition": level.env.success_condition,
                 "checkpoint": str(checkpoint),
                 "target_source_csv": str(source_csv),
                 "target_selection": replay_tag,
@@ -766,7 +796,8 @@ def main() -> None:
                 "mode=parallel to create checkpoint-scoped target data."
             )
         selected_target, replay_tag, selected_lane = select_eval_target_with_lane(
-            source_csv, result=result, offset=offset
+            source_csv, result=result, offset=offset,
+            success_condition=level.env.success_condition,
         )
         selected_records = load_eval_info_csv(source_csv)
         selected_obstacle_min, selected_obstacle_max = eval_layout_for_csv(source_csv)
@@ -808,10 +839,10 @@ def main() -> None:
         )
     final_state = states[-1]
     final_stage = _replay_stage_label(evaluation_stage(
-        success=bool(np.asarray(final_state.success)),
+        success=bool(np.asarray(final_state.success)) and level.env.success_condition == "chain_held",
         delivered=bool(np.asarray(final_state.base_target_known)),
         visually_found=bool(np.any(np.asarray(final_state.target_known))),
-    ))
+    ), level.env.success_condition)
     terminal_print(
         f"[REPLAY 1/1] {final_stage} with target="
         f"({selected_target[0]:.2f}, {selected_target[1]:.2f}, "
@@ -837,6 +868,7 @@ def main() -> None:
             "allow_redundancy_reward": level.reward.allow_redundancy_reward,
             "comm_radius_base_m": level.env.comm_radius_base,
             "visual_radius_m": level.env.visual_radius,
+            "success_condition": level.env.success_condition,
             "checkpoint": str(checkpoint),
             "target_source_csv": None if source_csv is None else str(source_csv),
             "target_selection": replay_tag,

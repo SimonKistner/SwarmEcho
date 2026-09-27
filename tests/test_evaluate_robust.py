@@ -5,6 +5,7 @@ import numpy as np
 
 from swarmecho.training.artifacts import load_eval_info_csv
 from swarmecho.training.artifacts import save_eval_info_csv
+from swarmecho.env.buildings import make_cuboid_building
 from swarmecho.training.evaluate import (
     diverse_success_lanes,
     run_parallel_evaluation,
@@ -60,10 +61,14 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
             eval_parallel_envs=2,
             eval_robustness_runs=5,
             eval_action_noise_max=0.011,
+            success_condition=None,
+            eval_differes_from_training_map=False,
         ),
+        env=SimpleNamespace(success_condition="chain_held", max_steps=100),
+        reward=SimpleNamespace(target_found_requires_delivery=True),
         training=SimpleNamespace(seed=7, num_envs=4000, num_steps=100),
         building_name="test_map",
-        building=SimpleNamespace(world_size_m=np.asarray([20.0, 20.0, 30.0])),
+        building=make_cuboid_building((4, 4, 6)),
     )
     targets = np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     bases = np.zeros((2, 3))
@@ -80,10 +85,15 @@ def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
         calls.append(kwargs)
         run_index = kwargs["action_noise_seed"] - (passed_level.training.seed + 20_000)
         successes = np.asarray(success_by_run[run_index])
-        return {"eval_success": float(np.mean(successes))}, {
+        return {"eval_success": float(np.mean(successes)),
+                "eval_episode_length": 10.0, "eval_coverage": 0.5,
+                "eval_target_found_rate": float(np.mean(successes)),
+                "eval_visually_found_rate": 1.0,
+                "eval_chain_progress_pct": 50.0}, {
             "target_positions": targets.copy(),
             "base_positions": bases.copy(),
             "successes": successes,
+            "lengths": np.where(successes, 10, 100),
             "delivered": successes.copy(),
             "visually_found": np.ones(2, dtype=bool),
             "final_chain_lengths": np.asarray([7.0, 8.0]),

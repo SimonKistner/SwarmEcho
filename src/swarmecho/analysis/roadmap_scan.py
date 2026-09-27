@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
-from swarmecho.analysis.roadmap_paths import generate
-from swarmecho.env.buildings import load_building, target_spawn_boxes
+from swarmecho.analysis.roadmap_paths import generate, ranked_paths
+from swarmecho.env.buildings import building_snapshot, load_building, target_spawn_boxes
 from swarmecho.env.roadmap_cpu import building_roadmap
 
 
@@ -33,6 +34,83 @@ def inside(points, lower, upper):
     return np.asarray([np.any(np.all((p >= lower) & (p <= upper), axis=-1)) for p in points])
 
 
+def write_top_farthest(output, stem, map_name, building, cfg, graph, points, costs,
+                       planning_lo, planning_hi, maximum, farthest, count, level_name):
+    """Write distinct farthest-point pairs with one shortest route per pair."""
+    ranked = []
+    seen = set()
+    for i in sorted(np.flatnonzero(np.isfinite(maximum)),
+                    key=lambda index: (-float(maximum[index]), int(index))):
+        j = int(farthest[i])
+        key = tuple(sorted((int(i), j)))
+        if j < 0 or key in seen:
+            continue
+        seen.add(key)  # The reverse direction is the same comparison pair.
+        ranked.append((int(i), j, float(maximum[i])))
+        if len(ranked) == count:
+            break
+    if not ranked:
+        return None
+
+    vertices = graph.vertices
+    merge_distance = building.wall_thickness_m + 2 * graph.clearance
+    edges = np.argwhere(np.triu(graph.visible_edges, 1))
+    static = [[] for _ in range(len(vertices) + 2)]
+    for left, right in edges:
+        distance = float(np.linalg.norm(vertices[left] - vertices[right]))
+        weight = distance + (cfg.roadmap_corner_bonus_m if distance > merge_distance + 1e-4 else 0.)
+        static[int(left) + 2].append((int(right) + 2, weight))
+        static[int(right) + 2].append((int(left) + 2, weight))
+
+    pairs = []
+    for rank, (target_index, base_index, raster_distance) in enumerate(ranked, 1):
+        base, target = points[base_index], points[target_index]
+        adjacency = [neighbors.copy() for neighbors in static]
+        for vertex_index in np.flatnonzero(np.isfinite(costs[base_index])):
+            weight = float(costs[base_index, vertex_index]) + cfg.roadmap_corner_bonus_m
+            adjacency[0].append((int(vertex_index) + 2, weight))
+            adjacency[int(vertex_index) + 2].append((0, weight))
+        for vertex_index in np.flatnonzero(np.isfinite(costs[target_index])):
+            weight = float(costs[target_index, vertex_index])
+            adjacency[1].append((int(vertex_index) + 2, weight))
+            adjacency[int(vertex_index) + 2].append((1, weight))
+        if visible(base, target[None], planning_lo, planning_hi)[0]:
+            weight = float(np.linalg.norm(target - base))
+            adjacency[0].append((1, weight))
+            adjacency[1].append((0, weight))
+        route = ranked_paths(adjacency, 1)
+        if not route:
+            raise ValueError(f"No inspectable route for ranked raster pair {rank}.")
+        path = np.concatenate((base[None], target[None], vertices))[route[0]]
+        physical = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+        corners = (0 if len(route[0]) <= 2 else 1 + sum(
+            np.linalg.norm(path[k + 1] - path[k]) > merge_distance + 1e-4
+            for k in range(1, len(path) - 2)))
+        length = float(physical + corners * cfg.roadmap_corner_bonus_m)
+        pairs.append({"rank": rank, "base": base.tolist(), "target": target.tolist(),
+                      "path": path.tolist(), "path_length_m": length,
+                      "path_corner_count": int(corners), "raster_distance_m": raster_distance})
+        print(f"  #{rank}: {base.tolist()} -> {target.tolist()}: {length:.3f} m", flush=True)
+
+    path = output / f"{stem}_top{len(pairs)}_longest_farthest.roadmap.json"
+    path.write_text(json.dumps({"format": "swarmecho-roadmap-test/v1",
+        "manifest": {"world_size_m": building.world_size_m.tolist(), "map_name": map_name,
+                     "building_snapshot": building_snapshot(building),
+                     "pair_ranking": "longest_farthest", "requested_pairs": count,
+                     "clearance_m": graph.clearance, "comm_radius_m": cfg.comm_radius,
+                     "roadmap_approach": cfg.roadmap_approach,
+                     "roadmap_node_density": cfg.roadmap_node_density,
+                     "roadmap_merge_wall_end_nodes": cfg.roadmap_merge_wall_end_nodes,
+                     "roadmap_corner_bonus_m": cfg.roadmap_corner_bonus_m,
+                     "corner_merge_distance_m": merge_distance,
+                     "path_metric": "Shortest-route distance including corner allowance (equivalent m)",
+                     "level": level_name, "generated_obstacles": False},
+        "layouts": [{"obstacle_min": graph.solid_min.tolist(), "obstacle_max": graph.solid_max.tolist(),
+                     "vertices": vertices.tolist(), "edges": edges.tolist(), "pairs": pairs,
+                     "base": pairs[0]["base"], "target": pairs[0]["target"]}]}, indent=2), encoding="utf-8")
+    return path
+
+
 def scan(args, *, building=None, cfg=None):
     level = None
     if cfg is None:
@@ -42,6 +120,12 @@ def scan(args, *, building=None, cfg=None):
         cfg = level.env if level else EnvConfig()
     if args.corner_bonus_m is not None:
         cfg = replace(cfg, roadmap_corner_bonus_m=args.corner_bonus_m)
+    if getattr(args, "roadmap_approach", None) is not None:
+        cfg = replace(cfg, roadmap_approach=args.roadmap_approach)
+    if getattr(args, "roadmap_node_density", None) is not None:
+        cfg = replace(cfg, roadmap_node_density=args.roadmap_node_density)
+    if getattr(args, "merge_wall_end_nodes", None) is not None:
+        cfg = replace(cfg, roadmap_merge_wall_end_nodes=args.merge_wall_end_nodes)
     if not np.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:
         raise ValueError("Corner bonus must be finite and nonnegative.")
     if building is not None:
@@ -56,8 +140,9 @@ def scan(args, *, building=None, cfg=None):
     else:
         raise ValueError("Provide --level or --map.")
     spacing = args.spacing if args.spacing is not None else building.cell_size_m
-    if not np.isfinite(spacing) or spacing <= 0 or args.paths < 1:
-        raise ValueError("Spacing must be finite and positive; paths must be positive.")
+    top_pairs = getattr(args, "top_pairs", 1)
+    if not np.isfinite(spacing) or spacing <= 0 or args.paths < 1 or top_pairs < 1:
+        raise ValueError("Spacing must be finite and positive; paths and top pairs must be positive.")
     if not np.isfinite(cfg.comm_radius) or cfg.comm_radius <= 0:
         raise ValueError("Drone communication range must be finite and positive.")
     world = np.asarray(building.world_size_m, dtype=np.float32)
@@ -155,7 +240,12 @@ def scan(args, *, building=None, cfg=None):
             print(f"Inspectable roadmap: {path}")
     finite = np.isfinite(maximum)
     report("shortest_farthest", finite, farthest, maximum)
-    report("longest_farthest", finite, farthest, maximum, longest=True)
+    report("longest_farthest", finite, farthest, maximum, longest=True, save=top_pairs == 1)
+    if top_pairs > 1:
+        path = write_top_farthest(output, stem, name, building, cfg, graph, points, costs,
+                                  planning_lo, planning_hi, maximum, farthest, top_pairs, args.level)
+        if path is not None:
+            print(f"Inspectable ranked pairs: {path}", flush=True)
     report("minimum_target_to_base", target_allowed & np.isfinite(maximum_base), farthest_base, maximum_base, save=False)
     if np.any(finite):
         for label, value in zip(("Minimum", "Median", "Maximum"), np.percentile(maximum[finite], [0, 50, 100])):
@@ -177,7 +267,13 @@ def main():
     parser.add_argument("--map", help="Map name/path; optionally overrides the level map")
     parser.add_argument("--spacing", type=float, help="Raster spacing in metres (default: map cell size)")
     parser.add_argument("--paths", type=int, default=1, help="Legacy option; each of the two extreme pairs exports its best route only")
+    parser.add_argument("--top-pairs", type=int, default=1,
+                        help="Export this many distinct longest-farthest raster pairs in one inspectable artifact")
     parser.add_argument("--corner-bonus-m", type=float, help="Override env.roadmap_corner_bonus_m (default: general/level config)")
+    parser.add_argument("--roadmap-approach", choices=("full", "minimal"), help="Override env.roadmap_approach")
+    parser.add_argument("--roadmap-node-density", type=float, help="Override env.roadmap_node_density (full only)")
+    parser.add_argument("--merge-wall-end-nodes", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override env.roadmap_merge_wall_end_nodes (full only)")
     parser.add_argument("--output-dir", default="outputs/testresults")
     args = parser.parse_args()
     try:

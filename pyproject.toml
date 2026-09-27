@@ -37,6 +37,8 @@ swarmecho-validate = "swarmecho.training.validate_workflow:main"
 swarmecho-train = "swarmecho.training.train:main"
 swarmecho-multi-train = "swarmecho.training.multi_train:main"
 swarmecho-curriculum = "swarmecho.training.curriculum:main"
+swarmecho-build-random-bank = "swarmecho.curriculum_config.maps.random_building_bank.generate_bank:main"
+swarmecho-check-spawn-pairs = "swarmecho.analysis.check_spawn_pairs:main"
 swarmecho-evaluate = "swarmecho.training.evaluate:main"
 swarmecho-inspect = "swarmecho.visualize.inspector:main"
 

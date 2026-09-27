@@ -171,7 +171,6 @@ def validate_update(
                 base_signatures=np.asarray(base_signatures),
                 base_values=np.asarray(base_values),
                 base_memory_masks=np.asarray(base_memory_masks),
-                critic_obs=np.asarray(obs),
             )
         )
         states = next_states

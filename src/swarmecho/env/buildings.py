@@ -42,6 +42,8 @@ class BuildingArrays:
     wall_thickness_m: float
     max_base_to_top_corner_m: float
     extra_geometry_json: str = "{}"
+    wall_solid_range: tuple[int, int] = (0, 0)
+    generated_map: bool = False
 
 
 def _triples(values: Any, label: str) -> list[tuple[int, int, int]]:
@@ -131,6 +133,9 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
     geometry = data.get("geometry")
     if not isinstance(geometry, dict):
         raise BuildingValidationError("geometry must define tiles, x_walls, and y_walls.")
+    stair_full_width = geometry.get("stair_full_width", False)
+    if type(stair_full_width) is not bool:
+        raise BuildingValidationError("geometry.stair_full_width must be boolean.")
     tiles = np.zeros((size_x, size_y, size_z + 1), dtype=np.bool_)
     x_walls = np.zeros((size_x + 1, size_y, size_z), dtype=np.bool_)
     y_walls = np.zeros((size_x, size_y + 1, size_z), dtype=np.bool_)
@@ -197,6 +202,8 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
             raise BuildingValidationError("Stairs require two interior cells, an open tile above, and a unique lower cell.")
         occupied_stairs.add((x, y, z))
     extras["stairs"] = stairs
+    if "stair_full_width" in geometry:
+        extras["stair_full_width"] = stair_full_width
     if "roadmap_nodes_m" in data:
         nodes = np.asarray(data["roadmap_nodes_m"], dtype=float)
         if nodes.ndim != 2 or nodes.shape[1] != 3 or not np.isfinite(nodes).all():
@@ -302,6 +309,7 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
             continue
         solid_min.append([x * cell_size, y * cell_size, z_boundary * cell_size - tile_thickness / 2])
         solid_max.append([(x + 1) * cell_size, (y + 1) * cell_size, z_boundary * cell_size + tile_thickness / 2])
+    wall_solid_start = len(solid_min)
     for x_boundary, y, z in np.argwhere(x_walls):
         if x_boundary in (0, size_x):
             continue
@@ -335,12 +343,13 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
             lo[2] += v0 * cell_size
             hi[2] += v1 * cell_size
             solid_min.append(lo.tolist()); solid_max.append(hi.tolist())
+    wall_solid_end = len(solid_min)
     for x, y, z, direction in stairs:
-        # Eight solid treads occupy 45% of the cell width. The remaining
-        # side passage provides drone clearance throughout the ascent.
+        # Generated buildings use full-width treads; older maps retain their
+        # 45%-width treads and side passages.
         for index in range(8):
-            lo = np.array([index / 8, .275, 0.0])
-            hi = np.array([(index + 1) / 8, .725, (index + 1) / 8])
+            lo = np.array([index / 8, 0.0 if stair_full_width else .275, 0.0])
+            hi = np.array([(index + 1) / 8, 1.0 if stair_full_width else .725, (index + 1) / 8])
             if direction >= 2:
                 lo[0], hi[0] = 1 - hi[0], 1 - lo[0]
             if direction % 2:
@@ -372,6 +381,8 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
         wall_thickness_m=wall_thickness,
         max_base_to_top_corner_m=max_distance,
         extra_geometry_json=json.dumps(extras, sort_keys=True) if any(extras.values()) else "{}",
+        wall_solid_range=(wall_solid_start, wall_solid_end),
+        generated_map=isinstance(data.get("generation"), dict) and bool(data["generation"].get("version")),
     )
 
 
@@ -489,7 +500,8 @@ def validate_feature_clearance(building, clearance):
     if any(extra.get(key) for key in ("x_doors", "y_doors", "x_windows", "y_windows")):
         if .4 * building.cell_size_m <= 2 * clearance + .01:
             raise BuildingValidationError("Door/window aperture is too small for drone planning clearance.")
-    if extra.get("stairs") and .275 * building.cell_size_m - building.wall_thickness_m / 2 <= 2 * clearance + .01:
+    if (extra.get("stairs") and not extra.get("stair_full_width")
+            and .275 * building.cell_size_m - building.wall_thickness_m / 2 <= 2 * clearance + .01):
         raise BuildingValidationError("Stair side passage is too small for drone planning clearance.")
 
 

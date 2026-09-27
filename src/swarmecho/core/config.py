@@ -1,51 +1,126 @@
-"""Strict level configuration and key=value CLI overrides."""
+"""User-facing level settings, defaults, and key=value CLI overrides."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+import math
 import warnings
 from swarmecho.core.compatibility import canonical_level_name, canonical_map_name, resolve_level_file, resolve_map_file
-from swarmecho.env.random_buildings import RandomBuildingConfig
-
-from omegaconf import OmegaConf
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 MAP_DIR = _SRC_ROOT / "curriculum_config" / "maps"
 LEVEL_DIR = _SRC_ROOT / "curriculum_config" / "levels"
 
+# env
+@dataclass(frozen=True)
+class EnvConfig:
+    num_agents: int = 5
+
+    dt: float = 0.1  # Simulated time per step; scales velocity and position updates.
+    max_force: float = 15.0
+    max_speed: float = 5.0
+    drag: float = 0.85
+    drone_radius: float = 0.25
+
+    comm_radius_base: float = 6.0
+    base_keeps_informing: bool = False
+    comm_radius: float = 5.0
+    visual_radius: float = 4.0
+    radar_bins: int = 8
+
+    target_wall_buffer_fraction: float = 0.1
+    spawn_delay: int = 5
+
+    max_steps: int = 700
+    hold_chain_for: int = 50
+    no_movement_termination_steps: int = 50
+    movement_epsilon: float = 1e-3
+    success_condition: str = "chain_held"  # coverage | discovery | delivery | chain_held
+
+    observe_target_vector: bool = False
+    observe_base_vector: bool = False
+    observe_chain_contributor: bool = False
+    observe_current_timestep: bool = False  # Episode step / max_steps, in [0, 1].
+    observe_coverage_probe: bool = False
+    coverage_voxel_size: float | None = None # None -> use the building’s cell size i.e. 5m
+
+    num_obstacles: int = 0
+    obstacle_size_min_m: float = 2.0
+    obstacle_size_max_m: float = 4.0
+    obstacle_spawn_layer_min: int = 2
+    obstacle_spawn_layer_max: int = 5
+    obstacle_boundary_buffer_m: float = 0.5
+    obstacle_target_buffer_m: float = 0.5
+    obstacle_planning_clearance_m: float = 0.1
+    obstacle_layout_version: str = "three_aabb_v1"
+
+    roadmap_approach: str = "full"
+    roadmap_node_density: float = 1.0
+    roadmap_merge_wall_end_nodes: bool = False
+    roadmap_corner_bonus_m: float = 1.0
+
+
+# random_buildings
+@dataclass(frozen=True)
+class RandomBuildingConfig:
+    enabled: bool = False
+
+    length_m: float = 30.0
+    width_m: float = 30.0
+    stories: int = 3
+    cell_size_m: float = 5.0
+    wall_thickness_m: float = 0.25
+    tile_thickness_m: float = 0.25
+
+    rooms_per_story_min: int = 4
+    rooms_per_story_max: int = 8
+    extra_door_probability: float = 0.15
+    window_probability: float = 0.2
+    staircase_max: int = 1
+
+    save_training_maps: bool = False
+    load_maps_from_bank: bool = False
+
+
+# reward
+@dataclass(frozen=True)
+class RewardConfig:
+    target_found_requires_delivery: bool = True
+    chain_reward_system: str = "euclidean"
+
+    # Credit every drone on a simple base-target path, including alternate routes.
+    allow_redundancy_reward: bool = False
+    enable_chain_efficiency_reward: bool = False
+    chain_efficiency_bonus: float = 0.5
+
+    exploration_bonus: float = 0.25
+    finder_bonus: float = 0.0
+    target_found_bonus: float = 100.0
+    success_bonus: float = 500.0
+
+    collision_penalty: float = 0.5
+    # Team cost, divided among active drones on every transition.
+    time_penalty_per_step: float = 5.0
+    # Per contributing drone, per metre of the base-target route already closed.
+    gap_reduction_meter_bonus: float = 0.125
+    no_movement_termination_penalty: float = -1000.0
+
+
+# training
 # Keep training action perturbations aligned with the default used by the
 # standalone robust checkpoint evaluator.
 DEFAULT_ACTION_NOISE_LEVEL = 0.011
 
 @dataclass(frozen=True)
-class NetworkConfig:
-    hidden_dim: int = 256
-    num_layers: int = 3
-    actor_num_layers: int = 3
-    actor_memory: bool = True
-    critic_memory: bool = True
-    critic_type: str = "observation"  # observation (unchanged) | privileged (compact state)
-    memory_comm_enabled: bool = True
-    memory_comm_every_k_steps: int = 5
-    tarmac_sig_dim: int = 16
-    tarmac_val_dim: int = 32
-    tarmac_include_self: bool = False
-
-
-@dataclass(frozen=True)
 class TrainingConfig:
-    randomize_base: bool = False
-    minimum_geodesic_separation: bool = False
-    minimum_geodesic_separation_multiplier: float = 2.0
-    spawn_pair_max_attempts: int = 1024
     total_timesteps: int = 250_000_000
-    profile_timing: bool = False
-    seed: int = 42
     num_envs: int = 4000
     num_steps: int = 100
     num_epochs: int = 4
     num_minibatches: int = 20
+    seed: int = 42
+
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -53,62 +128,105 @@ class TrainingConfig:
     # Raw value units, or normalized units with value_normalization=running.
     # None (YAML: null) disables value clipping; zero does NOT disable it.
     value_clip_eps: float | None = 0.2
-    entropy_mode: str = "legacy"  # legacy or squashed (reparameterized tanh entropy)
-    value_normalization: str = "none"  # none or running; checkpointed critic units
-    diagnostics_every: int = 1  # PPO updates between before/after diagnostic passes
+    entropy_mode: str = "squashed"  # legacy or squashed (reparameterized tanh entropy)
+    value_normalization: str = "running"  # none or running; checkpointed critic units
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
-    checkpoint_path: str | None = None
-    checkpoint_step_offset: int | None = None
-    ckpt_loading_mode: str = "branch"  # "resume" continues counters; "branch" carries progress; "init" loads weights only
+
+    diagnostics_every: int = 1  # PPO updates between before/after diagnostic passes
+    profile_timing: bool = False # debug diagnostic
+
     # Perturb sampled pre-tanh actions before stepping training environments.
     # Evaluation uses its separate eval_action_noise_max configuration.
     training_noise: bool = False
     noise_level: float = DEFAULT_ACTION_NOISE_LEVEL
 
+    randomize_base: bool = False
+    minimum_geodesic_separation: bool = False
+    minimum_geodesic_separation_multiplier: float = 2.0
+    skip_on_no_pair_found: bool = False
+    spawn_pair_max_attempts: int = 1024
 
+    checkpoint_path: str | None = None
+    checkpoint_step_offset: int | None = None
+    ckpt_loading_mode: str = "branch"  # "resume" continues counters; "branch" carries progress; "init" loads weights only
+
+
+# network
+@dataclass(frozen=True)
+class NetworkConfig:
+    hidden_dim: int = 256
+    num_layers: int = 3
+    actor_num_layers: int = 3
+
+    actor_memory: bool = True
+    critic_memory: bool = True
+    critic_type: str = "observation"  # Only observation is implemented; retained for a future critic experiment.
+
+    memory_comm_enabled: bool = True
+    memory_comm_every_k_steps: int = 5
+    tarmac_sig_dim: int = 16
+    tarmac_val_dim: int = 32
+    tarmac_include_self: bool = False
+
+
+# evaluation
 @dataclass(frozen=True)
 class EvaluationConfig:
+    eval_parallel_envs: int = 4000
+    eval_differes_from_training_map: bool = False
+    eval_map: str | None = None
+    # Optional handcrafted [min_x,min_y,min_z,max_x,max_y,max_z] cuboids.
+    eval_fixed_obstacle_bounds: tuple[tuple[float, float, float, float, float, float], ...] | None = None
+
     random_eval: bool = False
     random_eval_envs: int = 5
     random_eval_maps: tuple[str, ...] | None = None
-    eval_freq: int = 20
-    eval_offset: int = 1
-    eval_min_train_success: float = 0.0
-    eval_differes_from_training_map: bool = False
-    eval_map: str | None = None
-    eval_parallel_envs: int = 4000
+    replay_targets_from_storey: int | None = None  # 1-based; None samples every valid storey.
+    apply_trainings_min_geo_separation: bool = False
+    minimum_geodesic_separation: bool | None = None  # None follows apply_trainings_min_geo_separation.
+
     # Periodic metrics may use the same ensemble as the always-robust final eval.
     training_robustness: bool = False
     eval_robustness_runs: int = 5
     eval_action_noise_max: float = DEFAULT_ACTION_NOISE_LEVEL
-    # Optional handcrafted [min_x,min_y,min_z,max_x,max_y,max_z] cuboids.
-    eval_fixed_obstacle_bounds: tuple[tuple[float, float, float, float, float, float], ...] | None = None
-    eval_broadcast_on_curriculum_early_stop: bool = False
+
     early_exit: bool = False
-    early_exit_threshold: float = 0.99
+    success_condition: str | None = None  # null follows env; coverage | discovery | delivery | chain_held
+    early_exit_success_rate: float = 0.99
+    early_exit_min_success_length_reduction: float | None = None  # 0.25 -> mean completion by step 450 of 600
     early_exit_hold_evals: int = 0
-    eval_video: bool = True
-    eval_video_freq: int = 20
-    eval_video_offset: int = 1
-    training_heatmap_creation: bool = False
-    eval_not_deliv_not_visual_splitt_in_two: bool = False
+    eval_broadcast_on_curriculum_early_stop: bool = False
+
     save_model: bool = True
     checkpoint_freq: int = 50
     checkpoint_offset: int = 0
     checkpoint_dir: str | None = None
+    eval_freq: int = 20
+    eval_offset: int = 1
+    eval_min_train_success: float = 0.0
+
+    training_heatmap_creation: bool = False
+
+    eval_video: bool = True
+    eval_video_freq: int = 20
+    eval_video_offset: int = 1
+    eval_not_deliv_not_visual_splitt_in_two: bool = False
 
 
+# logging
 @dataclass(frozen=True)
 class LoggingConfig:
-    run_name: str | None = "M00_no_maze_open_cuboid"
+    run_name: str | None = "no_name_provided"
     use_timestamp_postfix: bool = False
     log_dir: str = "outputs"
+
     wandb_mode: str = "online"
     wandb_project: str = "SwarmEcho"
     wandb_entity: str | None = None
     wandb_group: str | None = None
+
     suppress_xla_warnings: bool = True
     terminal_logging_frequency: int = 1
     terminal_log_warmup: bool = False
@@ -120,8 +238,8 @@ class Level:
     name: str
     map_names: list[str]
     building: object
-    env: object
-    reward: object
+    env: EnvConfig
+    reward: RewardConfig
     training: TrainingConfig
     network: NetworkConfig
     evaluation: EvaluationConfig
@@ -145,6 +263,8 @@ class Level:
 def resolve_evaluation_level(level: Level) -> Level:
     """Return the level configuration whose building should be used for eval."""
     evaluation = level.evaluation
+    if evaluation.success_condition is not None:
+        level = replace(level, env=replace(level.env, success_condition=evaluation.success_condition))
     if not evaluation.eval_differes_from_training_map:
         return level
     if evaluation.eval_map is None:
@@ -174,6 +294,17 @@ def resolve_evaluation_level(level: Level) -> Level:
     )
 
 
+def evaluation_minimum_geodesic_separation(level: Level) -> bool:
+    """Select the evaluation target/base separation independently of coverage training."""
+    if resolve_evaluation_level(level).env.success_condition == "coverage":
+        return False
+    override = level.evaluation.minimum_geodesic_separation
+    if override is not None:
+        return override
+    return (level.evaluation.apply_trainings_min_geo_separation
+            and level.training.minimum_geodesic_separation)
+
+
 def _strict_dataclass(cls, values: object, label: str):
     if not isinstance(values, dict):
         raise ValueError(f"{label} must be a mapping.")
@@ -185,7 +316,7 @@ def _strict_dataclass(cls, values: object, label: str):
 
 def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: list[str] | None = None) -> Level:
     """Load a strict level through the canonical config module."""
-    from swarmecho.env.environment import EnvConfig, RewardConfig
+    from omegaconf import OmegaConf
     from swarmecho.env.buildings import load_building
 
     source = resolve_level_file(name_or_path, LEVEL_DIR)
@@ -203,6 +334,8 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     generation = _strict_dataclass(RandomBuildingConfig, data.get("random_buildings", {}), "random_buildings")
     env = _strict_dataclass(EnvConfig, env_data, "env")
     training = _strict_dataclass(TrainingConfig, data.get("training", {}), "training")
+    if generation.load_maps_from_bank and not generation.enabled:
+        raise ValueError("random_buildings.load_maps_from_bank requires random_buildings.enabled=true.")
     if generation.enabled:
         if map_names not in (None, [], ["random"]):
             raise ValueError("random_buildings.enabled requires env.map_names: [] (or [random]); authored maps cannot be specified.")
@@ -228,7 +361,17 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         logging=_strict_dataclass(LoggingConfig, data.get("logging", {}), "logging"),
         random_buildings=generation,
     )
-    if level.ideal_chain_margin_m < 0:
+    success_conditions = {"coverage", "discovery", "delivery", "chain_held"}
+    if level.env.success_condition not in success_conditions:
+        raise ValueError(f"env.success_condition must be one of {sorted(success_conditions)}.")
+    if (level.evaluation.success_condition is not None
+            and level.evaluation.success_condition not in success_conditions):
+        raise ValueError(f"evaluation.success_condition must be one of {sorted(success_conditions)} or null.")
+    if level.network.critic_type != "observation":
+        raise ValueError("network.critic_type currently supports only observation.")
+    if level.env.success_condition == "coverage" and level.training.minimum_geodesic_separation:
+        raise ValueError("Coverage training has no target for minimum geodesic separation.")
+    if level.env.success_condition != "coverage" and level.ideal_chain_margin_m < 0:
         raise ValueError(f"level {level.name!r} is geometrically unsolvable: ideal chain margin is {level.ideal_chain_margin_m:.3f} m.")
     if level.training.num_epochs < 1 or level.training.num_minibatches < 1:
         raise ValueError("PPO epoch and minibatch counts must be positive.")
@@ -246,13 +389,23 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("training.diagnostics_every must be positive.")
     if level.network.memory_comm_every_k_steps < 1:
         raise ValueError("network.memory_comm_every_k_steps must be positive.")
+    if type(env.base_keeps_informing) is not bool:
+        raise ValueError("env.base_keeps_informing must be a boolean.")
     if level.training.noise_level < 0.0:
         raise ValueError("training.noise_level must be non-negative.")
     if level.evaluation.eval_parallel_envs < 1:
         raise ValueError("evaluation.eval_parallel_envs must be positive.")
     ev = level.evaluation
+    if type(ev.apply_trainings_min_geo_separation) is not bool:
+        raise ValueError("evaluation.apply_trainings_min_geo_separation must be a boolean.")
+    if ev.minimum_geodesic_separation is not None and type(ev.minimum_geodesic_separation) is not bool:
+        raise ValueError("evaluation.minimum_geodesic_separation must be boolean or null.")
     if type(ev.random_eval) is not bool or type(ev.random_eval_envs) is not int or ev.random_eval_envs < 1:
         raise ValueError("random_eval must be boolean and random_eval_envs a positive integer.")
+    if ev.replay_targets_from_storey is not None and (
+        type(ev.replay_targets_from_storey) is not int or ev.replay_targets_from_storey < 1
+    ):
+        raise ValueError("evaluation.replay_targets_from_storey must be null or a positive integer.")
     if ev.random_eval:
         if ev.training_robustness:
             raise ValueError("random_eval requires training_robustness=false (robust evaluation off).")
@@ -267,7 +420,8 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
                 # Resolve during suite initialization, which first checks the
                 # run's frozen copy. Replays must survive source-map removal.
         else:
-            generation.grid()
+            from swarmecho.env.random_buildings import random_building_grid
+            random_building_grid(generation)
     if type(level.logging.terminal_logging_frequency) is not int or level.logging.terminal_logging_frequency < 1:
         raise ValueError("logging.terminal_logging_frequency must be a positive integer.")
     if type(level.logging.terminal_log_warmup) is not bool:
@@ -282,9 +436,12 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         value = getattr(level.evaluation, name)
         if type(value) is not int or value < 0:
             raise ValueError(f"evaluation.{name} must be a non-negative integer.")
-    for name in ("early_exit_threshold", "eval_min_train_success"):
+    for name in ("early_exit_success_rate", "eval_min_train_success"):
         if not 0.0 <= getattr(level.evaluation, name) <= 1.0:
             raise ValueError(f"evaluation.{name} must be in [0, 1].")
+    speed_gate = level.evaluation.early_exit_min_success_length_reduction
+    if speed_gate is not None and not 0.0 <= speed_gate <= 1.0:
+        raise ValueError("evaluation.early_exit_min_success_length_reduction must be in [0, 1] or null.")
     if type(level.evaluation.training_robustness) is not bool:
         raise ValueError("evaluation.training_robustness must be a boolean.")
     if type(level.evaluation.eval_robustness_runs) is not int or level.evaluation.eval_robustness_runs < 2:
@@ -310,6 +467,10 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("logging.wandb_mode must be disabled, offline, or online.")
     if level.reward.chain_reward_system not in {"euclidean", "obstacle_geodesic"}:
         raise ValueError("reward.chain_reward_system must be euclidean or obstacle_geodesic.")
+    for name in ("time_penalty_per_step", "gap_reduction_meter_bonus"):
+        value = getattr(level.reward, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"reward.{name} must be finite and nonnegative.")
     if level.env.num_obstacles and level.env.obstacle_spawn_layer_max <= level.env.obstacle_spawn_layer_min:
         raise ValueError("The obstacle spawn layer range must have positive height.")
     return level

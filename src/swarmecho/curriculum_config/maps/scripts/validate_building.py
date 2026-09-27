@@ -34,7 +34,6 @@ def validate_building_file(path: str | Path, *, runtime_smoke: bool = False) -> 
             comm_radius_base=0.1,
             comm_radius=0.1,
             visual_radius=0.1,
-            target_spawn_buffer=0.0,
             coverage_voxel_size=building.cell_size_m,
             max_steps=2,
         )

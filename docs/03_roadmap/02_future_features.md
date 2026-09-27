@@ -12,15 +12,16 @@
 - [x] Optional redundancy and route-efficiency rewards, both default off and
   enabled for B01 office:
   - `reward.allow_redundancy_reward`: when fully connected, all members of at
-    least one simple base-target path get zero gap penalty. Dead-end branches
-    remain non-contributors. Before full connection the old shaping is retained.
+    least one simple base-target path receive the gap reduction bonus. Dead-end
+    branches remain non-contributors. Before full connection the selected
+    frontier paths receive the bonus.
   - `reward.enable_chain_efficiency_reward`: add
     `chain_efficiency_bonus / num_agents * clip(roadmap_length / relay_length, 0, 1)`.
     The default weight is `0.5`. Lengths are physical metres, without the
     spawn-separation corner allowance. Efficiency does not modify gap shaping.
   - Efficiency alone rewards one deterministic shortest physical relay route;
     redundancy plus efficiency rewards each drone's best containing route,
-    without summing rewards across routes. Both off retain the original reward.
+    without summing rewards across routes. Both off retain single-route credit.
   - With redundancy, the contributor observation and green inspector links
     include all valid simple paths. Replays save the mode in their metadata;
     older artifacts retain the original single-selection display.

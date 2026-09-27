@@ -42,7 +42,7 @@ class Model(nnx.Module):
 def minibatch():
     shape = (2, 1, 2)
     return {
-        "obs": jnp.zeros((*shape, 1)), "critic_obs": jnp.zeros((*shape, 1)),
+        "obs": jnp.zeros((*shape, 1)),
         "actions": jnp.full((*shape, 3), 3.0), "old_log_probs": jnp.zeros(shape),
         "old_values": jnp.zeros(shape), "returns": jnp.full(shape, 20.0),
         "advantages": jnp.zeros(shape), "rnn_resets": jnp.zeros(shape, dtype=bool),

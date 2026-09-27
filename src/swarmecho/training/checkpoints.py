@@ -10,7 +10,6 @@ from swarmecho.core.terminal import terminal_print, display_path
 from typing import Any
 
 from flax import nnx
-from swarmecho.core.compatibility import canonical_marker
 
 
 def validate_checkpoint_contract(model: Any, path: Path) -> None:
@@ -20,9 +19,6 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     expected = dict(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
-        if expected.get("critic_type", "observation") == "privileged":
-            raise ValueError("Privileged critics require checkpoint input-layout metadata; "
-                             "an observation critic checkpoint cannot be restored into this architecture.")
         if expected["value_normalization"] != "none":
             raise ValueError(
                 "Checkpoint has no value-normalization metadata. It cannot be loaded as a "
@@ -34,18 +30,13 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
                       stacklevel=2)
         return
     actual = json.loads(source.read_text(encoding="utf-8"))
-    for contract in (expected, actual):
-        if "privileged_layout" in contract:
-            contract["privileged_layout"] = canonical_marker(contract["privileged_layout"])
-    if actual.get("critic_type", "observation") != expected.get("critic_type", "observation"):
-        raise ValueError("Incompatible checkpoint critic_type: observation and privileged "
-                         "critics have different input architectures.")
+    if actual.get("critic_type", "observation") != "observation":
+        raise ValueError("This checkpoint uses a critic architecture that is no longer supported.")
     if actual.get("format") != expected["format"]:
         raise ValueError("Unsupported checkpoint training-contract version.")
     critical = {
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization", "radar_bins",
-        "critic_type", "privileged_layout", "critic_input_dim",
         *[name for name in expected if name.startswith("observe_")],
     }
     critical.intersection_update(expected)

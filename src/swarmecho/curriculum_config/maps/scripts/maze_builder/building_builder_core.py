@@ -143,6 +143,10 @@ def normalize_document(data: dict[str, Any]) -> dict[str, Any]:
             or any(type(i) is not int for i in v) or v[3] not in range(4) for v in stairs):
         raise ValueError("stairs must contain [x,y,z,direction] with direction 0..3.")
     result["stairs"] = stairs
+    if "stair_full_width" in data:
+        if type(data["stair_full_width"]) is not bool:
+            raise ValueError("stair_full_width must be boolean.")
+        result["stair_full_width"] = data["stair_full_width"]
     # Editing invalidates generated navigation hints. Geometry remains the
     # authoritative source; saved manual edits get the normal visibility graph.
     return result
@@ -209,6 +213,7 @@ def document_from_map_data(data: dict[str, Any]) -> dict[str, Any]:
             **({"base_position_m": base_position} if base_position is not None else {}),
             "target_exclusion_cells": data.get("target_exclusion_cells", []),
             **{key: geometry.get(key, []) for key in (*OPENING_KEYS, "stairs")},
+            **({"stair_full_width": geometry["stair_full_width"]} if "stair_full_width" in geometry else {}),
         }
     )
 
@@ -242,6 +247,7 @@ def map_data_from_document(document: dict[str, Any]) -> dict[str, Any]:
             "x_walls": doc["x_walls"],
             "y_walls": doc["y_walls"],
             **{key: doc[key] for key in (*OPENING_KEYS, "stairs")},
+            **({"stair_full_width": doc["stair_full_width"]} if "stair_full_width" in doc else {}),
         },
         "base_position_m": doc.get(
             "base_position_m",
