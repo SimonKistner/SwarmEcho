@@ -893,9 +893,16 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             distances = jnp.zeros((0, 0), dtype=jnp.float32)
         return obstacle_min, obstacle_max, vertices, distances
 
+    def target_inside_buffered_solids(point, obstacle_min, obstacle_max):
+        """Use wall clearance for building solids and obstacle clearance for cuboids."""
+        wall_buffer = cfg.target_wall_buffer_fraction * building.cell_size_m
+        if building_bank is not None:
+            return points_inside_aabbs(point, obstacle_min, obstacle_max, wall_buffer)
+        return (points_inside_aabbs(point, authored_min, authored_max, wall_buffer)
+                | points_inside_aabbs(point, obstacle_min, obstacle_max, cfg.obstacle_target_buffer_m))
+
     def sample_target(key, obstacle_min, obstacle_max, map_id=0):
         """Sample allowed interior volume, rejecting buffered solid geometry."""
-        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
         target_lower, target_upper, target_volumes = spawn_lower, spawn_upper, spawn_volumes
         if building_bank is not None:
             target_lower, target_upper, target_volumes = (building_bank.get("target_" + suffix, map_id)
@@ -913,9 +920,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
         def condition(carry):
             iteration, _, point = carry
-            invalid_obstacle = points_inside_aabbs(
-                point, solid_min, solid_max, cfg.obstacle_target_buffer_m
-            )
+            invalid_obstacle = target_inside_buffered_solids(point, obstacle_min, obstacle_max)
             return (iteration < 64) & invalid_obstacle
 
         def retry(carry):
@@ -925,17 +930,12 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
         point = jax.lax.while_loop(condition, retry, (0, key, first))[2]
         fallback_candidates = (target_lower + target_upper) / 2
-        fallback_valid = ~points_inside_aabbs(
-            fallback_candidates, solid_min, solid_max,
-            cfg.obstacle_target_buffer_m,
-        )
+        fallback_valid = ~target_inside_buffered_solids(fallback_candidates, obstacle_min, obstacle_max)
         fallback_valid &= target_volumes > 0
         fallback_index = jnp.argmax(
             jnp.where(fallback_valid, fallback_candidates[:, 2], -jnp.inf)
         )
-        point_invalid = points_inside_aabbs(
-            point, solid_min, solid_max, cfg.obstacle_target_buffer_m
-        )
+        point_invalid = target_inside_buffered_solids(point, obstacle_min, obstacle_max)
         return jnp.where(point_invalid, fallback_candidates[fallback_index], point)
 
     def connectivity(pos, active, base_pos, target_pos, obstacle_min, obstacle_max):
@@ -1138,7 +1138,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
                          & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
                          & jnp.all((drone >= lower) & (drone <= upper))) if randomize_base else jnp.bool_(True)
-                valid &= ~points_inside_aabbs(target, solid_min, solid_max, cfg.obstacle_target_buffer_m)
+                valid &= ~target_inside_buffered_solids(target, obstacle_min, obstacle_max)
                 if minimum_geodesic_separation:
                     distance = jnp.linalg.norm(base - target)
                     distance = jnp.where(segments_blocked(base, target, planning_min, planning_max), 1e6, distance)
@@ -1455,6 +1455,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             rel_norm = rel / jnp.maximum(pair_dist[i, :, None], 1e-8)
             bin_index = jnp.argmax(rel_norm @ directions.T, axis=-1)
             other = (jnp.arange(n) != i) & state.active
+            if cfg.num_obstacles or has_authored_solids:
+                other &= ~segments_blocked(origin, pos, solid_min, solid_max)
             signal = jnp.maximum(0.0, 1.0 - pair_dist[i] / cfg.comm_radius) * other
 
             def scatter(values):

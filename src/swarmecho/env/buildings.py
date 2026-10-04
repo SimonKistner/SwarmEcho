@@ -246,6 +246,18 @@ def compile_building(data: dict[str, Any]) -> BuildingArrays:
         raise BuildingValidationError(
             f"target_exclusion_cells contains non-interior cell {coordinate}."
         )
+    # Saved generated maps used to exclude both stair cells. Recognize only
+    # that exact historical default; custom authored exclusions remain intact.
+    generation = data.get("generation")
+    if (isinstance(generation, dict)
+            and generation.get("version") in {f"partition_connect_v{i}" for i in range(1, 6)}):
+        legacy_exclusion = np.zeros(dimensions, dtype=np.bool_)
+        legacy_exclusion[tuple(base_cell)] = True
+        for x, y, z, _ in stairs:
+            legacy_exclusion[x, y, z:z + 2] = True
+        if stairs and np.array_equal(target_exclusion, legacy_exclusion):
+            target_exclusion[:] = False
+            target_exclusion[tuple(base_cell)] = True
     if not np.any(interior_cells & ~target_exclusion):
         raise BuildingValidationError("Building has no non-excluded interior target cell.")
 
@@ -455,10 +467,34 @@ def make_cuboid_building(
         max_base_to_top_corner_m=max(dist(base_position, corner) for corner in top_corners),
     )
 
+def _subtract_spawn_solid(lower, upper, solid_lower, solid_upper):
+    """Split overlapping boxes into disjoint slabs around one buffered solid."""
+    overlaps = np.all((upper > solid_lower) & (lower < solid_upper), axis=-1)
+    if not np.any(overlaps):
+        return lower, upper
+    pieces_lower, pieces_upper = [lower[~overlaps]], [upper[~overlaps]]
+    remaining_lower, remaining_upper = lower[overlaps].copy(), upper[overlaps].copy()
+    cut_lower = np.maximum(remaining_lower, solid_lower)
+    cut_upper = np.minimum(remaining_upper, solid_upper)
+    for axis in range(3):
+        for low_side in (True, False):
+            slab_lower, slab_upper = remaining_lower.copy(), remaining_upper.copy()
+            if low_side:
+                slab_upper[:, axis] = cut_lower[:, axis]
+            else:
+                slab_lower[:, axis] = cut_upper[:, axis]
+            valid = np.all(slab_upper > slab_lower, axis=-1)
+            pieces_lower.append(slab_lower[valid])
+            pieces_upper.append(slab_upper[valid])
+        remaining_lower[:, axis] = cut_lower[:, axis]
+        remaining_upper[:, axis] = cut_upper[:, axis]
+    return np.concatenate(pieces_lower), np.concatenate(pieces_upper)
+
+
 def target_spawn_boxes(
     building: BuildingArrays, cfg, *, include_excluded: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return valid cell boxes and their volumes for continuous target sampling."""
+    """Return buffered free-volume boxes for continuous target sampling."""
     dims = building.target_exclusion.shape
     cells = np.stack(np.meshgrid(*[np.arange(size) for size in dims], indexing="ij"), axis=-1)
     cells = cells.reshape(-1, 3)
@@ -486,10 +522,18 @@ def target_spawn_boxes(
             upper[index, 2] -= half_tile + clearance
     volumes = np.prod(np.maximum(upper - lower, 0), axis=-1)
     valid = interior & ~excluded & (volumes > 0)
-    if not np.any(valid):
+    lower, upper = lower[valid], upper[valid]
+    # Include treads and solid edges extending from neighbouring cells, such
+    # as the floor slabs beside an open stairwell. Face bounds alone miss them.
+    for solid_lower, solid_upper in zip(building.solid_min_m, building.solid_max_m):
+        lower, upper = _subtract_spawn_solid(
+            lower, upper, solid_lower - clearance, solid_upper + clearance
+        )
+    if not len(lower):
         raise ValueError("Building has no non-excluded target spawn volume.")
+    volumes = np.prod(upper - lower, axis=-1)
     return tuple(
-        np.asarray(value[valid], dtype=np.float32)
+        np.asarray(value, dtype=np.float32)
         for value in (lower, upper, volumes)
     )
 

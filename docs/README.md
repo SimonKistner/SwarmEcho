@@ -16,6 +16,7 @@ The [repository README](../README.md) is the entry point for the current runtime
 - [Configuration](02_guide/01_configuration_guide.md)
 - [Analysis and tools](02_guide/02_analysis_and_tools.md)
 - [Commands](02_guide/03_commands.md)
+- [Public inspector exports and GitHub Pages](02_guide/04_public_inspector.md)
 
 The general run-analysis dashboard remains available for runs.
 The separate inspector handles replay and evaluation visualization.

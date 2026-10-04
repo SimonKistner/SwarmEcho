@@ -23,6 +23,17 @@ building visibility controls, replay inspection, target selection, and a
 command for generating a replay at the selected XYZ position. Existing spatial
 artifacts and compatibility fallbacks remain supported.
 
+The replay sidebar places **Episode** on the left, beside **Checkpoint
+configuration** and **Building visibility** stacked on the right. The
+configuration panel automatically shows the producing run's training map
+type/count, training agent count, and the actual evaluation agent count;
+unavailable values show **Unknown**. The public inspector uses the same panel.
+**Reward debug plots** start disabled in both inspectors; enable the checkbox
+under **Playback** when needed.
+New artifacts start at 10° elevation with two 15% zoom-in steps applied to the
+starting camera distance. Artifact switches reset the camera, while refreshing
+the same selected artifact preserves its current pose.
+
 For a multi-map static run such as `B02c_static`, the inspector groups each
 evaluation event's heatmaps and replays by map and shows the configured map
 names. The saved evaluation copies live in `static_eval_maps/` and use IDs such
@@ -83,7 +94,7 @@ without a building snapshot use the current map file. If positions or obstacles
 change during an episode, the reference stays tied to the first frame and the
 sidebar labels it as such.
 
-Reward debug plots are on by default and can be switched off in Playback to
+Reward debug plots are off by default and can be enabled in Playback. Leave them off to
 give the 3D view the full centre area. The left timeline shows cumulative
 reward for each drone. The right timeline shows each drone's cumulative
 relative advantage. At every step it subtracts the lowest drone reward before
@@ -113,6 +124,15 @@ episode clock.
 inspector. Use its `key=value` options, rather than old Streamlit or artefacts
 server options. The old flat-map target picker, MP4 renderer, and evaluation
 job queue are removed.
+
+The **Export public page** button prepares the selected replay or heatmap as a
+static page in `public-inspector/`, with optional precomputed reference paths.
+Choose or create a section, add custom tags, and capture a thumbnail of the
+current view. The public gallery sorts cards by publication date and sections
+by their newest card, with horizontal dividers between section galleries.
+The reduced viewer retains the 3D controls without discovery or evaluation
+commands. Exports can be previewed locally and published with GitHub Pages;
+see [the export and deployment guide](04_public_inspector.md).
 
 Evaluation CSVs contain XYZ coordinates with either categorical stages or
 cumulative robust outcome rates. Both formats remain supported. Replay JSON

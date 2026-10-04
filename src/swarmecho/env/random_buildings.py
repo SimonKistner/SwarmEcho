@@ -13,7 +13,7 @@ import numpy as np
 from swarmecho.core.config import RandomBuildingConfig
 from swarmecho.env.buildings import BUILDING_FORMAT, compile_building
 
-GENERATOR_VERSION = "partition_connect_v5"
+GENERATOR_VERSION = "partition_connect_v6"
 
 _STAIR_STEPS = ((1, 0), (0, 1), (-1, 0), (0, -1))
 
@@ -164,10 +164,8 @@ def generate_building(settings: RandomBuildingConfig, seed: int, *, name: str = 
                 break
     if free_floors is None:
         raise ValueError("Could not place stairs with clear entrances, exits, and connected rooms; enlarge the grid or lower staircase_max.")
-    connectors = set()
     for x, y, z, _ in stairs:
         tiles.remove((x, y, z + 1))
-        connectors.update(((x, y, z), (x, y, z + 1)))
     for z in range(nz):
         rooms = [(0, 0, nx, ny)]
         wanted = int(rng.integers(settings.rooms_per_story_min, settings.rooms_per_story_max + 1))
@@ -250,7 +248,7 @@ def generate_building(settings: RandomBuildingConfig, seed: int, *, name: str = 
             "cell_size_m": c, "tile_thickness_m": settings.tile_thickness_m,
             "wall_thickness_m": settings.wall_thickness_m, "geometry": geometry,
             "base_position_m": [(base[0] + .5) * c, (base[1] + .5) * c, settings.tile_thickness_m / 2],
-            "target_exclusion_cells": [list(v) for v in sorted(connectors | {base})],
+            "target_exclusion_cells": [list(base)],
             "generation": {"version": GENERATOR_VERSION, "seed": int(seed), "settings": asdict(settings),
                            "planning_clearance_m": drone_clearance}}
     # A compact, architecture-aware visibility graph. Cell centres and portal

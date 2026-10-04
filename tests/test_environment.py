@@ -267,6 +267,38 @@ def test_octant_radar_and_configured_distance_contracts():
     assert maximum_chain_distance(replace(cfg, num_agents=6)) == 35.0
 
 
+def test_peer_radar_hides_drones_behind_walls():
+    """Problem 9: all three peer channels must respect line of sight."""
+    cfg = replace(EnvConfig(), num_agents=2, spawn_delay=0)
+    reset, _, observations, _ = make_env_fns(
+        _partial_wall_building(), cfg, plan_geodesic=False,
+    )
+    state = reset(jax.random.PRNGKey(95))._replace(
+        pos=jnp.array([[9., 4., 2.], [11., 4., 2.]]),
+        active=jnp.ones(2, dtype=jnp.bool_),
+        # Peers may belong to either component via other relay paths.
+        is_conn_base=jnp.ones(2, dtype=jnp.bool_),
+        is_conn_target=jnp.ones(2, dtype=jnp.bool_),
+    )
+    observe = jax.jit(observations)
+
+    def peer_channels(value):
+        # Six self features, then bins of [wall, peer, target-peer, base-peer].
+        return np.asarray(observe(value))[:, 6:].reshape(2, cfg.radar_bins, 4)[:, :, 1:]
+
+    # Both drones see each other through the opening below the wall (y < 5).
+    np.testing.assert_allclose(
+        peer_channels(state).max(axis=1), 1.0 - 2.0 / cfg.comm_radius,
+        rtol=1e-6,
+    )
+    # Same separation, but the wall at x=10 now blocks both directions.
+    blocked = state._replace(pos=jnp.array([[9., 10., 2.], [11., 10., 2.]]))
+    np.testing.assert_array_equal(
+        peer_channels(blocked), 0.0,
+        err_msg="Peer radar leaks through the wall in problem 9",
+    )
+
+
 def test_optional_observation_features_match_the_maintained_config_switches():
     cfg, (reset, _, observations, _) = _functions(
         observe_base_vector=True,

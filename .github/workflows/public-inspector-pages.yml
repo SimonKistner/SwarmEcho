@@ -1,0 +1,38 @@
+name: Publish public inspector
+
+on:
+  push:
+    paths:
+      - 'public-inspector/**'
+      - '.github/workflows/public-inspector-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-inspector-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload only the public inspector
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public-inspector
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

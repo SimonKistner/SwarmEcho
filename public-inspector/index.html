@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwarmEcho · Selected results</title>
+  <style>
+    :root{color-scheme:dark;--bg:#090e18;--panel:#111a2a;--line:#26344d;--text:#e5eefc;--muted:#91a4c3;--cyan:#22d3ee}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}
+    main{max-width:1180px;margin:56px auto;padding:0 24px 48px}h1{font-size:32px;margin-bottom:10px}p{color:var(--muted);line-height:1.6}.brand{color:var(--cyan)}
+    .filters{display:flex;flex-wrap:wrap;gap:12px;margin:26px 0 14px}.filters label{display:grid;gap:7px;color:var(--muted);font-size:12px}.filters label:first-child{flex:1;min-width:220px}input,select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:11px 12px;min-width:150px}input:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+    #status{font-size:13px;min-height:21px}.section{border-top:1px solid var(--line);margin-top:30px;padding-top:25px}.section-header{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:18px}.section h2{font-size:21px;margin:0}.section-summary{color:var(--muted);font-size:12px}
+    .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:18px}.card{display:flex;flex-direction:column;overflow:hidden;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text);text-decoration:none;transition:border-color .15s,transform .15s}.card:hover{border-color:var(--cyan);transform:translateY(-2px)}.preview{aspect-ratio:8/5;width:100%;background:#0c1422;display:grid;place-items:center;overflow:hidden}.preview img{display:block;width:100%;height:100%;object-fit:cover}.placeholder{color:var(--muted);text-align:center;font-size:13px}.placeholder svg{display:block;margin:0 auto 9px;color:#446783}
+    .card-body{padding:17px;display:flex;flex-direction:column;gap:10px;flex:1}.card h3{font-size:16px;line-height:1.45;margin:0;overflow-wrap:anywhere}.card-meta{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:12px}.tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:3px}.tag{border:1px solid #35506b;border-radius:5px;padding:3px 7px;font-size:11px;color:#b8cada;overflow-wrap:anywhere}.tag.success{color:#a3e635;border-color:#496126;background:#24321b}.tag.fail{color:#fb7185;border-color:#783b48;background:#33202b}.tag.rate{color:#60a5fa;border-color:#355b8c;background:#172b46}
+    @media(max-width:600px){main{margin-top:30px;padding:0 16px 32px}h1{font-size:26px}.gallery{grid-template-columns:1fr}.filters label{flex:1}}
+  </style>
+</head>
+<body><main>
+<h1><span class="brand">SwarmEcho</span> · Selected results</h1>
+<p>Interactive replays and evaluation heatmaps, grouped by section. Newest publications appear first.</p>
+<div class="filters" role="search">
+  <label>Search <input id="search" type="search" placeholder="Title, section or tag…"></label>
+  <label>Tag <select id="tagFilter"><option value="">All tags</option></select></label>
+  <label>Artifact <select id="kindFilter"><option value="">All artifacts</option><option value="replay">Replays</option><option value="heatmap">Heatmaps</option></select></label>
+</div>
+<p id="status" role="status" aria-live="polite">Loading results…</p><div id="results"></div>
+</main><script>
+const $=id=>document.getElementById(id);
+const dateFormat=new Intl.DateTimeFormat(undefined,{year:'numeric',month:'short',day:'numeric'});
+const PATH=/^(replays|heatmaps)\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
+let catalogue=[];
+function timestamp(item){const time=Date.parse(item.published_at);return Number.isFinite(time)?time:0}
+function publishedLabel(item){return timestamp(item)?dateFormat.format(new Date(item.published_at)):'Date unavailable'}
+function tagsFor(item){return [...new Set([...(Array.isArray(item.tags)?item.tags:[]).filter(tag=>typeof tag==='string'),...(['success','fail'].includes(item.result)?[item.result]:[])])]}
+function placeholder(kind){
+  const block=document.createElement('div');block.className='placeholder';
+  block.innerHTML='<svg width="64" height="58" viewBox="0 0 64 58" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M32 3 59 18v26L32 55 5 40V14Z M5 14 32 29l27-11 M32 29v26 M14 19v26 M23 24v26 M41 25v26 M50 21v27 M5 27l27 15 27-12"/></svg>';
+  block.append(document.createTextNode(kind==='heatmap'?'Heatmap preview unavailable':'Building preview unavailable'));return block;
+}
+function card(item){
+  const link=document.createElement('a');link.className='card';link.href='./'+item.path;
+  const preview=document.createElement('div');preview.className='preview';
+  if(item.thumbnail===item.path+'thumbnail.png'){
+    const image=document.createElement('img');image.src='./'+item.thumbnail;image.alt='3D preview of '+item.title;image.loading='lazy';image.width=640;image.height=400;
+    image.onerror=()=>preview.replaceChildren(placeholder(item.kind));preview.appendChild(image);
+  }else preview.appendChild(placeholder(item.kind));
+  const body=document.createElement('div');body.className='card-body';const heading=document.createElement('h3');heading.textContent=item.title;
+  const meta=document.createElement('div');meta.className='card-meta';const kind=document.createElement('span');kind.textContent=item.kind==='heatmap'?'Heatmap':'Replay';
+  const date=document.createElement('time');date.textContent='Published '+publishedLabel(item);if(timestamp(item))date.dateTime=item.published_at;
+  if(item.updated_at&&item.updated_at!==item.published_at)date.title='Updated '+new Date(item.updated_at).toLocaleString();
+  meta.append(kind,date);const tags=document.createElement('div');tags.className='tags';
+  if(['success','fail'].includes(item.result)){const badge=document.createElement('span');badge.className='tag '+item.result;badge.textContent=item.result==='success'?'Success':'Fail';tags.appendChild(badge)}
+  if(item.kind==='heatmap'&&typeof item.success_rate==='number'&&Number.isFinite(item.success_rate)){const badge=document.createElement('span');badge.className='tag rate';badge.textContent='Chain success '+Math.round(item.success_rate*100)+'%';tags.appendChild(badge)}
+  for(const tag of Array.isArray(item.tags)?item.tags:[]){if(typeof tag!=='string'||tag.toLowerCase()===item.result)continue;const badge=document.createElement('span');badge.className='tag';badge.textContent=tag;tags.appendChild(badge)}
+  body.append(heading,meta,tags);link.append(preview,body);return link;
+}
+function renderGallery(){
+  const query=$('search').value.trim().toLowerCase(),tag=$('tagFilter').value,kind=$('kindFilter').value;
+  const groups=new Map();
+  // Section recency comes from its entire collection, independent of filters.
+  for(const item of catalogue){const section=typeof item.section==='string'&&item.section.trim()?item.section.trim():'General',key=section.toLowerCase();if(!groups.has(key))groups.set(key,{name:section,latest:0,items:[]});const group=groups.get(key);group.latest=Math.max(group.latest,timestamp(item));group.items.push(item)}
+  const sections=[...groups.values()].sort((a,b)=>b.latest-a.latest||a.name.localeCompare(b.name));
+  $('results').replaceChildren();let shown=0,sectionCount=0;
+  for(const section of sections){
+    const items=section.items.filter(item=>(!kind||item.kind===kind)&&(!tag||tagsFor(item).some(value=>value.toLowerCase()===tag))&&(!query||[item.title,section.name,item.kind,...tagsFor(item)].join(' ').toLowerCase().includes(query))).sort((a,b)=>timestamp(b)-timestamp(a)||String(a.title).localeCompare(String(b.title))||a.path.localeCompare(b.path));
+    if(!items.length)continue;shown+=items.length;sectionCount++;
+    const block=document.createElement('section');block.className='section';const header=document.createElement('div');header.className='section-header';const heading=document.createElement('h2');heading.textContent=section.name;
+    const summary=document.createElement('span');summary.className='section-summary';summary.textContent=items.length+' result'+(items.length===1?'':'s')+(section.latest?' · Latest publication '+dateFormat.format(new Date(section.latest)):'');
+    header.append(heading,summary);const gallery=document.createElement('div');gallery.className='gallery';items.forEach(item=>gallery.appendChild(card(item)));block.append(header,gallery);$('results').appendChild(block);
+  }
+  $('status').textContent=!catalogue.length?'No results have been published yet.':!shown?'No results match these filters.':shown+' result'+(shown===1?'':'s')+' in '+sectionCount+' section'+(sectionCount===1?'':'s');
+}
+for(const id of ['search','tagFilter','kindFilter'])$(id).addEventListener(id==='search'?'input':'change',renderGallery);
+fetch('./catalogue.json').then(response=>{if(!response.ok)throw Error('The result list could not be loaded.');return response.json()}).then(items=>{
+  if(!Array.isArray(items))throw Error('The result list is invalid.');
+  catalogue=items.filter(item=>item&&PATH.test(item.path)&&typeof item.title==='string');
+  const tags=new Map();for(const item of catalogue)for(const tag of tagsFor(item))tags.set(tag.toLowerCase(),tag);
+  for(const [value,label] of [...tags].sort((a,b)=>a[1].localeCompare(b[1]))){const option=document.createElement('option');option.value=value;option.textContent=label;$('tagFilter').appendChild(option)}
+  renderGallery();
+}).catch(error=>{$('status').textContent=error.message});
+</script></body></html>

@@ -105,6 +105,8 @@ uv run swarmecho-inspect root=outputs
 ```
 
 The inspector shows replays and evaluation heatmaps. It opens on port 8765 by default.
+Its **Export public page** button prepares selected results for browser-only
+sharing through GitHub Pages. See the [export and deployment guide](docs/02_guide/04_public_inspector.md).
 
 ### 7. Explore training runs
 
