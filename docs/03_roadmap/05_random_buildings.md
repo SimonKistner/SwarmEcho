@@ -94,8 +94,23 @@ while stair treads, flight nodes, and T or cross joins are not merge candidates.
 5. Randomly add windows to remaining eligible room walls, excluding stair
    walls. Windows never replace a required door.
 6. Choose one free ground-floor corner cell for the saved base, placing it at the
-   cell centre on top of the floor tile. Exclude the base cell and connector cells
-   from target sampling; compile and validate the map.
+   cell centre on top of the floor tile. Exclude the base cell from target
+   sampling; compile and validate the map.
+
+Targets can spawn in the free space of both staircase cells: above/beside the
+lower treads and in the upper landing cell. Stair treads use the same
+`env.target_wall_buffer_fraction * cell_size_m` clearance from their solid
+surfaces as ordinary walls. Spawn boxes are split around buffered treads and
+sampled by their remaining volume, shared by training and evaluation. Generated
+cuboid obstacles still use `env.obstacle_target_buffer_m`.
+
+Generator version `partition_connect_v6` saves only the base-cell exclusion.
+When compiling older generated maps (including B02c static maps and saved
+evaluation suites), an exclusion list matching the old base-plus-stairs default
+is upgraded in memory to the base cell alone. Custom exclusion lists are
+preserved. Source YAML files and existing replay/heatmap data are unchanged.
+Older bank records are incompatible with the updated generator/source digest;
+bank setup builds a compatible pool instead of reusing obsolete spawn boxes.
 
 The room-count settings apply before stair walls and door repairs. The repairs
 may change the final room boundaries. No minimum final room count or

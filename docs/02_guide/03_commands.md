@@ -57,6 +57,17 @@ uv run swarmecho-dashboard
 `swarmecho-eval-dashboard` and `swarmecho-artefacts` are aliases for
 `swarmecho-inspect` with identical options.
 
+Export a selected replay or evaluation heatmap as a static public page:
+
+```bash
+uv run swarmecho-inspect export=outputs/RUN/artifacts/eval/replays/REPLAY.json name=example-replay "title=Selected replay"
+uv run swarmecho-inspect export=outputs/RUN/artifacts/eval/HEATMAP_info.csv name=example-heatmap
+```
+
+The inspector also provides an **Export public page** button. See
+[the public inspector guide](04_public_inspector.md) for export options,
+previewing, and GitHub Pages setup.
+
 ## Build maps
 
 ```bash
