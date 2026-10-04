@@ -52,7 +52,7 @@ reward:
   exploration_bonus: 2.0
   target_found_bonus: 500.0
   finder_bonus: 100
-  success_bonus: 12000.0
+  success_bonus: 24000.0
   success_bonus_as_hold_record: false
   peer_informing_reward_enabled: true
   peer_informing_bonus: 50.0
