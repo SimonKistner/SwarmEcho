@@ -71,6 +71,20 @@ def steps_for_update(update: int, cfg: Any) -> int:
     return int(update) * envs * rollout_steps
 
 
+def steps_for_checkpoint(checkpoint_path: str | Path, cfg: Any) -> int:
+    """Return accumulated environment steps recorded for a checkpoint."""
+    update = parse_checkpoint_update(checkpoint_path) or 0
+    steps = steps_for_update(update, cfg)
+    history_path = Path(checkpoint_path) / "step_history.json"
+    if history_path.exists():
+        try:
+            data = json.loads(history_path.read_text())
+            steps = int(data.get("total_steps", steps))
+        except Exception:
+            pass
+    return steps
+
+
 def compact_steps(steps: int) -> str:
     """Format step counts for artifact filenames, e.g. 70M -> s00070M."""
     steps = int(steps)
@@ -91,14 +105,7 @@ def checkpoint_artifact_suffix(checkpoint_path: str | Path, cfg: Any) -> str:
     update = parse_checkpoint_update(checkpoint_path)
     if update is None:
         update = 0
-    steps = steps_for_update(update, cfg)
-    history_path = Path(checkpoint_path) / "step_history.json"
-    if history_path.exists():
-        try:
-            data = json.loads(history_path.read_text())
-            steps = int(data.get("total_steps", steps))
-        except Exception:
-            pass
+    steps = steps_for_checkpoint(checkpoint_path, cfg)
     return artifact_suffix(update, steps)
 
 

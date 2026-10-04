@@ -1,0 +1,47 @@
+feat: configure evaluation swarm size independently of training
+
+- Add evaluation.num_agents with null inheriting env.num_agents, applied to periodic, final, standalone, and map-suite evaluation and replay generation.
+- Initialize recurrent actor memory and TarMAC messages for the deployed swarm without changing trained weights or training state; record the evaluation count in heatmap metadata.
+- Configure B02c_random_buildings to train with 7 agents and evaluate with 9, and document the setting.
+
+fix: label checkpoint map evaluations with accumulated steps
+
+- Read the checkpoint's accumulated step history when writing map-suite evaluation artifact names and metadata.
+- Update the existing 9-agent evaluation filenames and manifests from the branch-local 48M label to its accumulated 186M checkpoint step.
+
+fix: keep inspector camera interaction independent of replay playback
+
+- Preserve the live 3D camera pose through replay redraws, including the first mouse adjustment after loading.
+- Allow orbiting, zooming, elevation adjustment, and frame stepping while playback or camera interaction continues.
+- Keep camera orbit upright with a fixed vertical axis, including views from below, without restarting Plotly's turntable transition on each redraw.
+- Animate auto rotation on its own real-time clock with lightweight camera updates; mouse dragging temporarily takes over without stopping playback.
+
+feat: add on-demand replay roadmap reference paths
+
+- Compute the shortest base-to-target visibility path only when enabled in the inspector, using a separate worker so replay controls stay responsive.
+- Persist the path beside its replay for instant reuse across inspector sessions, and display only the route and its optional waypoints.
+- Record planner settings in new replay manifests and identify default-setting or first-frame references for older or changing layouts.
+- Document the replay path controls and cache behavior.
+
+feat: train B02c on named static building suites
+
+- Add B02c_static with three portable 15 m building definitions copied from the existing pool; commenting out two names selects classic single-map training.
+- Share padded building-bank preparation between generated and named multi-map training, with balanced persistent lane assignments and a content-checked static-map manifest.
+- Evaluate every named training map with persistent per-map heatmaps and replays, and support static suite selection in standalone evaluation and the inspector.
+- Star individual map heatmaps and replays from the inspector picker or horizontal map row, with shared saved state.
+- Highlight named manual evaluations in the inspector run list, artifact picker, and step navigation.
+- Preserve existing single-map M-level and random-building workflows and document the static-map configuration.
+
+feat: add togglable relay reward experiments for B02c
+
+- Spread the existing success bonus over first achieved consecutive chain-hold records, credited only to complete-chain contributors.
+- Add signed per-agent changes in credited chain progress and one-time sender credit for peer target-knowledge transfers.
+- Vest pre-delivery chain credit over a configurable interval after delivery, with unpaid credit absorbing losses and terminal transitions settling remaining credit.
+- Enable hold-record, gap-change, and delivery vesting rewards for B02c; calibrate its time and gap weights while keeping optional reward modes disabled by default.
+- Cover vesting, post-delivery progress, loss, and terminal settlement with focused behavioral tests, and document the reward switches and their credit rules.
+
+feat: compare legacy B02c gap reward on the recorded 180M evaluation trajectory
+
+- Add a one-off replay rescorer for `random_eval_0001` that preserves every recorded frame and substitutes only the gap reward component.
+- Reconstruct relay credit with the environment's geometry and vesting functions, store the result as a separate inspector replay, and record source and reward provenance.
+- Document how to generate and view the comparison.

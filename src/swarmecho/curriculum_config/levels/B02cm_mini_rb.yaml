@@ -1,7 +1,7 @@
 env:
   map_names: []
 
-  num_agents: 9
+  num_agents: 7
 
   max_force: 50.0
   max_speed: 10.0
@@ -45,20 +45,20 @@ reward:
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
 
-  allow_redundancy_reward: false
+  allow_redundancy_reward: true
   enable_chain_efficiency_reward: false
   chain_efficiency_bonus: 0
 
   exploration_bonus: 2.0
   target_found_bonus: 500.0
   finder_bonus: 100
-  success_bonus: 12000.0
-  success_bonus_as_hold_record: false
+  success_bonus: 3000.0
+  success_bonus_as_hold_record: true
   peer_informing_reward_enabled: true
-  peer_informing_bonus: 50.0
+  peer_informing_bonus: 15.0
 
   collision_penalty: 0.5
-  time_penalty_per_step: 3.0
+  time_penalty_per_step: 1.0
   no_movement_termination_penalty: 0.0
   gap_reduction_meter_bonus: 0.2
   gap_reward_uses_change: false
@@ -68,34 +68,32 @@ reward:
 
 training:
   total_timesteps: 800000000
-  num_envs: 2000
+  num_envs: 2500
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 8135665357
+  seed: 456789
 
-  randomize_base: false
+  randomize_base: true
   minimum_geodesic_separation: true
   minimum_geodesic_separation_multiplier: 1.0
   skip_on_no_pair_found: true
 
 network:
-  hidden_dim: 256
-  num_layers: 3
-  actor_num_layers: 3
+  num_layers: 4
+  actor_num_layers: 4
   memory_comm_enabled: true
   memory_comm_every_k_steps: 3
   tarmac_sig_dim: 32
-  tarmac_val_dim: 64
+  tarmac_val_dim: 128
   tarmac_include_self: false
 
 evaluation:
-  num_agents: 9 # null uses env.num_agents from training; a number overrides all evaluation runs, heatmaps, and replays.
   apply_trainings_min_geo_separation: true
-  eval_parallel_envs: 4000
+  eval_parallel_envs: 2500
   random_eval: true
   replay_targets_from_storey: 3
-  random_eval_envs: 5
+  random_eval_envs: 3
 
   early_exit: true
   early_exit_success_rate: 0.99

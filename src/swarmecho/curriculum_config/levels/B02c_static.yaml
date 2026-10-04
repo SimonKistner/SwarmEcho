@@ -1,7 +1,11 @@
 env:
-  map_names: []
+  # Comment out two entries to use one classic static map.
+  map_names:
+    - B02c_static_map_02713
+    #- B02c_static_map_02557
+    #- B02c_static_map_02344
 
-  num_agents: 9
+  num_agents: 7
 
   max_force: 50.0
   max_speed: 10.0
@@ -27,19 +31,7 @@ env:
   roadmap_corner_bonus_m: 0.0
 
 random_buildings:
-  enabled: true
-
-  length_m: 15.0
-  width_m: 15.0
-  stories: 3
-  cell_size_m: 5.0
-
-  rooms_per_story_min: 2
-  rooms_per_story_max: 4
-  staircase_max: 2
-
-  save_training_maps: false
-  load_maps_from_bank: true
+  enabled: false
 
 reward:
   target_found_requires_delivery: true
@@ -68,11 +60,11 @@ reward:
 
 training:
   total_timesteps: 800000000
-  num_envs: 2000
+  num_envs: 3500
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 8135665357
+  seed: 456789
 
   randomize_base: false
   minimum_geodesic_separation: true
@@ -90,12 +82,10 @@ network:
   tarmac_include_self: false
 
 evaluation:
-  num_agents: 9 # null uses env.num_agents from training; a number overrides all evaluation runs, heatmaps, and replays.
   apply_trainings_min_geo_separation: true
-  eval_parallel_envs: 4000
-  random_eval: true
+  eval_parallel_envs: 3500
+  random_eval: false
   replay_targets_from_storey: 3
-  random_eval_envs: 5
 
   early_exit: true
   early_exit_success_rate: 0.99

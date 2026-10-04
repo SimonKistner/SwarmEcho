@@ -19,23 +19,62 @@ explicitly.
 There is no visualization configuration section in a level. Inspector controls
 belong to the independent inspector.
 
+Reward switches `success_bonus_as_hold_record`, `gap_reward_uses_change`,
+`delivery_gap_vesting_enabled`, and `peer_informing_reward_enabled` default to
+`false`. Delivery gap vesting requires gap-change reward and delivery gating;
+`delivery_gap_vesting_steps` defaults to 10 and must be positive.
+`gap_change_meter_bonus` and `peer_informing_bonus` set the respective enabled
+reward amounts. The hold-record switch spreads the existing `success_bonus`
+across first achieved consecutive chain-hold lengths rather than adding to it.
+The current B02c level enables peer informing and terminal success reward
+while keeping the per-step absolute gap reward. Its time cost is 3 per step;
+hold records and delivery gap vesting are disabled.
+
+**First visual sighting is not a reward event in delivery-gated missions.**
+Coverage rewards the exploration pattern; randomized target placement makes
+the identity of the first drone to see the target incidental. `finder_bonus`
+rewards a target-aware drone that delivers knowledge directly to the base,
+while `target_found_bonus` is shared at delivery. See
+[First visual sighting is not rewarded](../01_reference/02_environment_and_physics.md#first-visual-sighting-is-not-rewarded)
+for the intended exploration, handoff, and relay sequence.
+
 ## Levels and maps
 
 Levels live in `src/swarmecho/curriculum_config/levels/`; maps live in the
-adjacent `maps/` directory. `env.map_names` must contain exactly one map for
-an authored level. With `random_buildings.enabled=true`, set `env.map_names`
-to `[]` or `[random]`; omitted generation fields use the defaults in
-`RandomBuildingConfig`. Use a level name or an existing YAML path:
+adjacent `maps/` directory. With `random_buildings.enabled=false`,
+`env.map_names` contains one or more authored map names or YAML paths relative
+to `maps/`. A one-map list keeps the classic authored-map training and
+evaluation path, including the M levels. With `random_buildings.enabled=true`,
+set `env.map_names` to `[]` or `[random]`; omitted generation fields use the
+defaults in `RandomBuildingConfig`. Use a level name or an existing YAML path:
 
 ```bash
 uv run swarmecho-train level=B01a_office_find_only logging.run_name=office
+```
+
+`B02c_static` copies the current B02c mission settings and names three 15 m
+buildings copied from the compatible random-building pool into `maps/`. Its
+`random_buildings.enabled` and `evaluation.random_eval` flags are false. Training
+uses each named layout persistently, distributing lanes as evenly as possible
+(2,000 lanes across three maps: 667/667/666). The maps must share grid and world
+dimensions, and the number of maps cannot exceed `training.num_envs`.
+Evaluation uses those same layouts, with `evaluation.eval_parallel_envs` episodes
+**per map**; its heatmaps and scheduled replays are saved for every map. This
+measures performance on the training layouts. The run records map paths,
+content hashes, and lane counts in `static_maps.json` and rejects changes to
+that selection in the same run directory. Comment out two `env.map_names`
+entries and use a new run name to use the classic single-map path, whose
+evaluation also uses that map and retains its usual final robust evaluation.
+
+```bash
+uv run swarmecho-train level=B02c_static logging.run_name=B02c_static
 ```
 
 The supported M-series names are `M00_no_maze_open_cuboid`,
 `M01_no_maze_open_cuboid_tall`, and `M02_random_cuboid_obstacles`.
 The B-series names are `B00_test`, `B01a_office_find_only`, `B01b_office`,
 `B02a_random_buildings_find_only`, `B02b_random_buildings_deliver`, and
-`B02c_random_buildings`.
+`B02c_random_buildings`, and `B02c_static`.
 
 Building cell size controls authoring geometry. `env.coverage_voxel_size`
 controls coverage resolution and must divide every world dimension; null uses
@@ -78,6 +117,17 @@ and normalization. Training action perturbations use
 `training.training_noise` and `training.noise_level`.
 
 ## Evaluation
+
+`evaluation.num_agents` defaults to `null` (`None` in Python), which uses the
+training count from `env.num_agents`. Set it to a positive integer to deploy
+that many agents with the trained policy during periodic and final evaluation,
+standalone checkpoint evaluation, heatmap generation, and all replay modes.
+Recurrent actor memory and TarMAC messages use the evaluation count; training
+and the checkpoint's weights keep their original count and architecture.
+`B02c_random_buildings` trains with 7 agents and evaluates with 9, so newly
+generated replays contain 9 agents. Existing saved artifacts retain their
+original agent count. Override with `evaluation.num_agents=null` to evaluate
+with the training count, or, for example, `evaluation.num_agents=9` to use 9.
 
 Evaluation can use a different map through the existing
 `evaluation.eval_differes_from_training_map` and `evaluation.eval_map`
@@ -122,6 +172,7 @@ per-step gap reduction bonus of 0.125 per metre of the selected base-to-target
 distance already closed. Coverage missions, including B02a training, receive
 the time penalty but no gap bonus. Optional redundancy and efficiency rewards
 are disabled by default; the efficiency bonus is 0.5. Level overrides take
-precedence. B02c explicitly sets the 0.125 per-metre bonus.
-At a 40 m roadmap distance, closing 1 m pays 0.125 to each contributing
-drone each step; a held zero-gap chain pays 5 to each contributor each step.
+precedence. B02c explicitly sets the 0.2 per-metre bonus.
+At a 40 m roadmap distance, closing 1 m pays the default 0.125 to each
+contributing drone each step; a held zero-gap chain pays 5 to each contributor
+each step. With B02c's 0.2 setting, those amounts are 0.2 and 8.

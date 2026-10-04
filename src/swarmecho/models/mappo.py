@@ -143,17 +143,20 @@ class MAPPOModel(nnx.Module):
             return values
         return self.critic(all_obs, deterministic=deterministic)
 
-    def initial_actor_hidden(self, batch_shape=()) -> jax.Array:
-        """Return zero actor memory with shape batch_shape + (N, H)."""
-        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.hidden_dim), dtype=jnp.float32)
+    def initial_actor_hidden(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
+        """Return zero actor memory; N defaults to training, or the deployment count."""
+        n = self.num_agents if num_agents is None else num_agents
+        return jnp.zeros((*tuple(batch_shape), n, self.hidden_dim), dtype=jnp.float32)
 
-    def initial_actor_signature(self, batch_shape=()) -> jax.Array:
-        """Return zero TarMAC actor signatures with shape batch_shape + (N, S)."""
-        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.tarmac_sig_dim), dtype=jnp.float32)
+    def initial_actor_signature(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
+        """Return zero TarMAC signatures for the training or deployment count."""
+        n = self.num_agents if num_agents is None else num_agents
+        return jnp.zeros((*tuple(batch_shape), n, self.tarmac_sig_dim), dtype=jnp.float32)
 
-    def initial_actor_value(self, batch_shape=()) -> jax.Array:
-        """Return zero TarMAC actor values with shape batch_shape + (N, V)."""
-        return jnp.zeros((*tuple(batch_shape), self.num_agents, self.tarmac_val_dim), dtype=jnp.float32)
+    def initial_actor_value(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
+        """Return zero TarMAC values for the training or deployment count."""
+        n = self.num_agents if num_agents is None else num_agents
+        return jnp.zeros((*tuple(batch_shape), n, self.tarmac_val_dim), dtype=jnp.float32)
 
     def initial_critic_hidden(self, batch_shape=()) -> jax.Array:
         """Return zero critic memory with shape batch_shape + (N, H)."""

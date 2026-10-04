@@ -98,12 +98,24 @@ class RewardConfig:
     finder_bonus: float = 0.0
     target_found_bonus: float = 100.0
     success_bonus: float = 500.0
+    # Spread the existing team success budget over first achieved hold lengths.
+    success_bonus_as_hold_record: bool = False
+    # One bonus per newly informed peer, shared by all eligible senders.
+    peer_informing_reward_enabled: bool = False
+    peer_informing_bonus: float = 25.0
 
     collision_penalty: float = 0.5
     # Team cost, divided among active drones on every transition.
     time_penalty_per_step: float = 5.0
     # Per contributing drone, per metre of the base-target route already closed.
     gap_reduction_meter_bonus: float = 0.125
+    # Replace the recurring gap term with signed changes in per-drone credit.
+    gap_reward_uses_change: bool = False
+    gap_change_meter_bonus: float = 5.0
+    # Vest already credited gap progress after target delivery instead of
+    # discarding its gain while retaining a later loss.
+    delivery_gap_vesting_enabled: bool = False
+    delivery_gap_vesting_steps: int = 10
     no_movement_termination_penalty: float = -1000.0
 
 
@@ -174,6 +186,7 @@ class NetworkConfig:
 # evaluation
 @dataclass(frozen=True)
 class EvaluationConfig:
+    num_agents: int | None = None  # None (YAML: null) uses env.num_agents from training; otherwise deploy this many for all evals/replays.
     eval_parallel_envs: int = 4000
     eval_differes_from_training_map: bool = False
     eval_map: str | None = None
@@ -245,10 +258,16 @@ class Level:
     evaluation: EvaluationConfig
     logging: LoggingConfig
     random_buildings: RandomBuildingConfig = RandomBuildingConfig()
+    map_paths: tuple[Path, ...] = ()
+    map_source_name: str | None = None
 
     @property
     def building_name(self) -> str:
         return self.map_names[0]
+
+    @property
+    def static_map_suite(self) -> bool:
+        return not self.random_buildings.enabled and len(self.map_paths) > 1
 
     @property
     def ideal_chain_margin_m(self) -> float:
@@ -261,8 +280,11 @@ class Level:
 
 
 def resolve_evaluation_level(level: Level) -> Level:
-    """Return the level configuration whose building should be used for eval."""
+    """Apply evaluation-only agent, goal, and map overrides without changing training."""
     evaluation = level.evaluation
+    num_agents = getattr(evaluation, "num_agents", None)
+    if num_agents is not None:
+        level = replace(level, env=replace(level.env, num_agents=num_agents))
     if evaluation.success_condition is not None:
         level = replace(level, env=replace(level.env, success_condition=evaluation.success_condition))
     if not evaluation.eval_differes_from_training_map:
@@ -336,6 +358,7 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     training = _strict_dataclass(TrainingConfig, data.get("training", {}), "training")
     if generation.load_maps_from_bank and not generation.enabled:
         raise ValueError("random_buildings.load_maps_from_bank requires random_buildings.enabled=true.")
+    map_paths: tuple[Path, ...] = ()
     if generation.enabled:
         if map_names not in (None, [], ["random"]):
             raise ValueError("random_buildings.enabled requires env.map_names: [] (or [random]); authored maps cannot be specified.")
@@ -346,12 +369,26 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
                                         drone_clearance=env.drone_radius + env.obstacle_planning_clearance_m)
         map_names = ["random_buildings"]
     else:
-        if not isinstance(map_names, list) or len(map_names) != 1:
-            raise ValueError("env.map_names must select exactly one map.")
-        building = load_building(resolve_map_file(MAP_DIR / f"{Path(map_names[0]).stem}.yaml", MAP_DIR))
+        if not isinstance(map_names, list) or not map_names or any(
+            not isinstance(name, str) or not name.strip() for name in map_names
+        ):
+            raise ValueError("env.map_names must contain at least one map name or YAML path.")
+        paths = []
+        for name in map_names:
+            requested = Path(name)
+            local = MAP_DIR / requested
+            path = local if local.is_file() else resolve_map_file(name, MAP_DIR)
+            if not path.is_file():
+                raise FileNotFoundError(f"Map not found: {name!r} (resolved to {path}).")
+            paths.append(path.resolve())
+        if len(set(paths)) != len(paths):
+            raise ValueError("env.map_names cannot contain the same map more than once.")
+        map_paths = tuple(paths)
+        building = load_building(map_paths[0])
     level = Level(
         name=canonical_level_name(source.stem),
-        map_names=[canonical_map_name(str(map_names[0]))],
+        map_names=(["random_buildings"] if generation.enabled else
+                   [canonical_map_name(Path(name).stem) for name in map_names]),
         building=building,
         env=env,
         reward=_strict_dataclass(RewardConfig, data.get("reward", {}), "reward"),
@@ -360,6 +397,7 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         evaluation=_strict_dataclass(EvaluationConfig, data.get("evaluation", {}), "evaluation"),
         logging=_strict_dataclass(LoggingConfig, data.get("logging", {}), "logging"),
         random_buildings=generation,
+        map_paths=map_paths,
     )
     success_conditions = {"coverage", "discovery", "delivery", "chain_held"}
     if level.env.success_condition not in success_conditions:
@@ -396,6 +434,15 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     if level.evaluation.eval_parallel_envs < 1:
         raise ValueError("evaluation.eval_parallel_envs must be positive.")
     ev = level.evaluation
+    if ev.num_agents is not None and (type(ev.num_agents) is not int or ev.num_agents < 1):
+        raise ValueError("evaluation.num_agents must be null or a positive integer.")
+    if level.static_map_suite:
+        if ev.random_eval or ev.random_eval_maps is not None:
+            raise ValueError("Static multi-map evaluation uses env.map_names; disable random_eval and random_eval_maps.")
+        if ev.training_robustness or ev.eval_differes_from_training_map or ev.eval_map or ev.eval_fixed_obstacle_bounds:
+            raise ValueError("Static multi-map evaluation cannot use robustness or evaluation map overrides.")
+        if env.num_obstacles:
+            raise ValueError("Static multi-map training cannot use generated obstacles.")
     if type(ev.apply_trainings_min_geo_separation) is not bool:
         raise ValueError("evaluation.apply_trainings_min_geo_separation must be a boolean.")
     if ev.minimum_geodesic_separation is not None and type(ev.minimum_geodesic_separation) is not bool:
@@ -467,10 +514,31 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("logging.wandb_mode must be disabled, offline, or online.")
     if level.reward.chain_reward_system not in {"euclidean", "obstacle_geodesic"}:
         raise ValueError("reward.chain_reward_system must be euclidean or obstacle_geodesic.")
-    for name in ("time_penalty_per_step", "gap_reduction_meter_bonus"):
+    for name in ("time_penalty_per_step", "gap_reduction_meter_bonus",
+                 "gap_change_meter_bonus", "peer_informing_bonus"):
         value = getattr(level.reward, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"reward.{name} must be finite and nonnegative.")
+    for name in ("success_bonus_as_hold_record", "gap_reward_uses_change",
+                 "peer_informing_reward_enabled", "delivery_gap_vesting_enabled"):
+        if type(getattr(level.reward, name)) is not bool:
+            raise ValueError(f"reward.{name} must be a boolean.")
+    if (type(level.reward.delivery_gap_vesting_steps) is not int
+            or level.reward.delivery_gap_vesting_steps < 1):
+        raise ValueError("reward.delivery_gap_vesting_steps must be a positive integer.")
+    if level.reward.delivery_gap_vesting_enabled and not (
+        level.reward.gap_reward_uses_change and level.reward.target_found_requires_delivery
+    ):
+        raise ValueError("Delivery gap vesting requires gap-change reward and target delivery.")
+    if level.reward.success_bonus_as_hold_record and level.env.success_condition != "chain_held":
+        raise ValueError("reward.success_bonus_as_hold_record requires env.success_condition=chain_held.")
+    if (level.reward.success_bonus_as_hold_record
+            and level.evaluation.success_condition not in (None, "chain_held")):
+        raise ValueError("Hold-record success reward requires chain_held evaluation success.")
+    if level.env.success_condition == "coverage" and (
+        level.reward.gap_reward_uses_change or level.reward.peer_informing_reward_enabled
+    ):
+        raise ValueError("Gap-change and peer-informing rewards require a target mission.")
     if level.env.num_obstacles and level.env.obstacle_spawn_layer_max <= level.env.obstacle_spawn_layer_min:
         raise ValueError("The obstacle spawn layer range must have positive height.")
     return level

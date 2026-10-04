@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from swarmecho.training.artifacts import (
     load_eval_info_csv,
     load_eval_layout,
     parse_checkpoint_update,
+    steps_for_checkpoint,
     save_eval_info_csv,
     save_eval_layout,
     write_manifest,
@@ -39,7 +41,7 @@ from swarmecho.training.train import (
     evaluate_suite,
     replay_recorded_actions,
 )
-from swarmecho.visualize.replay import building_snapshot, write_replay
+from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
 
 
 _EVAL_INFO_UPDATE = re.compile(r"eval_info_u(\d+)_")
@@ -111,6 +113,7 @@ def _heatmap_manifest(
         "checkpoint": str(checkpoint),
         "artifact_scope": "eval",
         "success_condition": resolve_evaluation_level(level).env.success_condition,
+        "num_agents": getattr(resolve_evaluation_level(level).env, "num_agents", None),
     }
     if robustness_runs is not None:
         manifest["robustness_runs"] = int(robustness_runs)
@@ -572,6 +575,7 @@ def render_csv_replays(
             reward_terms=rewards,
             progress=False,
             metadata={
+                **planner_metadata(level.env),
                 "world_size_m": level.building.world_size_m.tolist(),
                 "cell_size_m": level.building.cell_size_m,
                 "coverage_voxel_size_m": level.building.cell_size_m
@@ -611,7 +615,7 @@ def main() -> None:
     selection_argument_seen = False
     target_argument_seen = False
     config_arguments: list[str] = []
-    random_eval_map_id = None
+    suite_map_id = None
     for argument in sys.argv[1:]:
         if "=" not in argument:
             raise ValueError(
@@ -655,8 +659,10 @@ def main() -> None:
             explicit_target = np.asarray(coordinates, dtype=np.float32)
         elif key == "replay_execution":
             replay_execution = value.lower()
-        elif key == "random_eval_map_id":
-            random_eval_map_id = value
+        elif key in {"random_eval_map_id", "map_suite_map_id"}:
+            if suite_map_id is not None:
+                raise ValueError("Specify only one evaluation map ID.")
+            suite_map_id = value
         else:
             config_arguments.append(argument)
     if checkpoint is None:
@@ -690,33 +696,61 @@ def main() -> None:
     if checkpoint_level is not None:
         config_arguments.insert(0, f"level={checkpoint_level}")
     level = load_level_cli(config_arguments)
-    if random_eval_map_id is not None:
+    if suite_map_id is not None:
         import re
         from dataclasses import replace
         from swarmecho.env.buildings import load_building
-        if not re.fullmatch(r"random_eval_\d{4,}", random_eval_map_id):
-            raise ValueError("random_eval_map_id must be an ID such as random_eval_0000.")
-        saved_map = run_dir / "random_eval_maps" / f"{random_eval_map_id}.yaml"
-        level = replace(level, building=load_building(saved_map), map_names=[random_eval_map_id],
+        if not re.fullmatch(r"(?:random|static)_eval_\d{4,}", suite_map_id):
+            raise ValueError("Evaluation map ID must be random_eval_0000 or static_eval_0000 (or another saved ID).")
+        directory = "static_eval_maps" if suite_map_id.startswith("static_") else "random_eval_maps"
+        saved_map = run_dir / directory / f"{suite_map_id}.yaml"
+        source_name = None
+        static_manifest = run_dir / "static_maps.json"
+        if directory == "static_eval_maps" and static_manifest.is_file():
+            maps = json.loads(static_manifest.read_text(encoding="utf-8")).get("maps", [])
+            index = int(suite_map_id.rsplit("_", 1)[1])
+            if index < len(maps):
+                source_name = maps[index].get("name")
+        level = replace(level, building=load_building(saved_map), map_names=[suite_map_id], map_paths=(saved_map,),
+                        map_source_name=source_name,
                         random_buildings=replace(level.random_buildings, enabled=False),
                         evaluation=replace(level.evaluation, random_eval=False, training_robustness=False,
                                            eval_differes_from_training_map=False, eval_map=None))
-    elif level.evaluation.random_eval and mode != "parallel":
-        raise ValueError("Choose random_eval_map_id=random_eval_0000 (or another persistent eval ID) for a selected-map replay.")
-    terminal_print(f"[EVAL] using level: {level.name}", flush=True)
+    elif (level.evaluation.random_eval or level.static_map_suite) and mode != "parallel":
+        raise ValueError("Choose a saved evaluation map ID for a selected-map replay.")
+    terminal_print(
+        f"[EVAL] using level: {level.name}; agents: {resolve_evaluation_level(level).env.num_agents}",
+        flush=True,
+    )
     model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
-    if (level.evaluation.random_eval or random_eval_map_id is not None) and mode == "parallel":
-        from swarmecho.training.random_evaluation import prepare_evaluation_maps, evaluate_random_maps
-        levels = ([level] if random_eval_map_id is not None else
-                  prepare_evaluation_maps(level, run_dir / "random_eval_maps", log=terminal_print))
+    if (level.evaluation.random_eval or level.static_map_suite or suite_map_id is not None) and mode == "parallel":
+        from swarmecho.training.random_evaluation import prepare_evaluation_maps, evaluate_map_suite
+        if suite_map_id is not None:
+            levels = [level]
+        else:
+            static = level.static_map_suite
+            directory = run_dir / ("static_eval_maps" if static else "random_eval_maps")
+            levels = prepare_evaluation_maps(level, directory,
+                static_maps=level.map_paths if static else None, log=terminal_print)
         # Same frozen maps as training, with no robust/noise ensemble.
         root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
-        from swarmecho.training.artifacts import parse_checkpoint_update, steps_for_update
+        from swarmecho.training.artifacts import parse_checkpoint_update
         update = parse_checkpoint_update(checkpoint) or 0
-        evaluate_random_maps(model, levels, run_dir, update=update, steps=steps_for_update(update, level),
-                             replay_due=replay_after and level.evaluation.eval_video,
-                             artifact_root=root, scope="eval", checkpoint=checkpoint, eval_name=eval_name)
+        cumulative_steps = steps_for_checkpoint(checkpoint, level)
+        metrics = evaluate_map_suite(
+            model, levels, run_dir, update=update,
+            steps=cumulative_steps,
+            replay_due=replay_after and level.evaluation.eval_video,
+            artifact_root=root, scope="eval", checkpoint=checkpoint,
+            eval_name=eval_name,
+        )
+        terminal_print(
+            f"[EVAL] successfully completed: {len(levels)} map(s), "
+            f"{level.evaluation.eval_parallel_envs:,} episodes/map, "
+            f"overall success={metrics['eval_success']:.1%}.",
+            flush=True,
+        )
         return
     eval_run_root = create_eval_run_root(
         run_dir, checkpoint, level, eval_name=eval_name
@@ -857,6 +891,7 @@ def main() -> None:
         reward_terms=rewards,
         progress=False,
         metadata={
+            **planner_metadata(level.env),
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "coverage_voxel_size_m": (

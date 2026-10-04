@@ -17,6 +17,13 @@ from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 REPLAY_FORMAT = "swarmecho-replay/v1"
 
 
+def planner_metadata(cfg) -> dict:
+    """Keep the roadmap assumptions needed to reproduce an inspector route."""
+    names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
+             "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m")
+    return {name: getattr(cfg, name) for name in names}
+
+
 from swarmecho.env.buildings import building_snapshot
 
 

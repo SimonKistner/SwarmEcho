@@ -51,6 +51,12 @@ class EnvState(NamedTuple):
     coverage_credit: jax.Array
     stationary_steps: jax.Array = jnp.int32(0)
     idle_terminated: jax.Array = jnp.bool_(False)
+    best_chain_held_steps: jax.Array = jnp.int32(0)
+    # Credited gap progress when target delivery first opened the reward gate.
+    delivery_gap_credit: jax.Array = jnp.zeros((0,), dtype=jnp.float32)
+    delivery_gap_step: jax.Array = jnp.int32(-1)
+    # Receiver-by-sender attribution for newly shared target knowledge.
+    peer_informed_by: jax.Array = jnp.zeros((0, 0), dtype=jnp.bool_)
     # Persistent record of target delivery to the base by an informed drone
     # on a communication tick. A later chain break cannot revoke delivery.
     base_target_known: jax.Array = jnp.bool_(False)
@@ -464,6 +470,52 @@ def chain_path_efficiencies(paths: ChainPaths, reference):
                      jnp.clip(reference / jnp.maximum(paths.lengths, 1e-6), 0., 1.), 0.)
 
 
+def credited_chain_progress(state: EnvState, env_cfg: EnvConfig, *,
+                            chain_reward_system: str, allow_redundancy_reward: bool,
+                            distances=None, paths=None, diagnostics=None):
+    """Closed route metres credited to each selected partial or complete relay."""
+    if chain_reward_system == "obstacle_geodesic":
+        if distances is None:
+            distances = chain_distance_matrix(state)
+        if diagnostics is None:
+            diagnostics = obstacle_chain_diagnostics(state, distances)
+        gap_distance, _, _, leaders = diagnostics
+        full_distance = distances[0, 1]
+    else:
+        if diagnostics is None:
+            diagnostics = chain_diagnostics(state)
+        gap_distance = diagnostics[0]
+        full_distance = jnp.linalg.norm(state.target_pos - state.base_pos)
+        leaders = None
+    contributing = _contributing_chain_agents(state, env_cfg, frontier_leaders=leaders)
+    if allow_redundancy_reward:
+        def complete_members(_):
+            selected_paths = paths if paths is not None else simple_chain_paths(state, env_cfg)
+            return jnp.any(selected_paths.members & (selected_paths.counts > 0)[:, None], axis=0)
+        contributing = jax.lax.cond(
+            state.fully_connected, complete_members, lambda _: contributing, None,
+        )
+    closed_metres = jnp.where(
+        jnp.isfinite(full_distance) & (full_distance < 1e6),
+        jnp.maximum(full_distance - gap_distance, 0.0), 0.0,
+    )
+    return contributing.astype(jnp.float32) * closed_metres
+
+
+def vested_delivery_gap_credit(credited_metres, initial_metres, elapsed_steps,
+                               vesting_steps: int, *, finish: jax.Array):
+    """Pay new progress now and release pre-delivery credit while it persists."""
+    fraction = jnp.where(
+        finish, 1.0,
+        jnp.clip(elapsed_steps / vesting_steps, 0.0, 1.0),
+    )
+    # Loss consumes unpaid initial credit before any earned credit is reclaimed.
+    return jnp.minimum(
+        credited_metres,
+        fraction * initial_metres + jnp.maximum(credited_metres - initial_metres, 0.0),
+    )
+
+
 def compute_rewards(
     previous: EnvState,
     current: EnvState,
@@ -475,8 +527,8 @@ def compute_rewards(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute rewards for the configured coverage or target mission.
 
-    Finder and delivery bonuses are one-shot events. The terminal success
-    bonus follows ``env.success_condition``.
+    Finder and delivery bonuses are one-shot events. Success pays at termination
+    or incrementally on new chain-hold records when configured.
     """
     n = current.pos.shape[0]
     reward_active = current.active.astype(jnp.float32)
@@ -493,6 +545,7 @@ def compute_rewards(
             "target_found": zero,
             "time_penalty": time_penalty,
             "gap_reduction": zero,
+            "peer_informing": zero,
             "success": reward_active * (cfg.success_bonus / reward_count) * success_event,
             "no_movement_termination": reward_active * (cfg.no_movement_termination_penalty / reward_count)
             * (current.idle_terminated & ~current.success
@@ -563,11 +616,87 @@ def compute_rewards(
         )
         return is_contributing.astype(jnp.float32) * (cfg.gap_reduction_meter_bonus * closed_metres)
 
-    # The base must know the target before partial-chain shaping begins.
-    # A completed chain continues to earn the full per-step bonus while held.
-    gap_bonus = (jax.lax.cond(dynamic_gap_enabled, gap_bonus_when_known,
-                              lambda _: jnp.zeros(n, dtype=jnp.float32), None)
-                 if cfg.gap_reduction_meter_bonus > 0 else jnp.zeros(n, dtype=jnp.float32))
+    if cfg.gap_reward_uses_change:
+        def credited_progress(state, distances=None, paths=None, diagnostics=None):
+            return credited_chain_progress(
+                state, env_cfg, chain_reward_system=cfg.chain_reward_system,
+                allow_redundancy_reward=cfg.allow_redundancy_reward,
+                distances=distances, paths=paths, diagnostics=diagnostics,
+            )
+
+        previous_gap_enabled = (previous.base_target_known if cfg.target_found_requires_delivery
+                                else jnp.any(previous.target_known))
+
+        def gap_change_when_known(_):
+            current_credit = credited_progress(
+                current, geodesic_distances, chain_paths, chain_diagnostics_result,
+            )
+            if cfg.delivery_gap_vesting_enabled:
+                current_vested = vested_delivery_gap_credit(
+                    current_credit, current.delivery_gap_credit,
+                    current.step - current.delivery_gap_step,
+                    cfg.delivery_gap_vesting_steps, finish=current.done,
+                )
+                previous_vested = jax.lax.cond(
+                    previous_gap_enabled,
+                    lambda _: vested_delivery_gap_credit(
+                        credited_progress(previous), previous.delivery_gap_credit,
+                        previous.step - previous.delivery_gap_step,
+                        cfg.delivery_gap_vesting_steps, finish=previous.done,
+                    ),
+                    lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+                )
+                return cfg.gap_change_meter_bonus * (current_vested - previous_vested)
+            # Original change mode deliberately pays nothing on gate activation.
+            return jax.lax.cond(
+                previous_gap_enabled,
+                lambda _: cfg.gap_change_meter_bonus * (
+                    current_credit - credited_progress(previous)
+                ),
+                lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+            )
+
+        gap_bonus = (jax.lax.cond(
+            dynamic_gap_enabled, gap_change_when_known,
+            lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+        ) if cfg.gap_change_meter_bonus > 0 else jnp.zeros(n, dtype=jnp.float32))
+    else:
+        # The base must know the target before partial-chain shaping begins.
+        # Legacy mode keeps paying for already closed metres while held.
+        gap_bonus = (jax.lax.cond(dynamic_gap_enabled, gap_bonus_when_known,
+                                  lambda _: jnp.zeros(n, dtype=jnp.float32), None)
+                     if cfg.gap_reduction_meter_bonus > 0 else jnp.zeros(n, dtype=jnp.float32))
+
+    if cfg.success_bonus_as_hold_record:
+        new_hold_record = current.best_chain_held_steps > previous.best_chain_held_steps
+
+        def pay_record(_):
+            if cfg.allow_redundancy_reward:
+                selected_paths = chain_paths if chain_paths is not None else simple_chain_paths(current, env_cfg)
+                holders = jnp.any(selected_paths.members & (selected_paths.counts > 0)[:, None], axis=0)
+            else:
+                leaders = None
+                if cfg.chain_reward_system == "obstacle_geodesic":
+                    leaders = (chain_diagnostics_result[3] if chain_diagnostics_result is not None
+                               else obstacle_chain_diagnostics(current)[3])
+                holders = _contributing_chain_agents(current, env_cfg, frontier_leaders=leaders)
+            holder_count = jnp.maximum(jnp.sum(holders), 1)
+            return (holders.astype(jnp.float32)
+                    * (cfg.success_bonus / env_cfg.hold_chain_for / holder_count))
+
+        success_reward = jax.lax.cond(
+            new_hold_record, pay_record, lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+        )
+    else:
+        success_reward = reward_active * (cfg.success_bonus / reward_count) * success_event
+
+    if cfg.peer_informing_reward_enabled and current.peer_informed_by.shape[0]:
+        sender_count = jnp.maximum(jnp.sum(current.peer_informed_by, axis=1), 1)
+        peer_informing_reward = cfg.peer_informing_bonus * jnp.sum(
+            current.peer_informed_by / sender_count[:, None], axis=0,
+        )
+    else:
+        peer_informing_reward = jnp.zeros(n, dtype=jnp.float32)
     if cfg.enable_chain_efficiency_reward and chain_paths is None:
         chain_paths = simple_chain_paths(current, env_cfg)
     terms = {
@@ -581,7 +710,8 @@ def compute_rewards(
         "target_found": reward_active * (cfg.target_found_bonus / reward_count) * target_found_event,
         "time_penalty": time_penalty,
         "gap_reduction": gap_bonus,
-        "success": reward_active * (cfg.success_bonus / reward_count) * success_event,
+        "peer_informing": peer_informing_reward,
+        "success": success_reward,
         "no_movement_termination": reward_active * (cfg.no_movement_termination_penalty / reward_count)
         * (current.idle_terminated & ~current.success
            & ~(current.step >= jnp.int32(env_cfg.max_steps))).astype(jnp.float32),
@@ -612,7 +742,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                        spawn_pair_max_attempts: int = 1024, allow_redundancy_reward: bool = False,
                        target_found_requires_delivery: bool = True, building_bank=None,
                        memory_comm_every_k_steps: int = 1,
-                       chain_reward_system: str = "euclidean"):
+                       chain_reward_system: str = "euclidean",
+                       delivery_gap_vesting_enabled: bool = False):
     """Create pure reset, step, observation, and metric functions."""
     from swarmecho.env.buildings import validate_feature_clearance
     validate_feature_clearance(building, cfg.drone_radius + cfg.obstacle_planning_clearance_m)
@@ -625,6 +756,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     if cfg.success_condition not in {"coverage", "discovery", "delivery", "chain_held"}:
         raise ValueError("Unknown env.success_condition.")
     has_target = cfg.success_condition != "coverage"
+    if delivery_gap_vesting_enabled and (not has_target or not target_found_requires_delivery):
+        raise ValueError("Delivery gap vesting requires a target mission with delivery.")
     if not has_target and minimum_geodesic_separation:
         raise ValueError("Coverage episodes cannot require target/base separation.")
     plan_geodesic = plan_geodesic and has_target
@@ -1079,6 +1212,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             success=jnp.bool_(False),
             fully_connected=fully_connected,
             chain_held_steps=jnp.int32(0),
+            best_chain_held_steps=jnp.int32(0),
+            delivery_gap_credit=jnp.zeros(n, dtype=jnp.float32),
+            delivery_gap_step=jnp.int32(-1),
+            peer_informed_by=jnp.zeros((n, n), dtype=jnp.bool_),
             done=jnp.bool_(False),
             collided=jnp.zeros(n, dtype=jnp.bool_),
             coverage_credit=jnp.zeros(n, dtype=jnp.float32),
@@ -1109,20 +1246,23 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                     state.pos, state.active, state.base_pos,
                     state.obstacle_min, state.obstacle_max,
                 )
+                informed_by = peer_links & state.target_known[None, :]
                 return (
-                    jnp.any(peer_links & state.target_known[None, :], axis=1),
+                    informed_by,
                     jnp.any(base_links & state.target_known),
                     base_links & state.base_target_known,
                 )
-            peer_received, base_received, from_base = jax.lax.cond(
+            informed_by, base_received, from_base = jax.lax.cond(
                 share_now, share_knowledge,
-                lambda _: (jnp.zeros(n, dtype=jnp.bool_), jnp.bool_(False),
+                lambda _: (jnp.zeros((n, n), dtype=jnp.bool_), jnp.bool_(False),
                            jnp.zeros(n, dtype=jnp.bool_)),
                 operand=None,
             )
+            peer_received = jnp.any(informed_by, axis=1)
         else:
             peer_received = from_base = jnp.zeros(n, dtype=jnp.bool_)
             base_received = jnp.bool_(False)
+            informed_by = jnp.zeros((n, n), dtype=jnp.bool_)
         next_step = state.step + 1
         active = next_step >= jnp.arange(n) * cfg.spawn_delay
         force = jnp.clip(action, -1.0, 1.0) * cfg.max_force
@@ -1172,10 +1312,19 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 state.chain_held_steps + jnp.int32(1),
                 jnp.int32(0),
             )
+            best_chain_held_steps = jnp.minimum(
+                jnp.maximum(state.best_chain_held_steps, chain_held_steps),
+                jnp.int32(cfg.hold_chain_for),
+            )
+            # Direct sighting and base replay take precedence over peer credit.
+            newly_peer_informed = (~state.target_known) & peer_received & ~sees & ~from_base
+            peer_informed_by = informed_by & newly_peer_informed[:, None]
         else:
             known = jnp.zeros(n, dtype=jnp.bool_)
             fully_connected = base_target_known = jnp.bool_(False)
             chain_held_steps = jnp.int32(0)
+            best_chain_held_steps = jnp.int32(0)
+            peer_informed_by = informed_by
         if cfg.success_condition == "coverage":
             success = jnp.all(coverage | ~coverage_mask(state.map_id))
         elif cfg.success_condition == "discovery":
@@ -1185,7 +1334,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         else:
             success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
         done = success | idle_terminated | (next_step >= jnp.int32(cfg.max_steps))
-        return EnvState(
+        next_state = EnvState(
             pos=pos,
             vel=velocity,
             base_pos=state.base_pos,
@@ -1201,6 +1350,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             success=success,
             fully_connected=fully_connected,
             chain_held_steps=chain_held_steps,
+            best_chain_held_steps=best_chain_held_steps,
+            delivery_gap_credit=state.delivery_gap_credit,
+            delivery_gap_step=state.delivery_gap_step,
+            peer_informed_by=peer_informed_by,
             done=done,
             collided=jnp.any(collided, axis=-1) & active,
             coverage_credit=coverage_credit,
@@ -1219,6 +1372,20 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             map_id=state.map_id,
             building_bank=state.building_bank,
         )
+        if delivery_gap_vesting_enabled:
+            def record_delivery_credit(next_state):
+                credit = credited_chain_progress(
+                    next_state, cfg, chain_reward_system=chain_reward_system,
+                    allow_redundancy_reward=allow_redundancy_reward,
+                )
+                return next_state._replace(
+                    delivery_gap_credit=credit, delivery_gap_step=next_step,
+                )
+            next_state = jax.lax.cond(
+                base_target_known & ~state.base_target_known,
+                record_delivery_credit, lambda value: value, next_state,
+            )
+        return next_state
 
     def observations(state: EnvState):
         pos = state.pos
@@ -1348,6 +1515,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             "success": state.success,
             "fully_connected": state.fully_connected,
             "base_target_known": state.base_target_known,
+            "best_chain_held_steps": state.best_chain_held_steps,
             "stationary_steps": state.stationary_steps,
             "idle_terminated": state.idle_terminated,
             "done": state.done,
@@ -1379,6 +1547,13 @@ def make_autoreset_fns(
         raise ValueError("chain_efficiency_bonus must be finite and nonnegative.")
     if minimum_geodesic_separation and reward_cfg.chain_reward_system != "obstacle_geodesic":
         raise ValueError("Minimum geodesic separation requires obstacle_geodesic chain reward.")
+    if reward_cfg.delivery_gap_vesting_enabled and not (
+        has_target and reward_cfg.gap_reward_uses_change
+        and reward_cfg.target_found_requires_delivery
+        and type(reward_cfg.delivery_gap_vesting_steps) is int
+        and reward_cfg.delivery_gap_vesting_steps > 0
+    ):
+        raise ValueError("Delivery gap vesting requires delivery, gap-change reward, and positive steps.")
     reset, step, observations, metrics = make_env_fns(
         building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic" or reward_cfg.enable_chain_efficiency_reward,
         randomize_base=randomize_base, minimum_geodesic_separation=minimum_geodesic_separation,
@@ -1390,6 +1565,7 @@ def make_autoreset_fns(
         building_bank=building_bank,
         memory_comm_every_k_steps=memory_comm_every_k_steps,
         chain_reward_system=reward_cfg.chain_reward_system,
+        delivery_gap_vesting_enabled=reward_cfg.delivery_gap_vesting_enabled,
     )
 
     def transition(state: EnvState, action: jax.Array):
@@ -1432,6 +1608,10 @@ def make_autoreset_fns(
         terminal_metrics = metrics(terminal_state)
         info = {
             **reward_terms,
+            "gap_gain": jnp.maximum(reward_terms["gap_reduction"], 0.0),
+            "gap_loss": jnp.minimum(reward_terms["gap_reduction"], 0.0),
+            "peer_informed_count": jnp.sum(jnp.any(terminal_state.peer_informed_by, axis=1)),
+            "best_chain_held_steps": terminal_state.best_chain_held_steps,
             "done": terminal_state.done,
             "idle_terminated": terminal_state.idle_terminated,
             # Keep the reward component distinct from the terminal-success

@@ -61,7 +61,7 @@ from swarmecho.training.run_lifecycle import (
     resolve_run_layout,
     schedule_due,
 )
-from swarmecho.visualize.replay import building_snapshot, write_replay
+from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
 
 
 def communication_due(episode_step, every_k_steps):
@@ -146,6 +146,7 @@ def _evaluation_env_fns(level: Level):
         level.reward.chain_reward_system,
         level.reward.allow_redundancy_reward,
         level.reward.target_found_requires_delivery,
+        level.reward.delivery_gap_vesting_enabled,
         level.network.memory_comm_every_k_steps,
         apply_separation,
         level.training.minimum_geodesic_separation_multiplier,
@@ -162,6 +163,7 @@ def _evaluation_env_fns(level: Level):
                 spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
                 memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
                 chain_reward_system=level.reward.chain_reward_system,
+                delivery_gap_vesting_enabled=level.reward.delivery_gap_vesting_enabled,
             )
         if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.random_eval_envs):
             _EVALUATION_ENV_CACHE.popitem(last=False)
@@ -400,6 +402,8 @@ def train(
     run_name = layout.run_name
     destination = Path(output_dir).absolute() if output_dir is not None else layout.run_dir
     destination.mkdir(parents=True, exist_ok=True)
+    if not level.static_map_suite and (destination / "static_maps.json").exists():
+        raise ValueError("This run directory contains a multi-map static run; use a new run name for a single-map or random run.")
     def record_timing(update, phase, **values):
         if not training.profile_timing:
             return
@@ -412,6 +416,37 @@ def train(
     cfg = level.env
     building_bank = None
     bank_eval_maps = None
+    bank_map_count = training.num_envs
+    if level.static_map_suite:
+        import hashlib
+        from swarmecho.env.buildings import load_building
+        from swarmecho.env.building_bank import balanced_map_ids, prepare_bank
+
+        sources = level.map_paths
+        lane_ids = balanced_map_ids(training.num_envs, len(sources))
+        static_manifest = {
+            "type": "static_map_suite", "maps": [
+                {"name": name, "path": str(path),
+                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                 "training_lanes": int(np.count_nonzero(lane_ids == index))}
+                for index, (name, path) in enumerate(zip(level.map_names, sources))
+            ],
+        }
+        init_log("Static map lanes: " + ", ".join(
+            f"{item['name']}={item['training_lanes']}" for item in static_manifest["maps"]))
+        manifest_path = destination / "static_maps.json"
+        if manifest_path.exists():
+            if json.loads(manifest_path.read_text(encoding="utf-8")) != static_manifest:
+                raise ValueError("The static map selection or map content changed in this run; use a new run directory.")
+        buildings = [load_building(path) for path in sources]
+        init_log(f"Compiling {len(buildings)} static maps for {training.num_envs} training lanes...")
+        building_bank = prepare_bank(buildings, cfg,
+            plan=cfg.success_condition != "coverage" and (level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward),
+            corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
+        if not manifest_path.exists():
+            write_manifest(manifest_path, static_manifest)
+        bank_map_count = len(buildings)
+        del buildings
     if level.random_buildings.enabled:
         if level.random_buildings.load_maps_from_bank:
             import shutil
@@ -469,11 +504,13 @@ def train(
                 plan=cfg.success_condition != "coverage" and (level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward),
                 corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
             del buildings
-    random_eval_levels = None
-    if evaluation.random_eval:
+    map_suite_levels = None
+    if evaluation.random_eval or level.static_map_suite:
         from swarmecho.training.random_evaluation import prepare_evaluation_maps
-        random_eval_levels = prepare_evaluation_maps(level, destination / "random_eval_maps",
-                                                     bank_maps=bank_eval_maps, log=init_log)
+        suite_dir = destination / ("static_eval_maps" if level.static_map_suite else "random_eval_maps")
+        map_suite_levels = prepare_evaluation_maps(level, suite_dir,
+            bank_maps=bank_eval_maps, static_maps=level.map_paths if level.static_map_suite else None,
+            log=init_log)
     init_log("Initializing JAX devices...")
     devices = jax.devices()
     init_log(f"JAX devices ready: {devices}")
@@ -533,7 +570,10 @@ def train(
         reset_keys = jnp.concatenate((keys, jnp.repeat(keys[-1:], reset_padded_count - training.num_envs, axis=0)))
         reset_keys = reset_keys.reshape((reset_batch_count, reset_batch_size) + keys.shape[1:])
         if building_bank is not None:
-            ids = jnp.minimum(jnp.arange(reset_padded_count), training.num_envs - 1).reshape(reset_batch_count, reset_batch_size)
+            from swarmecho.env.building_bank import balanced_map_ids
+            lane_ids = balanced_map_ids(training.num_envs, bank_map_count)
+            padded_ids = np.pad(lane_ids, (0, reset_padded_count - training.num_envs), mode="edge")
+            ids = jnp.asarray(padded_ids).reshape(reset_batch_count, reset_batch_size)
             reset_batches = jax.lax.map(lambda pair: jax.vmap(lambda key, index: reset(key, map_id=index))(*pair), (reset_keys, ids))
         else:
             reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
@@ -584,9 +624,14 @@ def train(
     episode_gap = np.zeros(training.num_envs, dtype=np.float32)
     episode_progress_pct = np.zeros(training.num_envs, dtype=np.float32)
     episode_coverage = np.zeros(training.num_envs, dtype=np.float32)
+    episode_peer_informed = np.zeros(training.num_envs, dtype=np.float32)
+    episode_gap_gain = np.zeros(training.num_envs, dtype=np.float64)
+    episode_gap_loss = np.zeros(training.num_envs, dtype=np.float64)
     episode_rewards = {
         name: np.zeros(training.num_envs, dtype=np.float64)
-        for name in ("coverage", "collision", "finder", "time_penalty", "gap_reduction", "target_found", "success", "no_movement_termination")
+        for name in ("coverage", "collision", "finder", "time_penalty", "gap_reduction",
+                     "peer_informing", "target_found", "success",
+                     "no_movement_termination")
     }
         # Collect one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
@@ -600,6 +645,10 @@ def train(
     window_gap: deque[float] = deque(maxlen=window_size)
     window_prog_pct: deque[float] = deque(maxlen=window_size)
     window_cov: deque[float] = deque(maxlen=window_size)
+    window_best_hold: deque[float] = deque(maxlen=window_size)
+    window_peer_informed: deque[float] = deque(maxlen=window_size)
+    window_gap_gain: deque[float] = deque(maxlen=window_size)
+    window_gap_loss: deque[float] = deque(maxlen=window_size)
     window_pair_attempts: deque[int] = deque(maxlen=window_size)
     window_success_target_distance: deque[float] = deque(maxlen=window_size)
     window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
@@ -612,7 +661,7 @@ def train(
     config_snapshot = {
         "name": level.name,
         "building": level.building_name,
-        "env": asdict(level.env),
+        "env": {**asdict(level.env), "map_names": level.map_names},
         "reward": asdict(level.reward),
         "training": asdict(training),
         "network": asdict(network),
@@ -642,7 +691,10 @@ def train(
     terminal_print(f"  environments     : {training.num_envs:,}")
     terminal_print(f"  rollout / updates: {training.num_steps} / {num_updates}")
     terminal_print(f"  eval map         : {evaluation_level.building_name}")
-    if evaluation.random_eval:
+    terminal_print(f"  eval agents      : {evaluation_level.env.num_agents}")
+    if level.static_map_suite:
+        terminal_print(f"  eval mode        : {len(level.map_paths)} training maps, sequential, no action noise")
+    elif evaluation.random_eval:
         terminal_print(f"  eval mode        : {evaluation.random_eval_envs} persistent maps, sequential, no action noise")
     else:
         terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}")
@@ -796,6 +848,11 @@ def train(
                 "finder": info["finder"],
                 "time_penalty": info["time_penalty"],
                 "gap_reduction": info["gap_reduction"],
+                "gap_gain": info["gap_gain"],
+                "gap_loss": info["gap_loss"],
+                "peer_informing": info["peer_informing"],
+                "peer_informed_count": info["peer_informed_count"],
+                "best_chain_held_steps": info["best_chain_held_steps"],
                 "target_found": info["target_found"],
                 "reward_success": info["reward_success"],
                 "no_movement_termination": info["no_movement_termination"],
@@ -928,6 +985,9 @@ def train(
             episode_gap = rollout_host["chain_gap_dist"][step_index]
             episode_progress_pct = rollout_host["chain_progress_pct"][step_index]
             episode_coverage = rollout_host["global_coverage"][step_index]
+            episode_peer_informed += rollout_host["peer_informed_count"][step_index]
+            episode_gap_gain += rollout_host["gap_gain"][step_index].sum(axis=-1)
+            episode_gap_loss += rollout_host["gap_loss"][step_index].sum(axis=-1)
             for reward_name, accumulator in episode_rewards.items():
                 info_name = "reward_success" if reward_name == "success" else reward_name
                 accumulator += rollout_host[info_name][step_index].sum(axis=-1)
@@ -958,6 +1018,10 @@ def train(
                 window_gap.append(float(episode_gap[index]))
                 window_prog_pct.append(float(episode_progress_pct[index]))
                 window_cov.append(float(episode_coverage[index]))
+                window_best_hold.append(float(rollout_host["best_chain_held_steps"][step_index, index]))
+                window_peer_informed.append(float(episode_peer_informed[index]))
+                window_gap_gain.append(float(episode_gap_gain[index]))
+                window_gap_loss.append(float(episode_gap_loss[index]))
                 window_pair_attempts.append(int(rollout_host["spawn_pair_attempts"][step_index, index]))
                 if episode_success[index] > 0.5:
                     for name, window in window_path_stats.items():
@@ -978,6 +1042,9 @@ def train(
             episode_found[completed_indices] = 0.0
             episode_visually_found[completed_indices] = 0.0
             episode_idle[completed_indices] = 0.0
+            episode_peer_informed[completed_indices] = 0.0
+            episode_gap_gain[completed_indices] = 0.0
+            episode_gap_loss[completed_indices] = 0.0
             # These are read-only host views of per-step rollout data, and
             # are overwritten on the next step rather than accumulated across
             # an episode.  They therefore do not need resetting here.
@@ -1026,6 +1093,10 @@ def train(
                 "chain_gap": float(np.mean(window_gap)) if window_gap else 0.0,
                 "chain_progress_pct": float(np.mean(window_prog_pct)) if window_prog_pct else 0.0,
                 "mean_terminal_coverage": float(np.mean(window_cov)) if window_cov else 0.0,
+                "mean_best_chain_hold": float(np.mean(window_best_hold)) if window_best_hold else 0.0,
+                "mean_peer_informed": float(np.mean(window_peer_informed)) if window_peer_informed else 0.0,
+                "mean_gap_gain": float(np.mean(window_gap_gain)) if window_gap_gain else 0.0,
+                "mean_gap_loss": float(np.mean(window_gap_loss)) if window_gap_loss else 0.0,
             }
         )
         successful_distances = np.asarray(window_success_target_distance, dtype=np.float64)
@@ -1096,6 +1167,10 @@ def train(
                     "train/chain_progress_pct": latest_stats["chain_progress_pct"],
                     "train/ep_length_reduction": (1.0 - latest_stats["mean_episode_length"] / cfg.max_steps) * 100.0,
                     "train/map_coverage_pct": latest_stats["mean_terminal_coverage"] * 100.0,
+                    "train/best_chain_hold": latest_stats["mean_best_chain_hold"],
+                    "train/peer_informed": latest_stats["mean_peer_informed"],
+                    "train/gap_gain": latest_stats["mean_gap_gain"],
+                    "train/gap_loss": latest_stats["mean_gap_loss"],
                     "train/episodes_completed": completed_eps_count,
                     "train/success_target_distance_mean_norm": latest_stats["success_target_distance_mean_norm"],
                     "train/success_target_distance_max_norm": latest_stats["success_target_distance_max_norm"],
@@ -1155,9 +1230,9 @@ def train(
                     total=num_updates, episodes=evaluation.eval_parallel_envs,
                 )
             # Replay-only updates do not create metrics or advance the hold.
-            if random_eval_levels is not None:
-                from swarmecho.training.random_evaluation import evaluate_random_maps
-                eval_metrics = evaluate_random_maps(model, random_eval_levels, destination,
+            if map_suite_levels is not None:
+                from swarmecho.training.random_evaluation import evaluate_map_suite
+                eval_metrics = evaluate_map_suite(model, map_suite_levels, destination,
                     update=update, steps=steps_done, eval_due=eval_due, replay_due=replay_due, on_run=report_run)
                 evaluation_result = None
                 stop_training = bool(
@@ -1180,7 +1255,7 @@ def train(
                 )
                 if stop_training:
                     terminal_print("[EARLY-STOP]")
-            if eval_metrics is not None and (is_final_update or stop_training) and random_eval_levels is None:
+            if eval_metrics is not None and (is_final_update or stop_training) and map_suite_levels is None:
                 if evaluation_result is None or int(evaluation_result[0]["eval_robustness_runs"]) == 1:
                     from swarmecho.training.evaluate import collect_robust_evaluation
                     evaluation_result = collect_robust_evaluation(
@@ -1224,6 +1299,7 @@ def train(
                         "map_name": evaluation_level.building_name, "building_snapshot": building_snapshot(evaluation_level.building),
                         "world_size_m": evaluation_level.building.world_size_m.tolist(),
                         "success_condition": evaluation_level.env.success_condition,
+                        "num_agents": evaluation_level.env.num_agents,
                         "training_update": update,
                         "environment_steps": steps_done,
                         "artifact_scope": "train",
@@ -1244,7 +1320,7 @@ def train(
                         **artifact_metrics,
                     },
                 )
-            if replay_due and not stop_training and random_eval_levels is None:
+            if replay_due and not stop_training and map_suite_levels is None:
                 replay_started = time.perf_counter()
                 replay_bounds = evaluation.eval_fixed_obstacle_bounds
                 eval_states, eval_rewards = evaluate_model(
@@ -1263,6 +1339,7 @@ def train(
                     dt=cfg.dt,
                     reward_terms=eval_rewards,
                     metadata={
+                        **planner_metadata(evaluation_level.env),
                         "world_size_m": evaluation_level.building.world_size_m.tolist(),
                         "cell_size_m": evaluation_level.building.cell_size_m,
                         "coverage_voxel_size_m": (
@@ -1318,7 +1395,7 @@ def train(
             num_steps=training.num_steps,
             prior_history=resume.prior_history,
         )
-        if random_eval_levels is None:
+        if map_suite_levels is None:
             _create_final_checkpoint_evaluation(
                 model, level, checkpoint, destination, result=final_robust_result,
             )
@@ -1366,9 +1443,9 @@ def _collect_replay_impl(
             stored_vertices=vertices,
             stored_distances=distances,
         )
-    actor_hidden = model.initial_actor_hidden(())
-    actor_signature = model.initial_actor_signature(())
-    actor_value = model.initial_actor_value(())
+    actor_hidden = model.initial_actor_hidden((), num_agents=cfg.num_agents)
+    actor_signature = model.initial_actor_signature((), num_agents=cfg.num_agents)
+    actor_value = model.initial_actor_value((), num_agents=cfg.num_agents)
     base_valid = jnp.bool_(False)
     base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
     base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)
@@ -1636,9 +1713,9 @@ def _run_parallel_evaluation_jit(
             stored_vertices=fixed_roadmap_vertices,
             stored_distances=fixed_roadmap_distances,
         ) if fixed_layout else reset(env_key)
-        actor_hidden = model.initial_actor_hidden(())
-        actor_signature = model.initial_actor_signature(())
-        actor_value = model.initial_actor_value(())
+        actor_hidden = model.initial_actor_hidden((), num_agents=cfg.num_agents)
+        actor_signature = model.initial_actor_signature((), num_agents=cfg.num_agents)
+        actor_value = model.initial_actor_value((), num_agents=cfg.num_agents)
         base_valid = jnp.bool_(False)
         base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
         base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)

@@ -25,6 +25,13 @@ class BuildingBank:
         return self.arrays[key][map_id]
 
 
+def balanced_map_ids(num_envs: int, num_maps: int) -> np.ndarray:
+    """Assign persistent lane IDs with map counts differing by at most one."""
+    if num_envs < 1 or num_maps < 1 or num_maps > num_envs:
+        raise ValueError("A map bank needs between one and num_envs maps.")
+    return np.arange(num_envs, dtype=np.int32) % num_maps
+
+
 def prepare_bank(buildings, cfg, *, plan, corner_bonus_m=0., log=lambda message: None):
     from swarmecho.env.buildings import target_spawn_boxes
     first = buildings[0]
