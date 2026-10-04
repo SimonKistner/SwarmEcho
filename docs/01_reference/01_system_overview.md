@@ -11,7 +11,6 @@ The maintained training runtime uses recurrent MAPPO and optionally TarMAC.
 | `env/environment.py` | State, reset/step, observations, coverage, relay rewards, and episode completion |
 | `env/buildings.py` | Validate and compile authored maps |
 | `env/obstacles.py` | Obstacle generation, visibility, and geodesic roadmaps |
-| `env/critic.py` | Compact privileged critic features |
 | `core/config.py` | Strict level loading and CLI overrides |
 | `training/train.py` and `ppo.py` | Rollout collection, recurrent PPO, evaluation, and training lifecycle |
 | `training/evaluate.py` | Parallel evaluation and selective replay generation |

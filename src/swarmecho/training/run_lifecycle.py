@@ -113,11 +113,16 @@ class EvaluationHold:
 
     threshold: float
     required: int = 0
+    min_success_length_reduction: float | None = None
     consecutive: int = 0
 
-    def observe(self, success: float) -> bool:
+    def observe(self, success: float, success_length_reduction: float | None = None) -> bool:
         # NaN also fails the comparison and clears the streak.
-        self.consecutive = self.consecutive + 1 if success >= self.threshold else 0
+        passed = success >= self.threshold
+        if self.min_success_length_reduction is not None:
+            passed = (passed and success_length_reduction is not None
+                      and success_length_reduction >= self.min_success_length_reduction)
+        self.consecutive = self.consecutive + 1 if passed else 0
         return self.consecutive >= max(1, self.required)
 
 

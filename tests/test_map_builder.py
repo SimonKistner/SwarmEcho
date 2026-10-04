@@ -173,7 +173,6 @@ def test_runtime_authored_wall_blocks_motion_and_visibility():
         visual_radius=10.0,
         comm_radius_base=0.1,
         comm_radius=0.1,
-        target_spawn_buffer=0.0,
         coverage_voxel_size=5.0,
     )
     reset, step, _, _ = make_env_fns(building, cfg)

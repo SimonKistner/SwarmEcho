@@ -1,0 +1,104 @@
+env:
+  map_names: []
+
+  num_agents: 7
+
+  max_force: 50.0
+  max_speed: 10.0
+  drone_radius: 0.25
+
+  comm_radius_base: 15.0
+  base_keeps_informing: false
+  comm_radius: 15.0
+  visual_radius: 5.0
+  radar_bins: 16
+
+  max_steps: 600
+  success_condition: coverage # coverage | discovery | delivery | chain_held
+
+  observe_chain_contributor: true
+  observe_current_timestep: false
+  observe_coverage_probe: false
+  coverage_voxel_size: 1.0
+
+  roadmap_approach: "full" #"minimal"
+  roadmap_node_density: 0.5
+  roadmap_merge_wall_end_nodes: true
+  roadmap_corner_bonus_m: 0.0
+
+random_buildings:
+  enabled: true
+
+  length_m: 20.0
+  width_m: 20.0
+  stories: 3
+  cell_size_m: 5.0
+
+  rooms_per_story_min: 2
+  rooms_per_story_max: 5
+  staircase_max: 2
+
+  save_training_maps: false
+  load_maps_from_bank: true
+
+reward:
+  target_found_requires_delivery: false
+  chain_reward_system: obstacle_geodesic
+
+  allow_redundancy_reward: false
+  enable_chain_efficiency_reward: false
+  chain_efficiency_bonus: 0
+
+  exploration_bonus: 2.0
+  target_found_bonus: 0.0
+  success_bonus: 100.0 # to_test: 0.0
+
+  collision_penalty: 0.5
+  time_penalty_per_step: 5.0
+
+training:
+  total_timesteps: 500000000
+  num_envs: 2500
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+  seed: 555
+
+  randomize_base: true
+  minimum_geodesic_separation: false
+  minimum_geodesic_separation_multiplier: 1.5
+
+network:
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 3
+  tarmac_sig_dim: 16
+  tarmac_val_dim: 32
+  tarmac_include_self: false
+
+evaluation:
+  apply_trainings_min_geo_separation: true
+  minimum_geodesic_separation: true
+  success_condition: discovery # coverage | discovery | delivery | chain_held
+  eval_parallel_envs: 2500
+  random_eval: true
+  replay_targets_from_storey: 3
+  random_eval_envs: 3
+
+  early_exit: true
+  early_exit_success_rate: 1.0
+  early_exit_min_success_length_reduction: 0.5 # 0.25 -> mean completion by step 450 of 600; to_test: null
+  early_exit_hold_evals: 1
+
+  save_model: true
+  checkpoint_freq: 30
+  eval_freq: 30
+
+  training_heatmap_creation: true
+
+  eval_video: true
+  eval_video_freq: 50
+  eval_video_offset: 1
+
+logging:
+  terminal_log_warmup: true
+  terminal_log_init: true

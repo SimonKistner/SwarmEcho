@@ -17,6 +17,13 @@ from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 REPLAY_FORMAT = "swarmecho-replay/v1"
 
 
+def planner_metadata(cfg) -> dict:
+    """Keep the roadmap assumptions needed to reproduce an inspector route."""
+    names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
+             "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m")
+    return {name: getattr(cfg, name) for name in names}
+
+
 from swarmecho.env.buildings import building_snapshot
 
 
@@ -56,6 +63,7 @@ def write_replay(
         "velocity": stack("vel"),
         "active": stack("active"),
         "target_position": stack("target_pos"),
+        "target_present": stack("target_present"),
         "base_position": stack("base_pos"),
         "directly_sees_target": stack("directly_sees_target"),
         "connected_to_base": stack("is_conn_base"),
@@ -72,6 +80,19 @@ def write_replay(
         "obstacle_min": stack("obstacle_min"),
         "obstacle_max": stack("obstacle_max"),
     }
+    if building is not None:
+        shape = arrays["coverage"].shape[1:]
+        voxel_size = np.asarray(building.world_size_m) / np.asarray(shape)
+        indices = np.stack(np.meshgrid(*[np.arange(size) for size in shape], indexing="ij"), axis=-1)
+        centres = (indices + 0.5) * voxel_size
+        cells = np.minimum(np.floor(centres / building.cell_size_m).astype(int),
+                           np.asarray(building.interior_cells.shape) - 1)
+        eligible = building.interior_cells[cells[..., 0], cells[..., 1], cells[..., 2]]
+        if len(building.solid_min_m):
+            eligible &= ~np.any(np.all(
+                (centres[..., None, :] >= building.solid_min_m)
+                & (centres[..., None, :] <= building.solid_max_m), axis=-1), axis=-1)
+        arrays["coverage_eligible"] = eligible
     if all(hasattr(state, "base_target_known") for state in state_list):
         arrays["base_target_known"] = stack("base_target_known")
     else:

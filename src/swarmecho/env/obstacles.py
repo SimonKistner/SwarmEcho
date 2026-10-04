@@ -45,6 +45,7 @@ class SharedRoadmap:
 
 # Keep the existing public JAX-facing API and static-pytree contract.
 from swarmecho.env.roadmap_cpu import authored_roadmap_vertices
+from swarmecho.env.roadmap_cpu import building_candidate_vertices, validate_roadmap_settings
 from swarmecho.env.roadmap_cpu import shared_roadmap as _cpu_shared_roadmap
 from swarmecho.env.roadmap_cpu import building_roadmap as _cpu_building_roadmap
 

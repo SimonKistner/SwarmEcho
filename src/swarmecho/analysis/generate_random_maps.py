@@ -15,16 +15,18 @@ from swarmecho.training.artifacts import write_manifest
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--level", default="B02_random_buildings")
+    parser.add_argument("--level", default="B02a_random_buildings_find_only")
     parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--seed", type=int, help="Override training.seed")
     parser.add_argument("--spacing", type=float, help="Raster spacing in metres, default cell size")
+    parser.add_argument("--top-pairs", type=int, default=5,
+                        help="Number of distinct longest-farthest pairs shown together per map (default: 5)")
     parser.add_argument("--output-dir", default="outputs/testresults")
     parser.add_argument("--maps-only", action="store_true", help="Skip the roadmap raster scan")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="Level override, repeatable")
     args = parser.parse_args()
-    if args.count < 1:
-        parser.error("--count must be positive")
+    if args.count < 1 or args.top_pairs < 1:
+        parser.error("--count and --top-pairs must be positive")
     overrides = args.set + ([] if args.seed is None else [f"training.seed={args.seed}"])
     level = load_level(args.level, overrides)
     if not level.random_buildings.enabled:
@@ -46,7 +48,8 @@ def main():
         for record in manifest["maps"]:
             path = (maps_dir / f"{record['id']}.yaml").resolve()
             scan(SimpleNamespace(level=str(settings_path), map=str(path), spacing=args.spacing,
-                                 paths=1, corner_bonus_m=None, output_dir=str(root)))
+                                 paths=1, top_pairs=args.top_pairs,
+                                 corner_bonus_m=None, output_dir=str(root)))
     print(f"Inspectable maps and routes: {root.resolve()}")
     print(f"Maze builder: uv run swarmecho-maze-builder --map-dir {maps_dir.resolve()}")
 

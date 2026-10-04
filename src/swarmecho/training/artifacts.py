@@ -25,7 +25,7 @@ EVAL_STAGES = (
 def evaluation_stage(
     *, success: bool, delivered: bool, visually_found: bool
 ) -> str:
-    """Return the canonical CSV stage for one evaluation result."""
+    """Return the highest physical target stage; ``success`` means held chain."""
     if success:
         return "chain_success"
     if delivered:
@@ -71,6 +71,20 @@ def steps_for_update(update: int, cfg: Any) -> int:
     return int(update) * envs * rollout_steps
 
 
+def steps_for_checkpoint(checkpoint_path: str | Path, cfg: Any) -> int:
+    """Return accumulated environment steps recorded for a checkpoint."""
+    update = parse_checkpoint_update(checkpoint_path) or 0
+    steps = steps_for_update(update, cfg)
+    history_path = Path(checkpoint_path) / "step_history.json"
+    if history_path.exists():
+        try:
+            data = json.loads(history_path.read_text())
+            steps = int(data.get("total_steps", steps))
+        except Exception:
+            pass
+    return steps
+
+
 def compact_steps(steps: int) -> str:
     """Format step counts for artifact filenames, e.g. 70M -> s00070M."""
     steps = int(steps)
@@ -91,14 +105,7 @@ def checkpoint_artifact_suffix(checkpoint_path: str | Path, cfg: Any) -> str:
     update = parse_checkpoint_update(checkpoint_path)
     if update is None:
         update = 0
-    steps = steps_for_update(update, cfg)
-    history_path = Path(checkpoint_path) / "step_history.json"
-    if history_path.exists():
-        try:
-            data = json.loads(history_path.read_text())
-            steps = int(data.get("total_steps", steps))
-        except Exception:
-            pass
+    steps = steps_for_checkpoint(checkpoint_path, cfg)
     return artifact_suffix(update, steps)
 
 
@@ -210,6 +217,7 @@ def save_eval_info_csv(
     final_chain_lengths: Any = None,
     obstacle_min: Any = None,
     obstacle_max: Any = None,
+    success_condition: str = "chain_held",
 ) -> Path:
     """Save the canonical per-episode result of a parallel evaluation."""
     targets = np.asarray(target_positions, dtype=np.float32)
@@ -265,7 +273,7 @@ def save_eval_info_csv(
     else:
         if successes is None or delivered is None or visually_found is None:
             raise ValueError(
-                "Legacy evaluation CSV output requires successes, delivered, "
+                "Single-pass evaluation CSV output requires successes, delivered, "
                 "and visually_found arrays."
             )
         successes = np.asarray(successes, dtype=bool).reshape((-1,))
@@ -282,6 +290,9 @@ def save_eval_info_csv(
                 "Evaluation CSV arrays must contain one target, base, and outcome "
                 "for every evaluated episode."
             )
+        chain_successes = successes & (success_condition == "chain_held")
+        delivered = delivered | chain_successes
+        visually_found = visually_found | delivered
         stages = np.asarray(
             [
                 evaluation_stage(
@@ -290,7 +301,7 @@ def save_eval_info_csv(
                     visually_found=bool(was_visually_found),
                 )
                 for success, is_delivered, was_visually_found in zip(
-                    successes, delivered, visually_found, strict=True
+                    chain_successes, delivered, visually_found, strict=True
                 )
             ],
             dtype="<U21",

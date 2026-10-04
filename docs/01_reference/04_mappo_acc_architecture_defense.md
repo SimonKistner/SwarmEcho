@@ -1,8 +1,7 @@
 # Defense of the Current MAPPO + Agent-Centric Critic Architecture
 
-> Design rationale for the observation-based critic. The current runtime also
-> supports an optional compact privileged critic; see
-> [PPO controls](05_ppo_controls.md). This rationale does not restrict that option.
+> Design rationale for the observation-based critic. The prior privileged
+> critic experiment has been removed from the runtime.
 
 ## Position
 
@@ -119,7 +118,7 @@ experience rather than receiving a global oracle.
 
 The critic should not receive reward decomposition values as observations.
 
-Feeding values such as `r_chain_gap`, `r_success`, or `r_collision` directly into the critic would blur the line between state representation and target construction. It may reduce value loss, but it does so by giving the critic precomputed answers rather than forcing it to learn from state.
+Feeding values such as `r_gap_reduction`, `r_success`, or `r_collision` directly into the critic would blur the line between state representation and target construction. It may reduce value loss, but it does so by giving the critic precomputed answers rather than forcing it to learn from state.
 
 A cleaner critic may use state facts from which rewards are computed, such as positions, connectivity, or coverage summaries. But if those facts are already present or inferable from the joint observation stack, the gain is mainly optimization convenience, not a principled architectural improvement.
 

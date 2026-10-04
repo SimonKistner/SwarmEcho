@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from swarmecho.env.buildings import load_building
-from swarmecho.env.roadmap_cpu import building_roadmap, authored_roadmap_vertices
+from swarmecho.env.roadmap_cpu import building_roadmap
 from swarmecho.env.buildings import building_snapshot
 
 
@@ -73,7 +73,8 @@ def _visible(start, ends, lower, upper):
 
 def generate(destination=None, *, level_name=None, map_name=None, target=None,
              start=None, path_count=5, layout_count=None, seed=9000, obstacles=False,
-             merge_walls=None, corner_bonus_m=None, building=None, cfg=None,
+             roadmap_approach=None, roadmap_node_density=None, merge_wall_end_nodes=None,
+             corner_bonus_m=None, building=None, cfg=None,
              level_loader=None, obstacle_generator=None):
     if path_count < 1 or (layout_count is not None and layout_count < 1):
         raise ValueError("Path and layout counts must be positive.")
@@ -91,8 +92,12 @@ def generate(destination=None, *, level_name=None, map_name=None, target=None,
     else:
         from swarmecho.env.environment import EnvConfig
         cfg = EnvConfig()
-    if merge_walls is not None:
-        cfg = replace(cfg, roadmap_merge_walls=merge_walls)
+    if roadmap_approach is not None:
+        cfg = replace(cfg, roadmap_approach=roadmap_approach)
+    if roadmap_node_density is not None:
+        cfg = replace(cfg, roadmap_node_density=roadmap_node_density)
+    if merge_wall_end_nodes is not None:
+        cfg = replace(cfg, roadmap_merge_wall_end_nodes=merge_wall_end_nodes)
     if corner_bonus_m is not None:
         cfg = replace(cfg, roadmap_corner_bonus_m=corner_bonus_m)
     if not np.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:
@@ -122,9 +127,7 @@ def generate(destination=None, *, level_name=None, map_name=None, target=None,
                                building.wall_thickness_m / 2 + cfg.drone_radius,
                                building.tile_thickness_m / 2 + cfg.drone_radius], dtype=np.float32)
     bounds_upper = world - bounds_lower
-    use_authored = cfg.roadmap_merge_walls or "roadmap_nodes_m" in json.loads(getattr(building, "extra_geometry_json", "{}"))
-    if use_authored:
-        authored_vertices = building_roadmap(building, cfg).vertices
+    authored_vertices = building_roadmap(building, cfg).vertices
     for index in range(count):
         if obstacle_count:
             import jax
@@ -140,25 +143,17 @@ def generate(destination=None, *, level_name=None, map_name=None, target=None,
             )
         else:
             lower = upper = np.zeros((0, 3), dtype=np.float32)
-        if use_authored:
-            vertices = authored_vertices
-            if obstacle_count:
-                from swarmecho.env.obstacles import roadmap_vertices
-                vertices = np.concatenate((authored_vertices, np.clip(
-                    np.asarray(roadmap_vertices(lower, upper, clearance)), bounds_lower, bounds_upper)))
+        vertices = authored_vertices
+        if obstacle_count:
+            from swarmecho.env.obstacles import roadmap_vertices
+            vertices = np.concatenate((authored_vertices, np.clip(
+                np.asarray(roadmap_vertices(lower, upper, clearance)), bounds_lower, bounds_upper)))
         lower = np.concatenate([building.solid_min_m, np.asarray(lower)], axis=0)
         upper = np.concatenate([building.solid_max_m, np.asarray(upper)], axis=0)
         planning_lower, planning_upper = lower - clearance + 1e-4, upper + clearance - 1e-4
         for label, point in (("Start", base), ("Target", target)):
             if np.any(np.all((point >= planning_lower) & (point <= planning_upper), axis=1)):
                 raise ValueError(f"{label} intersects a clearance-expanded solid in layout {index}; choose another point or seed.")
-        if not use_authored:
-            from swarmecho.env.roadmap_cpu import ROADMAP_CORNERS
-            vertices = (lower[:, None] - clearance + ROADMAP_CORNERS[None] * (upper - lower + 2 * clearance)[:, None]).reshape(-1, 3)
-            vertices = vertices[np.all((vertices >= cfg.drone_radius) & (vertices <= world - cfg.drone_radius), axis=1)]
-            if len(vertices):
-                interior = building.interior_cells[tuple((vertices / building.cell_size_m).astype(int).T)]
-                vertices = vertices[interior]
         vertices = np.unique(vertices, axis=0)
         if len(vertices):
             vertices = vertices[[not np.any(np.all((v >= planning_lower) & (v <= planning_upper), axis=1)) for v in vertices]]
@@ -204,7 +199,9 @@ def generate(destination=None, *, level_name=None, map_name=None, target=None,
                      **({"building_snapshot": building_snapshot(building)} if hasattr(building, "target_exclusion") else {}),
                      "requested_paths": path_count, "clearance_m": clearance,
                      "comm_radius_m": cfg.comm_radius,
-                     "roadmap_merge_walls": cfg.roadmap_merge_walls,
+                     "roadmap_approach": cfg.roadmap_approach,
+                     "roadmap_node_density": cfg.roadmap_node_density,
+                     "roadmap_merge_wall_end_nodes": cfg.roadmap_merge_wall_end_nodes,
                      "roadmap_corner_bonus_m": cfg.roadmap_corner_bonus_m,
                      "corner_merge_distance_m": corner_merge_distance,
                      "path_metric": "Distance including corner allowance (equivalent m); lower is better",
@@ -221,8 +218,12 @@ def main():
     parser.add_argument("--paths", type=int, default=5, help="Maximum number of ranked paths")
     parser.add_argument("--corner-bonus-m", type=float, help="Override env.roadmap_corner_bonus_m (default: general/level config)")
     parser.add_argument("--obstacles", action="store_true", help="Enable generated obstacles using the level's settings (default: off)")
-    parser.add_argument("--merge-walls", action=argparse.BooleanOptionalAction, default=None,
-                        help="Override env.roadmap_merge_walls (otherwise uses the level/general config default)")
+    parser.add_argument("--roadmap-approach", choices=("full", "minimal"),
+                        help="Override env.roadmap_approach")
+    parser.add_argument("--roadmap-node-density", type=float,
+                        help="Override env.roadmap_node_density (full approach only)")
+    parser.add_argument("--merge-wall-end-nodes", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override env.roadmap_merge_wall_end_nodes (full approach only)")
     parser.add_argument("--layouts", type=int, help="Layout count (default: 5 randomized, 1 static)")
     parser.add_argument("--seed", type=int, default=9000)
     parser.add_argument("--output", help="Output .roadmap.json path under outputs/testresults for discovery")
@@ -230,7 +231,9 @@ def main():
     try:
         print(generate(args.output, level_name=args.level, map_name=args.map, target=args.target,
                        start=args.start, path_count=args.paths, layout_count=args.layouts, seed=args.seed,
-                       obstacles=args.obstacles, merge_walls=args.merge_walls, corner_bonus_m=args.corner_bonus_m))
+                       obstacles=args.obstacles, roadmap_approach=args.roadmap_approach,
+                       roadmap_node_density=args.roadmap_node_density,
+                       merge_wall_end_nodes=args.merge_wall_end_nodes, corner_bonus_m=args.corner_bonus_m))
     except (ValueError, FileNotFoundError) as exc:
         parser.error(str(exc))
 
