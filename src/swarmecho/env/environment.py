@@ -10,6 +10,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from swarmecho.env import adapt_size as adaptive_population
 
 from swarmecho.env.buildings import BuildingArrays
 from swarmecho.env.obstacles import (
@@ -71,6 +72,7 @@ class EnvState(NamedTuple):
     roadmap_corner_distances: jax.Array = jnp.zeros((0, 0), dtype=jnp.float32)
     map_id: jax.Array = jnp.int32(0)
     building_bank: object = None
+    adaptive: adaptive_population.AdaptiveState | None = None
 
     @property
     def solid_min(self):
@@ -126,7 +128,7 @@ def build_obstacle_roadmap(obstacle_min, obstacle_max, cfg: EnvConfig):
 def spherical_directions(count: int) -> np.ndarray:
     """Return deterministic unit directions, with exact octants for count 8."""
     if count < 4:
-        raise ValueError("radar_bins must be at least 4.")
+        raise ValueError("Radar direction counts must be at least 4.")
     if count == 8:
         directions = np.asarray(list(product((-1.0, 1.0), repeat=3)), dtype=np.float32)
         return directions / np.linalg.norm(directions, axis=1, keepdims=True)
@@ -180,10 +182,13 @@ def observation_dim(cfg: EnvConfig) -> int:
         6
         + 3 * int(cfg.observe_base_vector)
         + 3 * int(cfg.observe_target_vector)
-        + cfg.radar_bins * 4
-        + cfg.radar_bins * int(cfg.observe_coverage_probe)
+        + cfg.wall_radar_bins
+        + (cfg.drone_radar_bins * max(1, cfg.distance_bands) * 3
+           if cfg.radar_mode == "band_sep_counting" else cfg.drone_radar_bins * 3)
+        + cfg.wall_radar_bins * int(cfg.observe_coverage_probe)
         + int(cfg.observe_chain_contributor)
         + int(cfg.observe_current_timestep)
+        + 2 * int(cfg.adapt_size.enabled)
     )
 
 
@@ -328,7 +333,7 @@ def _contributing_chain_agents(
     cfg: EnvConfig,
     *, return_graph: bool = False, frontier_leaders: jax.Array | None = None,
 ) -> jax.Array:
-    """Trace shortest relay paths to the selected base and target leaders."""
+    """Use one shortest complete chain, or paths to partial-chain leaders."""
     n = state.pos.shape[0]
     node_count = n + 2
     base_node = n
@@ -421,7 +426,10 @@ def _contributing_chain_agents(
     target_path = jnp.where(
         has_target_chain, trace_path(target_node, target_tip), False
     )
-    return base_path | target_path
+    # Once a chain exists, frontier leaders can lie on a longer detour. Trace
+    # the complete base-target route instead so redundant agents get no credit.
+    complete_path = trace_path(base_node, target_node)
+    return jnp.where(state.fully_connected, complete_path, base_path | target_path)
 
 
 class ChainPaths(NamedTuple):
@@ -514,6 +522,18 @@ def vested_delivery_gap_credit(credited_metres, initial_metres, elapsed_steps,
         credited_metres,
         fraction * initial_metres + jnp.maximum(credited_metres - initial_metres, 0.0),
     )
+
+
+def success_contributors(state, cfg, *, chain_reward_system="euclidean", allow_redundancy=False):
+    """The same selected relay membership used by chain-contributor observations."""
+    def connected(_):
+        if allow_redundancy:
+            paths = simple_chain_paths(state, cfg)
+            return jnp.any(paths.members & (paths.counts > 0)[:, None], axis=0)
+        leaders = obstacle_chain_diagnostics(state)[3] if chain_reward_system == "obstacle_geodesic" else None
+        return _contributing_chain_agents(state, cfg, frontier_leaders=leaders)
+    return jax.lax.cond(state.fully_connected, connected,
+                        lambda _: jnp.zeros_like(state.active), None) & state.active
 
 
 def compute_rewards(
@@ -687,13 +707,31 @@ def compute_rewards(
         success_reward = jax.lax.cond(
             new_hold_record, pay_record, lambda _: jnp.zeros(n, dtype=jnp.float32), None,
         )
+    elif cfg.success_bonus_contributors_only:
+        def pay_contributors(_):
+            contributors = success_contributors(
+                current, env_cfg, chain_reward_system=cfg.chain_reward_system,
+                allow_redundancy=cfg.allow_redundancy_reward,
+            )
+            contributor_count = jnp.maximum(jnp.sum(contributors), 1)
+            return contributors.astype(jnp.float32) * (cfg.success_bonus / contributor_count)
+
+        success_reward = jax.lax.cond(
+            success_event, pay_contributors,
+            lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+        )
     else:
         success_reward = reward_active * (cfg.success_bonus / reward_count) * success_event
 
     if cfg.peer_informing_reward_enabled and current.peer_informed_by.shape[0]:
+        peer_credit = current.peer_informed_by
+        if env_cfg.adapt_size.enabled:
+            receivers = jnp.any(peer_credit, axis=1)
+            remaining = jnp.maximum(n - 1 - previous.adaptive.peer_credit_count, 0)
+            peer_credit = peer_credit & (jnp.cumsum(receivers) <= remaining)[:, None]
         sender_count = jnp.maximum(jnp.sum(current.peer_informed_by, axis=1), 1)
         peer_informing_reward = cfg.peer_informing_bonus * jnp.sum(
-            current.peer_informed_by / sender_count[:, None], axis=0,
+            peer_credit / sender_count[:, None], axis=0,
         )
     else:
         peer_informing_reward = jnp.zeros(n, dtype=jnp.float32)
@@ -727,6 +765,27 @@ def compute_rewards(
     # ``newly_knows`` is exposed for diagnostics without double-paying finders.
     terms["newly_knows"] = newly_knows.astype(jnp.float32)
     terms = {name: jnp.where(current.active, value, 0.0) for name, value in terms.items()}
+    if env_cfg.adapt_size.enabled:
+        a = current.adaptive
+        previous_share = previous.active.astype(jnp.float32) / jnp.maximum(jnp.sum(previous.active), 1)
+        current_share = reward_active / reward_count
+        unused = jnp.sum(current.active & ~success_contributors(
+            current, env_cfg, chain_reward_system=cfg.chain_reward_system,
+            allow_redundancy=cfg.allow_redundancy_reward,
+        ))
+        terms.update({
+            # Pay transition costs to the acting lifetime, even after removal.
+            "time_penalty": -cfg.time_penalty_per_step * previous_share,
+            "reinforcement_cost": -cfg.reinforcement_cost
+                * (a.calls > previous.adaptive.calls) * previous_share,
+            "decommission_cost": -cfg.decommission_cost * a.decommissioned.astype(jnp.float32),
+            "rejected_call_penalty": -cfg.rejected_call_penalty * a.rejected_voters.astype(jnp.float32),
+            "all_decommissioned_penalty": -cfg.all_decommissioned_penalty
+                * a.all_decommissioned * previous_share,
+            # Public metric spelling retained exactly as requested.
+            "useless_agetnst_at_success_penalty": -cfg.success_unused_agent_penalty
+                * unused * success_event * current_share,
+        })
     total = sum(value for name, value in terms.items() if name != "newly_knows")
     return total, terms
 
@@ -745,7 +804,9 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                        chain_reward_system: str = "euclidean",
                        delivery_gap_vesting_enabled: bool = False):
     """Create pure reset, step, observation, and metric functions."""
+    from swarmecho.core.config import validate_radar_config
     from swarmecho.env.buildings import validate_feature_clearance
+    validate_radar_config(cfg)
     validate_feature_clearance(building, cfg.drone_radius + cfg.obstacle_planning_clearance_m)
     if building_bank is not None:
         if cfg.num_obstacles:
@@ -753,6 +814,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         building = building_bank.envelope
     if cfg.num_agents < 1:
         raise ValueError("num_agents must be positive.")
+    from swarmecho.core.config import validate_adapt_size
+    validate_adapt_size(cfg)
     if cfg.success_condition not in {"coverage", "discovery", "delivery", "chain_held"}:
         raise ValueError("Unknown env.success_condition.")
     has_target = cfg.success_condition != "coverage"
@@ -780,7 +843,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     if cfg.obstacle_size_min_m <= 0 or cfg.obstacle_size_max_m < cfg.obstacle_size_min_m:
         raise ValueError("Obstacle size bounds must be positive and ordered.")
     coverage_voxel_size, coverage_shape = coverage_grid_geometry(building, cfg)
-    directions = jnp.asarray(spherical_directions(cfg.radar_bins))
+    wall_directions = jnp.asarray(spherical_directions(cfg.wall_radar_bins))
+    drone_directions = jnp.asarray(spherical_directions(cfg.drone_radar_bins))
+    distance_bands = max(1, cfg.distance_bands) if cfg.radar_mode == "band_sep_counting" else 1
+    band_edges = jnp.arange(1, distance_bands, dtype=jnp.float32) * (cfg.comm_radius / distance_bands)
     if has_target:
         spawn_lower, spawn_upper, spawn_volumes = _target_spawn_boxes(building, cfg)
     if not math.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:
@@ -860,6 +926,28 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 jnp.concatenate((authored_max, obstacle_max), axis=0),
             )
         return obstacle_min, obstacle_max
+
+    def decommission_zone(base_pos, obstacle_min, obstacle_max):
+        # Place the zone directly above the base. The station is on the floor
+        # and drones spawn one radius above it, so lift the zone by one drone
+        # radius beyond the decommission sphere radius to keep the initial
+        # drone body outside the zone.
+        radius = cfg.adapt_size.decommission_radius_m
+        spawn_z = jnp.maximum(base_pos[2] + cfg.drone_radius, lower[2])
+        zone_z = spawn_z + radius + cfg.drone_radius
+        candidates = jnp.stack([base_pos[0], base_pos[1], zone_z])[None, :]
+        valid = jnp.all((candidates - radius >= lower - 1e-5)
+                        & (candidates + radius <= upper + 1e-5), axis=-1)
+        solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
+        if solid_min.shape[0]:
+            closest = jnp.clip(candidates[:, None, :], solid_min, solid_max)
+            valid &= ~jnp.any(jnp.linalg.norm(candidates[:, None, :] - closest, axis=-1)
+                              < radius + cfg.drone_radius - 1e-5, axis=-1)
+            spawn = base_pos + jnp.asarray([0., 0., cfg.drone_radius])
+            valid &= ~segments_blocked(spawn, candidates,
+                                       solid_min - cfg.drone_radius, solid_max + cfg.drone_radius)
+        index = jnp.argmax(valid)
+        return candidates[index], jnp.any(valid)
 
     obstacle_z_min = cfg.obstacle_spawn_layer_min * building.cell_size_m
     obstacle_z_max = min(cfg.obstacle_spawn_layer_max * building.cell_size_m, float(world_size[2]))
@@ -1192,11 +1280,20 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         drone_spawn = base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
         pos = jnp.broadcast_to(drone_spawn, (n, 3))
         active = jnp.arange(n) * cfg.spawn_delay <= 0
+        if cfg.adapt_size.enabled:
+            active &= jnp.arange(n) < cfg.adapt_size.initial_agents
+        adaptive = None
+        if cfg.adapt_size.enabled:
+            zone, valid_zone = decommission_zone(base_pos, obstacle_min, obstacle_max)
+            adaptive = adaptive_population.initial_state(
+                n, cfg.adapt_size.initial_agents, zone, valid_zone, max_steps=cfg.max_steps,
+            )
         coverage = jnp.zeros(coverage_shape, dtype=jnp.bool_)
         coverage, _ = update_coverage(coverage, pos, active, obstacle_min, obstacle_max, map_id)
         sees, conn_base, conn_target, _ = connectivity(pos, active, base_pos, target, obstacle_min, obstacle_max)
         fully_connected = jnp.any(conn_base & conn_target) if has_target else jnp.bool_(False)
         return EnvState(
+            adaptive=adaptive,
             pos=pos,
             vel=jnp.zeros((n, 3), dtype=jnp.float32),
             base_pos=base_pos,
@@ -1236,6 +1333,9 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         )
 
     def step(state: EnvState, action: jax.Array):
+        expected_actions = 4 if cfg.adapt_size.enabled else 3
+        if action.shape != (n, expected_actions):
+            raise ValueError(f"Expected actions shaped {(n, expected_actions)}, got {action.shape}.")
         # The policy communicates from the pre-action state. Knowledge uses
         # those same positions and the same episode clock. New recipients may
         # relay on a later communication tick, never transitively in one tick.
@@ -1264,10 +1364,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             base_received = jnp.bool_(False)
             informed_by = jnp.zeros((n, n), dtype=jnp.bool_)
         next_step = state.step + 1
-        active = next_step >= jnp.arange(n) * cfg.spawn_delay
-        force = jnp.clip(action, -1.0, 1.0) * cfg.max_force
+        active = state.active if cfg.adapt_size.enabled else next_step >= jnp.arange(n) * cfg.spawn_delay
+        force = jnp.clip(action[..., :3], -1.0, 1.0) * cfg.max_force
         # Newly spawned agents first choose an action from their next observation.
-        force = jnp.where(state.active[:, None], force, 0.0)
+        if cfg.adapt_size.enabled:
+            force = jnp.where(state.active[:, None], force, 0.0)
         velocity = state.vel * cfg.drag + force * cfg.dt
         speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
         velocity *= jnp.minimum(1.0, cfg.max_speed / jnp.maximum(speed, 1e-8))
@@ -1285,8 +1386,27 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         drone_spawn = state.base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
         pos = jnp.where(active[:, None], pos, drone_spawn)
         velocity = jnp.where(active[:, None], velocity, 0.0)
+        adaptive = state.adaptive
+        if cfg.adapt_size.enabled:
+            peer_links, base_links = knowledge_links(state.pos, state.active, state.base_pos,
+                                                     state.obstacle_min, state.obstacle_max)
+            adaptive, active = adaptive_population.transition(
+                adaptive, state.active, pos, action[:, 3], peer_links, base_links,
+                (state.step % memory_comm_every_k_steps) == 0, cfg.adapt_size,
+            )
+            initial_due = (~state.active) & (state.adaptive.ids >= 0) & (
+                next_step >= jnp.arange(n) * cfg.spawn_delay
+            )
+            active |= initial_due
+            adaptive = adaptive._replace(
+                spawned=adaptive.spawned | initial_due,
+                all_decommissioned=~jnp.any(active),
+            )
+            pos = jnp.where((active & ~adaptive.spawned)[:, None], pos, drone_spawn)
+            velocity = jnp.where((active & ~adaptive.spawned)[:, None], velocity, 0.0)
         any_agent_moved = jnp.any(
-            jnp.linalg.norm(pos - state.pos, axis=-1) > cfg.movement_epsilon
+            (jnp.linalg.norm(pos - state.pos, axis=-1) > cfg.movement_epsilon) & active
+            & (state.active if cfg.adapt_size.enabled else True)
         )
         stationary_steps = jnp.where(
             any_agent_moved,
@@ -1319,6 +1439,12 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             # Direct sighting and base replay take precedence over peer credit.
             newly_peer_informed = (~state.target_known) & peer_received & ~sees & ~from_base
             peer_informed_by = informed_by & newly_peer_informed[:, None]
+            if cfg.adapt_size.enabled:
+                continuing = active & ~adaptive.spawned
+                known &= continuing
+                peer_informed_by &= continuing[:, None] & continuing[None, :]
+                adaptive = adaptive._replace(peer_credit_count=jnp.minimum(
+                    n - 1, adaptive.peer_credit_count + jnp.sum(jnp.any(peer_informed_by, axis=1))))
         else:
             known = jnp.zeros(n, dtype=jnp.bool_)
             fully_connected = base_target_known = jnp.bool_(False)
@@ -1334,7 +1460,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         else:
             success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
         done = success | idle_terminated | (next_step >= jnp.int32(cfg.max_steps))
+        if cfg.adapt_size.enabled:
+            done |= adaptive.all_decommissioned
         next_state = EnvState(
+            adaptive=adaptive,
             pos=pos,
             vel=velocity,
             base_pos=state.base_pos,
@@ -1418,14 +1547,14 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
         def one_agent(i):
             origin = pos[i]
-            positive = jnp.where(directions > 0, (upper - origin) / directions, jnp.inf)
-            negative = jnp.where(directions < 0, (lower - origin) / directions, jnp.inf)
+            positive = jnp.where(wall_directions > 0, (upper - origin) / wall_directions, jnp.inf)
+            negative = jnp.where(wall_directions < 0, (lower - origin) / wall_directions, jnp.inf)
             wall_distance = jnp.min(jnp.minimum(positive, negative), axis=-1)
             if cfg.num_obstacles or has_authored_solids:
                 solid_min, solid_max = all_solids(state.obstacle_min, state.obstacle_max)
-                ray_end = origin[None, :] + directions * cfg.visual_radius
-                lo = jnp.zeros(cfg.radar_bins, dtype=jnp.float32)
-                hi = jnp.ones(cfg.radar_bins, dtype=jnp.float32)
+                ray_end = origin[None, :] + wall_directions * cfg.visual_radius
+                lo = jnp.zeros(cfg.wall_radar_bins, dtype=jnp.float32)
+                hi = jnp.ones(cfg.wall_radar_bins, dtype=jnp.float32)
                 hit = segments_blocked(
                     jnp.broadcast_to(origin, ray_end.shape), ray_end,
                     solid_min, solid_max,
@@ -1433,7 +1562,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 def refine_radar(_, interval):
                     lo, hi = interval
                     mid = (lo + hi) / 2
-                    mid_point = origin[None, :] + directions * (mid * cfg.visual_radius)[:, None]
+                    mid_point = origin[None, :] + wall_directions * (mid * cfg.visual_radius)[:, None]
                     blocked = segments_blocked(
                         jnp.broadcast_to(origin, mid_point.shape), mid_point,
                         solid_min, solid_max,
@@ -1453,24 +1582,46 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
             rel = pos - origin
             rel_norm = rel / jnp.maximum(pair_dist[i, :, None], 1e-8)
-            bin_index = jnp.argmax(rel_norm @ directions.T, axis=-1)
+            bin_index = jnp.argmax(rel_norm @ drone_directions.T, axis=-1)
             other = (jnp.arange(n) != i) & state.active
             if cfg.num_obstacles or has_authored_solids:
                 other &= ~segments_blocked(origin, pos, solid_min, solid_max)
-            signal = jnp.maximum(0.0, 1.0 - pair_dist[i] / cfg.comm_radius) * other
+            if cfg.radar_mode == "legacy":
+                signal = jnp.maximum(0.0, 1.0 - pair_dist[i] / cfg.comm_radius) * other
 
-            def scatter(values):
-                return jnp.zeros(cfg.radar_bins, dtype=jnp.float32).at[bin_index].max(values)
+                def scatter(values):
+                    return jnp.zeros(cfg.drone_radar_bins, dtype=jnp.float32).at[bin_index].max(values)
 
-            radar = jnp.stack(
-                [
-                    wall_signal,
-                    scatter(signal),
-                    scatter(signal * state.is_conn_target),
-                    scatter(signal * state.is_conn_base),
-                ],
-                axis=-1,
-            ).reshape(-1)
+                drone_proximity = jnp.stack(
+                    [scatter(signal),
+                     scatter(signal * state.is_conn_target),
+                     scatter(signal * state.is_conn_base)],
+                    axis=-1,
+                )
+                if cfg.wall_radar_bins == cfg.drone_radar_bins:
+                    # Preserve the original checkpoint feature order exactly.
+                    radar = jnp.concatenate([wall_signal[:, None], drone_proximity], axis=-1).reshape(-1)
+                else:
+                    radar = jnp.concatenate([wall_signal, drone_proximity.reshape(-1)])
+            else:
+                visible = other & (pair_dist[i] <= cfg.comm_radius)
+                # An internal border belongs to the outer band; the final
+                # band includes comm_radius. Each neighbor occupies one cell.
+                band_index = jnp.searchsorted(band_edges, pair_dist[i], side="right")
+                cell_index = bin_index * distance_bands + band_index
+
+                def count_channel(qualifying):
+                    counts = jnp.zeros(cfg.drone_radar_bins * distance_bands, dtype=jnp.float32)
+                    counts = counts.at[cell_index].add(qualifying.astype(jnp.float32))
+                    return jnp.minimum(counts, cfg.radar_count_cap) / cfg.radar_count_cap
+
+                counts = jnp.stack(
+                    [count_channel(visible),
+                     count_channel(visible & state.is_conn_target),
+                     count_channel(visible & state.is_conn_base)],
+                    axis=-1,
+                ).reshape(-1)
+                radar = jnp.concatenate([wall_signal, counts])
             self_state = jnp.concatenate(
                 [
                     state.vel[i] / cfg.max_speed,
@@ -1481,6 +1632,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 ]
             )
             optional = []
+            if cfg.adapt_size.enabled:
+                in_zone = (jnp.linalg.norm(origin - state.adaptive.zone_center)
+                           <= cfg.adapt_size.decommission_radius_m) & state.adaptive.zone_valid
+                optional.append(jnp.asarray([state.adaptive.vote[i], in_zone], dtype=jnp.float32))
             if cfg.observe_chain_contributor:
                 optional.append(jnp.asarray([chain_contributor[i]], dtype=jnp.float32))
             scale = jnp.maximum(jnp.max(world_size), 1e-6)
@@ -1495,7 +1650,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             if cfg.observe_coverage_probe:
                 probe = jnp.clip(
                     jnp.floor(
-                        (origin + directions * coverage_voxel_size)
+                        (origin + wall_directions * coverage_voxel_size)
                         / coverage_voxel_size
                     ).astype(jnp.int32),
                     0,
@@ -1634,7 +1789,20 @@ def make_autoreset_fns(
             "global_coverage": terminal_metrics["coverage_fraction"],
             "terminal_target_pos": terminal_state.target_pos,
             "terminal_coverage_fraction": terminal_metrics["coverage_fraction"],
+            "agent_terminated": adaptive_population.lifetime_ended(state, terminal_state),
         }
+        if cfg.adapt_size.enabled:
+            a = terminal_state.adaptive
+            info.update({
+                "adapt_calls": a.calls, "adapt_decommissions": a.decommissions,
+                "adapt_rejected_calls": a.rejected_calls,
+                "adapt_end_agents": jnp.sum(terminal_state.active),
+                "adapt_all_decommissioned": a.all_decommissioned & ~terminal_state.success,
+                "adapt_useless_agents": jnp.sum(terminal_state.active & ~success_contributors(
+                    terminal_state, cfg, chain_reward_system=reward_cfg.chain_reward_system,
+                    allow_redundancy=reward_cfg.allow_redundancy_reward)),
+                "adapt_zone_valid": a.zone_valid,
+            })
         if paths is not None:
             info["number_of_valid_paths"] = jnp.sum(paths.counts)
             if reward_cfg.enable_chain_efficiency_reward:
@@ -1683,7 +1851,8 @@ def make_autoreset_fns(
                 unchanged = {"obstacle_min", "obstacle_max", "roadmap_vertices", "roadmap_corner_distances",
                              "roadmap_distances", "shared_geometry", "building_bank", "map_id"}
                 return result._replace(**{
-                    field: getattr(result, field).at[lanes].set(getattr(fresh, field), mode="drop")
+                    field: jax.tree.map(lambda old, new: old.at[lanes].set(new, mode="drop"),
+                                        getattr(result, field), getattr(fresh, field))
                     for field in result._fields if field not in unchanged
                 })
 

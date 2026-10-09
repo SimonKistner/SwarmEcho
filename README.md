@@ -60,6 +60,12 @@ uv run swarmecho-train level=M00_no_maze_open_cuboid
 
 Level files select the environment and training settings. Override individual values with `key=value`, for example `training.num_envs=512 logging.wandb_mode=online`.
 
+`B02c_random_buildings` experiments with majority-voted reinforcements and
+decommissioning, up to nine simultaneous drones. The two initial drones retain
+the usual spawn stagger; approved reinforcements arrive immediately. See the
+[adaptive swarm reference](docs/01_reference/06_adaptive_swarm_size.md) and
+[W&B diagnostics guide](docs/01_reference/07_adaptive_swarm_diagnostics.md).
+
 ### 2. Start curriculum training
 
 Run levels in order; each stage inherits the previous stage's final checkpoint:

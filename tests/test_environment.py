@@ -284,7 +284,7 @@ def test_peer_radar_hides_drones_behind_walls():
 
     def peer_channels(value):
         # Six self features, then bins of [wall, peer, target-peer, base-peer].
-        return np.asarray(observe(value))[:, 6:].reshape(2, cfg.radar_bins, 4)[:, :, 1:]
+        return np.asarray(observe(value))[:, 6:].reshape(2, cfg.drone_radar_bins, 4)[:, :, 1:]
 
     # Both drones see each other through the opening below the wall (y < 5).
     np.testing.assert_allclose(
@@ -297,6 +297,131 @@ def test_peer_radar_hides_drones_behind_walls():
         peer_channels(blocked), 0.0,
         err_msg="Peer radar leaks through the wall in problem 9",
     )
+
+
+def _counting_radar_counts(observation, cfg):
+    """Decode counting-mode fixtures with the six mandatory self values."""
+    values = np.asarray(observation)
+    count_start = 6 + cfg.wall_radar_bins
+    counts = values[:, count_start:].reshape(cfg.num_agents, cfg.drone_radar_bins,
+                                            max(1, cfg.distance_bands), 3)
+    return counts
+
+
+def test_counting_radar_places_and_caps_visible_neighbors_in_exact_cells():
+    """Check crowd/category counts, inactive/self filtering, and the range edge."""
+    cfg = replace(EnvConfig(), num_agents=10, spawn_delay=0, comm_radius=15.,
+                  wall_radar_bins=16, drone_radar_bins=8,
+                  radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3)
+    reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    # All neighbors are on +X. In the deterministic eight-octant layout,
+    # ties resolve to octant 4 (+X, -Y, -Z). Exact axis distances avoid
+    # rounding ambiguity at the 7.5 m and 15 m boundaries.
+    distances = jnp.array([0., 1., 2., 2.5, 4., 7.5, 15., 15.25, 1.5, 3.])
+    positions = jnp.stack([2. + distances, jnp.full(10, 2.), jnp.full(10, 2.)], axis=-1)
+    state = reset(jax.random.PRNGKey(96))._replace(
+        pos=positions,
+        active=jnp.array([True, True, True, True, True, True, True, True, False, True]),
+        is_conn_target=jnp.array([True, True, False, True, False, True, False, True, True, False]),
+        is_conn_base=jnp.array([True, False, True, True, True, False, True, True, True, False]),
+    )
+    observed = jax.jit(observations)(state)
+    assert observed.shape == (10, 118)
+    counts = _counting_radar_counts(observed, cfg)
+    expected_counts = np.zeros((8, 4, 3), dtype=np.float32)
+    # Four visible drones saturate the inner all-drone count. Each connected
+    # category still has two; self/inactive leaks would change those values.
+    expected_counts[4] = np.array([[3, 2, 2], [1, 0, 1], [1, 1, 0], [1, 0, 1]]) / 3.
+    np.testing.assert_allclose(counts[0], expected_counts, rtol=1e-6, atol=0.)
+    np.testing.assert_array_equal(np.asarray(observed)[8], 0.)
+
+
+def test_counting_radar_moves_a_neighbor_inward_across_each_band_boundary():
+    cfg = replace(EnvConfig(), num_agents=2, spawn_delay=0, comm_radius=15.,
+                  wall_radar_bins=16, drone_radar_bins=8,
+                  radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3)
+    reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    state = reset(jax.random.PRNGKey(97))._replace(
+        active=jnp.ones(2, dtype=jnp.bool_),
+        is_conn_target=jnp.zeros(2, dtype=jnp.bool_),
+        is_conn_base=jnp.zeros(2, dtype=jnp.bool_),
+    )
+    observe = jax.jit(observations)
+    # Borders belong to the outer band. Just below each border the drone
+    # moves inward and leaves its old cell empty.
+    for distance, expected_band in [(14., 3), (11.25, 3), (11.249, 2),
+                                    (7.5, 2), (7.499, 1), (3.75, 1),
+                                    (3.749, 0), (1., 0)]:
+        moved = state._replace(pos=jnp.array([[2., 2., 2.], [2. + distance, 2., 2.]]))
+        counts = _counting_radar_counts(observe(moved), cfg)
+        expected = np.zeros((8, 4, 3), dtype=np.float32)
+        expected[4, expected_band, 0] = 1. / 3.
+        np.testing.assert_allclose(counts[0], expected, rtol=1e-6, atol=0.,
+                                   err_msg=f"Incorrect cell at distance {distance} m")
+
+
+@pytest.mark.parametrize("distance_bands", [0, 1])
+def test_counting_radar_single_band_counts_without_subdivision(distance_bands):
+    cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=15.,
+                  wall_radar_bins=16, drone_radar_bins=8,
+                  radar_mode="band_sep_counting", distance_bands=distance_bands,
+                  radar_count_cap=2)
+    reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    state = reset(jax.random.PRNGKey(98))._replace(
+        pos=jnp.array([[2., 2., 2.], [3., 2., 2.], [16., 2., 2.]]),
+        active=jnp.ones(3, dtype=jnp.bool_),
+        is_conn_target=jnp.array([False, True, False]),
+        is_conn_base=jnp.array([False, False, True]),
+    )
+    observed = jax.jit(observations)(state)
+    assert observed.shape == (3, 46)
+    counts = _counting_radar_counts(observed, cfg)
+    expected = np.zeros((8, 1, 3), dtype=np.float32)
+    expected[4, 0] = [1., .5, .5]
+    np.testing.assert_array_equal(counts[0], expected)
+
+
+@pytest.mark.parametrize("geometry", ["authored_wall", "generated_obstacle"])
+def test_counting_radar_respects_line_of_sight_in_all_categories_and_bands(geometry):
+    cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=8.,
+                  wall_radar_bins=16, drone_radar_bins=8,
+                  radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3,
+                  num_obstacles=int(geometry == "generated_obstacle"))
+    building = _partial_wall_building() if geometry == "authored_wall" else BUILDING
+    reset, _, observations, _ = make_env_fns(building, cfg, plan_geodesic=False)
+    reset_kwargs = {}
+    if geometry == "generated_obstacle":
+        half_width = BUILDING.wall_thickness_m / 2
+        reset_kwargs = {
+            "obstacle_min": jnp.array([[10. - half_width, 5., 0.]]),
+            "obstacle_max": jnp.array([[10. + half_width, 15., 20.]]),
+        }
+    state = reset(jax.random.PRNGKey(99), target_pos=jnp.array([17., 17., 12.]),
+                  **reset_kwargs)._replace(
+        pos=jnp.array([[9.5, 4., 2.], [8.5, 4., 2.], [10.5, 4., 2.]]),
+        active=jnp.ones(3, dtype=jnp.bool_),
+        # Connectivity through other paths must not bypass local occlusion.
+        is_conn_target=jnp.ones(3, dtype=jnp.bool_),
+        is_conn_base=jnp.ones(3, dtype=jnp.bool_),
+    )
+    observe = jax.jit(observations)
+    # Exercise occlusion in each of the four bands. The receiver stays on
+    # the left of x=10; one peer is on either side at the same distance.
+    for distance, band in [(1., 0), (3., 1), (5., 2), (7., 3)]:
+        open_state = state._replace(pos=jnp.array(
+            [[9.5, 4., 2.], [9.5 - distance, 4., 2.], [9.5 + distance, 4., 2.]]))
+        # At y=4 the wall starts above the line joining the drones.
+        open_counts = _counting_radar_counts(observe(open_state), cfg)
+        expected_counts = np.zeros((8, 4, 3), dtype=np.float32)
+        expected_counts[[0, 4], band, :] = 1. / 3.
+        np.testing.assert_allclose(open_counts[0], expected_counts, rtol=1e-6, atol=0.)
+        # At y=10 only the +X neighbor is hidden; the -X peer stays visible.
+        # Thus a broken implementation that blanks all counts also fails.
+        blocked = open_state._replace(pos=open_state.pos.at[:, 1].set(10.))
+        blocked_counts = _counting_radar_counts(observe(blocked), cfg)
+        expected_counts[4] = 0.
+        np.testing.assert_allclose(blocked_counts[0], expected_counts, rtol=1e-6, atol=0.,
+                                   err_msg=f"{geometry}: count leak in band {band}")
 
 
 def test_optional_observation_features_match_the_maintained_config_switches():
@@ -312,7 +437,7 @@ def test_optional_observation_features_match_the_maintained_config_switches():
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
 def test_reset_observation_and_step_jit_contract(bins):
-    cfg, (reset, step, observations, metrics) = _functions(radar_bins=bins)
+    cfg, (reset, step, observations, metrics) = _functions(wall_radar_bins=bins, drone_radar_bins=bins)
     state = jax.jit(reset)(jax.random.PRNGKey(0))
     obs = jax.jit(observations)(state)
     next_state = jax.jit(step)(state, jnp.zeros((cfg.num_agents, 3)))

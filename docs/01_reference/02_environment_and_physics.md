@@ -11,6 +11,9 @@ scales them by maximum force, applies drag and the timestep, caps speed, and
 advances position. World bounds constrain motion. Segment checks against solid
 bounds expanded by the drone radius prevent crossing authored or generated
 obstacles. Collided velocity components are zeroed.
+With [adaptive swarm size](06_adaptive_swarm_size.md) enabled, the actor adds a
+fourth discrete vote action. The environment uses only the first three
+components for motion.
 
 Authored maps use `swarmecho-map/v1`, including world width, height, depth,
 building cells, tiles, walls, spawn settings, and target exclusions. All bundled
@@ -23,19 +26,78 @@ The actor receives local information, with width given by
 `observation_dim(cfg)`:
 
 ```text
-6 + 4 * radar_bins
+6 + wall_radar_bins
+  + 3 * drone_radar_bins                        [legacy only]
+  + 3 * drone_radar_bins * max(1, distance_bands) [band_sep_counting only]
   + 3 * observe_base_vector
   + 3 * observe_target_vector
-  + radar_bins * observe_coverage_probe
+  + wall_radar_bins * observe_coverage_probe
   + observe_chain_contributor
   + observe_current_timestep
 ```
 
 The six mandatory self values are normalized XYZ velocity, connection to the
-base chain, connection to the target chain, and target knowledge. Spherical
-radar bins encode walls, nearby drones, target-connected drones, and
-base-connected drones. Target vectors are masked until the target is known.
-Inactive agents receive zero observations.
+base chain, connection to the target chain, and target knowledge. Target
+vectors are masked until the target is known. Inactive agents receive zero
+observations.
+
+### Wall and drone radar
+
+`wall_radar_bins` and `drone_radar_bins` independently control spherical
+direction counts (integers of at least 4, both defaulting to 8). Eight directions
+use exact octants; other counts use a deterministic spherical distribution.
+Walls retain one continuous first-hit proximity signal per direction within
+`visual_radius`. Coverage probes follow the wall directions.
+
+In legacy mode, each drone direction has three nearest-neighbor proximity signals: all
+active neighbors, target-connected neighbors, and base-connected neighbors.
+Signals are `max(0, 1 - distance / comm_radius)`, with self and obstructed
+neighbors excluded. Each category can select a different nearest drone.
+
+`radar_mode: legacy` is the default and preserves the original behavior.
+`distance_bands` and `radar_count_cap` have no effect in this mode. With equal
+wall/drone direction counts, the original per-direction order
+`[wall, all-drone, target-connected-drone, base-connected-drone]` is preserved
+for checkpoint compatibility. With unequal counts, radar consists of a wall
+block followed by a drone block, where drone categories remain interleaved per
+direction.
+
+`radar_mode: band_sep_counting` replaces drone proximity signals with counts
+for the same three categories in each direction × distance-band cell.
+`distance_bands` defaults to 1; 0 is an alias for 1. Bands have equal width
+`comm_radius / max(1, distance_bands)`. Internal boundaries belong to the outer
+band, and the last band includes the communication-radius boundary. For four
+bands at a 15 m radius, the borders are 3.75, 7.5, 11.25, and 15 m. A neighbor
+occupies exactly one cell per applicable category. Counts include only visible,
+active, non-self neighbors within communication range; a drone exactly at the
+radius is counted in the last band. No continuous drone distance features are
+included in this mode; wall proximity remains continuous.
+
+`radar_count_cap` is a positive integer, defaulting to 3. Each count is encoded
+as `min(count, radar_count_cap) / radar_count_cap`: the default represents
+0, 1, 2, and 3+ as 0, 1/3, 2/3, and 1. Counting is enabled by the mode, not by
+changing the cap. To add counts without distance subdivision, select counting
+mode with `distance_bands: 1` (or 0).
+
+Counting mode uses radar blocks in this order: wall proximity, drone counts.
+Counts flatten `[direction, band, category]`, from inner to outer
+band, with categories ordered all / target-connected / base-connected. The
+self and optional observation prefix retains its existing order. Observation
+width stays independent of team size. With seven self values, 16 wall and
+drone directions, and four bands, counting mode has 215 values per drone;
+with three bands it has 167 values.
+
+B02c variants enable counting with a cap of 3 and retain their previous angular
+resolutions. `B02c_random_buildings` uses three bands; the static and mini variants
+use four. Other levels remain in legacy mode. Frozen YAML configs
+using `radar_bins` are accepted by assigning that value to both new parameters;
+explicit new fields take precedence. Checkpoint contracts record the separate
+resolutions, mode, layout, band count, and cap. Old contracts map to legacy
+interleaved radar; changing feature meanings requires a compatible checkpoint
+or fresh training. Legacy band/cap changes and the 0/1 band alias are treated as
+semantically equivalent during checkpoint validation. Counts-only radar uses
+the `band_counts_v2` layout identifier; checkpoints from the earlier counting
+layout that also included drone proximity cannot be loaded into this layout.
 
 Coverage is a voxel field. `coverage_voxel_size` may differ from the authoring
 cell size and must evenly divide all world dimensions.

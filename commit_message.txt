@@ -1,0 +1,18 @@
+feat: add adaptive swarm size and independent distance-band radar
+
+- Add majority-voted reinforcement calls and base-adjacent decommissioning with reusable fixed JAX slots and fresh drone lifetimes
+- Preserve staggered initial spawning while deploying voted reinforcements immediately
+- Require a live link to originate each YES credit and relay credits one at a time per hop
+- Train both Bernoulli hold and categorical KEEP/YES/NO vote heads with recurrent PPO and lifetime-aware return boundaries
+- Track adaptive population, churn, capacity rejection, and unused success agents in sliding-window W&B diagnostics; render voting and decommission status in replay inspector
+- Limit inspector reward debug plots and legends to agent slots active at least once in the replay
+- Match building studio stairs to saved tread widths; add rotation and shared selection on both storeys, with automatic upper-storey creation and protected stair openings
+- Document configuration, protocol, diagnostics interpretation, and focused WSL/Node verification
+- Add an optional contributor-only terminal success bonus, enabled in B02c small
+- Select the shortest complete relay chain for contributor credit, excluding redundant frontier detours
+
+- Split wall and drone angular resolutions while preserving legacy radar inputs
+- Add optional equal-width distance bands with capped counts replacing proximity signals for visible drone categories
+- Enable distance-band counting with a cap of three across B02c level variants
+- Update frozen-config/checkpoint compatibility, benchmark controls, and observation documentation
+- Add focused radar verification for exact band placement, count saturation, and authored/generated line-of-sight filtering

@@ -30,7 +30,7 @@ from swarmecho.env.roadmap_cpu import building_roadmap
 
 
 # Change this constant to change the manual batch size and new-pool minimum.
-DEFAULT_POOL_SIZE = 5000
+DEFAULT_POOL_SIZE = 2000
 POOL_FORMAT = "swarmecho-random-building-bank/v1"
 POOL_ROOT = Path(__file__).resolve().parent / "pools"
 _RECORD_KEYS = ("solid_min", "solid_max", "vertices", "distances", "base_position",

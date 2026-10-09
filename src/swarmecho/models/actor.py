@@ -30,6 +30,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from swarmecho.models.recurrent import GRUCell
+from swarmecho.models.actions import sample_vote, vote_statistics
 
 LOG_STD_MIN = -5.0
 LOG_STD_MAX =  2.0
@@ -272,6 +273,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
+        vote_mode: str | None = None,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
@@ -280,6 +282,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
         self.tarmac_include_self = tarmac_include_self
+        self.vote_mode = vote_mode
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
 
         gru_input_dim = hidden_dim + tarmac_val_dim if memory_comm_enabled else hidden_dim
@@ -291,6 +294,11 @@ class RecurrentDecentralizedActor(nnx.Module):
         self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
         self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
         self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
+        if vote_mode is not None:
+            self.vote_head = nnx.Linear(hidden_dim, 1 if vote_mode == "hold" else 3, rngs=rngs)
+
+    def vote_logits(self, hidden):
+        return self.vote_head(self.policy_trunk(hidden))
 
 
     def initial_tarmac_signature(self, batch_shape=(), num_agents: int | None = None) -> jax.Array:
@@ -437,6 +445,18 @@ class RecurrentDecentralizedActor(nnx.Module):
             u = jnp.where(active[..., None], u, 0.0)
             log_prob = jnp.where(active, log_prob, 0.0)
             entropy = jnp.where(active, entropy, 0.0)
+        if self.vote_mode is not None:
+            logits = self.vote_logits(hidden)
+            vote, vote_lp, vote_entropy = jax.vmap(
+                lambda z, k: sample_vote(z, jax.random.fold_in(k, 0xA6), self.vote_mode, deterministic)
+            )(logits, keys)
+            if active is not None:
+                vote = jnp.where(active, vote, 0.0)
+                vote_lp = jnp.where(active, vote_lp, 0.0)
+                vote_entropy = jnp.where(active, vote_entropy, 0.0)
+            u = jnp.concatenate([u, vote[..., None]], axis=-1)
+            log_prob += vote_lp
+            entropy += vote_entropy
         return hidden, signature, value, u, log_prob, entropy
 
     def __call__(
@@ -484,6 +504,12 @@ class RecurrentDecentralizedActor(nnx.Module):
         ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
         jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
         entropy = ent_gaussian + jnp.sum(jacobian)
+        if self.vote_mode is not None:
+            vote, lp, ent = sample_vote(self.vote_logits(hidden), jax.random.fold_in(key, 0xA6),
+                                        self.vote_mode, deterministic)
+            u = jnp.concatenate([u, vote[..., None]], axis=-1)
+            log_prob += lp
+            entropy += ent
         return hidden, u, log_prob, entropy
 
     def evaluate_actions_sequence(
@@ -519,10 +545,15 @@ class RecurrentDecentralizedActor(nnx.Module):
                     base_sig_t, base_val_t, base_mask_t,
                 )
                 std = jnp.exp(log_std)
-                log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+                movement = act_t[..., :3]
+                log_prob = -0.5 * jnp.sum(((movement - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
                 ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-                jacobian = 2.0 * (jnp.log(2.0) - act_t - jax.nn.softplus(-2.0 * act_t))
+                jacobian = 2.0 * (jnp.log(2.0) - movement - jax.nn.softplus(-2.0 * movement))
                 entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
+                if self.vote_mode is not None:
+                    lp, ent = vote_statistics(self.vote_logits(hidden), act_t[..., 3], self.vote_mode)
+                    log_prob += lp
+                    entropy += ent
                 return (hidden, signature, value), (log_prob, entropy)
             (final_hidden, final_signature, final_value), (log_probs, entropy) = jax.lax.scan(
                 _step,
@@ -535,10 +566,15 @@ class RecurrentDecentralizedActor(nnx.Module):
             obs_t, act_t, reset_t = xs
             hidden, mu, log_std = self(obs_t, hidden, reset_t)
             std = jnp.exp(log_std)
-            log_prob = -0.5 * jnp.sum(((act_t - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+            movement = act_t[..., :3]
+            log_prob = -0.5 * jnp.sum(((movement - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
             ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-            jacobian = 2.0 * (jnp.log(2.0) - act_t - jax.nn.softplus(-2.0 * act_t))
+            jacobian = 2.0 * (jnp.log(2.0) - movement - jax.nn.softplus(-2.0 * movement))
             entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
+            if self.vote_mode is not None:
+                lp, ent = vote_statistics(self.vote_logits(hidden), act_t[..., 3], self.vote_mode)
+                log_prob += lp
+                entropy += ent
             return hidden, (log_prob, entropy)
 
         final_hidden, (log_probs, entropy) = jax.lax.scan(_step, init_hidden, (obs, actions, resets))

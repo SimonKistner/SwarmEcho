@@ -167,7 +167,8 @@ The screenshot's eight pieces naturally represent spherical octants. They are
 useful for debugging but likely too coarse for control; latitude/longitude bins
 also over-represent poles.
 
-Make the direction count configurable. `radar_bins: 8` must use the eight
+Make the direction counts configurable. `wall_radar_bins: 8` and
+`drone_radar_bins: 8` must use the eight
 spherical octants shown in the reference image so the low-cost representation
 can be tested. Larger values use fixed approximately uniform unit directions
 (for example, a Fibonacci sphere), casting one wall ray per direction. Assign

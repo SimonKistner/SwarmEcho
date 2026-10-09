@@ -15,7 +15,11 @@ env:
   base_keeps_informing: false
   comm_radius: 15.0
   visual_radius: 5.0
-  radar_bins: 32
+  wall_radar_bins: 32
+  drone_radar_bins: 32
+  radar_mode: band_sep_counting
+  distance_bands: 4
+  radar_count_cap: 3
 
   max_steps: 1000
   success_condition: chain_held # coverage | discovery | delivery | chain_held

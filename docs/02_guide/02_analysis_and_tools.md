@@ -150,7 +150,22 @@ editor and `/api/buildings` routes for listing, loading, authoring, validation,
 and saving. Map-name validation retains the same filename rules.
 
 Create and edit storeys, walls, tiles, exclusions, roof geometry, and spawn
-settings, then validate the saved YAML:
+settings.
+
+In **Staircase** mode, click an interior cell to place stairs. Placing them on
+the top storey automatically adds the storey above, copying the volume, walls,
+and exclusions using the normal Add layer behavior. The upper stair cell and
+its floor opening are created together. UP/DOWN markers show the connected
+sections on both storeys; tile painting keeps that opening clear.
+
+Click either section to select the staircase, then change **Stair ascent** or
+use **Rotate 90°** / **R**. **Remove stairs** removes the staircase from both
+storeys; the opening can then be filled with Tiles. New buildings and stair
+templates use full cell width treads. The preview honors **Full cell width
+stairs**, which applies to all stairs in the map; existing maps retain their
+saved width setting, including legacy narrow stairs.
+
+Finish the roof with **Add roof**, then validate the saved YAML:
 
 ```bash
 uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_building.yaml

@@ -68,10 +68,11 @@ class MAPPOModel(nnx.Module):
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
+        vote_mode: str | None = None,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim
-        self.act_dim     = act_dim
+        self.act_dim     = act_dim + int(vote_mode is not None)
         self.hidden_dim  = hidden_dim
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
@@ -93,6 +94,7 @@ class MAPPOModel(nnx.Module):
                 tarmac_sig_dim = tarmac_sig_dim,
                 tarmac_val_dim = tarmac_val_dim,
                 tarmac_include_self = tarmac_include_self,
+                vote_mode        = vote_mode,
             )
         else:
             self.actor = DecentralizedActor(

@@ -16,6 +16,9 @@ import json
 import time
 from collections import OrderedDict, deque
 from dataclasses import asdict, fields
+from swarmecho.models.actions import physical_actions, deterministic_actions
+from swarmecho.env.adapt_size import policy_resets
+from swarmecho.training.adapt_size_metrics import AdaptiveWindow, REWARD_NAMES, INFO_NAMES, validate_zones
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print, display_path, evaluation_row, init_logging
 
@@ -79,6 +82,7 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
     model = MAPPOModel(
         obs_dim=observation_dim(cfg),
         act_dim=3,
+        vote_mode=cfg.adapt_size.vote_mode if cfg.adapt_size.enabled else None,
         num_agents=cfg.num_agents,
         hidden_dim=hidden_dim or level.network.hidden_dim,
         num_layers=level.network.num_layers,
@@ -116,8 +120,16 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "gae_lambda": level.training.gae_lambda,
         "communication_clock": "episode",
         "inactive_agents": "excluded",
+        "adaptive_size": cfg.adapt_size.enabled,
+        "vote_mode": cfg.adapt_size.vote_mode if cfg.adapt_size.enabled else None,
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
-           if field.name.startswith("observe_") or field.name == "radar_bins"},
+           if field.name.startswith("observe_") or field.name in {
+               "wall_radar_bins", "drone_radar_bins", "radar_mode",
+               "distance_bands", "radar_count_cap",
+           }},
+        "radar_layout": ("band_counts_v2" if cfg.radar_mode == "band_sep_counting"
+                         else "legacy_interleaved" if cfg.wall_radar_bins == cfg.drone_radar_bins
+                         else "radar_blocks_v1"),
     }.items()))
     return model
 
@@ -550,7 +562,7 @@ def train(
         num_envs=training.num_envs,
         num_agents=cfg.num_agents,
         obs_dim=obs_dim,
-        act_dim=3,
+        act_dim=model.act_dim,
         gamma=training.gamma,
         gae_lambda=training.gae_lambda,
         recurrent=True,
@@ -600,6 +612,8 @@ def train(
     if training.randomize_base or training.minimum_geodesic_separation:
         check_spawn_pairs(states.spawn_pair_attempts)
     init_log("Initial reset complete on device. Preparing recurrent state and logging...")
+    if cfg.adapt_size.enabled:
+        validate_zones(jax.device_get(states.adaptive.zone_valid))
     actor_hidden = model.initial_actor_hidden((training.num_envs,))
     actor_signature = model.initial_actor_signature((training.num_envs,))
     actor_value = model.initial_actor_value((training.num_envs,))
@@ -633,9 +647,14 @@ def train(
                      "peer_informing", "target_found", "success",
                      "no_movement_termination")
     }
-        # Collect one completed episode per parallel environment,
+    if level.reward.enable_chain_efficiency_reward:
+        episode_rewards["efficiency"] = np.zeros(training.num_envs, dtype=np.float64)
+    # Collect one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
     window_size = training.num_envs
+    adaptive_window = AdaptiveWindow(window_size) if cfg.adapt_size.enabled else None
+    if cfg.adapt_size.enabled:
+        episode_rewards.update({name: np.zeros(training.num_envs) for name in REWARD_NAMES})
     window_ret: deque[float] = deque(maxlen=window_size)
     window_len: deque[int] = deque(maxlen=window_size)
     window_succ: deque[float] = deque(maxlen=window_size)
@@ -661,7 +680,8 @@ def train(
     config_snapshot = {
         "name": level.name,
         "building": level.building_name,
-        "env": {**asdict(level.env), "map_names": level.map_names},
+        "env": {**{k: v for k, v in asdict(level.env).items() if k != "adapt_size"}, "map_names": level.map_names},
+        "adapt_size": asdict(level.adapt_size),
         "reward": asdict(level.reward),
         "training": asdict(training),
         "network": asdict(network),
@@ -685,7 +705,10 @@ def train(
     terminal_print(f"  level / building : {level.name} / {level.building_name}")
     terminal_print(f"  devices          : {jax.devices()}")
     terminal_print(f"  agents           : {cfg.num_agents}")
-    terminal_print(f"  observation      : {obs_dim}  (radar bins: {cfg.radar_bins})")
+    terminal_print(f"  observation      : {obs_dim}  (wall bins: {cfg.wall_radar_bins}; drone bins: {cfg.drone_radar_bins})")
+    terminal_print(f"  radar mode       : {cfg.radar_mode}")
+    if cfg.radar_mode == "band_sep_counting":
+        terminal_print(f"  drone counting   : {max(1, cfg.distance_bands)} distance bands; cap {cfg.radar_count_cap}")
     terminal_print("  action           : XYZ continuous force")
     terminal_print(f"  model parameters : {parameter_count:,}")
     terminal_print(f"  environments     : {training.num_envs:,}")
@@ -792,7 +815,7 @@ def train(
                 base_sig_in,
                 base_val_in,
                 base_masks,
-                resets | ~states.active,
+                resets | policy_resets(states),
             )
             # Mirror robust evaluation: perturb pre-tanh actions with bounded
             # uniform noise. Keep the sampled policy actions and their
@@ -811,12 +834,12 @@ def train(
                         maxval=training.noise_level,
                     )
                 )(noise_roots)
-                executed_actions = actions + action_noise
+                executed_actions = actions.at[..., :3].add(action_noise)
             else:
                 executed_actions = actions
             executed_actions = jnp.where(states.active[..., None], executed_actions, 0.0)
             next_states, rewards, dones, info = env_step.batched(
-                states, jnp.tanh(executed_actions)
+                states, physical_actions(executed_actions)
             )
             next_base_valid, next_base_signature, next_base_value = _update_base_memory(
                 states,
@@ -829,7 +852,7 @@ def train(
                 dones,
                 share_step,
             )
-            next_resets = jnp.broadcast_to(dones[:, None], resets.shape)
+            next_resets = jnp.broadcast_to(dones[:, None], resets.shape) | policy_resets(next_states)
             transition = {
                 "obs": obs,
                 "actions": actions,
@@ -837,9 +860,11 @@ def train(
                 "values": values,
                 "rewards": rewards,
                 "dones": dones,
-                "rnn_resets": resets,
+                "rnn_resets": resets | policy_resets(states),
                 "comm_masks": comm_masks,
                 "active_masks": states.active,
+                "agent_terminated": info["agent_terminated"],
+                **({name: info[name] for name in (*INFO_NAMES, *REWARD_NAMES)} if cfg.adapt_size.enabled else {}),
                 "base_signatures": base_sig_in,
                 "base_values": base_val_in,
                 "base_memory_masks": base_masks,
@@ -856,6 +881,8 @@ def train(
                 "target_found": info["target_found"],
                 "reward_success": info["reward_success"],
                 "no_movement_termination": info["no_movement_termination"],
+                **({"efficiency": info["efficiency"]}
+                   if level.reward.enable_chain_efficiency_reward else {}),
                 "success": info["success"],
                 "global_target_found": info["global_target_found"],
                 "global_visually_found": info["global_visually_found"],
@@ -898,16 +925,16 @@ def train(
             ),
             jnp.arange(training.num_steps, dtype=jnp.int32),
         )
-        final_states, _, _, _, _, final_critic_hidden, _, _, _, _ = carry
+        final_states, _, _, _, _, final_critic_hidden, _, _, _, final_resets = carry
         final_obs = jax.vmap(observations)(final_states)
 
-        def value_one(obs_e, hidden_e, active_e):
+        def value_one(obs_e, hidden_e, active_e, reset_e):
             return model.get_value_recurrent(
-                obs_e, hidden_e, ~active_e, active=active_e,
+                obs_e, hidden_e, reset_e, active=active_e,
             )[1]
 
         final_values = jax.vmap(value_one)(
-            final_obs, final_critic_hidden, final_states.active,
+            final_obs, final_critic_hidden, final_states.active, final_resets | policy_resets(final_states),
         )
         return (*carry, final_values, rollout)
 
@@ -958,6 +985,8 @@ def train(
             )
         )
         rollout_finished = time.perf_counter()
+        if cfg.adapt_size.enabled:
+            validate_zones(rollout_host["adapt_zone_valid"])
         if training.randomize_base or training.minimum_geodesic_separation:
             check_spawn_pairs(rollout_host["spawn_pair_attempts"])
             check_spawn_pairs(states.spawn_pair_attempts)
@@ -1002,6 +1031,7 @@ def train(
                     rnn_resets=rollout_host["rnn_resets"][step_index],
                     comm_masks=rollout_host["comm_masks"][step_index],
                     active_masks=rollout_host["active_masks"][step_index],
+                    agent_terminated=rollout_host["agent_terminated"][step_index],
                     base_signatures=rollout_host["base_signatures"][step_index],
                     base_values=rollout_host["base_values"][step_index],
                     base_memory_masks=rollout_host["base_memory_masks"][step_index],
@@ -1009,6 +1039,11 @@ def train(
             )
             completed_indices = np.flatnonzero(dones_host)
             for index in completed_indices:
+                if adaptive_window is not None:
+                    adaptive_window.append(
+                        {name: rollout_host[name][step_index, index] for name in INFO_NAMES},
+                        success=bool(episode_success[index]),
+                    )
                 window_ret.append(float(episode_returns[index]))
                 window_len.append(int(episode_lengths[index]))
                 window_succ.append(float(episode_success[index]))
@@ -1176,6 +1211,8 @@ def train(
                     "train/success_target_distance_max_norm": latest_stats["success_target_distance_max_norm"],
                     **{f"rewards/{name}": latest_stats[f"reward_{name}"] for name in window_rewards},
                 })
+                if adaptive_window is not None:
+                    wandb_logs.update(adaptive_window.metrics())
             for name, window in window_path_stats.items():
                 if len(window) == window.maxlen:
                     wandb_logs[f"train/{name}"] = float(np.mean(window))
@@ -1503,7 +1540,7 @@ def _collect_replay_impl(
             current_hidden,
             current_signature,
             current_value,
-            reset=jnp.zeros(num_agents, dtype=jnp.bool_),
+            reset=policy_resets(current_state),
             comm_mask=comm_mask,
             active=current_state.active,
             base_signature=current_base_signature,
@@ -1511,7 +1548,8 @@ def _collect_replay_impl(
             base_memory_mask=base_memory_mask,
             deterministic=True,
         )
-        candidate_state = step(current_state, jnp.tanh(means))
+        means = deterministic_actions(model.actor, next_hidden, means)
+        candidate_state = step(current_state, physical_actions(means))
         rewards, _ = compute_rewards(current_state, candidate_state, reward_cfg, cfg)
 
         reporters = current_state.target_known & in_base_range
@@ -1649,6 +1687,8 @@ def evaluate_model(
         )
     )
     _validate_evaluation_pairs(level, timeline.spawn_pair_attempts[0])
+    if cfg.adapt_size.enabled:
+        validate_zones(timeline.adaptive.zone_valid)
     frames = int(episode_length) + 1
     timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)
     states = [
@@ -1796,7 +1836,7 @@ def _run_parallel_evaluation_jit(
                 actor_hidden,
                 actor_signature,
                 actor_value,
-                reset=jnp.zeros(num_agents, dtype=jnp.bool_),
+                reset=policy_resets(state),
                 comm_mask=comm_mask,
                 active=state.active,
                 base_signature=base_signature,
@@ -1804,20 +1844,21 @@ def _run_parallel_evaluation_jit(
                 base_memory_mask=base_memory_mask,
                 deterministic=True,
             )
+            means = deterministic_actions(model.actor, next_actor_hidden, means)
             if action_noise_max > 0.0:
                 # Probe the observed shape-dependent actor-mean discrepancy
                 # without altering resets, target positions, or matrix shapes.
                 step_noise_key = jax.random.fold_in(
                     env_action_noise_key, step_index
                 )
-                means = means + jax.random.uniform(
+                means = means.at[..., :3].add(jax.random.uniform(
                     step_noise_key,
-                    means.shape,
+                    means[..., :3].shape,
                     dtype=means.dtype,
                     minval=-action_noise_max,
                     maxval=action_noise_max,
-                )
-            executed_actions = jnp.where(state.active[:, None], jnp.tanh(means), 0.0)
+                ))
+            executed_actions = jnp.where(state.active[:, None], physical_actions(means), 0.0)
             next_state = step(state, executed_actions)
             rewards, _ = compute_rewards(state, next_state, reward_cfg, cfg)
             target_found_or_delivered = (
@@ -1887,6 +1928,7 @@ def _run_parallel_evaluation_jit(
             state.obstacle_min, state.obstacle_max,
             state.spawn_pair_attempts,
             final_carry[15],
+            state.adaptive.zone_valid if cfg.adapt_size.enabled else jnp.bool_(True),
         )
         return (*metrics, action_history) if capture_actions else metrics
 
@@ -1898,7 +1940,7 @@ def _run_parallel_evaluation_jit(
 
     successes = batched[2]
     final_chain_lengths = batched[7]
-    action_histories = batched[14]
+    action_histories = batched[15]
     if capture_result == "success":
         scores = jnp.where(successes, final_chain_lengths, -jnp.inf)
         selected_lane = jnp.argsort(-scores, stable=True)[capture_offset]
@@ -1907,7 +1949,7 @@ def _run_parallel_evaluation_jit(
             ~successes, size=num_envs, fill_value=-1
         )[0]
         selected_lane = failure_lanes[capture_offset]
-    return batched[:14], selected_lane, action_histories[selected_lane]
+    return batched[:15], selected_lane, action_histories[selected_lane]
 
 
 def _validate_evaluation_pairs(level: Level, attempts: np.ndarray) -> None:
@@ -1978,6 +2020,7 @@ def evaluate_suite(
         obstacle_max,
         spawn_pair_attempts,
         base_delivered,
+        zone_valid,
     ) = jax.device_get(
         _run_parallel_evaluation_jit(
             model,
@@ -2004,6 +2047,8 @@ def evaluate_suite(
         )
     )
     _validate_evaluation_pairs(level, spawn_pair_attempts)
+    if cfg.adapt_size.enabled:
+        validate_zones(zone_valid)
     success_episode_length = float(np.mean(lengths[successes])) if np.any(successes) else float(cfg.max_steps)
     metrics = {
         "eval_return": float(np.mean(returns)),
@@ -2111,8 +2156,11 @@ def evaluate_suite_with_action_capture(
         obstacle_max,
         spawn_pair_attempts,
         base_delivered,
+        zone_valid,
     ) = batched
     _validate_evaluation_pairs(level, spawn_pair_attempts)
+    if cfg.adapt_size.enabled:
+        validate_zones(zone_valid)
     matching_count = int(np.count_nonzero(successes if capture_result == "success" else ~successes))
     if offset >= matching_count:
         raise ValueError(
@@ -2241,6 +2289,8 @@ def replay_recorded_actions(
         )
     )
     _validate_evaluation_pairs(level, timeline.spawn_pair_attempts[0])
+    if cfg.adapt_size.enabled:
+        validate_zones(timeline.adaptive.zone_valid)
     frames = int(episode_length) + 1
     timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)
     states = [

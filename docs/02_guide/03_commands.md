@@ -81,8 +81,10 @@ The builder command serves the building editor.
 
 ```bash
 uv run swarmecho-validate
-uv run swarmecho-benchmark num_envs=64 steps=64 radar_bins=8
+uv run swarmecho-benchmark num_envs=64 steps=64 wall_radar_bins=8 drone_radar_bins=8
+uv run swarmecho-benchmark num_envs=64 steps=64 wall_radar_bins=32 drone_radar_bins=16 radar_mode=band_sep_counting distance_bands=4 radar_count_cap=3
 uv run pytest tests
+uv run pytest tests/test_environment.py -k counting_radar -v
 node --test tests/test_map_builder_ui.cjs tests/test_inspector_visibility.cjs
 ```
 
@@ -90,3 +92,15 @@ Validation and benchmark implementations are packaged under
 `src/swarmecho/training/`, matching their console entry points.
 The validator checks one small update; the full tests and ordinary
 training/resume/evaluation workflows provide broader coverage.
+
+Benchmark radar options accept comma-separated values and run their Cartesian
+product. Use `radar_mode=band_sep_counting distance_bands=1` to benchmark counts
+without distance subdivision; `distance_bands=0` is equivalent. Legacy mode
+ignores band and count-cap settings.
+
+The benchmark measures compilation/runtime performance and observation shapes;
+it does not assert correct spatial assignment or visibility. The focused
+`counting_radar` tests run JIT observations for controlled scenes and compare
+exact cells: capped category counts, each radial boundary crossing, 0/1 single
+bands, self/inactive/out-of-range filtering, and authored/generated obstruction
+checks that preserve visible peers while excluding blocked ones.

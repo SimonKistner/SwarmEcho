@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 import time
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print
@@ -21,7 +22,7 @@ def planner_metadata(cfg) -> dict:
     """Keep the roadmap assumptions needed to reproduce an inspector route."""
     names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
              "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m")
-    return {name: getattr(cfg, name) for name in names}
+    return {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
 
 
 from swarmecho.env.buildings import building_snapshot
@@ -80,6 +81,19 @@ def write_replay(
         "obstacle_min": stack("obstacle_min"),
         "obstacle_max": stack("obstacle_max"),
     }
+    if state_list[0].adaptive is not None:
+        for name in ("vote", "ids", "round", "known_round", "source_yes", "spent",
+                     "dwell", "zone_center", "zone_valid", "spawned", "decommissioned",
+                     "rejected_voters", "calls", "decommissions", "rejected_calls"):
+            arrays[f"adapt_{name}"] = np.stack([
+                np.asarray(getattr(state.adaptive, name)) for state in state_list
+            ])
+        arrays["adapt_base_votes"] = np.stack([
+            np.where(np.asarray(state.adaptive.packet_round[-1]) == int(state.adaptive.round),
+                     np.asarray(state.adaptive.packet_count[-1]), 0) for state in state_list
+        ])
+        arrays["adapt_available_votes"] = np.maximum(
+            arrays["adapt_base_votes"] - arrays["adapt_spent"], 0)
     if building is not None:
         shape = arrays["coverage"].shape[1:]
         voxel_size = np.asarray(building.world_size_m) / np.asarray(shape)

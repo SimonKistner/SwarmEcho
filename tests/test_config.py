@@ -16,7 +16,7 @@ from swarmecho.training.artifacts import (
 def test_baseline_level_is_strict_and_solvable():
     level = load_level()
     assert level.name == "M00_no_maze_open_cuboid"
-    assert level.env.radar_bins == 16
+    assert level.env.wall_radar_bins == level.env.drone_radar_bins == 16
     assert level.env.num_agents == 4
     assert level.env.max_steps == 700
     assert level.env.coverage_voxel_size == 2.5
@@ -135,14 +135,15 @@ def test_cli_accepts_dotlist_overrides():
             "level=M00_no_maze_open_cuboid",
             "training.total_timesteps=400000",
             "logging.run_name=inspector_smoke",
-            "env.radar_bins=16",
+            "env.wall_radar_bins=16",
+            "env.drone_radar_bins=16",
             "env.coverage_voxel_size=2.5",
         ]
     )
 
     assert level.training.total_timesteps == 400_000
     assert level.logging.run_name == "inspector_smoke"
-    assert level.env.radar_bins == 16
+    assert level.env.wall_radar_bins == level.env.drone_radar_bins == 16
     assert level.env.coverage_voxel_size == 2.5
     assert level.num_updates == 1
 

@@ -12,10 +12,24 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 MAP_DIR = _SRC_ROOT / "curriculum_config" / "maps"
 LEVEL_DIR = _SRC_ROOT / "curriculum_config" / "levels"
 
+# Adaptive population control is opt-in; disabled levels retain their old shapes.
+@dataclass(frozen=True)
+class AdaptSizeConfig:
+    enabled: bool = False
+    initial_agents: int = 1
+    vote_mode: str = "hold"  # hold | keep_yes_no
+    vote_holding: int = 1  # Delivered, one-per-hop YES credits per voting batch.
+    quorum_fraction: float = 0.49  # Strictly greater than this fraction.
+    quorum_hold: int = 0  # Consecutive environment steps with sufficient votes.
+    decommission_radius_m: float = 1.0
+    decommission_hold_steps: int = 15
+
+
 # env
 @dataclass(frozen=True)
 class EnvConfig:
     num_agents: int = 5
+    adapt_size: AdaptSizeConfig = AdaptSizeConfig()
 
     dt: float = 0.1  # Simulated time per step; scales velocity and position updates.
     max_force: float = 15.0
@@ -27,7 +41,11 @@ class EnvConfig:
     base_keeps_informing: bool = False
     comm_radius: float = 5.0
     visual_radius: float = 4.0
-    radar_bins: int = 8
+    wall_radar_bins: int = 8
+    drone_radar_bins: int = 8
+    radar_mode: str = "legacy"  # legacy | band_sep_counting
+    distance_bands: int = 1  # Equal-width bands; 0 is an alias for 1.
+    radar_count_cap: int = 3  # Saturation count in band_sep_counting mode.
 
     target_wall_buffer_fraction: float = 0.1
     spawn_delay: int = 5
@@ -61,6 +79,45 @@ class EnvConfig:
     roadmap_corner_bonus_m: float = 1.0
 
 
+def validate_adapt_size(cfg: EnvConfig) -> None:
+    a = cfg.adapt_size
+    if type(a.enabled) is not bool:
+        raise ValueError("adapt_size.enabled must be boolean.")
+    if type(a.initial_agents) is not int or not 1 <= a.initial_agents <= cfg.num_agents:
+        raise ValueError("adapt_size.initial_agents must be in [1, env.num_agents].")
+    if a.vote_mode not in {"hold", "keep_yes_no"}:
+        raise ValueError("adapt_size.vote_mode must be hold or keep_yes_no.")
+    for name in ("vote_holding", "decommission_hold_steps"):
+        if type(getattr(a, name)) is not int or getattr(a, name) < 1:
+            raise ValueError(f"adapt_size.{name} must be a positive integer.")
+    if type(a.quorum_hold) is not int or a.quorum_hold < 0:
+        raise ValueError("adapt_size.quorum_hold must be a nonnegative integer.")
+    if not math.isfinite(a.quorum_fraction) or not 0 <= a.quorum_fraction < 1:
+        raise ValueError("adapt_size.quorum_fraction must be in [0, 1).")
+    if not math.isfinite(a.decommission_radius_m) or a.decommission_radius_m <= 0:
+        raise ValueError("adapt_size.decommission_radius_m must be positive and finite.")
+    if a.enabled and cfg.success_condition != "chain_held":
+        raise ValueError("Adaptive size currently requires success_condition=chain_held.")
+
+
+def validate_radar_config(cfg: EnvConfig) -> None:
+    """Validate radar settings for both loaded levels and direct environments."""
+    for name in ("wall_radar_bins", "drone_radar_bins"):
+        value = getattr(cfg, name)
+        if type(value) is not int or value < 4:
+            raise ValueError(f"env.{name} must be an integer of at least 4.")
+    if cfg.radar_mode not in {"legacy", "band_sep_counting"}:
+        raise ValueError("env.radar_mode must be legacy or band_sep_counting.")
+    if type(cfg.distance_bands) is not int or cfg.distance_bands < 0:
+        raise ValueError("env.distance_bands must be a nonnegative integer (0 means 1).")
+    if type(cfg.radar_count_cap) is not int or cfg.radar_count_cap < 1:
+        raise ValueError("env.radar_count_cap must be a positive integer.")
+    for name in ("comm_radius", "visual_radius"):
+        value = getattr(cfg, name)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"env.{name} must be finite and positive.")
+
+
 # random_buildings
 @dataclass(frozen=True)
 class RandomBuildingConfig:
@@ -86,6 +143,11 @@ class RandomBuildingConfig:
 # reward
 @dataclass(frozen=True)
 class RewardConfig:
+    reinforcement_cost: float = 0.0
+    decommission_cost: float = 0.0
+    rejected_call_penalty: float = 0.0  # Per qualified YES voter, per rejected batch.
+    all_decommissioned_penalty: float = 0.0  # Team cost on this termination.
+    success_unused_agent_penalty: float = 0.0  # Team cost per unused active drone.
     target_found_requires_delivery: bool = True
     chain_reward_system: str = "euclidean"
 
@@ -100,6 +162,8 @@ class RewardConfig:
     success_bonus: float = 500.0
     # Spread the existing team success budget over first achieved hold lengths.
     success_bonus_as_hold_record: bool = False
+    # At terminal chain success, split the team bonus among chain contributors only.
+    success_bonus_contributors_only: bool = False
     # One bonus per newly informed peer, shared by all eligible senders.
     peer_informing_reward_enabled: bool = False
     peer_informing_bonus: float = 25.0
@@ -262,6 +326,10 @@ class Level:
     map_source_name: str | None = None
 
     @property
+    def adapt_size(self) -> AdaptSizeConfig:
+        return self.env.adapt_size
+
+    @property
     def building_name(self) -> str:
         return self.map_names[0]
 
@@ -287,6 +355,7 @@ def resolve_evaluation_level(level: Level) -> Level:
         level = replace(level, env=replace(level.env, num_agents=num_agents))
     if evaluation.success_condition is not None:
         level = replace(level, env=replace(level.env, success_condition=evaluation.success_condition))
+    validate_adapt_size(level.env)
     if not evaluation.eval_differes_from_training_map:
         return level
     if evaluation.eval_map is None:
@@ -347,14 +416,26 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     data = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
     if overrides:
         data = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(data), OmegaConf.from_dotlist(overrides)), resolve=True)
-    allowed = {"env", "reward", "training", "network", "evaluation", "logging", "random_buildings"}
+    allowed = {"env", "reward", "training", "network", "evaluation", "logging", "random_buildings", "adapt_size"}
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"Unknown config sections: {', '.join(sorted(unknown))}.")
     env_data = dict(data.get("env", {}))
+    nested_adapt = env_data.pop("adapt_size", {})
+    env_data["adapt_size"] = _strict_dataclass(
+        AdaptSizeConfig, {**nested_adapt, **data.get("adapt_size", {})}, "adapt_size"
+    )
+    # Frozen run configs used one resolution for walls and drones. Explicit
+    # new fields take precedence when replaying them with dotlist overrides.
+    if "radar_bins" in env_data:
+        old_bins = env_data.pop("radar_bins")
+        env_data.setdefault("wall_radar_bins", old_bins)
+        env_data.setdefault("drone_radar_bins", old_bins)
     map_names = env_data.pop("map_names", None)
     generation = _strict_dataclass(RandomBuildingConfig, data.get("random_buildings", {}), "random_buildings")
     env = _strict_dataclass(EnvConfig, env_data, "env")
+    validate_adapt_size(env)
+    validate_radar_config(env)
     training = _strict_dataclass(TrainingConfig, data.get("training", {}), "training")
     if generation.load_maps_from_bank and not generation.enabled:
         raise ValueError("random_buildings.load_maps_from_bank requires random_buildings.enabled=true.")
@@ -399,6 +480,11 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         random_buildings=generation,
         map_paths=map_paths,
     )
+    for name in ("reinforcement_cost", "decommission_cost", "rejected_call_penalty",
+                 "all_decommissioned_penalty", "success_unused_agent_penalty"):
+        value = getattr(level.reward, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"reward.{name} must be finite and nonnegative.")
     success_conditions = {"coverage", "discovery", "delivery", "chain_held"}
     if level.env.success_condition not in success_conditions:
         raise ValueError(f"env.success_condition must be one of {sorted(success_conditions)}.")
@@ -519,7 +605,8 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         value = getattr(level.reward, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"reward.{name} must be finite and nonnegative.")
-    for name in ("success_bonus_as_hold_record", "gap_reward_uses_change",
+    for name in ("success_bonus_as_hold_record", "success_bonus_contributors_only",
+                 "gap_reward_uses_change",
                  "peer_informing_reward_enabled", "delivery_gap_vesting_enabled"):
         if type(getattr(level.reward, name)) is not bool:
             raise ValueError(f"reward.{name} must be a boolean.")
@@ -532,6 +619,11 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("Delivery gap vesting requires gap-change reward and target delivery.")
     if level.reward.success_bonus_as_hold_record and level.env.success_condition != "chain_held":
         raise ValueError("reward.success_bonus_as_hold_record requires env.success_condition=chain_held.")
+    if level.reward.success_bonus_contributors_only and level.env.success_condition != "chain_held":
+        raise ValueError("reward.success_bonus_contributors_only requires env.success_condition=chain_held.")
+    if (level.reward.success_bonus_contributors_only
+            and level.evaluation.success_condition not in (None, "chain_held")):
+        raise ValueError("Contributor-only success reward requires chain_held evaluation success.")
     if (level.reward.success_bonus_as_hold_record
             and level.evaluation.success_condition not in (None, "chain_held")):
         raise ValueError("Hold-record success reward requires chain_held evaluation success.")

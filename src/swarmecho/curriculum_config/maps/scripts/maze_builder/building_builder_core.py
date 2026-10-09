@@ -70,6 +70,7 @@ def new_document(cols: int = 6, rows: int = 4, layers: int = 1) -> dict[str, Any
         "cell_size_m": DEFAULT_CELL_SIZE_M,
         "tile_thickness_m": DEFAULT_TILE_THICKNESS_M,
         "wall_thickness_m": DEFAULT_WALL_THICKNESS_M,
+        "stair_full_width": True,
         "interior_cells": interior,
         "tiles": tiles,
         "x_walls": x_walls,
@@ -376,6 +377,35 @@ def add_layer(document: dict[str, Any]) -> dict[str, Any]:
             if z == source_layer
         ]
     )
+    return normalize_document(doc)
+
+
+def place_stair(document: dict[str, Any], stair: list[int]) -> dict[str, Any]:
+    """Place one connected staircase, creating its upper storey when needed."""
+    doc = normalize_document(deepcopy(document))
+    if (not isinstance(stair, list) or len(stair) != 4
+            or any(type(value) is not int for value in stair) or stair[3] not in range(4)):
+        raise ValueError("Stairs require [x,y,z,direction], direction 0..3.")
+    x, y, z, _ = stair
+    if [x, y, z] not in doc["interior_cells"]:
+        raise ValueError("Place stairs inside an interior cell of the selected storey.")
+    if z + 1 == doc["layers"]:
+        doc = add_layer(doc)
+    if [x, y, z + 1] not in doc["interior_cells"]:
+        doc["interior_cells"].append([x, y, z + 1])
+        # Close only the newly created upper cell's exposed sides.
+        interior = {tuple(cell) for cell in doc["interior_cells"]}
+        for nx, ny, key, wall in (
+            (x - 1, y, "x_walls", [x, y, z + 1]),
+            (x + 1, y, "x_walls", [x + 1, y, z + 1]),
+            (x, y - 1, "y_walls", [x, y, z + 1]),
+            (x, y + 1, "y_walls", [x, y + 1, z + 1]),
+        ):
+            if (nx, ny, z + 1) not in interior and wall not in doc[key]:
+                doc[key].append(wall)
+    doc["tiles"] = [tile for tile in doc["tiles"] if tile != [x, y, z + 1]]
+    doc["stairs"] = [value for value in doc["stairs"] if value[:3] != stair[:3]]
+    doc["stairs"].append(stair.copy())
     return normalize_document(doc)
 
 

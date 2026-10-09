@@ -32,6 +32,7 @@ class MAPPOTransition(NamedTuple):
     base_signatures: Optional[np.ndarray] = None  # (E, S), saved base TarMAC signature
     base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
+    agent_terminated: Optional[np.ndarray] = None  # (E, N), lifetime ends on this transition
 
 
 class MAPPORolloutBuffer:
@@ -86,6 +87,7 @@ class MAPPORolloutBuffer:
         self._actions   = np.zeros((self.T, self.E, self.N, self.A), dtype=np.float32)
         self._log_probs = np.zeros((self.T, self.E, self.N),          dtype=np.float32)
         self._dones     = np.zeros((self.T, self.E),                   dtype=np.float32)
+        self._agent_terminated = np.zeros((self.T, self.E, self.N), dtype=bool)
 
         self._rewards = np.zeros((self.T, self.E, self.N), dtype=np.float32)
         self._values = np.zeros((self.T, self.E, self.N), dtype=np.float32)
@@ -130,6 +132,8 @@ class MAPPORolloutBuffer:
             self._rewards[self._ptr] = rew_arr
         
         self._dones[self._ptr]     = np.asarray(tr.dones)
+        self._agent_terminated[self._ptr] = (False if tr.agent_terminated is None
+                                            else np.asarray(tr.agent_terminated, dtype=bool))
         if self.recurrent and tr.rnn_resets is not None:
             self._rnn_resets[self._ptr] = np.asarray(tr.rnn_resets).astype(bool)
         if self.recurrent and tr.comm_masks is not None:
@@ -179,6 +183,7 @@ class MAPPORolloutBuffer:
             # auto-reset boundary and suppresses the valid bootstrap one step
             # before that boundary.
             next_nonterminal = (1.0 - self._dones[t])[:, None]
+            next_nonterminal = next_nonterminal * (~self._agent_terminated[t])
 
             delta = (
                 self._rewards[t]

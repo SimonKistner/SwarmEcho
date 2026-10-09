@@ -104,13 +104,20 @@ add the panel.
 The private inspector displays the same configuration. For replays, the left
 sidebar places **Episode** at the top left, with **Checkpoint configuration**
 above **Building visibility** in the adjacent column. Reward debug plots start
-disabled in both versions; enable them under **Playback**. Public replay pages
+disabled in both versions; enable them under **Playback**. The reward lines,
+legend and axis scaling include only agent slots active in at least one
+recorded frame of the replay, including agents activated later or subsequently
+decommissioned. Drone labels and colors retain their original slot numbers.
+Public replay pages
 use a compact header with a full-width frame timeline and an **All results**
 link; the orbit/zoom hint sits inside the 3D view.
 New artifacts open at 10° camera elevation with two 15% zoom-in steps applied
 to the starting distance. This deterministic zoom avoids browser-dependent
-mouse-wheel timing. Switching artifacts resets to that pose; refreshing the
-same selected artifact retains its camera.
+mouse-wheel timing. Selecting an artifact from the run picker resets to that
+pose. The step buttons and arrow navigation retain the current camera angle,
+zoom and pan while loading the selected heatmap or replay; map and category
+navigation also retain the camera. Refreshing the same selected artifact
+retains its camera.
 
 ## Export from the command line
 

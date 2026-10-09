@@ -19,12 +19,17 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     expected = dict(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
+        if expected.get("adaptive_size", False):
+            raise ValueError("Adaptive voting checkpoints require matching action/observation metadata.")
         if expected["value_normalization"] != "none":
             raise ValueError(
                 "Checkpoint has no value-normalization metadata. It cannot be loaded as a "
                 "running-normalized critic. Use the original raw-value settings or an explicitly "
                 "converted checkpoint; changing the flag alone changes critic units."
             )
+        if expected.get("radar_layout", "legacy_interleaved") != "legacy_interleaved":
+            raise ValueError("Checkpoint has no radar metadata; its input layout cannot be verified. "
+                             "Load it with the original legacy radar settings.")
         warnings.warn("Checkpoint has no training contract; input semantics cannot be verified. "
                       "Communication timing and inactive-agent handling now use corrected behavior.",
                       stacklevel=2)
@@ -34,9 +39,37 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         raise ValueError("This checkpoint uses a critic architecture that is no longer supported.")
     if actual.get("format") != expected["format"]:
         raise ValueError("Unsupported checkpoint training-contract version.")
+    for contract in (actual, expected):
+        contract.setdefault("adaptive_size", False)
+        contract.setdefault("vote_mode", None)
+        # Old contracts contain radar_bins and the original interleaved layout.
+        old_bins = contract.pop("radar_bins", None)
+        if old_bins is not None:
+            contract.setdefault("wall_radar_bins", old_bins)
+            contract.setdefault("drone_radar_bins", old_bins)
+        contract.setdefault("radar_mode", "legacy")
+        contract.setdefault("distance_bands", 1)
+        contract.setdefault("radar_count_cap", 3)
+        contract.setdefault(
+            "radar_layout",
+            # Missing layout metadata predates counts-only radar. Keep the
+            # old inference so it cannot match the new band_counts_v2 layout.
+            "legacy_interleaved" if contract["radar_mode"] == "legacy"
+            and contract.get("wall_radar_bins") == contract.get("drone_radar_bins")
+            else "radar_blocks_v1",
+        )
+        if contract["radar_mode"] == "legacy":
+            # These settings do not affect legacy observations.
+            contract["distance_bands"] = 1
+            contract["radar_count_cap"] = None
+        else:
+            contract["distance_bands"] = max(1, contract["distance_bands"])
     critical = {
+        "adaptive_size", "vote_mode",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
-        "tarmac_val_dim", "memory_comm_enabled", "value_normalization", "radar_bins",
+        "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
+        "wall_radar_bins", "drone_radar_bins", "radar_mode", "radar_layout",
+        "distance_bands", "radar_count_cap",
         *[name for name in expected if name.startswith("observe_")],
     }
     critical.intersection_update(expected)

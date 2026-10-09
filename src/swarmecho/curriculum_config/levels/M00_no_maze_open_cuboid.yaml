@@ -9,7 +9,8 @@ env:
   comm_radius_base: 8.0
   comm_radius: 9.0
   visual_radius: 5.0
-  radar_bins: 16
+  wall_radar_bins: 16
+  drone_radar_bins: 16
 
   spawn_delay: 5
 

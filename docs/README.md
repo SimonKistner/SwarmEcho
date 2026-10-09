@@ -10,6 +10,8 @@ The [repository README](../README.md) is the entry point for the current runtime
 - [Agent-centric critic design rationale](01_reference/04_mappo_acc_architecture_defense.md)
 - [Maintained assumptions](01_reference/05_assumptions.md)
 - [PPO controls](01_reference/05_ppo_controls.md)
+- [Adaptive swarm size](01_reference/06_adaptive_swarm_size.md)
+- [Adaptive swarm diagnostics and interpretation](01_reference/07_adaptive_swarm_diagnostics.md)
 
 ## Operational guides
 

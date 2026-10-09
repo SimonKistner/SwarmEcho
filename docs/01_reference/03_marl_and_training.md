@@ -4,6 +4,11 @@ The maintained trainer is `training/train.py`, using `PPOTrainer` from
 `training/ppo.py`. Production training requires recurrent actor and critic
 memory. A shared decentralized actor emits three pre-squash action components;
 tanh produces the normalized forces supplied to the environment.
+With adaptive size enabled, a fourth discrete vote head shares the policy
+trunk and PPO objective; the vote is never tanh-squashed. The base collects
+majority approval through the communication graph. Per-drone lifetime
+boundaries reset recurrent state and stop return bootstrapping. See the
+[adaptive swarm reference](06_adaptive_swarm_size.md).
 
 The agent-centric critic produces one value per agent and attends over team
 observations. `network.critic_type` currently accepts only `observation`.

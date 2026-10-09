@@ -9,6 +9,7 @@ explicitly.
 | Section | Definition / purpose |
 | --- | --- |
 | `env` | `EnvConfig`: motion, perception, spawning, coverage, and obstacles |
+| `adapt_size` | `AdaptSizeConfig`: opt-in voting, deployment, and decommission controls |
 | `random_buildings` | `RandomBuildingConfig`: generated map dimensions and layout; disabled by default |
 | `reward` | `RewardConfig`: relay objectives and reward weights |
 | `training` | `TrainingConfig`: PPO, noise, rollout sizes, and checkpoint loading |
@@ -19,16 +20,26 @@ explicitly.
 There is no visualization configuration section in a level. Inspector controls
 belong to the independent inspector.
 
-Reward switches `success_bonus_as_hold_record`, `gap_reward_uses_change`,
+Reward switches `success_bonus_as_hold_record`, `success_bonus_contributors_only`, `gap_reward_uses_change`,
 `delivery_gap_vesting_enabled`, and `peer_informing_reward_enabled` default to
 `false`. Delivery gap vesting requires gap-change reward and delivery gating;
 `delivery_gap_vesting_steps` defaults to 10 and must be positive.
 `gap_change_meter_bonus` and `peer_informing_bonus` set the respective enabled
 reward amounts. The hold-record switch spreads the existing `success_bonus`
 across first achieved consecutive chain-hold lengths rather than adding to it.
+`success_bonus_contributors_only` keeps the terminal success bonus total unchanged
+but distributes it only among selected chain contributors; it is enabled in
+`B02c_random_buildings_small` and requires `chain_held` success.
 The current B02c level enables peer informing and terminal success reward
 while keeping the per-step absolute gap reward. Its time cost is 3 per step;
 hold records and delivery gap vesting are disabled.
+
+`B02c_random_buildings` also enables adaptive population control, starting with
+two reserved drones staggered by `env.spawn_delay` and capacity nine. Its
+voted reinforcements arrive immediately. Other levels keep their previous
+population behavior unless `adapt_size.enabled=true` is set. See the
+[adaptive swarm reference](../01_reference/06_adaptive_swarm_size.md) for settings
+and [diagnostics guide](../01_reference/07_adaptive_swarm_diagnostics.md) for W&B curves.
 
 **First visual sighting is not a reward event in delivery-gated missions.**
 Coverage rewards the exploration pattern; randomized target placement makes
@@ -106,6 +117,12 @@ Production actor and critic memory must both be enabled.
 The W&B metric `train/visually_found_rate` is the fraction of the last
 `training.num_envs` completed episodes in which any drone directly saw the
 target. It uses the same sliding window as `train/target_found_rate`.
+
+When `reward.enable_chain_efficiency_reward=true`, W&B logs
+`rewards/efficiency` alongside the other reward components. It sums the paid
+reward across agents and steps per episode, then averages over the last
+`training.num_envs` completed episodes. Logging starts once that window is
+full, including both successful and failed episodes.
 
 `training.checkpoint_path` loads a checkpoint. `ckpt_loading_mode=resume`
 continues run accounting, `branch` carries cumulative progress into another run,

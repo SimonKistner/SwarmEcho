@@ -24,15 +24,22 @@ DEFAULT_BUILDING = MAP_DIR / "M00_no_maze_open_cuboid.yaml"
 def run_benchmark(
     num_envs: int,
     steps: int,
-    radar_bins: int,
+    wall_radar_bins: int,
+    drone_radar_bins: int,
     grid: tuple[int, int, int] = (4, 4, 4),
+    *,
+    radar_mode: str = "legacy",
+    distance_bands: int = 1,
+    radar_count_cap: int = 3,
 ) -> dict:
     building = (
         load_building(DEFAULT_BUILDING)
         if grid == (4, 4, 4)
         else make_cuboid_building(grid)
     )
-    cfg = EnvConfig(radar_bins=radar_bins)
+    cfg = EnvConfig(wall_radar_bins=wall_radar_bins, drone_radar_bins=drone_radar_bins,
+                    radar_mode=radar_mode, distance_bands=distance_bands,
+                    radar_count_cap=radar_count_cap)
     reset, step, observations, _ = make_env_fns(building, cfg)
     keys = jax.random.split(jax.random.PRNGKey(0), num_envs)
     actions = jax.random.uniform(
@@ -70,7 +77,11 @@ def run_benchmark(
         "jax_version": jax.__version__,
         "num_envs": num_envs,
         "steps": steps,
-        "radar_bins": radar_bins,
+        "wall_radar_bins": wall_radar_bins,
+        "drone_radar_bins": drone_radar_bins,
+        "radar_mode": radar_mode,
+        "distance_bands": max(1, distance_bands),
+        "radar_count_cap": radar_count_cap,
         "grid": list(grid),
         "max_base_to_top_corner_m": building.max_base_to_top_corner_m,
         "ideal_chain_reach_m": maximum_chain_distance(cfg),
@@ -87,7 +98,9 @@ def run_benchmark(
 
 
 def main() -> None:
-    options = {"num_envs": "256", "steps": "100", "radar_bins": "8", "grid": "4x4x4"}
+    options = {"num_envs": "256", "steps": "100", "wall_radar_bins": "8",
+               "drone_radar_bins": "8", "radar_mode": "legacy",
+               "distance_bands": "1", "radar_count_cap": "3", "grid": "4x4x4"}
     output: Path | None = None
     for argument in sys.argv[1:]:
         if "=" not in argument:
@@ -100,15 +113,24 @@ def main() -> None:
         else:
             raise ValueError(f"Unknown benchmark option {key!r}.")
     environment_counts = [int(value) for value in options["num_envs"].split(",")]
-    radar_counts = [int(value) for value in options["radar_bins"].split(",")]
+    wall_counts = [int(value) for value in options["wall_radar_bins"].split(",")]
+    drone_counts = [int(value) for value in options["drone_radar_bins"].split(",")]
+    modes = options["radar_mode"].split(",")
+    bands = [int(value) for value in options["distance_bands"].split(",")]
+    caps = [int(value) for value in options["radar_count_cap"].split(",")]
     grids = [tuple(int(axis) for axis in value.split("x")) for value in options["grid"].split(",")]
     if any(len(grid) != 3 for grid in grids):
         raise ValueError("grid entries must use XxYxZ, for example 12x12x8")
     steps = int(options["steps"])
     reports = [
-        run_benchmark(num_envs, steps, radar_bins, grid)
+        run_benchmark(num_envs, steps, wall_bins, drone_bins, grid,
+                      radar_mode=mode, distance_bands=band_count, radar_count_cap=cap)
         for num_envs in environment_counts
-        for radar_bins in radar_counts
+        for wall_bins in wall_counts
+        for drone_bins in drone_counts
+        for mode in modes
+        for band_count in bands
+        for cap in caps
         for grid in grids
     ]
     report = reports[0] if len(reports) == 1 else {"benchmarks": reports}
