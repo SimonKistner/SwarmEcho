@@ -9,7 +9,7 @@ explicitly.
 | Section | Definition / purpose |
 | --- | --- |
 | `env` | `EnvConfig`: motion, perception, spawning, coverage, and obstacles |
-| `adapt_size` | `AdaptSizeConfig`: opt-in voting, deployment, and decommission controls |
+| `adapt_size` | `AdaptSizeConfig`: opt-in voting, deployment, decommission, and reference-reward controls |
 | `random_buildings` | `RandomBuildingConfig`: generated map dimensions and layout; disabled by default |
 | `reward` | `RewardConfig`: relay objectives and reward weights |
 | `training` | `TrainingConfig`: PPO, noise, rollout sizes, and checkpoint loading |
@@ -19,6 +19,18 @@ explicitly.
 
 There is no visualization configuration section in a level. Inspector controls
 belong to the independent inspector.
+
+Wall sensing has three independent controls: `env.wall_sensing_layout`
+(`fibonacci`, the legacy default, or `xyz`), `env.wall_sensing_rays` (default 16),
+and `env.wall_sensing_ray_max_distance` (default 8.0 metres). Fibonacci accepts
+any integer count >= 4; XYZ accepts only 14, 18, or 26. XYZ uses six axis rays
+plus cube corners (14), plane diagonals (18), or both (26). All C levels use
+XYZ with 26 rays and 8 m range. `env.visual_radius` controls target visibility
+independently; `env.drone_radar_bins` retains the existing direction layout.
+Saved configs using `wall_radar_bins` or the older combined `radar_bins` are
+still readable and preserve their original wall range from `visual_radius`.
+New explicit settings take precedence. Wall count, layout and range must match
+a loaded checkpoint; renaming an old count does not change its sensor semantics.
 
 Reward switches `success_bonus_as_hold_record`, `success_bonus_contributors_only`, `gap_reward_uses_change`,
 `delivery_gap_vesting_enabled`, and `peer_informing_reward_enabled` default to
@@ -41,6 +53,22 @@ population behavior unless `adapt_size.enabled=true` is set. See the
 [adaptive swarm reference](../01_reference/06_adaptive_swarm_size.md) for settings
 and [diagnostics guide](../01_reference/07_adaptive_swarm_diagnostics.md) for W&B curves.
 
+`reward.reinforcement_reward` and `reward.decommission_reward` default to zero.
+Positive values reward; negative values punish. Each qualified deployment voter
+receives the full reinforcement amount, and each removed drone receives the full
+decommission amount. Neither is divided across agents. Legacy saved cost fields
+are converted by negating their values.
+
+`adapt_size.reward_by_reference_enabled` defaults to `false` and requires adaptive
+size. When enabled, each qualified caller receives an additional signed share
+of a voted recruit's normal reward, excluding reference bonuses. Set
+`adapt_size.reward_by_reference_fraction` (default `0.10`, range `[0, 1]`) and
+`adapt_size.reward_by_reference_steps` (default `200`, positive integer) to control
+the initial share and linear decay window in environment steps. The recruit's
+reward is unchanged, each caller receives the full share, and references stop
+on decommissioning or episode reset. The separate W&B reward curve is
+`rewards/reward_by_reference`.
+
 **First visual sighting is not a reward event in delivery-gated missions.**
 Coverage rewards the exploration pattern; randomized target placement makes
 the identity of the first drone to see the target incidental. `finder_bonus`
@@ -51,7 +79,9 @@ for the intended exploration, handoff, and relay sequence.
 
 ## Levels and maps
 
-Levels live in `src/swarmecho/curriculum_config/levels/`; maps live in the
+Levels live in `src/swarmecho/curriculum_config/levels/M/`, `levels/B/`, and
+`levels/C/`; short CLI names, grouped paths, and legacy level paths still
+resolve through the shared loader. Maps live in the
 adjacent `maps/` directory. With `random_buildings.enabled=false`,
 `env.map_names` contains one or more authored map names or YAML paths relative
 to `maps/`. A one-map list keeps the classic authored-map training and
@@ -67,10 +97,13 @@ uv run swarmecho-train level=B01a_office_find_only logging.run_name=office
 buildings copied from the compatible random-building pool into `maps/`. Its
 `random_buildings.enabled` and `evaluation.random_eval` flags are false. Training
 uses each named layout persistently, distributing lanes as evenly as possible
-(2,000 lanes across three maps: 667/667/666). The maps must share grid and world
-dimensions, and the number of maps cannot exceed `training.num_envs`.
+(2,000 lanes across three maps: 667/667/666). Maps must share cell size and
+wall/tile thicknesses; grid/world dimensions may differ. Training pads arrays
+internally and uses each map's physical bounds. The number of maps cannot exceed
+`training.num_envs`.
 Evaluation uses those same layouts, with `evaluation.eval_parallel_envs` episodes
-**per map**; its heatmaps and scheduled replays are saved for every map. This
+**per map**; its heatmaps are saved for every map. Scheduled replays default to
+every map; `evaluation.map_suite_replay_limit` can cap only replay generation. This
 measures performance on the training layouts. The run records map paths,
 content hashes, and lane counts in `static_maps.json` and rejects changes to
 that selection in the same run directory. Comment out two `env.map_names`
@@ -167,7 +200,12 @@ episodes to finish sooner on average.
 
 `evaluation.training_robustness` enables robust periodic metrics.
 `eval_robustness_runs` and `eval_action_noise_max` control robustness.
-Standalone parallel checkpoint evaluation uses the robust evaluation path.
+`evaluation.final_robustness` defaults to `true` for final training and standalone
+parallel checkpoint evaluation. Set it to `false` for one deterministic pass
+without added action noise; training reuses its ending metric pass when available.
+All C levels disable both periodic and final robustness.
+`evaluation.eval_min_train_success` skips scheduled metrics/replays below the
+specified rolling training-success rate; ending evaluations bypass that gate.
 
 Evaluation, replay, and checkpoint schedules each have frequency and offset
 settings. The retained `eval_video`/frequency fields schedule replay
@@ -176,8 +214,14 @@ artifacts. `training_heatmap_creation` controls evaluation heatmap artifacts.
 storey number to restrict automatically generated random-building replay
 targets to that storey; evaluation metrics and heatmaps still sample across
 all valid target storeys. All B02 levels set it to `3`.
-Early-exit settings gate training on evaluation success, optionally requiring
-a hold period.
+Early-exit settings default to evaluation success (`early_exit_source:
+evaluation`), optionally requiring a hold period. Authored levels can select
+`early_exit_source: training` to require fresh completed-episode windows on
+every map; `early_exit_hold_evals` then counts passing training windows.
+The existing success and successful-episode speed thresholds apply to each
+map. Final evaluation still runs for diagnostics. See the
+[C curriculum guide](05_C_curriculum.md) for the stages, target-distance
+certificates, budgets and preview command.
 
 ## Reward defaults
 

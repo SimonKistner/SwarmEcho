@@ -18,7 +18,9 @@ from collections import OrderedDict, deque
 from dataclasses import asdict, fields
 from swarmecho.models.actions import physical_actions, deterministic_actions
 from swarmecho.env.adapt_size import policy_resets
-from swarmecho.training.adapt_size_metrics import AdaptiveWindow, REWARD_NAMES, INFO_NAMES, validate_zones
+from swarmecho.training.adapt_size_metrics import (
+    AdaptiveWindow, REWARD_NAMES, REFERENCE_DIAGNOSTIC_NAMES, INFO_NAMES, validate_zones,
+)
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print, display_path, evaluation_row, init_logging
 
@@ -58,6 +60,7 @@ from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.ppo import PPOTrainer, RunningValueNormalizer
 from swarmecho.training.run_lifecycle import (
     EvaluationHold,
+    TrainingSuccessHold,
     broadcast_early_stop_metrics,
     init_wandb,
     resolve_resume_state,
@@ -124,11 +127,12 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "vote_mode": cfg.adapt_size.vote_mode if cfg.adapt_size.enabled else None,
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
            if field.name.startswith("observe_") or field.name in {
-               "wall_radar_bins", "drone_radar_bins", "radar_mode",
+               "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
+               "drone_radar_bins", "radar_mode",
                "distance_bands", "radar_count_cap",
            }},
         "radar_layout": ("band_counts_v2" if cfg.radar_mode == "band_sep_counting"
-                         else "legacy_interleaved" if cfg.wall_radar_bins == cfg.drone_radar_bins
+                         else "legacy_interleaved" if cfg.wall_sensing_rays == cfg.drone_radar_bins
                          else "radar_blocks_v1"),
     }.items()))
     return model
@@ -274,7 +278,7 @@ def _evaluate_training_metrics(model, level, hold, *, eval_due, on_run=None):
         metrics = {**metrics, "eval_robustness_runs": 1}
         if evaluation.training_heatmap_creation:
             evaluation_result = metrics, episode_info
-    stop = evaluation.early_exit and hold.observe(
+    stop = evaluation.early_exit and evaluation.early_exit_source == "evaluation" and hold.observe(
         metrics["eval_success"], metrics.get("eval_success_length_reduction"))
     return metrics, evaluation_result, stop
 
@@ -288,6 +292,8 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
         f"hold={hold.consecutive}/{max(1, level.evaluation.early_exit_hold_evals)}"
         if level.evaluation.early_exit else "est=off"
     )
+    if level.evaluation.early_exit and level.evaluation.early_exit_source == "training":
+        tail = "early-exit source=training (diagnostic eval)"
     if phase == "final_eval" and level.evaluation.early_exit:
         tail += " (unchanged)"
     evaluation_row(
@@ -298,6 +304,7 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
         stream.write(json.dumps({
             "update": update, "global_step": steps, "phase": phase,
             "mode": "robust" if runs > 1 else "single_pass", **metrics,
+            "early_exit_source": level.evaluation.early_exit_source,
         }) + "\n")
     values = {
         "ep_return": metrics["eval_return"],
@@ -526,7 +533,8 @@ def train(
     init_log("Initializing JAX devices...")
     devices = jax.devices()
     init_log(f"JAX devices ready: {devices}")
-    voxel_size, coverage_shape = coverage_grid_geometry(level.building, cfg)
+    voxel_size, coverage_shape = coverage_grid_geometry(
+        level.building if building_bank is None else building_bank.envelope, cfg)
     init_log(
         f"Geometry: {len(level.building.solid_min_m):,} authored solids; "
         f"{cfg.num_obstacles} generated obstacles; coverage {coverage_shape} = "
@@ -628,7 +636,15 @@ def train(
         evaluation.early_exit_hold_evals,
         evaluation.early_exit_min_success_length_reduction,
     )
-    final_robust_result = None
+    training_hold = None
+    if evaluation.early_exit and evaluation.early_exit_source == "training":
+        training_hold = TrainingSuccessHold(
+            lane_ids if level.static_map_suite else [0] * training.num_envs,
+            cfg.max_steps, evaluation.early_exit_success_rate,
+            evaluation.early_exit_hold_evals,
+            evaluation.early_exit_min_success_length_reduction,
+        )
+    final_evaluation_result = None
     episode_returns = np.zeros(training.num_envs, dtype=np.float64)
     episode_lengths = np.zeros(training.num_envs, dtype=np.int32)
     episode_success = np.zeros(training.num_envs, dtype=np.float32)
@@ -645,6 +661,7 @@ def train(
         name: np.zeros(training.num_envs, dtype=np.float64)
         for name in ("coverage", "collision", "finder", "time_penalty", "gap_reduction",
                      "peer_informing", "target_found", "success",
+                     "success_noncontributor_penalty",
                      "no_movement_termination")
     }
     if level.reward.enable_chain_efficiency_reward:
@@ -654,7 +671,8 @@ def train(
     window_size = training.num_envs
     adaptive_window = AdaptiveWindow(window_size) if cfg.adapt_size.enabled else None
     if cfg.adapt_size.enabled:
-        episode_rewards.update({name: np.zeros(training.num_envs) for name in REWARD_NAMES})
+        episode_rewards.update({name: np.zeros(training.num_envs)
+                                for name in (*REWARD_NAMES, *REFERENCE_DIAGNOSTIC_NAMES)})
     window_ret: deque[float] = deque(maxlen=window_size)
     window_len: deque[int] = deque(maxlen=window_size)
     window_succ: deque[float] = deque(maxlen=window_size)
@@ -705,7 +723,7 @@ def train(
     terminal_print(f"  level / building : {level.name} / {level.building_name}")
     terminal_print(f"  devices          : {jax.devices()}")
     terminal_print(f"  agents           : {cfg.num_agents}")
-    terminal_print(f"  observation      : {obs_dim}  (wall bins: {cfg.wall_radar_bins}; drone bins: {cfg.drone_radar_bins})")
+    terminal_print(f"  observation      : {obs_dim}  (wall rays: {cfg.wall_sensing_rays}, {cfg.wall_sensing_layout}, {cfg.wall_sensing_ray_max_distance:g} m; drone bins: {cfg.drone_radar_bins})")
     terminal_print(f"  radar mode       : {cfg.radar_mode}")
     if cfg.radar_mode == "band_sep_counting":
         terminal_print(f"  drone counting   : {max(1, cfg.distance_bands)} distance bands; cap {cfg.radar_count_cap}")
@@ -720,7 +738,9 @@ def train(
     elif evaluation.random_eval:
         terminal_print(f"  eval mode        : {evaluation.random_eval_envs} persistent maps, sequential, no action noise")
     else:
-        terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}")
+        final_mode = (f"robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}"
+                      if evaluation.final_robustness else "single-pass, no action noise")
+        terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final {final_mode}")
     terminal_print(f"  terminal logging : every {logging.terminal_logging_frequency}; warmup={logging.terminal_log_warmup}; init={logging.terminal_log_init}")
     terminal_print(f"  PPO critic units : {training.value_normalization}; actor/value clip "
           f"{training.actor_clip_eps}/{training.value_clip_eps}; entropy {training.entropy_mode}")
@@ -864,7 +884,8 @@ def train(
                 "comm_masks": comm_masks,
                 "active_masks": states.active,
                 "agent_terminated": info["agent_terminated"],
-                **({name: info[name] for name in (*INFO_NAMES, *REWARD_NAMES)} if cfg.adapt_size.enabled else {}),
+                **({name: info[name] for name in (*INFO_NAMES, *REWARD_NAMES, *REFERENCE_DIAGNOSTIC_NAMES)}
+                   if cfg.adapt_size.enabled else {}),
                 "base_signatures": base_sig_in,
                 "base_values": base_val_in,
                 "base_memory_masks": base_masks,
@@ -880,6 +901,7 @@ def train(
                 "best_chain_held_steps": info["best_chain_held_steps"],
                 "target_found": info["target_found"],
                 "reward_success": info["reward_success"],
+                "success_noncontributor_penalty": info["success_noncontributor_penalty"],
                 "no_movement_termination": info["no_movement_termination"],
                 **({"efficiency": info["efficiency"]}
                    if level.reward.enable_chain_efficiency_reward else {}),
@@ -1039,6 +1061,8 @@ def train(
             )
             completed_indices = np.flatnonzero(dones_host)
             for index in completed_indices:
+                if training_hold is not None:
+                    training_hold.append(index, episode_success[index] > .5, episode_lengths[index])
                 if adaptive_window is not None:
                     adaptive_window.append(
                         {name: rollout_host[name][step_index, index] for name in INFO_NAMES},
@@ -1147,6 +1171,17 @@ def train(
             }
         )
         window_full = len(window_ret) == window_ret.maxlen
+        train_stop = False
+        if training_hold is not None:
+            train_stop, gate_metrics = training_hold.observe()
+            if gate_metrics is not None:
+                latest_stats.update(gate_metrics)
+                terminal_print(
+                    f"[TRAIN GATE] worst-map success={gate_metrics['train_early_exit_min_map_success']:.1%}; "
+                    f"worst-map speed reduction={gate_metrics['train_early_exit_min_map_length_reduction']:.1%}; "
+                    f"hold={training_hold.hold.consecutive}/{max(1, evaluation.early_exit_hold_evals)}",
+                    flush=True,
+                )
         with history_path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
         if update % log_every == 0 and (window_full or logging.terminal_log_warmup):
@@ -1216,6 +1251,8 @@ def train(
             for name, window in window_path_stats.items():
                 if len(window) == window.maxlen:
                     wandb_logs[f"train/{name}"] = float(np.mean(window))
+            wandb_logs.update({f"train/{name.removeprefix('train_')}": value
+                               for name, value in latest_stats.items() if name.startswith("train_early_exit_")})
             # Keep this step open for evaluation metrics from the same update.
             wandb.log(wandb_logs, step=steps_done, commit=False)
         checkpoint_due = evaluation.save_model and schedule_due(
@@ -1233,12 +1270,14 @@ def train(
                 prior_history=resume.prior_history,
             )
         # The final update bypasses the gate. Its training metric uses the same
-        # mode as earlier evaluations; final robustness is a separate phase.
+        # mode as earlier evaluations; optional final robustness is a separate phase.
         is_final_update = update == num_updates
+        if train_stop:
+            terminal_print("[EARLY-STOP] every map passed fresh training episode windows; collecting final diagnostics.")
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
         )
-        evaluation_enabled = threshold_met or is_final_update
+        evaluation_enabled = threshold_met or is_final_update or train_stop
         if schedule_due(update, evaluation.eval_freq, evaluation.eval_offset) and not evaluation_enabled:
             terminal_print(
                 f"[EVAL update={update}] skipped: training success "
@@ -1246,7 +1285,7 @@ def train(
                 f"{evaluation.eval_min_train_success:.1%} required.",
                 flush=True,
             )
-        eval_due = is_final_update or (
+        eval_due = is_final_update or train_stop or (
             schedule_due(update, evaluation.eval_freq, evaluation.eval_offset)
             and evaluation_enabled
         )
@@ -1273,13 +1312,27 @@ def train(
                     update=update, steps=steps_done, eval_due=eval_due, replay_due=replay_due, on_run=report_run)
                 evaluation_result = None
                 stop_training = bool(
-                    eval_metrics is not None and evaluation.early_exit
+                    eval_metrics is not None and evaluation.early_exit and evaluation.early_exit_source == "evaluation"
                     and eval_hold.observe(eval_metrics["eval_success"],
                                           eval_metrics.get("eval_success_length_reduction")))
             else:
                 eval_metrics, evaluation_result, stop_training = _evaluate_training_metrics(
                     model, evaluation_level, eval_hold,
                     eval_due=eval_due, on_run=report_run,
+                )
+            stop_training = stop_training or train_stop
+            if (
+                stop_training
+                and map_suite_levels is not None
+                and not replay_due
+            ):
+                # Early exit can happen between scheduled replay updates. Make
+                # sure the stopping checkpoint still has representative suite
+                # replays, without repeating its metric/heatmap evaluation.
+                from swarmecho.training.random_evaluation import evaluate_map_suite
+                evaluate_map_suite(
+                    model, map_suite_levels, destination,
+                    update=update, steps=steps_done, eval_due=False, replay_due=True,
                 )
             eval_wandb_logs = {}
             if eval_metrics is not None:
@@ -1292,17 +1345,21 @@ def train(
                 )
                 if stop_training:
                     terminal_print("[EARLY-STOP]")
-            if eval_metrics is not None and (is_final_update or stop_training) and map_suite_levels is None:
-                if evaluation_result is None or int(evaluation_result[0]["eval_robustness_runs"]) == 1:
+            if (eval_metrics is not None and (is_final_update or stop_training)
+                    and map_suite_levels is None):
+                if evaluation.final_robustness and (evaluation_result is None
+                        or int(evaluation_result[0]["eval_robustness_runs"]) == 1):
                     from swarmecho.training.evaluate import collect_robust_evaluation
                     evaluation_result = collect_robust_evaluation(
                         model, evaluation_level,
                         on_run=functools.partial(report_run, prefix="FINAL"),
                     )
-                else:
+                elif evaluation.final_robustness:
                     terminal_print("[FINAL] reusing this update's robust runs.")
-                final_robust_result = evaluation_result
-                final_metrics, _ = final_robust_result
+                else:
+                    terminal_print("[FINAL] reusing this update's noise-free metric pass.")
+                final_evaluation_result = evaluation_result
+                final_metrics = evaluation_result[0] if evaluation_result is not None else eval_metrics
                 latest_stats.update({f"final_{key}": value for key, value in final_metrics.items()})
                 _report_evaluation(
                     final_metrics, evaluation_level, update=update, total=num_updates, steps=steps_done,
@@ -1357,7 +1414,10 @@ def train(
                         **artifact_metrics,
                     },
                 )
-            if replay_due and not stop_training and map_suite_levels is None:
+            if (
+                ((evaluation.eval_video and replay_due) or stop_training)
+                and map_suite_levels is None
+            ):
                 replay_started = time.perf_counter()
                 replay_bounds = evaluation.eval_fixed_obstacle_bounds
                 eval_states, eval_rewards = evaluate_model(
@@ -1434,7 +1494,7 @@ def train(
         )
         if map_suite_levels is None:
             _create_final_checkpoint_evaluation(
-                model, level, checkpoint, destination, result=final_robust_result,
+                model, level, checkpoint, destination, result=final_evaluation_result,
             )
     (destination / "metrics.json").write_text(
         json.dumps(latest_stats, indent=2) + "\n", encoding="utf-8"

@@ -8,6 +8,17 @@ import re
 from pathlib import Path
 
 
+def representative_map_indices(count: int, limit: int | None) -> list[int]:
+    """Spread a replay sample across an ordered suite, including both ends."""
+    if limit is None or limit >= count:
+        return list(range(count))
+    if limit < 1:
+        raise ValueError("Map sample limit must be positive or null.")
+    if limit == 1:
+        return [0]
+    return [round(index * (count - 1) / (limit - 1)) for index in range(limit)]
+
+
 def pop_arg(args: list[str], key: str, default):
     """Remove one ``key=value`` argument and return its typed value."""
     value = default

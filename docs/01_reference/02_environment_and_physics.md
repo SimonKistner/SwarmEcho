@@ -26,12 +26,12 @@ The actor receives local information, with width given by
 `observation_dim(cfg)`:
 
 ```text
-6 + wall_radar_bins
+6 + wall_sensing_rays
   + 3 * drone_radar_bins                        [legacy only]
   + 3 * drone_radar_bins * max(1, distance_bands) [band_sep_counting only]
   + 3 * observe_base_vector
   + 3 * observe_target_vector
-  + wall_radar_bins * observe_coverage_probe
+  + wall_sensing_rays * observe_coverage_probe
   + observe_chain_contributor
   + observe_current_timestep
 ```
@@ -43,11 +43,28 @@ observations.
 
 ### Wall and drone radar
 
-`wall_radar_bins` and `drone_radar_bins` independently control spherical
-direction counts (integers of at least 4, both defaulting to 8). Eight directions
-use exact octants; other counts use a deterministic spherical distribution.
-Walls retain one continuous first-hit proximity signal per direction within
-`visual_radius`. Coverage probes follow the wall directions.
+`wall_sensing_layout` selects `fibonacci` (default, legacy directions) or `xyz`.
+`wall_sensing_rays` defaults to 16. Fibonacci accepts any integer of at least 4;
+eight preserves the original octant directions, and other counts use the
+original deterministic Fibonacci sphere and feature order. XYZ supports only
+14, 18, or 26 rays: 14 uses six axes plus eight corner diagonals; 18 uses six
+axes plus twelve plane diagonals; 26 uses all three groups. Directions are
+normalized, fixed in world coordinates, and ordered axes, plane diagonals
+when present, then corner diagonals when present.
+
+Walls retain one continuous first-hit proximity signal per thin ray:
+`max(0, 1 - hit_distance / wall_sensing_ray_max_distance)`. The range defaults
+to **8 m**, independently of `visual_radius`, which still controls target
+visibility. This spans a 5 m cell and part of the next cell. It is a plausible
+compact-LiDAR range; for comparison, the manufacturer specifies 7 m on dark
+targets and 12 m on reflective targets for the [TFmini-S](https://ai.benewake.com/en/products/tfmini-s/).
+The simulator uses ideal thin rays without reflectivity or sensor noise.
+Coverage probes follow the wall directions; their probe spacing still uses
+`coverage_voxel_size`.
+
+`drone_radar_bins` remains independent and defaults to 8. It always uses the
+original octant/Fibonacci directions and nearest-direction assignment; every
+visible neighbor belongs to one bin. It has no wall-layout setting.
 
 In legacy mode, each drone direction has three nearest-neighbor proximity signals: all
 active neighbors, target-connected neighbors, and base-connected neighbors.
@@ -89,12 +106,17 @@ with three bands it has 167 values.
 
 B02c variants enable counting with a cap of 3 and retain their previous angular
 resolutions. `B02c_random_buildings` uses three bands; the static and mini variants
-use four. Other levels remain in legacy mode. Frozen YAML configs
-using `radar_bins` are accepted by assigning that value to both new parameters;
-explicit new fields take precedence. Checkpoint contracts record the separate
-resolutions, mode, layout, band count, and cap. Old contracts map to legacy
-interleaved radar; changing feature meanings requires a compatible checkpoint
-or fresh training. Legacy band/cap changes and the 0/1 band alias are treated as
+use four. C levels use 26 XYZ wall rays, 16 drone bins and three counting bands.
+Frozen YAML configs using `wall_radar_bins` map that field to `wall_sensing_rays`;
+the older `radar_bins` maps to both wall rays and drone bins. Explicit current
+fields take precedence. These saved configs retain their original wall range
+from `visual_radius` unless the separate range is explicitly supplied.
+Checkpoint contracts record wall ray count, direction layout and range alongside
+drone resolution, mode, feature layout, band count, and cap. Old contracts
+default to Fibonacci directions and recover their wall range from the run's
+saved `config.yaml` (or the old 4 m default if that file is unavailable).
+Changing ray count, direction layout or range requires compatible weights or
+fresh training. Legacy band/cap changes and the 0/1 band alias are treated as
 semantically equivalent during checkpoint validation. Counts-only radar uses
 the `band_counts_v2` layout identifier; checkpoints from the earlier counting
 layout that also included drone proximity cannot be loaded into this layout.

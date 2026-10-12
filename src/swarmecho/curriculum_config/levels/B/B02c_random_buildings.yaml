@@ -1,7 +1,8 @@
 env:
   map_names: []
 
-  num_agents: 7
+  num_agents: 9
+  spawn_delay: 5 # Initial agents retain the normal stagger; voted reinforcements arrive immediately.
 
   max_force: 50.0
   max_speed: 10.0
@@ -11,10 +12,12 @@ env:
   base_keeps_informing: false
   comm_radius: 15.0
   visual_radius: 5.0
-  wall_radar_bins: 32
-  drone_radar_bins: 32
-  radar_mode: band_sep_counting
-  distance_bands: 4
+  wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
+  wall_sensing_rays: 16 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
+  drone_radar_bins: 16
+  radar_mode: band_sep_counting #| legacy
+  distance_bands: 3
   radar_count_cap: 3
 
   max_steps: 1000
@@ -45,24 +48,40 @@ random_buildings:
   save_training_maps: false
   load_maps_from_bank: true
 
+adapt_size:
+  enabled: true
+  initial_agents: 2 # Integer in [1, env.num_agents]; initial cohort follows env.spawn_delay.
+  vote_mode: hold # hold | keep_yes_no (KEEP=0, YES=1, NO=2)
+  vote_holding: 10 # Delivered YES credits; isolated YES ticks do not count, NO does not erase receipts.
+  quorum_fraction: 0.49 # Strict >; 4/8 and 5/9 qualify.
+  quorum_hold: 0 # Minimum consecutive environment steps with quorum; 0 acts immediately.
+  decommission_radius_m: 1.0 # Sphere above base, clear of the spawn point.
+  decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
+
+
 reward:
+  reinforcement_reward: -50
+  decommission_reward: 0.0
+  rejected_call_penalty: 500.0 # Per qualified YES voter, per fresh rejected batch.
+  all_decommissioned_penalty: 1000.0 # Team cost, paid to the last acting drones.
+  success_unused_agent_penalty: 500.0 # Team cost per active non-contributor at success.
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
 
-  allow_redundancy_reward: true
+  allow_redundancy_reward: false
   enable_chain_efficiency_reward: false
   chain_efficiency_bonus: 0
 
   exploration_bonus: 2.0
   target_found_bonus: 500.0
   finder_bonus: 100
-  success_bonus: 3000.0
-  success_bonus_as_hold_record: true
+  success_bonus: 12000.0
+  success_bonus_as_hold_record: false
   peer_informing_reward_enabled: true
-  peer_informing_bonus: 15.0
+  peer_informing_bonus: 50.0
 
   collision_penalty: 0.5
-  time_penalty_per_step: 1.0
+  time_penalty_per_step: 3.0
   no_movement_termination_penalty: 0.0
   gap_reduction_meter_bonus: 0.2
   gap_reward_uses_change: false
@@ -71,30 +90,32 @@ reward:
   delivery_gap_vesting_steps: 10
 
 training:
-  total_timesteps: 800000000
-  num_envs: 2500
+  total_timesteps: 200000000
+  num_envs: 2000
   num_steps: 100
   num_epochs: 4
   num_minibatches: 20
-  seed: 456789
+  seed: 35461354
 
-  randomize_base: true
+  randomize_base: false
   minimum_geodesic_separation: true
   minimum_geodesic_separation_multiplier: 1.0
   skip_on_no_pair_found: true
 
 network:
-  num_layers: 4
-  actor_num_layers: 4
+  hidden_dim: 256
+  num_layers: 3
+  actor_num_layers: 3
   memory_comm_enabled: true
   memory_comm_every_k_steps: 3
   tarmac_sig_dim: 32
-  tarmac_val_dim: 128
+  tarmac_val_dim: 64
   tarmac_include_self: false
 
 evaluation:
+  num_agents: 9 # null uses env.num_agents from training; a number overrides all evaluation runs, heatmaps, and replays.
   apply_trainings_min_geo_separation: true
-  eval_parallel_envs: 2500
+  eval_parallel_envs: 4000
   random_eval: true
   replay_targets_from_storey: 3
   random_eval_envs: 3

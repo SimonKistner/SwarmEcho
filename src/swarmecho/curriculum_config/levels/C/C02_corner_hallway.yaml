@@ -1,0 +1,165 @@
+# C curriculum: C02_corner_hallway. B02cs1 policy/reward/optimizer settings.
+# Progression uses every map's fresh completed-episode windows; eval is final diagnostics only.
+env:
+  map_names:
+    - C_curriculum/C02/C02_x_positive_then_y_positive.yaml
+    - C_curriculum/C02/C02_x_positive_then_y_negative.yaml
+    - C_curriculum/C02/C02_x_positive_then_z_positive.yaml
+    - C_curriculum/C02/C02_x_positive_then_z_negative.yaml
+    - C_curriculum/C02/C02_x_negative_then_y_positive.yaml
+    - C_curriculum/C02/C02_x_negative_then_y_negative.yaml
+    - C_curriculum/C02/C02_x_negative_then_z_positive.yaml
+    - C_curriculum/C02/C02_x_negative_then_z_negative.yaml
+    - C_curriculum/C02/C02_y_positive_then_x_positive.yaml
+    - C_curriculum/C02/C02_y_positive_then_x_negative.yaml
+    - C_curriculum/C02/C02_y_positive_then_z_positive.yaml
+    - C_curriculum/C02/C02_y_positive_then_z_negative.yaml
+    - C_curriculum/C02/C02_y_negative_then_x_positive.yaml
+    - C_curriculum/C02/C02_y_negative_then_x_negative.yaml
+    - C_curriculum/C02/C02_y_negative_then_z_positive.yaml
+    - C_curriculum/C02/C02_y_negative_then_z_negative.yaml
+    - C_curriculum/C02/C02_z_positive_then_x_positive.yaml
+    - C_curriculum/C02/C02_z_positive_then_x_negative.yaml
+    - C_curriculum/C02/C02_z_positive_then_y_positive.yaml
+    - C_curriculum/C02/C02_z_positive_then_y_negative.yaml
+    - C_curriculum/C02/C02_z_negative_then_x_positive.yaml
+    - C_curriculum/C02/C02_z_negative_then_x_negative.yaml
+    - C_curriculum/C02/C02_z_negative_then_y_positive.yaml
+    - C_curriculum/C02/C02_z_negative_then_y_negative.yaml
+
+  num_agents: 5
+  spawn_delay: 5 # Initial agents retain the normal stagger; voted reinforcements arrive immediately.
+
+  max_force: 50.0
+  max_speed: 10.0
+  drone_radius: 0.25
+
+  comm_radius_base: 8.0
+  base_keeps_informing: false
+  comm_radius: 15.0
+  visual_radius: 4.0
+  wall_sensing_layout: xyz # fibonacci (legacy) | xyz
+  wall_sensing_rays: 26 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
+  drone_radar_bins: 16
+  radar_mode: band_sep_counting #| legacy
+  distance_bands: 3
+  radar_count_cap: 3
+
+  max_steps: 400
+  success_condition: chain_held # coverage | discovery | delivery | chain_held
+
+  observe_chain_contributor: true
+  observe_current_timestep: false
+  observe_coverage_probe: false
+  coverage_voxel_size: 2.5
+
+  roadmap_approach: minimal # Interior cell/portal nodes represent all vertical turns and keep these banks small.
+  roadmap_node_density: 0.5
+  roadmap_merge_wall_end_nodes: true
+  roadmap_corner_bonus_m: 0.0
+
+random_buildings:
+  enabled: false
+
+adapt_size:
+  enabled: true
+  initial_agents: 1 # Integer in [1, env.num_agents]; initial cohort follows env.spawn_delay.
+  vote_mode: hold # hold | keep_yes_no (KEEP=0, YES=1, NO=2)
+  vote_holding: 5 # Delivered YES credits; isolated YES ticks do not count, NO does not erase receipts.
+  quorum_fraction: 0.49 # Strict >; 4/8 and 5/9 qualify.
+  quorum_hold: 0 # Minimum consecutive environment steps with quorum; 0 acts immediately.
+  decommission_radius_m: 0.75 # Fits above a centred base inside a sealed 5 m shaft.
+  decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
+  reward_by_reference_enabled: true # Extra signed reward for qualified reinforcement callers.
+  reward_by_reference_fraction: 0.50 # Full share per caller; linearly decays to zero.
+  reward_by_reference_steps: 200 # Environment transitions including the recruit's activation.
+
+
+reward:
+  reinforcement_reward: 0.0
+  decommission_reward: 0.0
+  rejected_call_penalty: 500.0 # Per qualified YES voter, per fresh rejected batch.
+  all_decommissioned_penalty: 1000.0 # Team cost, paid to the last acting drones.
+  success_unused_agent_penalty: 500.0 # Team cost per active non-contributor at success.
+  success_noncontributor_penalty: 4000.0 # Each active non-contributor pays this individually at terminal chain success.
+  target_found_requires_delivery: true
+  chain_reward_system: obstacle_geodesic
+
+  allow_redundancy_reward: false
+  enable_chain_efficiency_reward: true
+  chain_efficiency_bonus: 0.1
+
+  exploration_bonus: 2.0
+  target_found_bonus: 500.0
+  finder_bonus: 10
+  success_bonus: 12000.0
+  success_bonus_as_hold_record: false
+  success_bonus_contributors_only: true
+  peer_informing_reward_enabled: true
+  peer_informing_bonus: 50.0
+
+  collision_penalty: 0.5
+  time_penalty_per_step: 3.0
+  no_movement_termination_penalty: 0.0
+  gap_reduction_meter_bonus: 0.2
+  gap_reward_uses_change: false
+  gap_change_meter_bonus: 3.0
+  delivery_gap_vesting_enabled: false
+  delivery_gap_vesting_steps: 10
+
+training:
+  total_timesteps: 200000000
+  num_envs: 4000
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+  seed: 35461354
+
+  randomize_base: false
+  minimum_geodesic_separation: false # Certified whole-cell target bands need no rejection filter.
+  minimum_geodesic_separation_multiplier: 0.5
+  skip_on_no_pair_found: true
+
+network:
+  hidden_dim: 256
+  num_layers: 3
+  actor_num_layers: 3
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 3
+  tarmac_sig_dim: 32
+  tarmac_val_dim: 64
+  tarmac_include_self: false
+
+evaluation:
+  num_agents: null # Use the training agent cap in every eval/replay.
+  apply_trainings_min_geo_separation: true
+  eval_parallel_envs: 32 # Episodes PER map; every alternative is measured.
+  random_eval: false
+  replay_targets_from_storey: null # Cover every axis and both cellar floors.
+  random_eval_envs: 3
+
+  early_exit: true
+  early_exit_source: training
+  early_exit_success_rate: 0.95
+  early_exit_min_success_length_reduction: null # Success alone controls progression.
+  early_exit_hold_evals: 3 # Fresh windows per map for training source; eval calls otherwise.
+
+  save_model: true
+  checkpoint_freq: 30
+  eval_freq: 1000000
+  eval_min_train_success: 0.7 # Skip scheduled metrics/replays below this rolling training success.
+  training_robustness: false
+  final_robustness: false # Reuse the single noise-free metric pass at completion.
+  eval_action_noise_max: 0.0
+
+  training_heatmap_creation: true
+
+  eval_video: true
+  eval_video_freq: 100
+  eval_video_offset: 1
+  map_suite_replay_limit: 8
+
+logging:
+  terminal_log_warmup: true
+  terminal_log_init: true

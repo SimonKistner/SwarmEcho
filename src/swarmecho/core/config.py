@@ -23,6 +23,10 @@ class AdaptSizeConfig:
     quorum_hold: int = 0  # Consecutive environment steps with sufficient votes.
     decommission_radius_m: float = 1.0
     decommission_hold_steps: int = 15
+    # Each qualified caller receives a decaying share of the recruit's normal reward.
+    reward_by_reference_enabled: bool = False
+    reward_by_reference_fraction: float = 0.10
+    reward_by_reference_steps: int = 200
 
 
 # env
@@ -41,7 +45,9 @@ class EnvConfig:
     base_keeps_informing: bool = False
     comm_radius: float = 5.0
     visual_radius: float = 4.0
-    wall_radar_bins: int = 8
+    wall_sensing_layout: str = "fibonacci"  # fibonacci (legacy) | xyz
+    wall_sensing_rays: int = 16  # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+    wall_sensing_ray_max_distance: float = 8.0  # Metres; independent of target visual_radius.
     drone_radar_bins: int = 8
     radar_mode: str = "legacy"  # legacy | band_sep_counting
     distance_bands: int = 1  # Equal-width bands; 0 is an alias for 1.
@@ -83,6 +89,16 @@ def validate_adapt_size(cfg: EnvConfig) -> None:
     a = cfg.adapt_size
     if type(a.enabled) is not bool:
         raise ValueError("adapt_size.enabled must be boolean.")
+    if type(a.reward_by_reference_enabled) is not bool:
+        raise ValueError("adapt_size.reward_by_reference_enabled must be a boolean.")
+    fraction = a.reward_by_reference_fraction
+    if (type(fraction) not in (int, float) or not math.isfinite(fraction)
+            or not 0 <= fraction <= 1):
+        raise ValueError("adapt_size.reward_by_reference_fraction must be finite and in [0, 1].")
+    if type(a.reward_by_reference_steps) is not int or a.reward_by_reference_steps < 1:
+        raise ValueError("adapt_size.reward_by_reference_steps must be a positive integer.")
+    if a.reward_by_reference_enabled and not a.enabled:
+        raise ValueError("adapt_size.reward_by_reference_enabled requires adapt_size.enabled=true.")
     if type(a.initial_agents) is not int or not 1 <= a.initial_agents <= cfg.num_agents:
         raise ValueError("adapt_size.initial_agents must be in [1, env.num_agents].")
     if a.vote_mode not in {"hold", "keep_yes_no"}:
@@ -102,17 +118,21 @@ def validate_adapt_size(cfg: EnvConfig) -> None:
 
 def validate_radar_config(cfg: EnvConfig) -> None:
     """Validate radar settings for both loaded levels and direct environments."""
-    for name in ("wall_radar_bins", "drone_radar_bins"):
+    for name in ("wall_sensing_rays", "drone_radar_bins"):
         value = getattr(cfg, name)
         if type(value) is not int or value < 4:
             raise ValueError(f"env.{name} must be an integer of at least 4.")
+    if cfg.wall_sensing_layout not in {"fibonacci", "xyz"}:
+        raise ValueError("env.wall_sensing_layout must be fibonacci or xyz.")
+    if cfg.wall_sensing_layout == "xyz" and cfg.wall_sensing_rays not in {14, 18, 26}:
+        raise ValueError("env.wall_sensing_rays must be 14, 18, or 26 for the xyz layout.")
     if cfg.radar_mode not in {"legacy", "band_sep_counting"}:
         raise ValueError("env.radar_mode must be legacy or band_sep_counting.")
     if type(cfg.distance_bands) is not int or cfg.distance_bands < 0:
         raise ValueError("env.distance_bands must be a nonnegative integer (0 means 1).")
     if type(cfg.radar_count_cap) is not int or cfg.radar_count_cap < 1:
         raise ValueError("env.radar_count_cap must be a positive integer.")
-    for name in ("comm_radius", "visual_radius"):
+    for name in ("comm_radius", "visual_radius", "wall_sensing_ray_max_distance"):
         value = getattr(cfg, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"env.{name} must be finite and positive.")
@@ -143,11 +163,12 @@ class RandomBuildingConfig:
 # reward
 @dataclass(frozen=True)
 class RewardConfig:
-    reinforcement_cost: float = 0.0
-    decommission_cost: float = 0.0
+    reinforcement_reward: float = 0.0  # Signed amount per qualified deployment voter.
+    decommission_reward: float = 0.0  # Signed amount paid to each removed drone.
     rejected_call_penalty: float = 0.0  # Per qualified YES voter, per rejected batch.
     all_decommissioned_penalty: float = 0.0  # Team cost on this termination.
     success_unused_agent_penalty: float = 0.0  # Team cost per unused active drone.
+    success_noncontributor_penalty: float = 0.0  # Individual cost at terminal chain success.
     target_found_requires_delivery: bool = True
     chain_reward_system: str = "euclidean"
 
@@ -264,12 +285,14 @@ class EvaluationConfig:
     apply_trainings_min_geo_separation: bool = False
     minimum_geodesic_separation: bool | None = None  # None follows apply_trainings_min_geo_separation.
 
-    # Periodic metrics may use the same ensemble as the always-robust final eval.
+    # Periodic metrics may use the same ensemble as the optional robust final eval.
     training_robustness: bool = False
+    final_robustness: bool = True
     eval_robustness_runs: int = 5
     eval_action_noise_max: float = DEFAULT_ACTION_NOISE_LEVEL
 
     early_exit: bool = False
+    early_exit_source: str = "evaluation"  # evaluation | training (fresh completed-episode windows per map).
     success_condition: str | None = None  # null follows env; coverage | discovery | delivery | chain_held
     early_exit_success_rate: float = 0.99
     early_exit_min_success_length_reduction: float | None = None  # 0.25 -> mean completion by step 450 of 600
@@ -289,6 +312,7 @@ class EvaluationConfig:
     eval_video: bool = True
     eval_video_freq: int = 20
     eval_video_offset: int = 1
+    map_suite_replay_limit: int | None = None  # null replays all suite maps; metrics always evaluate every map.
     eval_not_deliv_not_visual_splitt_in_two: bool = False
 
 
@@ -425,12 +449,17 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     env_data["adapt_size"] = _strict_dataclass(
         AdaptSizeConfig, {**nested_adapt, **data.get("adapt_size", {})}, "adapt_size"
     )
-    # Frozen run configs used one resolution for walls and drones. Explicit
-    # new fields take precedence when replaying them with dotlist overrides.
+    # Preserve frozen run configs, including the old coupling to visual_radius.
+    # Explicit current fields take precedence over renamed/combined counts.
+    legacy_wall_sensing = "wall_radar_bins" in env_data or "radar_bins" in env_data
+    if "wall_radar_bins" in env_data:
+        env_data.setdefault("wall_sensing_rays", env_data.pop("wall_radar_bins"))
     if "radar_bins" in env_data:
         old_bins = env_data.pop("radar_bins")
-        env_data.setdefault("wall_radar_bins", old_bins)
+        env_data.setdefault("wall_sensing_rays", old_bins)
         env_data.setdefault("drone_radar_bins", old_bins)
+    if legacy_wall_sensing:
+        env_data.setdefault("wall_sensing_ray_max_distance", env_data.get("visual_radius", EnvConfig.visual_radius))
     map_names = env_data.pop("map_names", None)
     generation = _strict_dataclass(RandomBuildingConfig, data.get("random_buildings", {}), "random_buildings")
     env = _strict_dataclass(EnvConfig, env_data, "env")
@@ -466,13 +495,22 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
             raise ValueError("env.map_names cannot contain the same map more than once.")
         map_paths = tuple(paths)
         building = load_building(map_paths[0])
+    reward_data = dict(data.get("reward", {}))
+    # Saved configs used positive cost magnitudes. Preserve their sign while
+    # accepting current signed rewards; an explicit new name takes precedence.
+    for old_name, new_name in (("reinforcement_cost", "reinforcement_reward"),
+                               ("decommission_cost", "decommission_reward")):
+        if old_name in reward_data:
+            old_value = reward_data.pop(old_name)
+            if new_name not in reward_data:
+                reward_data[new_name] = -old_value
     level = Level(
         name=canonical_level_name(source.stem),
         map_names=(["random_buildings"] if generation.enabled else
                    [canonical_map_name(Path(name).stem) for name in map_names]),
         building=building,
         env=env,
-        reward=_strict_dataclass(RewardConfig, data.get("reward", {}), "reward"),
+        reward=_strict_dataclass(RewardConfig, reward_data, "reward"),
         training=training,
         network=_strict_dataclass(NetworkConfig, data.get("network", {}), "network"),
         evaluation=_strict_dataclass(EvaluationConfig, data.get("evaluation", {}), "evaluation"),
@@ -480,8 +518,12 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         random_buildings=generation,
         map_paths=map_paths,
     )
-    for name in ("reinforcement_cost", "decommission_cost", "rejected_call_penalty",
-                 "all_decommissioned_penalty", "success_unused_agent_penalty"):
+    for name in ("reinforcement_reward", "decommission_reward"):
+        if not math.isfinite(getattr(level.reward, name)):
+            raise ValueError(f"reward.{name} must be finite (positive, zero or negative).")
+    for name in ("rejected_call_penalty",
+                 "all_decommissioned_penalty", "success_unused_agent_penalty",
+                 "success_noncontributor_penalty"):
         value = getattr(level.reward, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"reward.{name} must be finite and nonnegative.")
@@ -577,10 +619,20 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("evaluation.early_exit_min_success_length_reduction must be in [0, 1] or null.")
     if type(level.evaluation.training_robustness) is not bool:
         raise ValueError("evaluation.training_robustness must be a boolean.")
+    if type(level.evaluation.final_robustness) is not bool:
+        raise ValueError("evaluation.final_robustness must be a boolean.")
     if type(level.evaluation.eval_robustness_runs) is not int or level.evaluation.eval_robustness_runs < 2:
         raise ValueError("evaluation.eval_robustness_runs must be at least 2 (no 1/1 robust evaluations).")
     if type(level.evaluation.early_exit_hold_evals) is not int or level.evaluation.early_exit_hold_evals < 0:
         raise ValueError("evaluation.early_exit_hold_evals must be a non-negative integer.")
+    if ev.early_exit_source not in {"evaluation", "training"}:
+        raise ValueError("evaluation.early_exit_source must be evaluation or training.")
+    if ev.early_exit_source == "training" and generation.enabled:
+        raise ValueError("Training-based early exit currently requires authored maps.")
+    if ev.map_suite_replay_limit is not None and (
+        type(ev.map_suite_replay_limit) is not int or ev.map_suite_replay_limit < 1
+    ):
+        raise ValueError("evaluation.map_suite_replay_limit must be null or a positive integer.")
     if level.evaluation.eval_action_noise_max < 0.0:
         raise ValueError("evaluation.eval_action_noise_max must be non-negative.")
     fixed_bounds = level.evaluation.eval_fixed_obstacle_bounds

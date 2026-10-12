@@ -19,9 +19,10 @@ REPLAY_FORMAT = "swarmecho-replay/v1"
 
 
 def planner_metadata(cfg) -> dict:
-    """Keep the roadmap assumptions needed to reproduce an inspector route."""
+    """Keep roadmap assumptions and sensor settings alongside inspector replays."""
     names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
-             "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m")
+             "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m",
+             "wall_sensing_layout", "wall_sensing_rays", "wall_sensing_ray_max_distance")
     return {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
 
 
@@ -84,7 +85,8 @@ def write_replay(
     if state_list[0].adaptive is not None:
         for name in ("vote", "ids", "round", "known_round", "source_yes", "spent",
                      "dwell", "zone_center", "zone_valid", "spawned", "decommissioned",
-                     "rejected_voters", "calls", "decommissions", "rejected_calls"):
+                     "rejected_voters", "calls", "decommissions", "rejected_calls",
+                     "reference_callers", "reference_age"):
             arrays[f"adapt_{name}"] = np.stack([
                 np.asarray(getattr(state.adaptive, name)) for state in state_list
             ])

@@ -1,6 +1,6 @@
 env:
   map_names:
-  - M00_no_maze_open_cuboid
+  - M01_no_maze_open_cuboid_tall
 
   num_agents: 5
 
@@ -9,7 +9,9 @@ env:
   comm_radius_base: 8.0
   comm_radius: 9.0
   visual_radius: 5.0
-  wall_radar_bins: 16
+  wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
+  wall_sensing_rays: 16 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
   drone_radar_bins: 16
 
   spawn_delay: 5
@@ -23,9 +25,19 @@ env:
   observe_coverage_probe: false
   coverage_voxel_size: 2.5
 
+  num_obstacles: 3
+  obstacle_size_min_m: 5.0
+  obstacle_size_max_m: 15.0
+  obstacle_spawn_layer_min: 2
+  obstacle_spawn_layer_max: 5
+  obstacle_boundary_buffer_m: 0.5
+  obstacle_target_buffer_m: 0.5
+  obstacle_planning_clearance_m: 0.15
+  obstacle_layout_version: three_aabb_v1
+
 reward:
   target_found_requires_delivery: true
-  chain_reward_system: euclidean
+  chain_reward_system: obstacle_geodesic
 
   exploration_bonus: 0.25
   finder_bonus: 50.0
@@ -36,7 +48,7 @@ reward:
   time_penalty_per_step: 5.0
 
 training:
-  total_timesteps: 400000000
+  total_timesteps: 500000000
   num_envs: 4000
   num_steps: 100
   num_epochs: 4
@@ -44,7 +56,7 @@ training:
   seed: 6302026950
 
   training_noise: false
-  noise_level: 0.015
+  noise_level: 0.011
 
 network:
   num_layers: 3
@@ -62,9 +74,13 @@ network:
 
 evaluation:
   eval_parallel_envs: 4000
+  eval_fixed_obstacle_bounds:
+  - [1.0, 5.0, 7.0, 14.0, 15.0, 10.0]
+  - [8.0, 3.0, 13.0, 16.0, 18.0, 15.0]
+  - [7.5, 7.5, 20.0, 12.5, 12.5, 26.0]
 
   early_exit: true
-  early_exit_success_rate: 0.9
+  early_exit_success_rate: 0.999
   eval_broadcast_on_curriculum_early_stop: false
 
   save_model: true
@@ -75,6 +91,6 @@ evaluation:
 
   training_heatmap_creation: false
 
-  eval_video: false
+  eval_video: true
   eval_video_freq: 9999999999
   eval_video_offset: 1

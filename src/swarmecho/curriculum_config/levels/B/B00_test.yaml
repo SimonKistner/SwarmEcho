@@ -1,6 +1,6 @@
 env:
   map_names:
-  - M01_no_maze_open_cuboid_tall
+  - easy_room
 
   num_agents: 4
 
@@ -9,7 +9,9 @@ env:
   comm_radius_base: 8.0
   comm_radius: 9.0
   visual_radius: 5.0
-  wall_radar_bins: 16
+  wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
+  wall_sensing_rays: 16 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
   drone_radar_bins: 16
 
   spawn_delay: 5
@@ -67,14 +69,14 @@ evaluation:
   early_exit_success_rate: 0.999
   eval_broadcast_on_curriculum_early_stop: false
 
-  save_model: true
+  save_model: false
   checkpoint_freq: 50
   checkpoint_offset: 1
   eval_freq: 30
   eval_offset: 1
 
-  training_heatmap_creation: false
+  training_heatmap_creation: true
 
   eval_video: true
-  eval_video_freq: 9999999999
+  eval_video_freq: 20
   eval_video_offset: 1

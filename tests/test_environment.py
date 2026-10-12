@@ -269,7 +269,7 @@ def test_octant_radar_and_configured_distance_contracts():
 
 def test_peer_radar_hides_drones_behind_walls():
     """Problem 9: all three peer channels must respect line of sight."""
-    cfg = replace(EnvConfig(), num_agents=2, spawn_delay=0)
+    cfg = replace(EnvConfig(), num_agents=2, spawn_delay=0, wall_sensing_rays=8)
     reset, _, observations, _ = make_env_fns(
         _partial_wall_building(), cfg, plan_geodesic=False,
     )
@@ -302,7 +302,7 @@ def test_peer_radar_hides_drones_behind_walls():
 def _counting_radar_counts(observation, cfg):
     """Decode counting-mode fixtures with the six mandatory self values."""
     values = np.asarray(observation)
-    count_start = 6 + cfg.wall_radar_bins
+    count_start = 6 + cfg.wall_sensing_rays
     counts = values[:, count_start:].reshape(cfg.num_agents, cfg.drone_radar_bins,
                                             max(1, cfg.distance_bands), 3)
     return counts
@@ -311,7 +311,7 @@ def _counting_radar_counts(observation, cfg):
 def test_counting_radar_places_and_caps_visible_neighbors_in_exact_cells():
     """Check crowd/category counts, inactive/self filtering, and the range edge."""
     cfg = replace(EnvConfig(), num_agents=10, spawn_delay=0, comm_radius=15.,
-                  wall_radar_bins=16, drone_radar_bins=8,
+                  wall_sensing_rays=16, drone_radar_bins=8,
                   radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3)
     reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     # All neighbors are on +X. In the deterministic eight-octant layout,
@@ -338,7 +338,7 @@ def test_counting_radar_places_and_caps_visible_neighbors_in_exact_cells():
 
 def test_counting_radar_moves_a_neighbor_inward_across_each_band_boundary():
     cfg = replace(EnvConfig(), num_agents=2, spawn_delay=0, comm_radius=15.,
-                  wall_radar_bins=16, drone_radar_bins=8,
+                  wall_sensing_rays=16, drone_radar_bins=8,
                   radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3)
     reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(97))._replace(
@@ -363,7 +363,7 @@ def test_counting_radar_moves_a_neighbor_inward_across_each_band_boundary():
 @pytest.mark.parametrize("distance_bands", [0, 1])
 def test_counting_radar_single_band_counts_without_subdivision(distance_bands):
     cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=15.,
-                  wall_radar_bins=16, drone_radar_bins=8,
+                  wall_sensing_rays=16, drone_radar_bins=8,
                   radar_mode="band_sep_counting", distance_bands=distance_bands,
                   radar_count_cap=2)
     reset, _, observations, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
@@ -384,7 +384,7 @@ def test_counting_radar_single_band_counts_without_subdivision(distance_bands):
 @pytest.mark.parametrize("geometry", ["authored_wall", "generated_obstacle"])
 def test_counting_radar_respects_line_of_sight_in_all_categories_and_bands(geometry):
     cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=8.,
-                  wall_radar_bins=16, drone_radar_bins=8,
+                  wall_sensing_rays=16, drone_radar_bins=8,
                   radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3,
                   num_obstacles=int(geometry == "generated_obstacle"))
     building = _partial_wall_building() if geometry == "authored_wall" else BUILDING
@@ -437,7 +437,7 @@ def test_optional_observation_features_match_the_maintained_config_switches():
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
 def test_reset_observation_and_step_jit_contract(bins):
-    cfg, (reset, step, observations, metrics) = _functions(wall_radar_bins=bins, drone_radar_bins=bins)
+    cfg, (reset, step, observations, metrics) = _functions(wall_sensing_rays=bins, drone_radar_bins=bins)
     state = jax.jit(reset)(jax.random.PRNGKey(0))
     obs = jax.jit(observations)(state)
     next_state = jax.jit(step)(state, jnp.zeros((cfg.num_agents, 3)))

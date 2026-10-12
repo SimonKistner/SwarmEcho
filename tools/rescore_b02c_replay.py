@@ -29,7 +29,7 @@ from swarmecho.visualize.replay import load_replay
 ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "outputs/solo_B02c_a4c4_15x15_rewardChange"
 SOURCE = RUN / "artifacts/train/replays/eval_u000451_s00180M_random_eval_0001.json"
-TARGET_CONFIG = ROOT / "src/swarmecho/curriculum_config/levels/B02c_random_buildings.yaml"
+TARGET_CONFIG = ROOT / "src/swarmecho/curriculum_config/levels/B/B02c_random_buildings.yaml"
 OUTPUT = (RUN / "artifacts/eval/replays"
           / "eval_u000451_s00180M_random_eval_0001_legacy_gap_fixed_trajectory")
 

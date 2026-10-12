@@ -11,7 +11,9 @@ env:
   base_keeps_informing: false
   comm_radius: 15.0
   visual_radius: 5.0
-  wall_radar_bins: 16
+  wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
+  wall_sensing_rays: 16 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
   drone_radar_bins: 16
 
   max_steps: 600

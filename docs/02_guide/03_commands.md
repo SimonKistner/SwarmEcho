@@ -77,14 +77,26 @@ uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_b
 
 The builder command serves the building editor.
 
+Generate the C curriculum maps and preview the requested checkpoint on them:
+
+```bash
+python src/swarmecho/curriculum_config/maps/scripts/C_curriculum_map_generator.py
+uv run swarmecho-preview-c-curriculum --checkpoint outputs/curr_cellarBuilding_B02cs1/checkpoints/ckpt_000540 --wall-sensing-layout fibonacci --wall-sensing-rays 16 --wall-sensing-ray-max-distance 4
+```
+
+See [C curriculum](05_C_curriculum.md) for sequential training, level settings,
+target-band certificates, evaluation budgets and replay sampling options.
+
 ## Validate and benchmark
 
 ```bash
 uv run swarmecho-validate
-uv run swarmecho-benchmark num_envs=64 steps=64 wall_radar_bins=8 drone_radar_bins=8
-uv run swarmecho-benchmark num_envs=64 steps=64 wall_radar_bins=32 drone_radar_bins=16 radar_mode=band_sep_counting distance_bands=4 radar_count_cap=3
+uv run swarmecho-benchmark num_envs=64 steps=64 wall_sensing_rays=8 drone_radar_bins=8
+uv run swarmecho-benchmark num_envs=64 steps=64 wall_sensing_rays=32 drone_radar_bins=16 radar_mode=band_sep_counting distance_bands=4 radar_count_cap=3
+uv run swarmecho-benchmark num_envs=64 steps=64 wall_sensing_layout=xyz wall_sensing_rays=14,18,26 wall_sensing_ray_max_distance=8 drone_radar_bins=16 radar_mode=band_sep_counting distance_bands=3
 uv run pytest tests
 uv run pytest tests/test_environment.py -k counting_radar -v
+JAX_PLATFORMS=cpu uv run pytest tests/test_wall_sensing.py -v
 node --test tests/test_map_builder_ui.cjs tests/test_inspector_visibility.cjs
 ```
 
@@ -93,8 +105,10 @@ Validation and benchmark implementations are packaged under
 The validator checks one small update; the full tests and ordinary
 training/resume/evaluation workflows provide broader coverage.
 
-Benchmark radar options accept comma-separated values and run their Cartesian
-product. Use `radar_mode=band_sep_counting distance_bands=1` to benchmark counts
+Benchmark radar options, including wall layout and range, accept comma-separated
+values and run their Cartesian product. Every layout/count combination must
+be valid; XYZ supports only 14, 18, or 26 rays. Use
+`radar_mode=band_sep_counting distance_bands=1` to benchmark counts
 without distance subdivision; `distance_bands=0` is equivalent. Legacy mode
 ignores band and count-cap settings.
 
@@ -104,3 +118,15 @@ it does not assert correct spatial assignment or visibility. The focused
 exact cells: capped category counts, each radial boundary crossing, 0/1 single
 bands, self/inactive/out-of-range filtering, and authored/generated obstruction
 checks that preserve visible peers while excluding blocked ones.
+
+`test_wall_sensing.py` verifies XYZ unit directions, the six exact axes,
+14/18/26 ray groups and cubic symmetry, plus unchanged legacy direction order.
+It checks every XYZ ray against analytic first-hit distances in a closed cell,
+then checks actual compiled 2 x 2 m windows from both sides of X/Y walls: frame
+hits, passage through the opening, the first wall beyond it and range clipping.
+Eager and JIT observations are compared. Separate checks verify that wall range
+controls both reach and normalization independently of target visibility, that
+target visibility still follows `visual_radius`, and that the C levels select
+XYZ/26/8 m. The suite includes a window that XYZ detects at 6 m while the nearest
+legacy Fibonacci ray hits its frame. These are geometric correctness tests;
+they do not measure policy learning or success rates.

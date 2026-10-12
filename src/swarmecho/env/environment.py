@@ -143,6 +143,30 @@ def spherical_directions(count: int) -> np.ndarray:
     )
 
 
+def wall_sensing_directions(count: int, layout: str = "fibonacci") -> np.ndarray:
+    """Return wall rays; preserve the legacy ordering for Fibonacci/octants."""
+    if layout == "fibonacci":
+        return spherical_directions(count)
+    if layout != "xyz":
+        raise ValueError("Wall sensing layout must be fibonacci or xyz.")
+    if count not in {14, 18, 26}:
+        raise ValueError("XYZ wall sensing supports 14, 18, or 26 rays.")
+    # Keep the six axes first, then deterministic plane and corner diagonals.
+    # 14 = axes + corners; 18 = axes + plane diagonals; 26 = all groups.
+    groups = {1: [], 2: [], 3: []}
+    for direction in product((-1.0, 0.0, 1.0), repeat=3):
+        nonzero = sum(component != 0 for component in direction)
+        if nonzero:
+            groups[nonzero].append(direction)
+    directions = groups[1]
+    if count in {18, 26}:
+        directions = directions + groups[2]
+    if count in {14, 26}:
+        directions = directions + groups[3]
+    directions = np.asarray(directions, dtype=np.float32)
+    return directions / np.linalg.norm(directions, axis=1, keepdims=True)
+
+
 def coverage_grid_geometry(
     building: BuildingArrays, cfg: EnvConfig
 ) -> tuple[float, tuple[int, int, int]]:
@@ -182,10 +206,10 @@ def observation_dim(cfg: EnvConfig) -> int:
         6
         + 3 * int(cfg.observe_base_vector)
         + 3 * int(cfg.observe_target_vector)
-        + cfg.wall_radar_bins
+        + cfg.wall_sensing_rays
         + (cfg.drone_radar_bins * max(1, cfg.distance_bands) * 3
            if cfg.radar_mode == "band_sep_counting" else cfg.drone_radar_bins * 3)
-        + cfg.wall_radar_bins * int(cfg.observe_coverage_probe)
+        + cfg.wall_sensing_rays * int(cfg.observe_coverage_probe)
         + int(cfg.observe_chain_contributor)
         + int(cfg.observe_current_timestep)
         + 2 * int(cfg.adapt_size.enabled)
@@ -567,6 +591,7 @@ def compute_rewards(
             "gap_reduction": zero,
             "peer_informing": zero,
             "success": reward_active * (cfg.success_bonus / reward_count) * success_event,
+            "success_noncontributor_penalty": zero,
             "no_movement_termination": reward_active * (cfg.no_movement_termination_penalty / reward_count)
             * (current.idle_terminated & ~current.success
                & ~(current.step >= jnp.int32(env_cfg.max_steps))).astype(jnp.float32),
@@ -723,6 +748,21 @@ def compute_rewards(
     else:
         success_reward = reward_active * (cfg.success_bonus / reward_count) * success_event
 
+    noncontributor_penalty = jnp.zeros(n, dtype=jnp.float32)
+    if env_cfg.success_condition == "chain_held" and cfg.success_noncontributor_penalty > 0:
+        def penalize_noncontributors(_):
+            contributors = success_contributors(
+                current, env_cfg, chain_reward_system=cfg.chain_reward_system,
+                allow_redundancy=cfg.allow_redundancy_reward,
+            )
+            # Individual cost: do not divide or distribute it among the team.
+            return -cfg.success_noncontributor_penalty * (current.active & ~contributors).astype(jnp.float32)
+
+        noncontributor_penalty = jax.lax.cond(
+            current.done & success_event, penalize_noncontributors,
+            lambda _: jnp.zeros(n, dtype=jnp.float32), None,
+        )
+
     if cfg.peer_informing_reward_enabled and current.peer_informed_by.shape[0]:
         peer_credit = current.peer_informed_by
         if env_cfg.adapt_size.enabled:
@@ -750,6 +790,7 @@ def compute_rewards(
         "gap_reduction": gap_bonus,
         "peer_informing": peer_informing_reward,
         "success": success_reward,
+        "success_noncontributor_penalty": noncontributor_penalty,
         "no_movement_termination": reward_active * (cfg.no_movement_termination_penalty / reward_count)
         * (current.idle_terminated & ~current.success
            & ~(current.step >= jnp.int32(env_cfg.max_steps))).astype(jnp.float32),
@@ -774,11 +815,11 @@ def compute_rewards(
             allow_redundancy=cfg.allow_redundancy_reward,
         ))
         terms.update({
-            # Pay transition costs to the acting lifetime, even after removal.
+            # Signed event rewards pay each recipient in full, even after removal.
             "time_penalty": -cfg.time_penalty_per_step * previous_share,
-            "reinforcement_cost": -cfg.reinforcement_cost
-                * (a.calls > previous.adaptive.calls) * previous_share,
-            "decommission_cost": -cfg.decommission_cost * a.decommissioned.astype(jnp.float32),
+            "reinforcement_reward": cfg.reinforcement_reward
+                * adaptive_population.reinforcement_voters(previous.adaptive, a).astype(jnp.float32),
+            "decommission_reward": cfg.decommission_reward * a.decommissioned.astype(jnp.float32),
             "rejected_call_penalty": -cfg.rejected_call_penalty * a.rejected_voters.astype(jnp.float32),
             "all_decommissioned_penalty": -cfg.all_decommissioned_penalty
                 * a.all_decommissioned * previous_share,
@@ -787,6 +828,33 @@ def compute_rewards(
                 * unused * success_event * current_share,
         })
     total = sum(value for name, value in terms.items() if name != "newly_knows")
+    if env_cfg.adapt_size.enabled:
+        reference_reward = jnp.zeros(n, dtype=jnp.float32)
+        reference_positive = jnp.zeros(n, dtype=jnp.float32)
+        reference_negative = jnp.zeros(n, dtype=jnp.float32)
+        reference_cfg = env_cfg.adapt_size
+        if reference_cfg.reward_by_reference_enabled:
+            a = current.adaptive
+            # The activation transition has age zero and the full fraction.
+            # At age `steps` the share is zero, including terminal rewards.
+            fraction = reference_cfg.reward_by_reference_fraction * jnp.maximum(
+                1.0 - a.reference_age.astype(jnp.float32) / reference_cfg.reward_by_reference_steps, 0.0,
+            )
+            references = a.reference_callers & current.active[:, None] & current.active[None, :]
+            # Snapshot the complete normal reward before adding any reference
+            # bonus: rewards and penalties pass through, reference bonuses do not.
+            payments = references * (fraction * total)[None, :]
+            reference_reward = jnp.sum(payments, axis=1)
+            # Split each caller-recruit payment before summing recruits. Even
+            # simultaneous opposing payments to one caller remain visible.
+            reference_positive = jnp.sum(jnp.maximum(payments, 0.0), axis=1)
+            reference_negative = jnp.sum(jnp.minimum(payments, 0.0), axis=1)
+        terms["reward_by_reference"] = reference_reward
+        total = total + reference_reward
+        # Diagnostics only: these decompose the net reference reward above.
+        # They are not additional rewards and must not be added to the total.
+        terms["reward_by_reference_positive"] = reference_positive
+        terms["reward_by_reference_negative"] = reference_negative
     return total, terms
 
 
@@ -843,7 +911,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     if cfg.obstacle_size_min_m <= 0 or cfg.obstacle_size_max_m < cfg.obstacle_size_min_m:
         raise ValueError("Obstacle size bounds must be positive and ordered.")
     coverage_voxel_size, coverage_shape = coverage_grid_geometry(building, cfg)
-    wall_directions = jnp.asarray(spherical_directions(cfg.wall_radar_bins))
+    wall_directions = jnp.asarray(wall_sensing_directions(cfg.wall_sensing_rays, cfg.wall_sensing_layout))
     drone_directions = jnp.asarray(spherical_directions(cfg.drone_radar_bins))
     distance_bands = max(1, cfg.distance_bands) if cfg.radar_mode == "band_sep_counting" else 1
     band_edges = jnp.arange(1, distance_bands, dtype=jnp.float32) * (cfg.comm_radius / distance_bands)
@@ -876,6 +944,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     upper = world_size - lower
     if bool(jnp.any(lower >= upper)):
         raise ValueError("Building is too small for the configured drone radius.")
+    def map_world_size(map_id):
+        return world_size if building_bank is None else building_bank.get("world_size", map_id)
+
+    def map_upper(map_id):
+        return map_world_size(map_id) - lower
     coverage_indices = jnp.stack(
         jnp.meshgrid(
             *[jnp.arange(size) for size in coverage_shape],
@@ -927,7 +1000,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             )
         return obstacle_min, obstacle_max
 
-    def decommission_zone(base_pos, obstacle_min, obstacle_max):
+    def decommission_zone(base_pos, obstacle_min, obstacle_max, map_id):
         # Place the zone directly above the base. The station is on the floor
         # and drones spawn one radius above it, so lift the zone by one drone
         # radius beyond the decommission sphere radius to keep the initial
@@ -937,7 +1010,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         zone_z = spawn_z + radius + cfg.drone_radius
         candidates = jnp.stack([base_pos[0], base_pos[1], zone_z])[None, :]
         valid = jnp.all((candidates - radius >= lower - 1e-5)
-                        & (candidates + radius <= upper + 1e-5), axis=-1)
+                         & (candidates + radius <= map_upper(map_id) + 1e-5), axis=-1)
         solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
         if solid_min.shape[0]:
             closest = jnp.clip(candidates[:, None, :], solid_min, solid_max)
@@ -1169,7 +1242,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 drone = base + jnp.asarray([0.0, 0.0, cfg.drone_radius])
                 valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
                          & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
-                         & jnp.all((drone >= lower) & (drone <= upper)))
+                         & jnp.all((drone >= lower) & (drone <= map_upper(map_id))))
                 return base, valid
 
             first_base, first_valid = draw_base(target_key)
@@ -1225,7 +1298,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 drone = base + jnp.asarray([0.0, 0.0, cfg.drone_radius])
                 valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
                          & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
-                         & jnp.all((drone >= lower) & (drone <= upper))) if randomize_base else jnp.bool_(True)
+                         & jnp.all((drone >= lower) & (drone <= map_upper(map_id)))) if randomize_base else jnp.bool_(True)
                 valid &= ~target_inside_buffered_solids(target, obstacle_min, obstacle_max)
                 if minimum_geodesic_separation:
                     distance = jnp.linalg.norm(base - target)
@@ -1284,7 +1357,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             active &= jnp.arange(n) < cfg.adapt_size.initial_agents
         adaptive = None
         if cfg.adapt_size.enabled:
-            zone, valid_zone = decommission_zone(base_pos, obstacle_min, obstacle_max)
+            zone, valid_zone = decommission_zone(base_pos, obstacle_min, obstacle_max, map_id)
             adaptive = adaptive_population.initial_state(
                 n, cfg.adapt_size.initial_agents, zone, valid_zone, max_steps=cfg.max_steps,
             )
@@ -1373,7 +1446,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
         velocity *= jnp.minimum(1.0, cfg.max_speed / jnp.maximum(speed, 1e-8))
         proposed = state.pos + velocity * cfg.dt
-        collided = (proposed < lower) | (proposed > upper)
+        physical_upper = map_upper(state.map_id)
+        collided = (proposed < lower) | (proposed > physical_upper)
         if cfg.num_obstacles or has_authored_solids:
             solid_min, solid_max = all_solids(state.obstacle_min, state.obstacle_max)
             motion_min = solid_min - cfg.drone_radius
@@ -1381,7 +1455,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             obstacle_collision = segments_blocked(state.pos, proposed, motion_min, motion_max)
             collided |= obstacle_collision[:, None]
             proposed = jnp.where(obstacle_collision[:, None], state.pos, proposed)
-        pos = jnp.clip(proposed, lower, upper)
+        pos = jnp.clip(proposed, lower, physical_upper)
         velocity = jnp.where(collided, 0.0, velocity)
         drone_spawn = state.base_pos + jnp.asarray([0.0, 0.0, cfg.drone_radius])
         pos = jnp.where(active[:, None], pos, drone_spawn)
@@ -1547,14 +1621,14 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
         def one_agent(i):
             origin = pos[i]
-            positive = jnp.where(wall_directions > 0, (upper - origin) / wall_directions, jnp.inf)
+            positive = jnp.where(wall_directions > 0, (map_upper(state.map_id) - origin) / wall_directions, jnp.inf)
             negative = jnp.where(wall_directions < 0, (lower - origin) / wall_directions, jnp.inf)
             wall_distance = jnp.min(jnp.minimum(positive, negative), axis=-1)
             if cfg.num_obstacles or has_authored_solids:
                 solid_min, solid_max = all_solids(state.obstacle_min, state.obstacle_max)
-                ray_end = origin[None, :] + wall_directions * cfg.visual_radius
-                lo = jnp.zeros(cfg.wall_radar_bins, dtype=jnp.float32)
-                hi = jnp.ones(cfg.wall_radar_bins, dtype=jnp.float32)
+                ray_end = origin[None, :] + wall_directions * cfg.wall_sensing_ray_max_distance
+                lo = jnp.zeros(cfg.wall_sensing_rays, dtype=jnp.float32)
+                hi = jnp.ones(cfg.wall_sensing_rays, dtype=jnp.float32)
                 hit = segments_blocked(
                     jnp.broadcast_to(origin, ray_end.shape), ray_end,
                     solid_min, solid_max,
@@ -1562,7 +1636,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 def refine_radar(_, interval):
                     lo, hi = interval
                     mid = (lo + hi) / 2
-                    mid_point = origin[None, :] + wall_directions * (mid * cfg.visual_radius)[:, None]
+                    mid_point = origin[None, :] + wall_directions * (mid * cfg.wall_sensing_ray_max_distance)[:, None]
                     blocked = segments_blocked(
                         jnp.broadcast_to(origin, mid_point.shape), mid_point,
                         solid_min, solid_max,
@@ -1576,9 +1650,9 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 lo, hi = jax.lax.fori_loop(0, 8, refine_radar, (lo, hi))
                 wall_distance = jnp.minimum(
                     wall_distance,
-                    jnp.where(hit, hi * cfg.visual_radius, jnp.inf),
+                    jnp.where(hit, hi * cfg.wall_sensing_ray_max_distance, jnp.inf),
                 )
-            wall_signal = jnp.maximum(0.0, 1.0 - wall_distance / cfg.visual_radius)
+            wall_signal = jnp.maximum(0.0, 1.0 - wall_distance / cfg.wall_sensing_ray_max_distance)
 
             rel = pos - origin
             rel_norm = rel / jnp.maximum(pair_dist[i, :, None], 1e-8)
@@ -1598,7 +1672,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                      scatter(signal * state.is_conn_base)],
                     axis=-1,
                 )
-                if cfg.wall_radar_bins == cfg.drone_radar_bins:
+                if cfg.wall_sensing_rays == cfg.drone_radar_bins:
                     # Preserve the original checkpoint feature order exactly.
                     radar = jnp.concatenate([wall_signal[:, None], drone_proximity], axis=-1).reshape(-1)
                 else:
@@ -1638,7 +1712,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 optional.append(jnp.asarray([state.adaptive.vote[i], in_zone], dtype=jnp.float32))
             if cfg.observe_chain_contributor:
                 optional.append(jnp.asarray([chain_contributor[i]], dtype=jnp.float32))
-            scale = jnp.maximum(jnp.max(world_size), 1e-6)
+            scale = jnp.maximum(jnp.max(map_world_size(state.map_id)), 1e-6)
             if cfg.observe_base_vector:
                 optional.append((state.base_pos - origin) / scale)
             if cfg.observe_target_vector:

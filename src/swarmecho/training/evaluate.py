@@ -255,11 +255,25 @@ def run_parallel_evaluation(
     eval_name: str | None = None,
     result: tuple[dict[str, float], dict] | None = None,
 ) -> Path:
-    """Save a robust ensemble, optionally reusing the final training evaluation."""
+    """Save the configured final ensemble or a single noise-free evaluation."""
     level = resolve_evaluation_level(level)
-    metrics, info = result if result is not None else collect_robust_evaluation(model, level)
+    if result is not None:
+        metrics, info = result
+    elif level.evaluation.final_robustness:
+        metrics, info = collect_robust_evaluation(model, level)
+    else:
+        metrics, info = evaluate_suite(model, level, episodes=level.evaluation.eval_parallel_envs,
+                                       return_episode_info=True, action_noise_max=0.)
+        successes = np.asarray(info["successes"], dtype=bool)
+        chain_success = successes & (level.env.success_condition == "chain_held")
+        delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
+        visually_found = np.asarray(info["visually_found"], dtype=bool) | delivered
+        info["stage_rates"] = {"chain_success": chain_success.astype(float),
+                               "found_and_delivered": delivered.astype(float),
+                               "visually_found": visually_found.astype(float)}
+        metrics = {**metrics, "eval_robustness_runs": 1}
     if result is None:
-        evaluation_row(metrics, label="[EVAL UNAN]", update=0, total=0,
+        evaluation_row(metrics, label="[EVAL UNAN]" if metrics["eval_robustness_runs"] > 1 else "[EVAL 1/1]", update=0, total=0,
                        episodes=level.evaluation.eval_parallel_envs)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
@@ -276,8 +290,8 @@ def run_parallel_evaluation(
         info_path,
         level,
         checkpoint=checkpoint,
-        robustness_runs=level.evaluation.eval_robustness_runs,
-        action_noise_max=level.evaluation.eval_action_noise_max,
+        robustness_runs=int(metrics["eval_robustness_runs"]),
+        action_noise_max=level.evaluation.eval_action_noise_max if metrics["eval_robustness_runs"] > 1 else 0.,
         obstacle_min=info["obstacle_min"],
         obstacle_max=info["obstacle_max"],
         eval_name=eval_name,

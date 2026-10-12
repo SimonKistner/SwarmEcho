@@ -12,6 +12,7 @@ from swarmecho.env.buildings import compile_building, target_spawn_boxes
 from swarmecho.env.random_buildings import generate_building, map_seed, save_generated_map
 from swarmecho.training.artifacts import artifact_suffix, save_eval_info_csv, write_manifest
 from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
+from swarmecho.training.orchestration import representative_map_indices
 
 
 def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=None, log=lambda message: None):
@@ -107,6 +108,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
     suffix = artifact_suffix(update, steps)
     results = []
     static = levels[0].building_name.startswith("static_eval_")
+    replay_indices = set(representative_map_indices(len(levels), levels[0].evaluation.map_suite_replay_limit))
     for index, level in enumerate(levels):
         level = resolve_evaluation_level(level)
         cfg, evaluation = level.env, level.evaluation
@@ -141,7 +143,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                 write_manifest(path.with_suffix(".heatmap.json"), {**common,
                     "format": "swarmecho-eval-heatmap/v1", "data_file": path.name, "robustness_runs": 1,
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
-        if replay_due:
+        if replay_due and index in replay_indices:
             replay_level = _replay_level_for_storey(level)
             states, rewards = evaluate_model(model, replay_level, max_steps=cfg.max_steps)
             write_replay(artifact_root / "replays" / f"eval_{suffix}_{name}",

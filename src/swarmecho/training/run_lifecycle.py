@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -124,6 +125,43 @@ class EvaluationHold:
                       and success_length_reduction >= self.min_success_length_reduction)
         self.consecutive = self.consecutive + 1 if passed else 0
         return self.consecutive >= max(1, self.required)
+
+
+class TrainingSuccessHold:
+    """Require fresh, complete episode windows to pass on every authored map.
+
+    Fast/easy maps cannot crowd slower maps out of a pooled history. Each
+    observed window consumes at least one new sample per lane on each map;
+    overlapping rollout updates never count the same evidence twice.
+    """
+
+    def __init__(self, lane_map_ids, max_steps, threshold, required=1,
+                 min_success_length_reduction=None):
+        self.lane_map_ids = list(map(int, lane_map_ids))
+        counts = {map_id: self.lane_map_ids.count(map_id) for map_id in set(self.lane_map_ids)}
+        self.windows = {map_id: deque(maxlen=count) for map_id, count in counts.items()}
+        self.fresh = dict.fromkeys(counts, 0)
+        self.max_steps = max_steps
+        self.hold = EvaluationHold(threshold, required, min_success_length_reduction)
+
+    def append(self, lane, success, length):
+        map_id = self.lane_map_ids[lane]
+        self.windows[map_id].append((bool(success), int(length)))
+        self.fresh[map_id] += 1
+
+    def observe(self):
+        if any(self.fresh[key] < window.maxlen for key, window in self.windows.items()):
+            return False, None
+        rates, reductions = [], []
+        for window in self.windows.values():
+            rates.append(sum(success for success, _ in window) / len(window))
+            lengths = [length for success, length in window if success]
+            reductions.append(1 - (sum(lengths) / len(lengths) if lengths else self.max_steps) / self.max_steps)
+        self.fresh = dict.fromkeys(self.fresh, 0)
+        stop = self.hold.observe(min(rates), min(reductions))
+        return stop, {"train_early_exit_min_map_success": min(rates),
+                      "train_early_exit_min_map_length_reduction": min(reductions),
+                      "train_early_exit_hold": self.hold.consecutive}
 
 
 def init_wandb(

@@ -39,6 +39,8 @@ class AdaptiveState(NamedTuple):
     rejected_voters: jax.Array
     all_decommissioned: jax.Array
     peer_credit_count: jax.Array
+    reference_callers: jax.Array  # [caller slot, recruit slot], scoped to lifetimes.
+    reference_age: jax.Array  # Environment steps since the recruit's voted activation.
 
 
 def initial_state(n, initial_agents, zone_center, zone_valid=True, max_steps=1024):
@@ -54,12 +56,24 @@ def initial_state(n, initial_agents, zone_center, zone_valid=True, max_steps=102
         z, jnp.int32(0),
         zone_center, jnp.asarray(zone_valid), z, jnp.int32(0), jnp.int32(0),
         jnp.int32(0), b, b, b, jnp.bool_(False), jnp.int32(0),
+        jnp.zeros((n, n), dtype=jnp.bool_), z,
     )
 
 
 def available_votes(a):
     received = jnp.where(a.packet_round[-1] == a.round, a.packet_count[-1], 0)
     return jnp.maximum(received - a.spent, 0)
+
+
+def reinforcement_voters(previous, current):
+    """All qualified sources captured for this transition's voted deployment.
+
+    Grant references are captured before base receipts are cleared, regardless
+    of whether reference rewards are enabled. Restrict to newly spawned recruits
+    and a new call so old references and staggered initial spawns cannot pay.
+    """
+    return (jnp.any(current.reference_callers & current.spawned[None, :], axis=1)
+            & (current.calls > previous.calls))
 
 
 def apply_vote(vote, commands, mode):
@@ -186,6 +200,13 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
     slot = jnp.argmax((~alive) & ~reserved)
     spawned = (jnp.arange(n) == slot) & grant
     result_active = alive | spawned
+    # Capture the qualified sources before the grant clears base receipts.
+    # Remove both incoming and outgoing references on any lifetime boundary,
+    # including decommission and replacement of the same slot on this step.
+    continuing = alive & ~spawned
+    reference_callers = a.reference_callers & continuing[:, None] & continuing[None, :]
+    reference_callers |= ready[:, None] & spawned[None, :]
+    reference_age = jnp.where(spawned, 0, a.reference_age + 1)
     new_round = a.round + grant.astype(jnp.int32)
     ids = jnp.where(removed, -1, a.ids)
     ids = jnp.where(spawned, a.next_id, ids)
@@ -214,6 +235,7 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
         rejected_calls=a.rejected_calls + reject.astype(jnp.int32),
         spawned=spawned, decommissioned=removed, rejected_voters=rejected_voters,
         all_decommissioned=~jnp.any(result_active),
+        reference_callers=reference_callers, reference_age=reference_age,
     ), result_active
 
 

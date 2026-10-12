@@ -3,8 +3,13 @@ from collections import deque
 import numpy as np
 
 REWARD_NAMES = (
-    "reinforcement_cost", "decommission_cost", "rejected_call_penalty",
+    "reinforcement_reward", "decommission_reward", "rejected_call_penalty",
     "all_decommissioned_penalty", "useless_agetnst_at_success_penalty",
+    "reward_by_reference",
+)
+# Breakdowns of an existing reward, excluded from the additive reward terms.
+REFERENCE_DIAGNOSTIC_NAMES = (
+    "reward_by_reference_positive", "reward_by_reference_negative",
 )
 INFO_NAMES = (
     "adapt_calls", "adapt_decommissions", "adapt_rejected_calls", "adapt_end_agents",

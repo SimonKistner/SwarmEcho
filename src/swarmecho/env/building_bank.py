@@ -37,15 +37,17 @@ def prepare_bank(buildings, cfg, *, plan, corner_bonus_m=0., log=lambda message:
     first = buildings[0]
     maps = []
     for i, building in enumerate(buildings):
-        if (building.interior_cells.shape != first.interior_cells.shape
-                or not np.array_equal(building.world_size_m, first.world_size_m)):
-            raise ValueError("A training map bank must use the same grid dimensions and cell size.")
+        if any(getattr(building, key) != getattr(first, key) for key in
+               ("cell_size_m", "wall_thickness_m", "tile_thickness_m")):
+            raise ValueError("A training map bank must use the same cell size and wall/tile thicknesses.")
         graph = building_roadmap(building, cfg, plan=plan, corner_bonus_m=corner_bonus_m)
-        if plan and (not len(graph.vertices) or np.any(graph.distances[0] >= 1e6)):
-            raise ValueError(f"Generated map {i} has a disconnected planning graph; inspect its seed before training.")
+        if plan and not len(graph.vertices):
+            raise ValueError(f"Training map {i} has no planning nodes (roadmap_approach={cfg.roadmap_approach}); inspect its geometry and roadmap settings.")
+        if plan and np.any(graph.distances[0] >= 1e6):
+            raise ValueError(f"Training map {i} has a disconnected planning graph ({len(graph.vertices)} nodes); inspect its geometry before training.")
         base = target_spawn_boxes(building, cfg, include_excluded=True)
         record = dict(solid_min=graph.solid_min, solid_max=graph.solid_max,
-                      base_position=building.base_position_m)
+                      base_position=building.base_position_m, world_size=building.world_size_m)
         if cfg.success_condition != "coverage":
             record.update(vertices=graph.vertices, distances=graph.distances,
                           corner_distances=graph.corner_distances)
@@ -65,19 +67,23 @@ def prepare_bank_from_records(maps, first, cfg, *, interiors=None, log=lambda me
     """Pad already compiled per-map records for the JAX training batch."""
     if not maps:
         raise ValueError("A training map bank must contain at least one map.")
-    envelope = make_cuboid_building(first.interior_cells.shape, cell_size_m=first.cell_size_m,
+    maps = [dict(record, world_size=record.get("world_size", first.world_size_m)) for record in maps]
+    dimensions = (first.interior_cells.shape if interiors is None else
+                  tuple(max(interior.shape[axis] for interior in interiors) for axis in range(3)))
+    envelope = make_cuboid_building(dimensions, cell_size_m=first.cell_size_m,
                                     tile_thickness_m=first.tile_thickness_m, wall_thickness_m=first.wall_thickness_m)
     from swarmecho.env.environment import coverage_grid_geometry
 
-    voxel_size, shape = coverage_grid_geometry(first, cfg)
+    voxel_size, shape = coverage_grid_geometry(envelope, cfg)
     indices = np.stack(np.meshgrid(*[np.arange(size) for size in shape], indexing="ij"), axis=-1)
     centres = (indices.astype(np.float32) + 0.5) * voxel_size
-    cells = np.minimum(np.floor(centres / first.cell_size_m).astype(int),
-                       np.asarray(first.interior_cells.shape) - 1)
+    cells = np.floor(centres / first.cell_size_m).astype(int)
     masks = np.empty((len(maps), *shape), dtype=np.bool_)
     for i, record in enumerate(maps):
         interior = first.interior_cells if interiors is None else interiors[i]
-        eligible = interior[cells[..., 0], cells[..., 1], cells[..., 2]]
+        valid = np.all(cells < np.asarray(interior.shape), axis=-1)
+        local_cells = np.minimum(cells, np.asarray(interior.shape) - 1)
+        eligible = valid & interior[local_cells[..., 0], local_cells[..., 1], local_cells[..., 2]]
         if len(record["solid_min"]):
             inside = np.any(np.all(
                 (centres[..., None, :] >= record["solid_min"])

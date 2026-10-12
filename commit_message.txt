@@ -1,18 +1,30 @@
-feat: add adaptive swarm size and independent distance-band radar
+feat: add C relay curriculum and decaying reinforcement reference rewards
 
-- Add majority-voted reinforcement calls and base-adjacent decommissioning with reusable fixed JAX slots and fresh drone lifetimes
-- Preserve staggered initial spawning while deploying voted reinforcements immediately
-- Require a live link to originate each YES credit and relay credits one at a time per hop
-- Train both Bernoulli hold and categorical KEEP/YES/NO vote heads with recurrent PPO and lifetime-aware return boundaries
-- Track adaptive population, churn, capacity rejection, and unused success agents in sliding-window W&B diagnostics; render voting and decommission status in replay inspector
-- Limit inspector reward debug plots and legends to agent slots active at least once in the replay
-- Match building studio stairs to saved tread widths; add rotation and shared selection on both storeys, with automatic upper-storey creation and protected stair openings
-- Document configuration, protocol, diagnostics interpretation, and focused WSL/Node verification
-- Add an optional contributor-only terminal success bonus, enabled in B02c small
-- Select the shortest complete relay chain for contributor credit, excluding redundant frontier detours
+- Separate wall sensing layout, ray count and range from drone radar and target visibility
+  - Rename wall_radar_bins to wall_sensing_rays; retain legacy Fibonacci with 16 rays as defaults
+  - Add symmetric XYZ layouts with 14, 18 or 26 rays; use XYZ/26 and an independent 8 m wall range in all C levels
+  - Preserve old saved-config sensor semantics and validate layout/range in checkpoint contracts
+  - Update benchmark options, checkpoint-compatible C previews and configuration documentation
+  - Add explicit geometry tests for XYZ symmetry, analytic ray distances, compiled windows, range separation and eager/JIT parity
 
-- Split wall and drone angular resolutions while preserving legacy radar inputs
-- Add optional equal-width distance bands with capped counts replacing proximity signals for visible drone categories
-- Enable distance-band counting with a cap of three across B02c level variants
-- Update frozen-config/checkpoint compatibility, benchmark controls, and observation documentation
-- Add focused radar verification for exact band placement, count saturation, and authored/generated line-of-sight filtering
+- Add opt-in reward_by_reference under adapt_size with configurable initial fraction and step window
+  - Credit each qualified caller independently from the recruit's normal signed reward, including terminal penalties
+  - Track caller relationships and recruit ages per lifetime; clear references on decommissioning and reset
+- Expose reference reward totals in W&B and caller relationships in replay artifacts
+  - Split positive and negative caller-recruit payments into comparable episode-total diagnostics without changing rewards
+- Document configuration, linear decay, attribution, and terminal reward behavior
+- Add lightweight CPU checks for reference attribution, signed rewards, decay boundaries, terminal penalties, and lifetime cleanup
+- Enable reference rewards in all C curriculum levels with 10% initial share and 200-step decay; other disabled levels inherit config defaults
+- Document comparable W&B reward-component totals and interpretation of their relative magnitudes
+
+- Add the sequential C relay curriculum from straight shafts and corners through a station to the cellar
+  - Generate sealed C01/C02 target bands certified for two-or-three-drone solutions, a seeded cube station, and a preserved cellar map
+  - Add C01, C02, C03, C05a and C05b levels with staged horizons, agent caps and representative evaluation budgets
+- Group level files under M/B/C while preserving short names, grouped paths and legacy run references
+- Add per-map training-success progression and capped suite replay sampling while measuring every map
+- Add a default-off individual noncontributor penalty at terminal chain success; enable 4000 per penalized drone in all C levels with separate reward telemetry
+- Refine C mastery gates to success alone (95%, except C05b at 99%) and remove all noisy evaluation ensembles
+- Write the configured representative replay sample when early exit ends a curriculum stage, even before the periodic replay cadence
+- Give C01/C02 tight map bounds with per-map runtime bounds and internal bank padding; use equal four-cell C02 legs sharing one corner
+- Add a checkpoint-based C geometry preview command with the requested six-replay sample, one inspector navigator group with map choices, and curriculum documentation
+- Replace reinforcement/decommission costs with signed individual event rewards; pay every qualified deployment voter in full and migrate legacy cost configs

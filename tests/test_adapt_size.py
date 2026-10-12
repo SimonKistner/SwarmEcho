@@ -273,21 +273,21 @@ def test_initial_spawn_delay_is_preserved_and_call_arrives_immediately():
 def test_delayed_initial_drone_is_not_charged_as_a_reinforcement():
     cfg = env_config(spawn_delay=2)
     reset, step, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
-    reward_cfg = RewardConfig(reinforcement_cost=10.)
+    reward_cfg = RewardConfig(reinforcement_reward=-10.)
     state = reset(jax.random.PRNGKey(41))
     state1 = step(state, jnp.zeros((3, 4)))
     state2 = step(state1, jnp.zeros((3, 4)))
     assert bool(state2.adaptive.spawned[1])
     assert int(state2.adaptive.calls) == 0
     _, terms = compute_rewards(state1, state2, reward_cfg, cfg)
-    np.testing.assert_array_equal(terms["reinforcement_cost"], 0)
+    np.testing.assert_array_equal(terms["reinforcement_reward"], 0)
     yes = jnp.zeros((3, 4)).at[0, 3].set(1)
     voted1 = step(state, yes)
     voted2 = step(voted1, yes)
     assert int(voted2.adaptive.calls) == 1
     np.testing.assert_array_equal(voted2.adaptive.spawned, [0, 1, 1])
     _, voted_terms = compute_rewards(voted1, voted2, reward_cfg, cfg)
-    assert float(voted_terms["reinforcement_cost"].sum()) == pytest.approx(-10.)
+    assert float(voted_terms["reinforcement_reward"].sum()) == pytest.approx(-10.)
 
 
 @pytest.mark.parametrize("terminated_lanes", [1, 3])
