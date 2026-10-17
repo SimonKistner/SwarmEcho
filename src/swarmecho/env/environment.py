@@ -115,7 +115,7 @@ class EnvState(NamedTuple):
         return self.solid_max + margin
 
 
-from swarmecho.core.config import EnvConfig, RewardConfig
+from swarmecho.core.config import EnvConfig, RewardConfig, maximum_chain_distance
 
 
 def build_obstacle_roadmap(obstacle_min, obstacle_max, cfg: EnvConfig):
@@ -202,10 +202,14 @@ def coverage_grid_geometry(
 
 def observation_dim(cfg: EnvConfig) -> int:
     """Return the configured actor observation width."""
+    # The target/base vectors and coverage probes below are legacy debugging
+    # options only, never design choices or candidates for design decisions.
     return (
         6
         + 3 * int(cfg.observe_base_vector)
         + 3 * int(cfg.observe_target_vector)
+        + int(cfg.observe_seeing_target)
+        + 3 * int(cfg.observe_visually_gated_target_displacement)
         + cfg.wall_sensing_rays
         + (cfg.drone_radar_bins * max(1, cfg.distance_bands) * 3
            if cfg.radar_mode == "band_sep_counting" else cfg.drone_radar_bins * 3)
@@ -221,15 +225,6 @@ def maximum_five_drone_chain_distance(cfg: EnvConfig) -> float:
     if cfg.num_agents != 5:
         raise ValueError("maximum_five_drone_chain_distance requires num_agents=5.")
     return maximum_chain_distance(cfg)
-
-
-def maximum_chain_distance(cfg: EnvConfig) -> float:
-    """Ideal straight-line reach for the configured number of mobile drones."""
-    return (
-        cfg.comm_radius_base
-        + max(0, cfg.num_agents - 1) * cfg.comm_radius
-        + cfg.visual_radius
-    )
 
 
 def chain_diagnostics(state: EnvState) -> tuple[jax.Array, jax.Array]:
@@ -356,8 +351,9 @@ def _contributing_chain_agents(
     state: EnvState,
     cfg: EnvConfig,
     *, return_graph: bool = False, frontier_leaders: jax.Array | None = None,
+    progress_based_cluster_tiebreaker_soft: bool = False, progress_distances=None,
 ) -> jax.Array:
-    """Use one shortest complete chain, or paths to partial-chain leaders."""
+    """Select a shortest chain, or share credit through its equal-hop alternatives."""
     n = state.pos.shape[0]
     node_count = n + 2
     base_node = n
@@ -446,6 +442,52 @@ def _contributing_chain_agents(
         )
         return jnp.any(path_nodes == jnp.arange(n)[:, None], axis=-1)
 
+    if progress_based_cluster_tiebreaker_soft:
+        # The matrix uses [base, target, agents]; the radio graph uses
+        # [agents, base, target]. Reuse geodesic distances already calculated
+        # for leader selection rather than running another roadmap query.
+        if progress_distances is None:
+            points = jnp.concatenate((state.base_pos[None], state.target_pos[None], state.pos))
+            progress_distances = jnp.linalg.norm(points[:, None] - points[None, :], axis=-1)
+        order = jnp.concatenate((jnp.arange(n) + 2, jnp.asarray([0, 1])))
+        progress_distances = progress_distances[order[:, None], order[None, :]]
+
+        def soft_trace_path(start_node, destination_node, opposite_frontier):
+            remaining = shortest[:, destination_node]
+            length = shortest[start_node, destination_node]
+            on_route = ((shortest[start_node, :] + remaining == length)
+                        & (remaining < 9999) & (length < 9999))
+            successors = ((hops == 1) & on_route[:, None] & on_route[None, :]
+                          & (remaining[None, :] == remaining[:, None] - 1))
+            # Pretend each successor is this side's frontier leader: smaller
+            # gap to the opposite frontier means more closed route metres.
+            # A communication radius is the fixed softmax scale: equal progress
+            # splits equally, while better progress gets a larger, smooth share.
+            gaps = progress_distances[:, opposite_frontier]
+            gaps = jnp.where(jnp.isfinite(gaps) & (gaps < 1e6), gaps, 1e6)
+            scores = -gaps / max(cfg.comm_radius, 1e-6)
+            logits = jnp.where(successors, scores[None, :], -1e30)
+            weights = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True)) * successors
+            weights /= jnp.maximum(jnp.sum(weights, axis=-1, keepdims=True), 1e-20)
+            initial = jnp.zeros(node_count, dtype=weights.dtype).at[start_node].set(1.0)
+
+            def advance(_, carry):
+                flow, visits = carry
+                flow = flow @ weights
+                return flow, visits + flow
+
+            _, visits = jax.lax.fori_loop(0, node_count - 1, advance, (initial, initial))
+            # At a split, credit is shared; at a merge it recombines. Thus each
+            # independent patch has its own budget and mandatory links keep 1.
+            return jnp.clip(visits[:n], 0.0, 1.0)
+
+        opposite_target = jnp.where(has_target_chain, target_tip, target_node)
+        opposite_base = jnp.where(has_base_chain, base_tip, base_node)
+        base_path = jnp.where(has_base_chain, soft_trace_path(base_node, base_tip, opposite_target), 0.0)
+        target_path = jnp.where(has_target_chain, soft_trace_path(target_node, target_tip, opposite_base), 0.0)
+        complete_path = soft_trace_path(base_node, target_node, target_node)
+        return jnp.where(state.fully_connected, complete_path, jnp.maximum(base_path, target_path))
+
     base_path = jnp.where(has_base_chain, trace_path(base_node, base_tip), False)
     target_path = jnp.where(
         has_target_chain, trace_path(target_node, target_tip), False
@@ -504,8 +546,11 @@ def chain_path_efficiencies(paths: ChainPaths, reference):
 
 def credited_chain_progress(state: EnvState, env_cfg: EnvConfig, *,
                             chain_reward_system: str, allow_redundancy_reward: bool,
+                            progress_based_cluster_tiebreaker_soft: bool = False,
                             distances=None, paths=None, diagnostics=None):
     """Closed route metres credited to each selected partial or complete relay."""
+    if progress_based_cluster_tiebreaker_soft and allow_redundancy_reward:
+        raise ValueError("Soft cluster credit requires allow_redundancy_reward=false.")
     if chain_reward_system == "obstacle_geodesic":
         if distances is None:
             distances = chain_distance_matrix(state)
@@ -519,7 +564,11 @@ def credited_chain_progress(state: EnvState, env_cfg: EnvConfig, *,
         gap_distance = diagnostics[0]
         full_distance = jnp.linalg.norm(state.target_pos - state.base_pos)
         leaders = None
-    contributing = _contributing_chain_agents(state, env_cfg, frontier_leaders=leaders)
+    contributing = _contributing_chain_agents(
+        state, env_cfg, frontier_leaders=leaders,
+        progress_based_cluster_tiebreaker_soft=progress_based_cluster_tiebreaker_soft,
+        progress_distances=distances if chain_reward_system == "obstacle_geodesic" else None,
+    )
     if allow_redundancy_reward:
         def complete_members(_):
             selected_paths = paths if paths is not None else simple_chain_paths(state, env_cfg)
@@ -571,8 +620,9 @@ def compute_rewards(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute rewards for the configured coverage or target mission.
 
-    Finder and delivery bonuses are one-shot events. Success pays at termination
-    or incrementally on new chain-hold records when configured.
+    Finder and delivery bonuses are one-shot events. Each active drone receives
+    the full target-found bonus. Success pays at termination or incrementally
+    on new chain-hold records when configured.
     """
     n = current.pos.shape[0]
     reward_active = current.active.astype(jnp.float32)
@@ -645,6 +695,8 @@ def compute_rewards(
             frontier_leaders = None
         is_contributing = _contributing_chain_agents(
             current, env_cfg, frontier_leaders=frontier_leaders,
+            progress_based_cluster_tiebreaker_soft=cfg.progress_based_cluster_tiebreaker_soft,
+            progress_distances=distances if cfg.chain_reward_system == "obstacle_geodesic" else None,
         )
         if cfg.allow_redundancy_reward:
             def complete_path_members(_):
@@ -666,6 +718,7 @@ def compute_rewards(
             return credited_chain_progress(
                 state, env_cfg, chain_reward_system=cfg.chain_reward_system,
                 allow_redundancy_reward=cfg.allow_redundancy_reward,
+                progress_based_cluster_tiebreaker_soft=cfg.progress_based_cluster_tiebreaker_soft,
                 distances=distances, paths=paths, diagnostics=diagnostics,
             )
 
@@ -785,7 +838,7 @@ def compute_rewards(
         "finder": cfg.finder_bonus * (
             target_found_event & finder_receivers
         ).astype(jnp.float32),
-        "target_found": reward_active * (cfg.target_found_bonus / reward_count) * target_found_event,
+        "target_found": reward_active * cfg.target_found_bonus * target_found_event,
         "time_penalty": time_penalty,
         "gap_reduction": gap_bonus,
         "peer_informing": peer_informing_reward,
@@ -864,14 +917,20 @@ def _target_spawn_boxes(building, cfg, *, include_excluded=False):
 
 def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: bool = True,
                        randomize_base: bool = False, minimum_geodesic_separation: bool = False,
+                       dynamic_max_geo_distance: bool = False,
                        minimum_geodesic_separation_multiplier: float = 2.0,
                        skip_on_no_pair_found: bool = False,
                        spawn_pair_max_attempts: int = 1024, allow_redundancy_reward: bool = False,
                        target_found_requires_delivery: bool = True, building_bank=None,
                        memory_comm_every_k_steps: int = 1,
                        chain_reward_system: str = "euclidean",
+                       progress_based_cluster_tiebreaker_soft: bool = False,
                        delivery_gap_vesting_enabled: bool = False):
     """Create pure reset, step, observation, and metric functions."""
+    if type(progress_based_cluster_tiebreaker_soft) is not bool:
+        raise ValueError("progress_based_cluster_tiebreaker_soft must be boolean.")
+    if progress_based_cluster_tiebreaker_soft and (allow_redundancy_reward or cfg.success_condition == "coverage"):
+        raise ValueError("Soft cluster credit requires a target mission and allow_redundancy_reward=false.")
     from swarmecho.core.config import validate_radar_config
     from swarmecho.env.buildings import validate_feature_clearance
     validate_radar_config(cfg)
@@ -891,7 +950,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         raise ValueError("Delivery gap vesting requires a target mission with delivery.")
     if not has_target and minimum_geodesic_separation:
         raise ValueError("Coverage episodes cannot require target/base separation.")
-    plan_geodesic = plan_geodesic and has_target
+    if dynamic_max_geo_distance and (not has_target or cfg.num_obstacles):
+        raise ValueError("Dynamic max distance requires a target task with static geometry.")
+    if dynamic_max_geo_distance and min(cfg.comm_radius_base, cfg.comm_radius, cfg.visual_radius) <= 0:
+        raise ValueError("Dynamic max distance requires positive communication and visual ranges.")
+    plan_geodesic = (plan_geodesic or dynamic_max_geo_distance) and has_target
     if cfg.spawn_delay < 0:
         raise ValueError("spawn_delay must be non-negative.")
     if cfg.hold_chain_for < 1:
@@ -921,7 +984,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         raise ValueError("roadmap_corner_bonus_m must be finite and nonnegative.")
     validate_roadmap_settings(cfg)
     corner_merge_distance = building.wall_thickness_m + 2 * (cfg.drone_radius + cfg.obstacle_planning_clearance_m)
-    if randomize_base or minimum_geodesic_separation:
+    if randomize_base or minimum_geodesic_separation or dynamic_max_geo_distance:
         if isinstance(spawn_pair_max_attempts, bool) or not isinstance(spawn_pair_max_attempts, int) or not 1 <= spawn_pair_max_attempts <= np.iinfo(np.int32).max:
             raise ValueError("spawn_pair_max_attempts must be a positive int32 integer.")
     if minimum_geodesic_separation:
@@ -989,6 +1052,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     geometry = building_roadmap(building, cfg, plan=plan_geodesic and cfg.num_obstacles == 0,
                                corner_bonus_m=cfg.roadmap_corner_bonus_m if minimum_geodesic_separation else 0.0)
     authored_vertices = jnp.asarray(geometry.vertices)
+    relay_calculator = None
+    if dynamic_max_geo_distance:
+        from swarmecho.env.relay import make_calculator
+        relay_calculator = make_calculator(cfg, geometry, building, building_bank)
     if plan_geodesic and cfg.num_obstacles:
         authored_vertices = jnp.asarray(building_candidate_vertices(building, cfg))
 
@@ -1062,16 +1129,23 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         return (points_inside_aabbs(point, authored_min, authored_max, wall_buffer)
                 | points_inside_aabbs(point, obstacle_min, obstacle_max, cfg.obstacle_target_buffer_m))
 
-    def sample_target(key, obstacle_min, obstacle_max, map_id=0):
+    def sample_target(key, obstacle_min, obstacle_max, map_id=0, target_spawn_weights=None):
         """Sample allowed interior volume, rejecting buffered solid geometry."""
         target_lower, target_upper, target_volumes = spawn_lower, spawn_upper, spawn_volumes
         if building_bank is not None:
             target_lower, target_upper, target_volumes = (building_bank.get("target_" + suffix, map_id)
                                                          for suffix in ("lower", "upper", "volumes"))
+        # None preserves the original volume sampler, including its keyed draws.
+        weights = target_volumes if target_spawn_weights is None else target_spawn_weights
+        if target_spawn_weights is not None and building_bank is not None:
+            # A single dynamic [map, padded box] table is shared by every lane.
+            # Map selection happens on device; padding is never spawnable.
+            row = target_spawn_weights[map_id] if target_spawn_weights.ndim == 2 else target_spawn_weights
+            weights = jnp.where(target_volumes > 0, row, 0.0)
 
         def draw(draw_key):
             box_key, point_key = jax.random.split(draw_key)
-            box = jax.random.categorical(box_key, jnp.log(target_volumes))
+            box = jax.random.categorical(box_key, jnp.log(weights))
             return jax.random.uniform(
                 point_key, (3,), minval=target_lower[box], maxval=target_upper[box]
             )
@@ -1096,6 +1170,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         fallback_index = jnp.argmax(
             jnp.where(fallback_valid, fallback_candidates[:, 2], -jnp.inf)
         )
+        if target_spawn_weights is not None:
+            # Keep the rare geometry fallback consistent with adaptive weights.
+            fallback_index = jax.random.categorical(
+                jax.random.fold_in(key, 1), jnp.where(fallback_valid, jnp.log(weights), -jnp.inf)
+            )
         point_invalid = target_inside_buffered_solids(point, obstacle_min, obstacle_max)
         return jnp.where(point_invalid, fallback_candidates[fallback_index], point)
 
@@ -1181,6 +1260,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         stored_distances: jax.Array | None = None,
         stored_corner_distances: jax.Array | None = None,
         map_id=0,
+        target_spawn_weights: jax.Array | None = None,
     ):
         """Reset an episode, optionally at one validated external target point.
 
@@ -1208,7 +1288,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             stored_distances = jnp.zeros((0, 0), dtype=jnp.float32)
         if not has_target and target_pos is not None:
             raise ValueError("A coverage episode cannot be reset with a target position.")
-        target = (sample_target(target_key, obstacle_min, obstacle_max, map_id)
+        target = (sample_target(target_key, obstacle_min, obstacle_max, map_id, target_spawn_weights)
                   if has_target and target_pos is None else
                   jnp.asarray(target_pos) if has_target else
                   jnp.zeros(3, dtype=jnp.float32))
@@ -1258,7 +1338,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 retry_base, (jnp.int32(1), target_key, first_base, first_valid),
             )
             pair_attempts = jnp.where(valid, pair_attempts, jnp.int32(0))
-        elif randomize_base or minimum_geodesic_separation:
+        elif randomize_base or minimum_geodesic_separation or dynamic_max_geo_distance:
             solid_min, solid_max = all_solids(obstacle_min, obstacle_max)
             vertices = jnp.asarray(geometry.vertices) if cfg.num_obstacles == 0 else stored_vertices
             distances = (jnp.asarray(geometry.corner_distances) if cfg.num_obstacles == 0 else
@@ -1293,14 +1373,16 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                     base = jax.random.uniform(point_key, (3,), minval=pair_lower[box], maxval=pair_upper[box])
                 # Randomized bases retry against the target for this batch.
                 # With a fixed base, retry targets instead.
-                target = (fixed_target if randomize_base or target_pos is not None
-                          else sample_target(target_key, obstacle_min, obstacle_max, map_id))
+                target = (fixed_target if (randomize_base and not dynamic_max_geo_distance) or target_pos is not None
+                          else sample_target(target_key, obstacle_min, obstacle_max, map_id, target_spawn_weights))
                 drone = base + jnp.asarray([0.0, 0.0, cfg.drone_radius])
                 valid = (~points_inside_aabbs(base, solid_min, solid_max, cfg.drone_radius)
                          & ~points_inside_aabbs(drone, solid_min, solid_max, cfg.drone_radius)
                          & jnp.all((drone >= lower) & (drone <= map_upper(map_id)))) if randomize_base else jnp.bool_(True)
                 valid &= ~target_inside_buffered_solids(target, obstacle_min, obstacle_max)
                 if minimum_geodesic_separation:
+                    if dynamic_max_geo_distance and randomize_base:
+                        fixed_routes = routes_for_target(target)
                     distance = jnp.linalg.norm(base - target)
                     distance = jnp.where(segments_blocked(base, target, planning_min, planning_max), 1e6, distance)
                     if vertices.shape[0]:
@@ -1308,6 +1390,16 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                         moving_cost = _roadmap_attachment(moving_point[None], vertices, planning_min, planning_max)[0]
                         distance = jnp.minimum(distance, jnp.min(moving_cost + fixed_routes))
                     valid &= (distance < 1e6) & (distance >= minimum_geodesic_separation_multiplier * cfg.comm_radius)
+                if dynamic_max_geo_distance:
+                    # Necessary straight-line bound, followed by a constructive
+                    # witness. Curriculum spare slots never enlarge target eligibility.
+                    budget = cfg.geometric_agent_budget
+                    bound = cfg.comm_radius_base + (budget - 1) * cfg.comm_radius + cfg.visual_radius
+                    valid &= jnp.linalg.norm(base - target) <= bound
+                    required, certified = jax.lax.cond(
+                        valid, lambda _: relay_calculator(base, target, map_id),
+                        lambda _: (jnp.int32(0), jnp.bool_(False)), operand=None)
+                    valid &= certified & (required <= budget)
                 return base, target, valid
 
             def sample_pair_for_target(fixed_target, key):
@@ -1327,14 +1419,14 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                     (jnp.int32(1), key, first_base, first_target, first_valid))
 
             pair_key, first_key = jax.random.split(target_key)
-            if (skip_on_no_pair_found and randomize_base and minimum_geodesic_separation
+            if (skip_on_no_pair_found and not dynamic_max_geo_distance and randomize_base and minimum_geodesic_separation
                     and target_pos is None):
                 pair_attempts, pair_key, base_pos, target, valid = sample_pair_for_target(fixed_target, first_key)
 
                 def retry_target(carry):
                     _, skipped_targets, key, _, _, _ = carry
                     key, target_key = jax.random.split(key)
-                    next_target = sample_target(target_key, obstacle_min, obstacle_max, map_id)
+                    next_target = sample_target(target_key, obstacle_min, obstacle_max, map_id, target_spawn_weights)
                     attempts, key, base, target, valid = sample_pair_for_target(next_target, key)
                     return attempts, skipped_targets + 1, key, base, target, valid
 
@@ -1580,6 +1672,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 credit = credited_chain_progress(
                     next_state, cfg, chain_reward_system=chain_reward_system,
                     allow_redundancy_reward=allow_redundancy_reward,
+                    progress_based_cluster_tiebreaker_soft=progress_based_cluster_tiebreaker_soft,
                 )
                 return next_state._replace(
                     delivery_gap_credit=credit, delivery_gap_step=next_step,
@@ -1713,6 +1806,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             if cfg.observe_chain_contributor:
                 optional.append(jnp.asarray([chain_contributor[i]], dtype=jnp.float32))
             scale = jnp.maximum(jnp.max(map_world_size(state.map_id)), 1e-6)
+            # These vectors are retained strictly as legacy debugging options;
+            # do not interpret or recommend them as design choices.
             if cfg.observe_base_vector:
                 optional.append((state.base_pos - origin) / scale)
             if cfg.observe_target_vector:
@@ -1722,6 +1817,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                     * state.target_known[i].astype(jnp.float32)
                 )
             if cfg.observe_coverage_probe:
+                # Legacy debugging probe only; not a design choice or candidate.
                 probe = jnp.clip(
                     jnp.floor(
                         (origin + wall_directions * coverage_voxel_size)
@@ -1733,6 +1829,14 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 optional.append(state.coverage[probe[:, 0], probe[:, 1], probe[:, 2]].astype(jnp.float32))
             if cfg.observe_current_timestep:
                 optional.append(jnp.asarray([state.step / cfg.max_steps], dtype=jnp.float32))
+            if cfg.observe_seeing_target:
+                optional.append(jnp.asarray([state.directly_sees_target[i]], dtype=jnp.float32))
+            if cfg.observe_visually_gated_target_displacement:
+                optional.append(jnp.where(
+                    state.directly_sees_target[i],
+                    (state.target_pos - origin) / cfg.visual_radius,
+                    jnp.zeros(3, dtype=jnp.float32),
+                ))
             observation = jnp.concatenate([self_state, *optional, radar])
             return jnp.where(state.active[i], observation, 0.0)
 
@@ -1762,17 +1866,23 @@ def make_autoreset_fns(
     cfg: EnvConfig,
     reward_cfg: RewardConfig = RewardConfig(),
     *, randomize_base: bool = False, minimum_geodesic_separation: bool = False,
+    dynamic_max_geo_distance: bool = False,
     minimum_geodesic_separation_multiplier: float = 2.0,
     skip_on_no_pair_found: bool = False,
     spawn_pair_max_attempts: int = 1024,
     building_bank=None,
     memory_comm_every_k_steps: int = 1,
+    adaptive_map_sampling: bool = False,
 ):
     """Return reset and terminal-aware step functions for batched training.
 
     Terminal rewards and diagnostic state describe the completed transition;
     only the returned carry state is replaced by a fresh episode.
     """
+    if type(adaptive_map_sampling) is not bool:
+        raise ValueError("adaptive_map_sampling must be boolean.")
+    if adaptive_map_sampling and building_bank is None:
+        raise ValueError("Adaptive map sampling requires a prepared building bank.")
     has_target = cfg.success_condition != "coverage"
     if not math.isfinite(reward_cfg.chain_efficiency_bonus) or reward_cfg.chain_efficiency_bonus < 0:
         raise ValueError("chain_efficiency_bonus must be finite and nonnegative.")
@@ -1788,6 +1898,7 @@ def make_autoreset_fns(
     reset, step, observations, metrics = make_env_fns(
         building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic" or reward_cfg.enable_chain_efficiency_reward,
         randomize_base=randomize_base, minimum_geodesic_separation=minimum_geodesic_separation,
+        dynamic_max_geo_distance=dynamic_max_geo_distance,
         minimum_geodesic_separation_multiplier=minimum_geodesic_separation_multiplier,
         skip_on_no_pair_found=skip_on_no_pair_found,
         spawn_pair_max_attempts=spawn_pair_max_attempts,
@@ -1796,6 +1907,7 @@ def make_autoreset_fns(
         building_bank=building_bank,
         memory_comm_every_k_steps=memory_comm_every_k_steps,
         chain_reward_system=reward_cfg.chain_reward_system,
+        progress_based_cluster_tiebreaker_soft=reward_cfg.progress_based_cluster_tiebreaker_soft,
         delivery_gap_vesting_enabled=reward_cfg.delivery_gap_vesting_enabled,
     )
 
@@ -1887,25 +1999,37 @@ def make_autoreset_fns(
                 info["chain_efficiency"] = jnp.float32(0.0)
         return terminal_state, reward, terminal_state.done, info
 
-    def reset_persisted(state):
+    def reset_persisted(state, target_spawn_weights=None, map_sampling_cdf=None):
+        if adaptive_map_sampling:
+            if map_sampling_cdf is None:
+                raise ValueError("Enabled adaptive map resets require a map-selection CDF.")
+            map_key, reset_key = jax.random.split(state.key)
+            index = jnp.minimum(jnp.searchsorted(map_sampling_cdf, jax.random.uniform(map_key, ()),
+                                                side="right"), map_sampling_cdf.shape[0] - 1)
+            return reset(reset_key, map_id=index, target_spawn_weights=target_spawn_weights)
         return reset(state.key, obstacle_min=state.obstacle_min, obstacle_max=state.obstacle_max,
                      stored_vertices=state.roadmap_vertices, stored_distances=state.roadmap_distances,
-                     stored_corner_distances=state.roadmap_corner_distances, map_id=state.map_id)
+                     stored_corner_distances=state.roadmap_corner_distances, map_id=state.map_id,
+                     target_spawn_weights=target_spawn_weights)
 
-    def autoreset_step(state: EnvState, action: jax.Array):
+    def autoreset_step(state: EnvState, action: jax.Array, target_spawn_weights=None, map_sampling_cdf=None):
         """Original scalar API retained as the dense equivalence reference."""
         terminal, reward, done, info = transition(state, action)
-        fresh = reset_persisted(terminal)
+        fresh = reset_persisted(terminal, target_spawn_weights, map_sampling_cdf)
         result = jax.tree_util.tree_map(lambda a, b: jnp.where(done, a, b), fresh, terminal)
         return result, reward, done, info
 
-    def batched_step(states, actions):
+    def batched_step(states, actions, target_spawn_weights=None, map_sampling_cdf=None):
         terminal, rewards, done, info = jax.vmap(transition)(states, actions)
         size = done.shape[0]
         count = jnp.sum(done, dtype=jnp.int32)
 
         def dense(current):
-            fresh = jax.vmap(reset_persisted)(current)
+            if adaptive_map_sampling:
+                fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf))(current)
+            else:
+                fresh = (jax.vmap(reset_persisted)(current) if target_spawn_weights is None else
+                         jax.vmap(lambda state: reset_persisted(state, target_spawn_weights))(current))
             return jax.tree_util.tree_map(
                 lambda a, b: jnp.where(done.reshape((size,) + (1,) * (a.ndim - 1)), a, b),
                 fresh, current,
@@ -1919,11 +2043,17 @@ def make_autoreset_fns(
             def reset_chunk(index, result):
                 lanes = jax.lax.dynamic_slice_in_dim(indices, index * block, block)
                 selected = jax.tree_util.tree_map(lambda a: a[jnp.minimum(lanes, size - 1)], current)
-                fresh = jax.vmap(reset_persisted)(selected)
+                if adaptive_map_sampling:
+                    fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf))(selected)
+                else:
+                    fresh = (jax.vmap(reset_persisted)(selected) if target_spawn_weights is None else
+                             jax.vmap(lambda state: reset_persisted(state, target_spawn_weights))(selected))
                 # Layout and roadmap are invariant across episode reset. Avoid
                 # scattering potentially large matrices back into their copies.
                 unchanged = {"obstacle_min", "obstacle_max", "roadmap_vertices", "roadmap_corner_distances",
                              "roadmap_distances", "shared_geometry", "building_bank", "map_id"}
+                if adaptive_map_sampling:
+                    unchanged = {"shared_geometry", "building_bank"}
                 return result._replace(**{
                     field: jax.tree.map(lambda old, new: old.at[lanes].set(new, mode="drop"),
                                         getattr(result, field), getattr(fresh, field))
@@ -1936,7 +2066,7 @@ def make_autoreset_fns(
         # dense reset remains efficient for synchronized episode endings.
         # Rejection sampling in a dense vmap runs until the slowest of all
         # lanes accepts. Keep it in small groups even at synchronized endings.
-        result = (sparse(terminal) if randomize_base or minimum_geodesic_separation else
+        result = (sparse(terminal) if randomize_base or minimum_geodesic_separation or dynamic_max_geo_distance else
                   jax.lax.cond(count > size // 2, dense, sparse, terminal))
         return result, rewards, done, info
 

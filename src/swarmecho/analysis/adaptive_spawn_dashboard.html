@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SwarmEcho · Adaptive spawning</title>
+<style>
+:root{color-scheme:dark;--bg:#09111d;--panel:#111d2c;--line:#29394d;--text:#e1e9f4;--muted:#92a5bf;--accent:#6ed9e1}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{position:sticky;top:0;z-index:5;background:#09111df5;border-bottom:1px solid var(--line);padding:16px 28px;backdrop-filter:blur(12px)}
+.heading,.controls,.timeline{display:flex;align-items:center;gap:12px;flex-wrap:wrap}h1{font-size:20px;margin:0 20px 0 0}h2{font-size:17px;margin:0 0 7px}.tag{color:var(--accent)}button,select{font:inherit;color:var(--text);background:#18293b;border:1px solid #3c526b;border-radius:6px;padding:7px 12px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.4;cursor:default}select{max-width:400px}input[type=range]{accent-color:var(--accent);flex:1;min-width:120px}.timeline{margin-top:14px}.timeline output{font-variant-numeric:tabular-nums;min-width:235px}.muted{color:var(--muted);font-size:12px}#status{margin:8px 0 0;min-height:16px}main{max-width:1700px;margin:auto;padding:24px 28px 60px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:20px}.panel p{margin:0 0 12px}.chart{display:block;width:100%;height:270px}.history{height:470px}.legend{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.legend button{font-size:11px;padding:4px 7px}.legend button.selected{outline:2px solid var(--accent)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.mini{padding:14px;margin:0}.mini canvas{display:block;width:100%;height:180px}.mini h3{margin:0 0 5px;font-size:13px}.mini p{font-variant-numeric:tabular-nums}.empty{padding:70px 20px;text-align:center;border:1px dashed var(--line);border-radius:10px}.hidden{display:none}#hover{min-height:16px}.controls{margin-left:auto}label{display:inline-flex;align-items:center;gap:5px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}header{padding:12px}.controls{margin-left:0}main{padding:18px 12px}.panel{padding:14px}.timeline output{min-width:190px}}@media(max-width:600px){.grid{grid-template-columns:1fr}.history{height:380px}}
+</style></head><body>
+<header><div class="heading"><h1><span class="tag">SwarmEcho</span> Adaptive spawning</h1><label>Run <select id="run"><option value="">Looking for runs…</option></select></label><div class="controls"><button id="refresh">Refresh</button><label><input id="follow" type="checkbox" checked>Follow latest</label><label><input id="auto" type="checkbox" checked>Auto refresh</label></div></div>
+<div class="timeline"><button id="previous" aria-label="Previous update">←</button><button id="play">Play</button><label class="sr-only" for="timeline">Training update</label><input id="timeline" type="range" min="0" max="0" value="0"><button id="next" aria-label="Next update">→</button><output id="position">Waiting for history</output></div><p id="status" class="muted" role="status"></p></header>
+<main><div id="empty" class="empty">No adaptive spawning history yet. Enable the feature in a training run; records appear after each PPO update.</div><div id="content" class="hidden">
+<section class="panel"><h2>Applied spawn probabilities</h2><p class="muted">Cells ordered by Manhattan distance to the base, then XYZ. Colours and horizontal positions match every plot.</p><canvas id="probability" class="chart" aria-label="Cell spawn probabilities"></canvas><h2>Measured success rates</h2><p class="muted" id="measurement"></p><canvas id="success" class="chart" aria-label="Cell success rates"></canvas><p id="hover" class="muted">Hover a bar for its cell, baseline and completed-episode window.</p></section>
+<section class="panel"><h2>Spawn probabilities over training</h2><p class="muted">Environment steps on the horizontal axis; applied probability on the vertical axis. Lines grow through the selected update. Select a cell below to highlight it.</p><canvas id="history" class="chart history" aria-label="All cell spawn probability histories"></canvas><div id="legend" class="legend"></div></section>
+<h2>Cell details</h2><p class="muted">Same distance order. Dashed lines mark each cell’s original volume-based probability.</p><div id="details" class="grid"></div>
+</div></main>
+<script>
+'use strict';
+const el=id=>document.getElementById(id), pct=v=>(100*v).toFixed(2)+'%', integer=v=>Number(v).toLocaleString();
+let rows=[],metadata=null,offset=0,generation=0,loading=false,selection=0,highlight=-1,timer=null,skipped=0,lastDiscovery=0;
+const colour=i=>`hsl(${(i*137.508+185)%360} 72% 65%)`;
+const label=i=>'['+metadata.cells[i].join(',')+']';
+function status(message){el('status').textContent=message;}
+async function json(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw Error('History temporarily unavailable ('+response.status+').');return response.json();}
+async function discover(){
+ const runs=await json('/api/runs'), previous=el('run').value;
+ el('run').replaceChildren();for(const run of runs){const option=document.createElement('option');option.value=run.id;option.textContent=run.name;el('run').append(option);}
+ if(!runs.length){const option=document.createElement('option');option.value='';option.textContent='No enabled runs yet';el('run').append(option);return;}
+ if(runs.some(run=>run.id===previous))el('run').value=previous;else await changeRun();lastDiscovery=Date.now();
+}
+async function changeRun(){generation++;loading=false;offset=0;rows=[];metadata=null;selection=0;highlight=-1;skipped=0;stop();el('content').classList.add('hidden');el('empty').classList.remove('hidden');await refresh();}
+function validRow(row){return row.kind==='update'&&Number.isFinite(row.steps)&&Number.isFinite(row.update)&&['probabilities','success_rates','window_counts'].every(key=>Array.isArray(row[key])&&row[key].length===metadata.cells.length&&row[key].every(Number.isFinite));}
+async function refresh(){
+ if(loading||!el('run').value)return;loading=true;const token=generation,run=el('run').value;
+ try{
+  const data=await json('/api/history?run='+encodeURIComponent(run)+'&offset='+offset);if(token!==generation)return;
+  const oldLength=rows.length,oldSteps=rows[selection]?.steps;metadata=data.metadata;if(data.reset){rows=[];offset=0;}
+  skipped+=data.skipped;for(const event of data.events){if(event.kind==='session'){rows=rows.filter(row=>row.steps<event.steps);}else if(validRow(event)){rows.push(event);}else skipped++;}
+  offset=data.offset;
+  if(!rows.length){status('Waiting for the first complete history record.');return;}
+  if(el('follow').checked)selection=rows.length-1;else if(oldSteps!==undefined){const found=rows.findIndex(row=>row.steps===oldSteps);selection=found<0?Math.min(selection,rows.length-1):found;}
+  if(oldLength===0||data.reset||el('details').children.length!==metadata.cells.length)buildDetails();
+  el('content').classList.remove('hidden');el('empty').classList.add('hidden');el('timeline').max=rows.length-1;
+  render();status(rows.length+' snapshots · '+metadata.cells.length+' cells · saved after each PPO update'+(skipped?' · '+skipped+' invalid records skipped':'')+' · refreshed '+new Date().toLocaleTimeString());
+ }catch(error){if(token===generation)status(error.message+' Retrying on the next refresh.');}finally{if(token===generation)loading=false;}
+}
+function buildDetails(){
+ el('details').replaceChildren();el('legend').replaceChildren();
+ metadata.cells.forEach((cell,i)=>{
+  const card=document.createElement('section');card.className='panel mini';const heading=document.createElement('h3');const distance=cell.reduce((sum,value,axis)=>sum+Math.abs(value-metadata.base_cell[axis]),0);heading.textContent='Cell '+label(i)+' · distance '+distance;heading.style.color=colour(i);const text=document.createElement('p');text.className='muted';const canvas=document.createElement('canvas');canvas.setAttribute('aria-label','Spawn probability history for cell '+label(i));card.append(heading,text,canvas);el('details').append(card);
+  const button=document.createElement('button');button.textContent=label(i);button.style.color=colour(i);button.onclick=()=>{highlight=highlight===i?-1:i;render();};el('legend').append(button);
+ });
+ el('measurement').textContent='Success in each cell’s latest '+metadata.config.success_window_episodes_per_cell+' completed episodes (available outcomes while filling). Measured at the selected rollout’s end; probabilities above were applied during that rollout.';
+}
+function context(canvas){const rect=canvas.getBoundingClientRect(),scale=devicePixelRatio||1;canvas.width=Math.round(rect.width*scale);canvas.height=Math.round(rect.height*scale);const ctx=canvas.getContext('2d');ctx.scale(scale,scale);ctx.font='11px system-ui';return {ctx,w:rect.width,h:rect.height};}
+function axes(ctx,w,h,ymax,xmin,xmax,mini=false){
+ const p={left:mini?49:57,right:16,top:18,bottom:mini?34:42};p.width=w-p.left-p.right;p.height=h-p.top-p.bottom;
+ ctx.lineWidth=1;for(let tick=0;tick<=4;tick++){const y=p.top+p.height*(1-tick/4);ctx.strokeStyle='#29394d';ctx.beginPath();ctx.moveTo(p.left,y);ctx.lineTo(w-p.right,y);ctx.stroke();ctx.fillStyle='#92a5bf';ctx.textAlign='right';ctx.fillText((100*ymax*tick/4).toFixed(ymax<.1?1:0)+'%',p.left-8,y+4);}
+ if(xmin!==undefined){ctx.textAlign='center';for(let tick=0;tick<=4;tick++){const value=xmin+(xmax-xmin)*tick/4;ctx.fillText(compact(value),p.left+p.width*tick/4,h-12);}}
+ return p;
+}
+function compact(value){if(Math.abs(value)>=1e6)return (value/1e6).toFixed(1)+'M';if(Math.abs(value)>=1e3)return (value/1e3).toFixed(0)+'k';return Math.round(value).toString();}
+function bars(canvas,values,success=false){
+ const {ctx,w,h}=context(canvas),maximum=success?1:Math.min(1,Math.max(.06,...values)*1.18),p=axes(ctx,w,h-34,maximum),slot=p.width/values.length;
+ canvas.plot={...p,slot};values.forEach((value,i)=>{const x=p.left+i*slot+slot*.15,bw=slot*.7,y=p.top+p.height*(1-value/maximum);ctx.fillStyle=colour(i);ctx.globalAlpha=highlight<0||highlight===i?.85:.25;ctx.fillRect(x,y,bw,p.top+p.height-y);ctx.globalAlpha=1;
+  if(!success){ctx.strokeStyle='#edf5ff';const baselineY=p.top+p.height*(1-metadata.baseline[i]/maximum);ctx.beginPath();ctx.moveTo(x,baselineY);ctx.lineTo(x+bw,baselineY);ctx.stroke();}
+  if(slot>34){ctx.textAlign='center';ctx.fillStyle='#e1e9f4';ctx.fillText((100*value).toFixed(1),x+bw/2,Math.max(12,y-5));}
+  ctx.save();ctx.translate(x+bw/2,p.top+p.height+12);ctx.rotate(-Math.PI/3);ctx.fillStyle='#92a5bf';ctx.textAlign='right';ctx.fillText(label(i),0,0);ctx.restore();
+ });
+}
+function history(canvas,cell=null){
+ const {ctx,w,h}=context(canvas),mini=cell!==null,indices=mini?[cell]:metadata.cells.map((_,i)=>i);
+ const xmin=rows[0].steps,xmax=Math.max(xmin+1,rows[rows.length-1].steps);
+ let ymax=.02;for(const row of rows)for(const i of indices)ymax=Math.max(ymax,row.probabilities[i]);if(mini)ymax=Math.max(ymax,metadata.baseline[cell]);ymax=Math.min(1,ymax*1.12);
+ const p=axes(ctx,w,h,ymax,xmin,xmax,mini),x=value=>p.left+(value-xmin)/(xmax-xmin)*p.width,y=value=>p.top+p.height*(1-value/ymax);
+ if(mini){ctx.strokeStyle='#92a5bf';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(p.left,y(metadata.baseline[cell]));ctx.lineTo(w-p.right,y(metadata.baseline[cell]));ctx.stroke();ctx.setLineDash([]);}
+ const stride=Math.max(1,Math.floor((selection+1)/Math.max(1,p.width*2)));
+ for(const i of indices){ctx.strokeStyle=colour(i);ctx.lineWidth=mini?1.4:highlight===i?2:.8;ctx.globalAlpha=mini||highlight===i?1:highlight<0?.65:.18;ctx.beginPath();for(let frame=0;frame<=selection;frame+=stride){const point=rows[frame];if(frame===0)ctx.moveTo(x(point.steps),y(point.probabilities[i]));else ctx.lineTo(x(point.steps),y(point.probabilities[i]));}const last=rows[selection];ctx.lineTo(x(last.steps),y(last.probabilities[i]));ctx.stroke();ctx.beginPath();ctx.arc(x(last.steps),y(last.probabilities[i]),mini||highlight===i?3:1.5,0,Math.PI*2);ctx.fillStyle=colour(i);ctx.fill();ctx.globalAlpha=1;}
+ ctx.lineWidth=1;ctx.strokeStyle='#6ed9e160';ctx.beginPath();ctx.moveTo(x(rows[selection].steps),p.top);ctx.lineTo(x(rows[selection].steps),p.top+p.height);ctx.stroke();
+}
+function render(){
+ if(!rows.length)return;selection=Math.max(0,Math.min(rows.length-1,selection));const row=rows[selection];el('timeline').value=selection;el('position').textContent='Update '+integer(row.update)+' · '+integer(row.steps)+' steps';el('previous').disabled=selection===0;el('next').disabled=selection===rows.length-1;
+ bars(el('probability'),row.probabilities);bars(el('success'),row.success_rates,true);history(el('history'));
+ Array.from(el('details').children).forEach((card,i)=>{card.querySelector('p').textContent=pct(row.probabilities[i])+' spawn · '+pct(row.success_rates[i])+' success · '+row.window_counts[i]+' outcomes';history(card.querySelector('canvas'),i);});
+ Array.from(el('legend').children).forEach((button,i)=>button.classList.toggle('selected',highlight===i));
+}
+function select(frame){el('follow').checked=false;selection=frame;requestAnimationFrame(render);}
+function stop(){if(timer)clearInterval(timer);timer=null;el('play').textContent='Play';}
+el('run').onchange=changeRun;el('refresh').onclick=async()=>{try{await discover();await refresh();}catch(error){status(error.message);}};
+el('timeline').oninput=()=>{stop();select(Number(el('timeline').value));};el('previous').onclick=()=>{stop();select(selection-1);};el('next').onclick=()=>{stop();select(selection+1);};
+el('play').onclick=()=>{if(timer){stop();return;}el('follow').checked=false;if(selection===rows.length-1)selection=0;el('play').textContent='Pause';timer=setInterval(()=>{if(selection>=rows.length-1){stop();return;}selection++;render();},150);};
+el('follow').onchange=()=>{if(el('follow').checked){stop();selection=rows.length-1;render();}};
+document.addEventListener('keydown',event=>{if(['INPUT','SELECT','BUTTON'].includes(event.target.tagName))return;if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();stop();select(selection+(event.key==='ArrowRight'?1:-1));}});
+for(const id of ['probability','success'])el(id).onmousemove=event=>{if(!metadata||!rows.length)return;const plot=el(id).plot,x=event.clientX-el(id).getBoundingClientRect().left,i=Math.floor((x-plot.left)/plot.slot);if(i<0||i>=metadata.cells.length)return;const row=rows[selection];el('hover').textContent='Cell '+label(i)+' · applied '+pct(row.probabilities[i])+' · success '+pct(row.success_rates[i])+' · baseline '+pct(metadata.baseline[i])+' · minimum '+pct(metadata.baseline[i]*metadata.config.min_probability_fraction)+' · valid volume '+metadata.cell_volumes_m3[i].toFixed(2)+' m³ · '+row.window_counts[i]+' measured episodes';};
+window.addEventListener('resize',()=>requestAnimationFrame(render));
+setInterval(async()=>{if(!el('auto').checked)return;try{if(Date.now()-lastDiscovery>30000)await discover();await refresh();}catch(error){status(error.message);}},2000);
+discover().then(refresh).catch(error=>status(error.message));
+</script></body></html>

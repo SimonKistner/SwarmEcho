@@ -10,7 +10,7 @@ from swarmecho.training.orchestration import (
     generate_unique_seeds,
     pop_arg,
 )
-from swarmecho.training.train import train
+from swarmecho.training.launcher import train
 
 
 def main() -> None:

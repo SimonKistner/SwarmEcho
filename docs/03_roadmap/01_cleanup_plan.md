@@ -48,6 +48,11 @@ separately approved:
 The only feature removals currently approved are those explicitly named in the
 confirmed queue.
 
+The observation switches listed above are debugging-only legacy options, not
+design decisions or endorsed choices. Their mention here only records that
+they remain outside this cleanup scope; they must under no circumstances be
+considered candidates in response to any design question.
+
 ### D04 — Consolidate or remove analysis applications
 
 Denied. Keep the existing analysis interfaces and do not merge or remove them

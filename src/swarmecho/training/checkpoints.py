@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import warnings
 from pathlib import Path
@@ -19,6 +20,8 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     expected = dict(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
+        if expected.get("observe_visually_gated_target_displacement", False):
+            raise ValueError("Visually gated target displacement requires matching checkpoint observation metadata.")
         if expected.get("adaptive_size", False):
             raise ValueError("Adaptive voting checkpoints require matching action/observation metadata.")
         if expected["value_normalization"] != "none":
@@ -53,8 +56,11 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
             legacy_range = saved_env.get("visual_radius", legacy_range)
         actual["wall_sensing_ray_max_distance"] = legacy_range
     for contract in (actual, expected):
+        contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
         contract.setdefault("adaptive_size", False)
         contract.setdefault("vote_mode", None)
+        contract.setdefault("observe_seeing_target", False)
+        contract.setdefault("observe_visually_gated_target_displacement", False)
         # Normalize both generations of renamed counts without changing rays.
         old_wall_rays = contract.pop("wall_radar_bins", None)
         if old_wall_rays is not None:
@@ -88,6 +94,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
         "drone_radar_bins", "radar_mode", "radar_layout",
         "distance_bands", "radar_count_cap",
+        "visually_gated_target_displacement_scale_m",
         *[name for name in expected if name.startswith("observe_")],
     }
     critical.intersection_update(expected)
@@ -128,11 +135,14 @@ def save_checkpoint_history(
     num_envs: int,
     num_steps: int,
     prior_history: list,
+    total_steps: int | None = None,
 ) -> None:
     """Write cumulative training-step history next to an Orbax checkpoint."""
     path = Path(checkpoint_path)
     try:
-        current_session_steps = int(update) * int(num_envs) * int(num_steps)
+        current_session_steps = (int(update) * int(num_envs) * int(num_steps)
+                                 if total_steps is None else
+                                 int(total_steps) - sum(int(item["steps"]) for item in prior_history))
         updated_history = list(prior_history)
         updated_history.append({"run_name": run_name, "steps": current_session_steps})
         total_steps = sum(item["steps"] for item in updated_history)
@@ -141,10 +151,15 @@ def save_checkpoint_history(
                 {
                     "total_steps": total_steps,
                     "history": updated_history,
+                    "update": int(update),
+                    "num_envs": int(num_envs),
+                    "num_steps": int(num_steps),
                 },
                 indent=2,
             )
         )
+    except MemoryError:
+        raise
     except Exception as exc:
         terminal_print(f"[checkpoint-history] Failed to save step_history.json to {display_path(path)}: {exc}")
 
@@ -158,6 +173,7 @@ def save_model_checkpoint(
     num_envs: int,
     num_steps: int,
     prior_history: list,
+    total_steps: int | None = None,
 ) -> Path:
     """Replace and save one complete Orbax model checkpoint."""
     import orbax.checkpoint as ocp
@@ -180,6 +196,37 @@ def save_model_checkpoint(
         num_envs=num_envs,
         num_steps=num_steps,
         prior_history=prior_history,
+        total_steps=total_steps,
     )
+    return path
+
+
+def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=None, final=False,
+                             metrics=None, run_dir=None, **kwargs):
+    """Publish model, history and adaptive state together before marking ready."""
+    path = Path(path).absolute()
+    pending = path.with_name("." + path.name + "_pending")
+    save_model_checkpoint(model, pending, **kwargs)
+    if adaptive_spawn is not None:
+        adaptive_spawn.save(pending)
+    if adaptive_maps is not None:
+        adaptive_maps.save(pending)
+        if run_dir is not None:
+            selection = Path(run_dir) / "adaptive_maps" / "selection.json"
+            if selection.is_file():
+                shutil.copy2(selection, pending / "adaptive_map_selection.json")
+    if not (pending / "step_history.json").is_file():
+        raise RuntimeError("Checkpoint step history was not saved; recovery checkpoint cannot be published.")
+    (pending / "recovery_ready.json").write_text(json.dumps({
+        "recovery_id": os.environ.get("SWARMECHO_RECOVERY_ID"),
+        "run_name": kwargs["run_name"], "run_dir": str(run_dir) if run_dir else None,
+        "update": kwargs["update"], "num_envs": kwargs["num_envs"],
+        "final": bool(final), "metrics": metrics or {},
+    }, indent=2) + "\n", encoding="utf-8")
+    # No GPU work follows the readiness marker. Keep the previous published
+    # checkpoint intact until all device copies and controller saves succeed.
+    if path.exists():
+        shutil.rmtree(path)
+    pending.rename(path)
     return path
 

@@ -20,9 +20,9 @@ env:
   hold_chain_for: 50
   no_movement_termination_steps: 50
 
-  observe_target_vector: false
-  observe_base_vector: false
-  observe_coverage_probe: false
+  observe_target_vector: false # Debugging-only legacy; never a design choice or candidate for any design question.
+  observe_base_vector: false # Debugging-only legacy; never a design choice or candidate for any design question.
+  observe_coverage_probe: false # Debugging-only legacy; never a design choice or candidate for any design question.
   coverage_voxel_size: 2.5
 
   num_obstacles: 3

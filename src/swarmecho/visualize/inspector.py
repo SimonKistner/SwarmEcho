@@ -35,6 +35,7 @@ header{height:116px;display:grid;grid-template-columns:230px minmax(0,1fr) 310px
 header.has-map-navigation,header.has-frame-navigation{height:154px;grid-template-rows:40px 37px 38px 38px}header.has-map-navigation+#layout,header.has-frame-navigation+#layout{height:calc(100vh - 154px)}header.has-map-navigation.has-frame-navigation{height:192px;grid-template-rows:40px 37px 38px 38px 38px}header.has-map-navigation.has-frame-navigation+#layout{height:calc(100vh - 192px)}
 h1{font-size:18px;margin:0;letter-spacing:.04em}.tag{color:var(--cyan);font-weight:700}.meta{color:var(--muted)}
 #layout{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 116px)}#mainView{display:grid;grid-template-rows:minmax(0,2fr) minmax(0,1fr);min-width:0;min-height:0}#mainView.plots-hidden{grid-template-rows:minmax(0,1fr)}#scene{min-width:0;min-height:0}#rewardPlots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:auto minmax(0,1fr);column-gap:8px;min-width:0;min-height:0;padding:5px 8px 7px;border-top:1px solid var(--line);background:#0c1422}.reward-plots-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;font-size:11px;color:var(--muted)}#rewardPlotLegend{display:flex;flex-wrap:wrap;gap:3px 12px;justify-content:flex-end}.reward-key{white-space:nowrap}.reward-key i{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:5px}.reward-chart{min-width:0;min-height:0}.reward-unavailable{align-self:center;text-align:center;color:var(--muted);font-size:13px}.panel{padding:18px;background:var(--panel);border-left:1px solid var(--line);overflow:auto}
+.reward-plots-head{order:-1}#absoluteRewardPlot{order:2}.reward-debug-panel{order:1;display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}.reward-debug-controls{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;padding:4px 0;font-size:11px;color:var(--muted)}.reward-debug-controls label{display:flex;align-items:center;gap:5px}.reward-debug-controls select{width:auto;max-width:100%;padding:3px 5px;font-size:11px}#rewardComponentLegend{display:flex;flex-wrap:wrap;gap:4px 12px;max-height:55px;overflow:auto;padding:3px 6px;font-size:10px;color:var(--muted)}#rewardComponentLegend .reward-key i{height:8px;width:10px;border-radius:2px}
 .card{padding:14px;margin-bottom:12px;background:#0c1422;border:1px solid var(--line);border-radius:10px}.label{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
 .value{font-size:24px;font-weight:750}.row{display:flex;justify-content:space-between;gap:12px;margin:7px 0;color:var(--muted)}.row b{color:var(--text)}
 #layout{grid-template-columns:clamp(360px,33vw,470px) minmax(0,1fr) 280px}
@@ -595,6 +596,10 @@ function updateAdaptiveInspector(f){
   $('knownList').querySelectorAll('.known-item').forEach((item,index)=>{if(!index)return;let i=index-1;item.hidden=enabled&&!D.active[f][i];item.textContent=enabled?adaptiveDroneStatus(f,i):'D'+(i+1);item.title=enabled?'Lifetime ID '+D.adapt_ids[f][i]:''});
 }
 function updateKnownList(agentKnown,baseKnown){let statuses=[baseKnown,...agentKnown];$('knownList').querySelectorAll('.known-item').forEach((item,i)=>item.classList.toggle('known',Boolean(statuses[i])));updateAdaptiveInspector(frame)}
+const rewardDebugPanel=document.createElement('div');rewardDebugPanel.className='reward-debug-panel';
+$('relativeRewardPlot').replaceWith(rewardDebugPanel);
+rewardDebugPanel.innerHTML='<div class="reward-debug-controls"><label>View <select id="rewardDebugMode"><option value="breakdown" selected>Reward breakdown (alternative)</option><option value="relative">Relative advantage (current)</option></select></label><label id="rewardDroneControl">Drone <select id="rewardDebugDrone" aria-label="Drone for reward breakdown"></select></label></div><div id="relativeRewardPlot" class="reward-chart"></div><div id="rewardComponentLegend" aria-label="Reward component legend"></div>';
+const REWARD_COMPONENT_STYLES={coverage:['Exploration','#22d3ee'],collision:['Collision','#f87171'],finder:['Finder','#fbbf24'],target_found:['Shared target found','#60a5fa'],time_penalty:['Time penalty','#94a3b8'],gap_reduction:['Gap reduction','#4ade80'],peer_informing:['Peer informing','#a78bfa'],success:['Success','#a3e635'],success_noncontributor_penalty:['Noncontributor penalty','#fb7185'],no_movement_termination:['No movement termination','#d97706'],efficiency:['Chain efficiency','#2dd4bf'],reinforcement_reward:['Reinforcement','#f472b6'],decommission_reward:['Decommission','#c084fc'],rejected_call_penalty:['Rejected call penalty','#ef4444'],all_decommissioned_penalty:['All decommissioned penalty','#b91c1c'],useless_agetnst_at_success_penalty:['Unused agent penalty','#fb923c'],reward_by_reference:['Reference reward','#e879f9']};
 const REWARD_COLORS=['#60a5fa','#fb7185','#4ade80','#fbbf24','#a78bfa','#22d3ee','#f472b6','#fb923c','#a3e635','#c084fc'];
 let rewardPlotData=null;
 function prepareRewardPlots(data){
@@ -609,25 +614,68 @@ function prepareRewardPlots(data){
         running=running.map((value,i)=>value+values[i]);relativeRunning=relativeRunning.map((value,i)=>value+values[i]-minimum);
         absolute.push([...running]);relative.push([...relativeRunning]);perStep.push(values);relativeStep.push(stepRelative);
     }
-    return {steps,absolute,relative,perStep,relativeStep,agents,agentIndices};
+    const names=data.manifest.reward_component_names,components=data.reward_components;
+    const hasComponents=Array.isArray(names)&&names.length>0&&Array.isArray(components)&&components.length===terms.length&&components.every(row=>Array.isArray(row)&&row.length===agents&&row.every(values=>Array.isArray(values)&&values.length===names.length&&values.every(Number.isFinite)));
+    return {steps,absolute,relative,perStep,relativeStep,agents,agentIndices,componentNames:hasComponents?names:null,components:hasComponents?components:null,componentCache:new Map()};
 }
 function renderRewardLegend(){const legend=$('rewardPlotLegend');legend.replaceChildren();if(!rewardPlotData)return;for(const i of rewardPlotData.agentIndices){const item=document.createElement('span'),swatch=document.createElement('i');item.className='reward-key';swatch.style.background=REWARD_COLORS[i%REWARD_COLORS.length];item.append(swatch,'D'+(i+1));legend.appendChild(item)}}
 function rewardAxisRange(rows,agentIndices){let lo=0,hi=0;for(const row of rows)for(const i of agentIndices){const value=row[i];lo=Math.min(lo,value);hi=Math.max(hi,value)}const padding=Math.max((hi-lo)*.08,.1);return [lo-padding,hi+padding]}
+function rewardUnavailable(element,message){if(element._fullLayout)Plotly.purge(element);element.__rewardData=null;element.classList.add('reward-unavailable');element.textContent=message}
+function updateRewardDroneOptions(currentFrame){
+    const select=$('rewardDebugDrone'),active=D.active?.[currentFrame]||[];
+    const indices=rewardPlotData.agentIndices.filter(i=>Boolean(active[i]));
+    const key=indices.join(',');
+    if(select.dataset.activeDrones!==key||select.options.length!==indices.length){const previous=select.value;select.replaceChildren(...indices.map(i=>{const option=document.createElement('option');option.value=String(i);option.textContent='D'+(i+1);return option}));if(indices.some(i=>String(i)===previous))select.value=previous;select.dataset.activeDrones=key}
+    select.disabled=!indices.length;return indices.length?Number(select.value):null;
+}
+function rewardComponentSeries(data,drone){
+    if(data.componentCache.has(drone))return data.componentCache.get(drone);
+    const series=data.componentNames.map((name,index)=>{let running=0;const cumulative=data.components.map(row=>running+=row[drone][index]);const [label,color]=REWARD_COMPONENT_STYLES[name]||[name.replaceAll('_',' '),REWARD_COLORS[index%REWARD_COLORS.length]];return {name,label,color,index,cumulative}}).filter(item=>data.components.some(row=>row[drone][item.index]!==0));
+    data.componentCache.set(drone,series);return series;
+}
+function componentLegend(series){const legend=$('rewardComponentLegend');legend.replaceChildren();for(const {label,color} of [...series,{label:'Net reward',color:'#e5eefc'}]){const item=document.createElement('span'),swatch=document.createElement('i');item.className='reward-key';swatch.style.background=color;item.append(swatch,label);legend.appendChild(item)}}
+async function paintRewardBreakdown(currentFrame,data,common,options){
+    const element=$('relativeRewardPlot'),drone=updateRewardDroneOptions(currentFrame);
+    if(!data.components){$('rewardComponentLegend').replaceChildren();rewardUnavailable(element,'Data not available (legacy replay)');return}
+    if(drone===null){$('rewardComponentLegend').replaceChildren();rewardUnavailable(element,'No active drones at this step.');return}
+    element.classList.remove('reward-unavailable');if(!element._fullLayout)element.replaceChildren();
+    const series=rewardComponentSeries(data,drone),x=data.steps.slice(0,currentFrame+1),traces=[];
+    const positive=Array(x.length).fill(0),negative=Array(x.length).fill(0);
+    for(const item of series){
+        const values=item.cumulative.slice(0,currentFrame+1),customdata=values.map((value,f)=>[value,data.components[f][drone][item.index]]);
+        for(const sign of [1,-1]){
+            const y=values.map(value=>sign>0?Math.max(value,0):Math.min(value,0));
+            if(!y.some(value=>value!==0))continue;
+            const bounds=sign>0?positive:negative;y.forEach((value,i)=>bounds[i]+=value);
+            traces.push({type:'scatter',mode:'lines',name:item.label,x,y,customdata,stackgroup:sign>0?'rewards':'penalties',line:{color:item.color,width:.7},fillcolor:item.color,hoveron:'fills',text:item.label,hoverinfo:'text',hovertemplate:item.label+'<extra></extra>'});
+        }
+    }
+    traces.push({type:'scatter',mode:'lines',name:'Net reward',x,y:data.absolute.slice(0,currentFrame+1).map(row=>row[drone]),line:{color:'#e5eefc',width:1.4,dash:'dot'},hovertemplate:'Net reward · D'+(drone+1)+'<br>Step %{x}<br>Cumulative %{y:.2f}<extra></extra>'});
+    componentLegend(series);
+    const bounds=positive.map((value,i)=>[negative[i],value]),range=rewardAxisRange(bounds,[0,1]);
+    await Plotly.react(element,traces,{...common,hovermode:'closest',title:{text:'Cumulative reward components · D'+(drone+1),font:{size:12,color:'#e5eefc'},x:0,xanchor:'left'},yaxis:{...common.yaxis,range}},options);element.__rewardData=null;
+}
 async function paintRewardPlots(currentFrame){
     if(mode!=='replay'||$('rewardPlots').classList.contains('hidden'))return Promise.resolve();
     const data=rewardPlotData;
-    if(!data){for(const id of ['absoluteRewardPlot','relativeRewardPlot']){if($(id)._fullLayout)Plotly.purge($(id));$(id).__rewardData=null;$(id).classList.add('reward-unavailable');$(id).textContent='Per-agent reward data is unavailable for this replay.'}return Promise.resolve()}
+    const breakdown=$('rewardDebugMode').value==='breakdown';$('rewardDroneControl').classList.toggle('hidden',!breakdown);$('rewardComponentLegend').classList.toggle('hidden',!breakdown);
+    const debugPlot=$('relativeRewardPlot');if(debugPlot.__rewardMode!==breakdown){if(debugPlot._fullLayout)Plotly.purge(debugPlot);debugPlot.__rewardData=null;debugPlot.__rewardMode=breakdown}
+    if(!data){$('rewardDebugDrone').replaceChildren();$('rewardDebugDrone').disabled=true;$('rewardComponentLegend').replaceChildren();for(const id of ['absoluteRewardPlot','relativeRewardPlot'])rewardUnavailable($(id),id==='relativeRewardPlot'&&breakdown?'Data not available (legacy replay)':'Per-agent reward data is unavailable for this replay.');return}
     const x=data.steps.slice(0,currentFrame+1),xEnd=data.steps[data.steps.length-1],xStart=data.steps[0],xRange=[xStart,Math.max(xStart+1,xEnd)];
     const common={paper_bgcolor:'#0c1422',plot_bgcolor:'#0c1422',font:{color:'#91a4c3',size:10},margin:{l:62,r:12,t:23,b:25},showlegend:false,hovermode:'x unified',xaxis:{title:{text:'Step',font:{size:10}},range:xRange,gridcolor:'#26344d',zeroline:false,tickfont:{size:10}},yaxis:{gridcolor:'#26344d',zerolinecolor:'#52627b',tickfont:{size:10}}};
     const options={responsive:true,displaylogo:false,displayModeBar:false};
-    const plots=[['absoluteRewardPlot',data.absolute,'Cumulative reward · drones',data.perStep],['relativeRewardPlot',data.relative,'Relative advantage · above step minimum',data.relativeStep]];
-    return Promise.all(plots.map(([id,rows,title,changes])=>{
+    const plots=[['absoluteRewardPlot',data.absolute,'Cumulative reward · drones',data.perStep]];
+    if(!breakdown)plots.push(['relativeRewardPlot',data.relative,'Relative advantage · above step minimum',data.relativeStep]);
+    const jobs=plots.map(([id,rows,title,changes])=>{
         const element=$(id);element.classList.remove('reward-unavailable');
+        if(!element._fullLayout)element.replaceChildren();
         const traces=data.agentIndices.map(i=>({type:'scatter',mode:'lines',name:'D'+(i+1),x,y:rows.slice(0,currentFrame+1).map(row=>row[i]),customdata:changes.slice(0,currentFrame+1).map(row=>row[i]),line:{color:REWARD_COLORS[i%REWARD_COLORS.length],width:1.2},hovertemplate:'D'+(i+1)+' · step %{x}<br>Cumulative %{y:.2f}<br>This step %{customdata:.2f}<extra></extra>'}));
         const range=rewardAxisRange(rows.slice(0,currentFrame+1),data.agentIndices);
         if(element.__rewardData===data&&element._fullLayout&&element.data.length===traces.length)return Plotly.update(element,{x:traces.map(trace=>trace.x),y:traces.map(trace=>trace.y),customdata:traces.map(trace=>trace.customdata)},{'yaxis.range':range});
         return Plotly.react(element,traces,{...common,title:{text:title,font:{size:12,color:'#e5eefc'},x:0,xanchor:'left'},yaxis:{...common.yaxis,range}},options).then(()=>{element.__rewardData=data});
-    }));
+    });
+    if(breakdown)jobs.push(paintRewardBreakdown(currentFrame,data,common,options));
+    return Promise.all(jobs);
 }
 let rewardRenderPromise=null,rewardRequestedFrame=null;
 function renderRewardPlots(currentFrame){
@@ -635,6 +683,8 @@ function renderRewardPlots(currentFrame){
     if(!rewardRenderPromise)rewardRenderPromise=(async()=>{do{const requested=rewardRequestedFrame;rewardRequestedFrame=null;await paintRewardPlots(requested)}while(rewardRequestedFrame!==null)})().finally(()=>{rewardRenderPromise=null});
     return rewardRenderPromise;
 }
+$('rewardDebugMode').onchange=()=>renderRewardPlots(frame).then(resizeMainView);
+$('rewardDebugDrone').onchange=()=>renderRewardPlots(frame);
 function moveFrame(direction){if(mode==='replay'&&D){const result=draw(Math.max(0,Math.min(D.manifest.frames-1,frame+direction)));anchorPlayback(result)}}
 $('timeline').addEventListener('keydown',event=>{if(event.key==='ArrowUp'){event.preventDefault();event.target.blur();setNavigationTrack($('mapNavigation').classList.contains('hidden')?'steps':'maps')}else if(event.key==='ArrowDown'){event.preventDefault();setNavigationTrack('frames')}});
 function draw(f){frame=+f;let p=D.position[f],active=D.active[f],known=D.target_known[f],tr=[],agents=p.filter((_,i)=>active[i]),b=D.base_position[f],t=D.target_position[f],visualRadius=D.manifest.visual_radius_m||4,commRadius=D.manifest.comm_radius_m||5,baseCommRadius=D.manifest.comm_radius_base_m||6,baseKnown=baseKnowsTarget(f,b);if($('showShell').checked)tr.push(boxTrace(D.manifest.world_size_m||[20,20,20]));tr.push(...buildingTraces());if(D.obstacle_min)D.obstacle_min[f].forEach((lo,i)=>{tr.push(cuboidMesh(lo,D.obstacle_max[f][i]));tr.push(cuboidLines(lo,D.obstacle_max[f][i],'rgba(255,190,100,.8)'))});if($('showReplayPath').checked&&replayPath){const path=replayPath.path,color='hsl(70 85% 60%)';tr.push(lineTrace(path,color,7));if($('showReplayPathNodes').checked&&path.length>2){const nodes=path.slice(1,-1);tr.push({type:'scatter3d',mode:'markers',x:nodes.map(v=>v[0]),y:nodes.map(v=>v[1]),z:nodes.map(v=>v[2]),marker:{size:5,color:'#22d3ee',line:{color:'#e5eefc',width:1}},hovertemplate:'Path waypoint<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>'})}}if($('showVisualRange').checked&&agents.length)tr.push(sphereTrace(agents,visualRadius,'#fbbf24',+$('visualOpacity').value));if($('showCommRange').checked&&agents.length)tr.push(sphereTrace(agents,commRadius,'#a78bfa',+$('commOpacity').value));if($('showCommRange').checked)tr.push(sphereTrace([b],baseCommRadius,'#a78bfa',+$('commOpacity').value));updateKnownList(known,baseKnown);

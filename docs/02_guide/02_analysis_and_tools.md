@@ -11,6 +11,40 @@ cross-run configuration and telemetry browser, including runs. Its code
 and primary launch behavior are preserved. Historical media browsing remains
 available where a run contains media.
 
+## Adaptive spawning dashboard
+
+```bash
+uv run swarmecho-spawn-dashboard root=outputs port=8767 open=false
+# Or restrict discovery to one producing run:
+uv run swarmecho-spawn-dashboard root=outputs/G01_adaptive_spawn
+```
+
+Open `http://127.0.0.1:8767` in a browser. This independent dashboard requires
+neither W&B nor video generation. Its timeline, previous/next controls and Play
+button step through training. Cells are sorted by Manhattan distance to the base
+with consistent colours and horizontal alignment across probability and success
+bar charts. A large plot shows thin per-cell probability histories through the
+selected update; clicking a cell's legend highlights its line. Individual
+probability plots follow in three columns with the same ordering. The dashed
+reference in each detail plot is that cell's original volume-based probability.
+
+Each enabled training run writes `adaptive_spawn/metadata.json` and an append-only
+`adaptive_spawn/history.jsonl`. One small CPU-side record is saved after each PPO
+update using outcomes already transferred for the training buffer; there are no
+callbacks, disk writes or additional device-to-host transfers within the JAX
+rollout. This is more frequent than evaluation and avoids repeatedly rewriting
+the full history. Records include **smoothed probabilities applied during the
+selected rollout** and **per-cell window success measured at its end**. The next
+rollout's computed probabilities are also retained in the journal.
+
+The page polls incremental records every two seconds, with auto refresh and
+follow-latest controls. Browsing an earlier update remains stable during refresh.
+Incomplete trailing writes remain invisible until completed; interrupted malformed
+records are skipped with a visible count. Writes are closed per update for live
+visibility, without forcing a costly disk `fsync` every time. Resume markers retain
+the original journal but roll the displayed history back to the selected checkpoint
+before adding the new session. Metadata and checkpoint state use atomic replacement.
+
 ## inspector
 
 ```bash
@@ -95,14 +129,32 @@ change during an episode, the reference stays tied to the first frame and the
 sidebar labels it as such.
 
 Reward debug plots are off by default and can be enabled in Playback. Leave them off to
-give the 3D view the full centre area. The left timeline shows cumulative
-reward for each drone. The right timeline shows each drone's cumulative
-relative advantage. At every step it subtracts the lowest drone reward before
-accumulating, matching the former 2D video view.
+give the 3D view the full centre area. The left plot defaults to **Reward
+breakdown (alternative)**. Select one drone from those active at the displayed
+frame to see its cumulative reward components as colored stacked areas. Positive
+components stack above zero and penalties below it; the dotted net reward curve
+shows their sum. The legend below the chart identifies each color, and hovering
+an area shows its reward name without permanent labels inside the plot. The drone
+selection is retained while it remains active. **Relative advantage (current)**
+in the View dropdown restores the previous comparison: at every step it subtracts
+the lowest drone reward before accumulating. The right plot shows cumulative
+reward for every drone.
 Both plots advance with the frame controls and playback speed. Their x axis
 uses replay steps; the Episode reward remains the aggregate reward for the
 selected frame. Replays without per-drone reward data show an unavailable
-message in the plot area.
+message in the plot area. The breakdown specifically shows **Data not available
+(legacy replay)** for older recordings; the inspector never reconstructs components.
+
+All policy and recorded-action replay collectors now capture the additive terms
+returned by the reward function at each transition, including adaptive population
+and reference rewards. The NPZ retains `reward_terms` as the historical per-drone
+total and adds `reward_components` with shape `(frames, agents, components)`;
+the JSON manifest's `reward_component_names` labels that final axis. The initial
+frame has zero reward and components. Component amounts include the terminal
+transition and are trimmed to the same frames as the recorded states. Event
+counters and the positive/negative reference diagnostics are excluded because
+they are not additional rewards. The writer checks that components sum to the
+recorded totals before saving. Public exports retain this breakdown too.
 
 For the `solo_B02c_a4c4_15x15_rewardChange` 180M `random_eval_0001`
 comparison, run `uv run python tools/rescore_b02c_replay.py` from the repository
@@ -179,3 +231,12 @@ It requires the project's Python/JAX environment.
 `swarmecho-validate` runs the small rollout/PPO validator.
 `swarmecho-benchmark` benchmarks the environment.
 The roadmap and radar diagnostic scripts remain under `tests/` and `tools/`.
+# Geo experiment reports
+
+The geo probe runner includes an observation-ambiguity audit. Open
+[`geo_experiments/outputs/index.html`](../../geo_experiments/outputs/index.html)
+for the report sidebar and the in-report comparison dropdown. Numeric table values
+are matched by section/table/row/column meaning, units and version; figures are
+unchanged. See the [geo runner guide](../../geo_experiments/README.md) for settings,
+historical audit import and compact source-data conventions.
+

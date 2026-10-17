@@ -1,0 +1,27 @@
+# Inherits common probe/report defaults from config.yaml.
+experiment: own_cell
+run:
+  name: own_cell_probes
+policy:
+  checkpoint: outputs/G01_static_targetVisual/checkpoints/ckpt_000351
+dataset:
+  eval_batch_size: 4 # Full team input histories are temporary, bounded by this batch.
+  max_episodes: 10000 # Many snapshots per episode; this is a safety cap, not the sample quota.
+  path: null
+sampling:
+  buffer_seconds: 0.2
+  uniform_cells: true # Split budgets divided across eligible cells; reject full buckets.
+  # Absolute map-grid XYZ cells, excluded from own-position sample labels.
+  exclude_cells:
+    - [0, 2, 1]
+    - [0, 0, 2]
+    - [2, 2, 1]
+    - [1, 1, 2]
+    - [0, 1, 1]
+    - [2, 0, 0]
+    - [0, 1, 0]
+    - [0, 1, 2]
+    - [1, 1, 1]
+    - [0, 0, 0]
+audit:
+  every: 1 # Full histories are required for exact prefix deduplication.

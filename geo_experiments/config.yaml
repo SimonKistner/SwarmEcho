@@ -1,0 +1,48 @@
+# Set policy.checkpoint below, then run from the repository root:
+# uv run python geo_experiments/run.py run.name=first_target_probes
+# All relative paths are resolved against the repository, not the shell cwd.
+run:
+  name: target_probes
+  output_root: geo_experiments/outputs
+  timezone: Europe/Berlin
+
+policy:
+  level: G01_static # Normal level definition supplies map and policy settings.
+  checkpoint: outputs\G01_static\checkpoints\ckpt_000330 # Historical Phase 0 (136 inputs); replace with a new visual G01 checkpoint (139 inputs).
+
+dataset:
+  train_samples: 10000
+  validation_samples: 1000 # Used only for early stopping.
+  test_samples: 5000 # Held out from training and model selection.
+  eval_batch_size: 256
+  max_episodes: 100000 # Stop with an explicit error if collection falls short.
+  seed: 467789
+  # Optional previous run's data.npz: skips rollout collection after
+  # validating its checkpoint/level/map provenance. Copied into this run.
+  path: null
+  split_seed: 20261013
+
+probe:
+  hidden_sizes: [256, 128]
+  seeds: [0, 1, 2] # Six combinations, trained sequentially for each seed.
+  epochs: 150
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 15
+  min_delta: 0.00001
+
+audit:
+  enabled: true
+  samples: 5000 # First matched collection episodes; capped at total dataset size.
+  every: 1 # Record every step through finder capture.
+  batch_size: 32 # Smaller history batches; ordinary collection resumes afterwards.
+
+distance:
+  # null uses drone_radius + obstacle_planning_clearance_m.
+  # Distances count six-neighbour cell transitions through clearance-safe
+  # shared-face portals; they are NOT metre distances or plain L1 distance.
+  clearance_m: null
+
+report:
+  dpi: 160

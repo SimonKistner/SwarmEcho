@@ -63,6 +63,7 @@ class ResumeState:
     start_update: int
     step_offset: int
     prior_history: list[dict[str, Any]]
+    completed_run_steps: int = 0
 
 
 def resolve_resume_state(training: Any, run_name: str, num_envs: int, num_steps: int) -> ResumeState:
@@ -100,7 +101,10 @@ def resolve_resume_state(training: Any, run_name: str, num_envs: int, num_steps:
         prior_history = history
     inferred_offset = max(0, total_steps - start_update * num_envs * num_steps)
     manual = cfg_value(training, "checkpoint_step_offset")
-    return ResumeState(start_update, int(manual) if manual is not None else inferred_offset, prior_history)
+    completed_run_steps = (max(0, total_steps - sum(int(row["steps"]) for row in prior_history))
+                           if mode == "resume" else 0)
+    return ResumeState(start_update, int(manual) if manual is not None else inferred_offset,
+                       prior_history, completed_run_steps)
 
 
 def schedule_due(update: int, frequency: int, offset: int = 0) -> bool:
@@ -195,7 +199,7 @@ def init_wandb(
     group = cfg_value(logging, "wandb_group")
     if group:
         kwargs["group"] = str(group)
-    if cfg_value(training, "checkpoint_path"):
+    if cfg_value(training, "checkpoint_path") or cfg_value(cfg_value(training, "oom_recovery"), "enabled", False):
         wandb_dir = run_dir / "wandb"
         candidates = (
             sorted(

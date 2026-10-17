@@ -38,6 +38,13 @@ The system operates under the **Centralized Training, Decentralized Execution (C
 The Actor policy is shared across all agents (parameter sharing) and executed decentralized via vectorization (`vmap`).
 
 ### 2.1 Ego-centric Observation Space
+
+> **Historical debugging scaffold only:** the base/target odometry vectors and
+> local coverage probes shown below are legacy debugging options. Their
+> inclusion in this archived specification is not a design decision or
+> endorsement, and they must under no circumstances be considered when
+> answering any design question.
+
 Each agent $i$ receives a local observation vector of dimension $D = 9 + 16 + 4B = 57$ (for $B = 8$ angular radar bins), structured as follows:
 
 ```

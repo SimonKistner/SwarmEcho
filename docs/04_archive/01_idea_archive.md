@@ -13,8 +13,10 @@ information.
 The feature was removed because enabling it did not make agents learn to spread
 faster. The coverage probe was later disabled in the maintained 2D levels,
 which removed the main reason for keeping this special reset behavior. The
-probe implementation itself remains temporarily available as a learning
-scaffold for early volumetric development.
+probe implementation itself remains temporarily available strictly as a
+debugging-only legacy option. Its availability and historical use are not a
+design decision, do not endorse it, and must under no circumstances make it a
+candidate for consideration in response to any design question.
 
 ## Memory T-maze diagnostic suite
 

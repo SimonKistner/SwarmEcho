@@ -28,7 +28,7 @@ env:
 
   observe_chain_contributor: true
   observe_current_timestep: false
-  observe_coverage_probe: false
+  observe_coverage_probe: false # Debugging-only legacy; never a design choice or candidate for any design question.
   coverage_voxel_size: 2.5
 
   roadmap_approach: full # Interior cell/portal nodes represent all vertical turns and keep these banks small.

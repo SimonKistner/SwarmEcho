@@ -1,0 +1,146 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Lifted corner connector versus all previous stages ---
+Rule: one forward XY intersection; choose its nearest allowed height analytically.
+Scope: non-horizontal windows with B-C gap <2m; no turn-angle bins.
+ Agents | Corrected | Horizontal | Doorways | Lifted | New change | Final % | visual
+--------+-----------+------------+----------+--------+------------+---------+----------------------------------------
+      0 |         0 |          0 |        0 |      0 |         +0 |   0.00% | 
+      1 |         5 |          5 |      216 |    216 |         +0 |   5.40% | IIIII
+      2 |       481 |        481 |    1,164 |  1,363 |       +199 |  34.08% | IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+      3 |       992 |        992 |      443 |    571 |       +128 |  14.28% | IIIIIIIIIIIIII
+      4 |       288 |        288 |      313 |    199 |       -114 |   4.97% | IIIII
+      5 |       175 |        175 |      337 |    135 |       -202 |   3.38% | III
+      6 |       268 |        392 |      238 |    257 |        +19 |   6.42% | IIIIII
+      7 |       264 |        378 |      254 |    553 |       +299 |  13.82% | IIIIIIIIIIIIII
+      8 |       238 |         78 |      621 |    678 |        +57 |  16.95% | IIIIIIIIIIIIIIIII
+      9 |        78 |        503 |      324 |     28 |       -296 |   0.70% | I
+     10 |       503 |        618 |       90 |      0 |        -90 |   0.00% | 
+     11 |       618 |         90 |        0 |      0 |         +0 |   0.00% | 
+     12 |        90 |          0 |        0 |      0 |         +0 |   0.00% | 
+
+Targets additionally improved: 1,484/4,000 (37.10%)
+Additional drones saved beyond doorway stage: 1,585; maximum additional saving on one target: 2
+Mean agents (corrected -> horizontal -> doorways -> lifted): 6.235 -> 5.822 -> 4.700 -> 4.304
+Targets requiring >7 agents (corrected -> horizontal -> doorways -> lifted): 1,527 (38.17%) -> 1,289 (32.23%) -> 1,035 (25.88%) -> 706 (17.65%)
+Additional targets moved to <=7 agents: 329
+No roadmap route: 0/4,000
+Previous horizontal/doorway replacements reproduced: 1,651 / 4,489
+
+Windows inspected (including revisits): 17,268
+Eligible lifted-corner attempts: 2,473; accepted: 1,585; rejected: 888
+  right horizontal distance exceeds range: 540
+  no forward horizontal intersection: 289
+  no height with left visibility: 48
+  no height with point clearance: 10
+  intersection outside drone bounds: 1
+
+--- Accepted connector examples: up to 5 ---
+Sample 10 (zero-based); accepted
+  Agents corrected/horizontal/doorways/lifted: 11/10/9/8; target=(12.133007260757557, 1.4183302137146145, 13.497827360038546)
+  A (drone): (3.1500000953674316, 5.474999904632568, 8.149999618530273)
+  B (drone): (3.1500000953674316, 10.475000381469727, 11.8125)
+  C (drone): (4.525000095367432, 11.850000381469727, 11.8125)
+  D (drone): (10.475000381469727, 11.850000381469727, 11.8125)
+  XY intersection: (3.1500000953674316, 11.850000381469727)
+  Allowed height intervals (m): [(11.174039855869653, 14.019809203709928)]
+  P: (3.1500000953674316, 11.850000381469727, 11.8125)
+  A-P/P-D lengths: 7.352179 / 7.325000m
+Sample 98 (zero-based); accepted
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/8; target=(1.9842624228375376, 3.5703558708813197, 12.260115892744542)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 11.8125)
+  C (drone): (4.525000095367432, 3.1500000953674316, 11.8125)
+  D (target): (1.9842624228375376, 3.5703558708813197, 12.260115892744542)
+  XY intersection: (5.474999904632568, 2.992826093942854)
+  Allowed height intervals (m): [(10.474901199340822, 13.638170148856986)]
+  P: (5.474999904632568, 2.992826093942854, 11.8125)
+  A-P/P-D lengths: 8.857174 / 3.566392m
+Sample 329 (zero-based); accepted
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/8; target=(0.6987538091088157, 3.322450966697997, 10.73492071464509)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 10.475000381469727)
+  C (drone): (4.525000095367432, 3.1500000953674316, 10.475000381469727)
+  D (target): (0.6987538091088157, 3.322450966697997, 10.73492071464509)
+  XY intersection: (5.474999904632568, 3.1071831195078254)
+  Allowed height intervals (m): [(10.474901244665137, 12.198181784890243)]
+  P: (5.474999904632568, 3.1071831195078254, 10.475000381469727)
+  A-P/P-D lengths: 8.844533 / 4.788155m
+Sample 336 (zero-based); accepted
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/8; target=(3.7655564324427444, 3.3246191239432514, 13.176625248346646)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 13.149999618530273)
+  C (drone): (4.525000095367432, 3.1500000953674316, 13.149999618530273)
+  D (target): (3.7655564324427444, 3.3246191239432514, 13.176625248346646)
+  XY intersection: (5.474999904632568, 2.931566455138949)
+  Allowed height intervals (m): [(10.474901199340822, 13.583254484037948)]
+  P: (5.474999904632568, 2.931566455138949, 13.149999618530273)
+  A-P/P-D lengths: 9.018169 / 1.754251m
+Sample 501 (zero-based); accepted
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/8; target=(3.712201198749532, 1.7895042208028094, 13.506367104752625)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 13.149999618530273)
+  C (drone): (4.525000095367432, 1.850000023841858, 13.149999618530273)
+  D (target): (3.712201198749532, 1.7895042208028094, 13.506367104752625)
+  XY intersection: (5.474999904632568, 1.9207075525892239)
+  Allowed height intervals (m): [(10.474901199340822, 13.496713597366067)]
+  P: (5.474999904632568, 1.9207075525892239, 13.149999618530273)
+  A-P/P-D lengths: 10.018970 / 1.803239m
+
+--- Rejected attempt examples: up to 5 ---
+Sample 18 (zero-based); no forward horizontal intersection
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/9; target=(4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 13.149999618530273)
+  C (drone): (4.525000095367432, 3.1500000953674316, 13.149999618530273)
+  D (target): (4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  XY intersection: not constructed
+  Allowed height intervals (m): []
+  P: not constructed
+Sample 28 (zero-based); right horizontal distance exceeds range
+  Agents corrected/horizontal/doorways/lifted: 11/10/9/8; target=(11.033698136423114, 5.630910069236728, 13.178270207426705)
+  A (drone): (3.1500000953674316, 11.850000381469727, 11.8125)
+  B (drone): (10.475000381469727, 11.850000381469727, 11.8125)
+  C (drone): (10.596652692202008, 10.495839387572387, 12.10988637785761)
+  D (target): (11.033698136423114, 5.630910069236728, 13.178270207426705)
+  XY intersection: (10.475000381469727, 11.850000381469727)
+  Allowed height intervals (m): []
+  P: not constructed
+Sample 3961 (zero-based); intersection outside drone bounds
+  Agents corrected/horizontal/doorways/lifted: 12/11/10/9; target=(4.340105508447199, 4.349446920355085, 11.760784794358038)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 11.8125)
+  C (drone): (4.525000095367432, 3.1500000953674316, 11.8125)
+  D (target): (4.340105508447199, 4.349446920355085, 11.760784794358038)
+  XY intersection: (5.474999904632568, -3.0128317859874256)
+  Allowed height intervals (m): []
+  P: not constructed
+Sample 71 (zero-based); no height with left visibility
+  Agents corrected/horizontal/doorways/lifted: 8/7/6/6; target=(1.518917728699824, 5.903663051525316, 13.94057162071041)
+  A (drone): (3.1500000953674316, 3.1500000953674316, 8.149999618530273)
+  B (drone): (3.1500000953674316, 5.474999904632568, 8.149999618530273)
+  C (drone): (2.87112999410869, 5.548289480697388, 9.140027733353913)
+  D (target): (1.518917728699824, 5.903663051525316, 13.94057162071041)
+  XY intersection: (3.1500000953674316, 5.474999904632568)
+  Allowed height intervals (m): []
+  P: not constructed
+Sample 325 (zero-based); no height with point clearance
+  Agents corrected/horizontal/doorways/lifted: 3/3/2/2; target=(3.892599906973195, 6.12801409055759, 4.364552519472081)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (6.850001, 10.0, 1.8125000596046448)
+  C (drone): (6.749027025004236, 9.409018212198143, 1.8996334390242888)
+  D (target): (3.892599906973195, 6.12801409055759, 4.364552519472081)
+  XY intersection: (7.1256261807307935, 9.841594760132933)
+  Allowed height intervals (m): []
+  P: not constructed
+
+Height intervals account for endpoint spheres, point clearance, signal occlusion and local reachability.
+Exactly one resulting point is checked; no placement search or simulation is performed.
+Accepted points independently pass full clearance, range, visibility and reachability checks.
+Counts describe constructed geometric chains, not global minima or policy success.
+Previous stages are preprocessing only; earlier inspection reports are not printed.
+
+Preparation: 0.20s; target inspection: 7.63s

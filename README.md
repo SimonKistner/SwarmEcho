@@ -23,6 +23,7 @@ The `src/swarmecho/` package separates configuration, the environment, models, t
 ```text
 SwarmEcho/
 ├── docs/                      Technical reference, guides, and project history
+├── geo_experiments/           Frozen-policy target probes, configs and static reports
 ├── src/swarmecho/
 │   ├── core/                  Level loading, configuration, and utilities
 │   ├── curriculum_config/     3D levels, maps, and building editor
@@ -33,6 +34,11 @@ SwarmEcho/
 │   └── visualize/             Replay data and interactive spatial inspector
 └── README.md
 ```
+
+The [Phase 0 target-probe suite](geo_experiments/README.md) evaluates target-cell
+and target-storey information in the finder GRU, outgoing message and base-stored
+message. It saves comparable static figures and source data in named,
+timestamped experiment folders.
 
 ---
 

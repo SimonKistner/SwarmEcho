@@ -1,0 +1,124 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Actual-runtime static chain-hold certification ---
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 128; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 216 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 216/216; chain-hold success 216/216; strictly certified 216/216; 11.53s
+
+Checking k=2: 1,408 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 1,408/1,408; chain-hold success 1,408/1,408; strictly certified 1,408/1,408; 9.16s
+
+Checking k=3: 622 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 622/622; chain-hold success 622/622; strictly certified 622/622; 8.94s
+
+Checking k=4: 415 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 410/415; chain-hold success 410/415; strictly certified 410/415; 9.08s
+
+Checking k=5: 740 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 740/740; chain-hold success 740/740; strictly certified 740/740; 9.32s
+
+Checking k=6: 596 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 596/596; chain-hold success 596/596; strictly certified 596/596; 9.56s
+
+Checking k=7: 3 targets; preparing/compiling runtime kernel...
+k=7: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 8.87s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |     216 |             216 |                  216 |               216
+      2 |   1,408 |           1,408 |                1,408 |             1,408
+      3 |     622 |             622 |                  622 |               622
+      4 |     415 |             410 |                  410 |               410
+      5 |     740 |             740 |                  740 |               740
+      6 |     596 |             596 |                  596 |               596
+      7 |       3 |               3 |                    3 |                 3
+
+Certified assignments: 3,995/4,000 (99.88%)
+Runtime hold successes: 3,995/4,000 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.476822 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25, 7:30
+Runtime checking time, including first compilation: 66.47s
+
+Failure reasons (may overlap):
+  first runtime tick not fully connected: 5
+  first runtime hold counter not one: 5
+  connectivity failed during hold window: 5
+  runtime chain-hold success not reached: 5
+Failed zero-based sample indices: 116, 192, 1434, 3288, 3556
+
+--- Failed assignment examples: up to 5 ---
+Sample 116; k=4; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(1.2489726895563409, 5.8175966484288155, 12.828960107092875); runtime float32=(1.2489726543426514, 5.817596435546875, 12.828960418701172)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False, False, False, False]; conn_base=[True, True, True, True]; conn_target=[False, False, False, False]
+  Drone 1: proposed64=(11.973685263157895, 10.0, 3.1499989999999998)
+    injected32=(11.973685264587402, 10.0, 3.149998903274536); final32=(11.973685264587402, 10.0, 3.149998903274536)
+  Drone 2: proposed64=(10.05480835107629, 3.1500000953674316, 7.487499713897705)
+    injected32=(10.054808616638184, 3.1500000953674316, 7.487499713897705); final32=(10.054808616638184, 3.1500000953674316, 7.487499713897705)
+  Drone 3: proposed64=(3.1500000953674316, 3.1500000953674316, 8.149999618530273)
+    injected32=(3.1500000953674316, 3.1500000953674316, 8.149999618530273); final32=(3.1500000953674316, 3.1500000953674316, 8.149999618530273)
+  Drone 4: proposed64=(3.1500000953674316, 5.474999904632568, 8.217157619858703)
+    injected32=(3.1500000953674316, 5.474999904632568, 8.217157363891602); final32=(3.1500000953674316, 5.474999904632568, 8.217157363891602)
+Sample 192; k=4; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(3.335108777731851, 8.176101420042873, 12.984032985312618); runtime float32=(3.335108757019043, 8.176101684570312, 12.98403263092041)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False, False, False, True]; conn_base=[True, True, True, False]; conn_target=[False, False, False, True]
+  Drone 1: proposed64=(11.973685263157895, 10.0, 3.1499989999999998)
+    injected32=(11.973685264587402, 10.0, 3.149998903274536); final32=(11.973685264587402, 10.0, 3.149998903274536)
+  Drone 2: proposed64=(10.05480835107629, 3.1500000953674316, 7.487499713897705)
+    injected32=(10.054808616638184, 3.1500000953674316, 7.487499713897705); final32=(10.054808616638184, 3.1500000953674316, 7.487499713897705)
+  Drone 3: proposed64=(2.99066596862869, 3.1500000953674316, 8.108408607232693)
+    injected32=(2.990665912628174, 3.1500000953674316, 8.10840892791748); final32=(2.990665912628174, 3.1500000953674316, 8.10840892791748)
+  Drone 4: proposed64=(3.168060882999208, 5.738542490634317, 8.621649294424458)
+    injected32=(3.168060779571533, 5.738542556762695, 8.621649742126465); final32=(3.168060779571533, 5.738542556762695, 8.621649742126465)
+Sample 1434; k=4; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(4.280542296803414, 7.410004703097581, 13.44656781313315); runtime float32=(4.280542373657227, 7.410004615783691, 13.44656753540039)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False, False, False, True]; conn_base=[True, True, True, False]; conn_target=[False, False, False, True]
+  Drone 1: proposed64=(11.973685263157895, 10.0, 3.1499989999999998)
+    injected32=(11.973685264587402, 10.0, 3.149998903274536); final32=(11.973685264587402, 10.0, 3.149998903274536)
+  Drone 2: proposed64=(10.05480835107629, 3.1500000953674316, 7.487499713897705)
+    injected32=(10.054808616638184, 3.1500000953674316, 7.487499713897705); final32=(10.054808616638184, 3.1500000953674316, 7.487499713897705)
+  Drone 3: proposed64=(1.791600155072723, 3.1500000953674316, 7.380021995033088)
+    injected32=(1.7916001081466675, 3.1500000953674316, 7.380022048950195); final32=(1.7916001081466675, 3.1500000953674316, 7.380022048950195)
+  Drone 4: proposed64=(3.297663018873878, 5.727735685019556, 8.841797539185436)
+    injected32=(3.2976629734039307, 5.72773551940918, 8.841797828674316); final32=(3.2976629734039307, 5.72773551940918, 8.841797828674316)
+Sample 3288; k=4; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(3.5636948689126666, 6.202827748630627, 14.06348898368131); runtime float32=(3.563694953918457, 6.2028279304504395, 14.063488960266113)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False, False, False, True]; conn_base=[True, True, True, False]; conn_target=[False, False, False, True]
+  Drone 1: proposed64=(11.973685263157895, 10.0, 3.1499989999999998)
+    injected32=(11.973685264587402, 10.0, 3.149998903274536); final32=(11.973685264587402, 10.0, 3.149998903274536)
+  Drone 2: proposed64=(10.05480835107629, 3.1500000953674316, 7.487499713897705)
+    injected32=(10.054808616638184, 3.1500000953674316, 7.487499713897705); final32=(10.054808616638184, 3.1500000953674316, 7.487499713897705)
+  Drone 3: proposed64=(1.8284784230127016, 3.1500000953674316, 5.91649753885792)
+    injected32=(1.828478455543518, 3.1500000953674316, 5.916497707366943); final32=(1.828478455543518, 3.1500000953674316, 5.916497707366943)
+  Drone 4: proposed64=(3.2173593947790238, 5.593507502018491, 9.112855632641653)
+    injected32=(3.2173593044281006, 5.593507289886475, 9.112855911254883); final32=(3.2173593044281006, 5.593507289886475, 9.112855911254883)
+Sample 3556; k=4; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(2.6391678469522146, 6.502890148802938, 13.122684262733118); runtime float32=(2.6391677856445312, 6.502890110015869, 13.122684478759766)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False, False, False, False]; conn_base=[True, True, True, True]; conn_target=[False, False, False, False]
+  Drone 1: proposed64=(11.973685263157895, 10.0, 3.1499989999999998)
+    injected32=(11.973685264587402, 10.0, 3.149998903274536); final32=(11.973685264587402, 10.0, 3.149998903274536)
+  Drone 2: proposed64=(10.05480835107629, 3.1500000953674316, 7.487499713897705)
+    injected32=(10.054808616638184, 3.1500000953674316, 7.487499713897705); final32=(10.054808616638184, 3.1500000953674316, 7.487499713897705)
+  Drone 3: proposed64=(3.1500000953674316, 3.1500000953674316, 8.149999618530273)
+    injected32=(3.1500000953674316, 3.1500000953674316, 8.149999618530273); final32=(3.1500000953674316, 3.1500000953674316, 8.149999618530273)
+  Drone 4: proposed64=(3.1500000953674316, 5.474999904632568, 8.256218197651691)
+    injected32=(3.1500000953674316, 5.474999904632568, 8.256217956542969); final32=(3.1500000953674316, 5.474999904632568, 8.256217956542969)
+
+Status: runtime_assignment_failures
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+Preparation: 0.19s; target inspection: 88.16s

@@ -30,6 +30,27 @@ BUILDING = load_building(
 )
 
 
+def test_observe_seeing_target():
+    cfg = replace(EnvConfig(), num_agents=1, spawn_delay=0, visual_radius=2.)
+    assert not cfg.observe_seeing_target
+    enabled = replace(cfg, observe_seeing_target=True)
+    reset, step, observe, _ = make_env_fns(BUILDING, enabled, plan_geodesic=False)
+    _, _, observe_disabled, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    state = reset(jax.random.PRNGKey(0), target_pos=jnp.array([8., 5., 5.]))
+
+    # See the target, then move out of visual range while remembering it.
+    for x, expected in ((7., 1.), (11., 0.)):
+        state = step(state._replace(pos=jnp.array([[x, 5., 5.]])), jnp.zeros((1, 3)))
+        values = np.asarray(observe(state))
+        assert values.shape == (1, observation_dim(cfg) + 1)
+        assert observation_dim(enabled) == values.shape[1]
+        assert values[0, 6] == expected
+        assert bool(state.target_known[0])
+        np.testing.assert_array_equal(np.delete(values, 6, axis=1), observe_disabled(state))
+
+    np.testing.assert_array_equal(observe(state._replace(active=jnp.array([False]))), 0.)
+
+
 def _partial_wall_building():
     """Keep the authored wall grid and its solid prism in agreement."""
     x_walls = BUILDING.x_walls.copy()
@@ -425,6 +446,7 @@ def test_counting_radar_respects_line_of_sight_in_all_categories_and_bands(geome
 
 
 def test_optional_observation_features_match_the_maintained_config_switches():
+    # Exercise legacy debugging switches only; this test is not design guidance.
     cfg, (reset, _, observations, _) = _functions(
         observe_base_vector=True,
         observe_target_vector=True,
@@ -567,6 +589,7 @@ def test_coverage_changes_across_height_layers():
 
 
 def test_coverage_voxel_size_is_independent_of_building_cell_size():
+    # Coverage probes are enabled here only to exercise the legacy debug option.
     cfg, (reset, step, observations, _) = _functions(
         coverage_voxel_size=2.5,
         observe_coverage_probe=True,
@@ -664,7 +687,7 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         base_target_known=jnp.bool_(True),
     )
     _, delivered_terms = compute_rewards(previous, delivered, reward_cfg, env_cfg)
-    np.testing.assert_allclose(delivered_terms["target_found"], [50.0, 50.0])
+    np.testing.assert_allclose(delivered_terms["target_found"], [100.0, 100.0])
     np.testing.assert_allclose(delivered_terms["finder"], [50.0, 0.0])
     np.testing.assert_allclose(delivered_terms["success"], [0.0, 0.0])
 

@@ -1,0 +1,160 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Remaining short non-horizontal corner geometry ---
+Preprocessing: corrected chain plus the existing horizontal 45/45 replacement.
+Existing rule replacements reproduced: 1,651
+Simplified targets still requiring >7 agents: 1,289/4,000
+No roadmap route: 0/4,000
+Final-chain windows: 19,289; short non-horizontal occurrences: 7,624
+Distinct affected targets: 3,802; affected targets still >7 agents: 1,289
+Distinct ordered B/C locations: 834; showing 20
+Filter: positive B-C gap <2m; non-horizontal legs; B and C are drones.
+Priority: distinct >7-agent targets, then occurrences. Feature labels indicate proximity.
+
+ Pair | Gap (m) | Occurrences | Targets | >7 targets | Common turns / plane / sense | Nearest feature
+------+---------+-------------+---------+------------+------------------------------+--------------------------
+    1 |   0.950 |       3,139 |   3,139 |      1,289 | 80/40d 3D skew               | stairs(2, 1, 0) dir=3 (0.000m)
+    2 |   1.945 |       1,227 |   1,227 |      1,227 | 55/45d 3D skew               | x-door(1, 2, 2) (1.091m)
+    3 |   0.950 |         505 |     505 |        505 | 45/90d 3D skew               | x-door(1, 2, 2) (0.000m)
+    4 |   0.950 |          50 |      50 |         50 | 55/50d 3D skew               | x-door(1, 2, 2) (0.000m)
+    5 |   0.950 |          42 |      42 |         42 | 90/30d 3D skew               | x-door(1, 0, 2) (0.000m)
+    6 |   0.950 |          33 |      33 |         33 | 90/15d 3D skew               | x-door(1, 0, 2) (0.000m)
+    7 |   1.610 |           6 |       6 |          6 | 35/35d 3D skew               | x-door(1, 0, 2) (0.000m)
+    8 |   0.950 |           4 |       4 |          4 | 90/10d 3D skew               | x-door(1, 0, 2) (0.000m)
+    9 |   1.610 |           2 |       2 |          2 | 35/30d 3D skew               | x-door(1, 0, 2) (0.000m)
+   10 |   1.610 |           2 |       2 |          2 | 35/20d 3D skew               | x-door(1, 0, 2) (0.000m)
+   11 |   0.013 |           1 |       1 |          1 | 65/0d 3D straight            | y-door(0, 2, 2) (0.354m)
+   12 |   0.137 |           1 |       1 |          1 | 60/0d 3D straight            | y-door(0, 2, 2) (0.398m)
+   13 |   0.008 |           1 |       1 |          1 | 50/0d 3D straight            | x-door(1, 2, 2) (0.347m)
+   14 |   0.027 |           1 |       1 |          1 | 40/0d 3D straight            | x-door(1, 2, 2) (0.338m)
+   15 |   0.031 |           1 |       1 |          1 | 30/0d 3D straight            | x-door(1, 2, 2) (0.336m)
+   16 |   0.203 |           1 |       1 |          1 | 35/0d 3D straight            | x-door(1, 2, 2) (0.262m)
+   17 |   0.262 |           1 |       1 |          1 | 25/0d 3D straight            | x-door(1, 2, 2) (0.240m)
+   18 |   0.349 |           1 |       1 |          1 | 40/0d 3D straight            | x-door(1, 2, 2) (0.194m)
+   19 |   0.431 |           1 |       1 |          1 | 30/0d 3D straight            | x-door(1, 2, 2) (0.171m)
+   20 |   1.366 |           1 |       1 |          1 | 35/0d 3D straight            | x-door(1, 2, 2) (0.075m)
+Unshown groups: 814; occurrences in those groups: 2,604
+
+Pair 1: representative sample index 3 (zero-based)
+  Agents: baseline 11 -> simplified 10; target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (11.850000381469727, 10.475000381469727, 3.1500000953674316)
+  C (drone): (11.850000381469727, 9.524999618530273, 3.1500000953674316)
+  D (drone): (10.475000381469727, 4.650000095367432, 6.824999809265137)
+  Turn angles: 78.356521 / 38.830004 degrees; AB/BC/CD lengths: 10.033631 / 0.950001 / 6.257944m
+  Outer infinite-line separation: 0.587761m
+  A-D direct segment: 13.042742m; signal visibility=False (diagnostic only)
+  Common rounded patterns at this B/C location:
+    80/40d 3D skew: 2,771 occurrences
+    80/50d 3D skew: 81 occurrences
+    80/35d 3D skew: 69 occurrences
+  Nearest authored feature envelopes (midpoint distance):
+    stairs(2, 1, 0) dir=3: 0.000000m; lo=(10.0, 5.0, 0.0); hi=(15.0, 10.0, 10.0)
+    y-door(2, 2, 0): 0.000000m; lo=(11.5, 9.875, 0.0); hi=(13.5, 10.125, 3.5)
+    y-door(1, 2, 0): 3.350000m; lo=(6.5, 9.875, 0.0); hi=(8.5, 10.125, 3.5)
+  Nearest physical solid boxes (midpoint distance, map-local solid index):
+    solid 56: 0.350000m; lo=(11.5, 9.875, 3.5); hi=(13.5, 10.125, 5.0)
+    solid 54: 0.350000m; lo=(10.0, 9.875, 0.0); hi=(11.5, 10.125, 5.0)
+    solid 55: 1.650000m; lo=(13.5, 9.875, 0.0); hi=(15.0, 10.125, 5.0)
+    solid 14: 1.725000m; lo=(10.0, 10.0, 4.875); hi=(15.0, 15.0, 5.125)
+
+Pair 2: representative sample index 3 (zero-based)
+  Agents: baseline 11 -> simplified 10; target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  A (drone): (3.1500000953674316, 5.474999904632568, 8.149999618530273)
+  B (drone): (3.1500000953674316, 10.475000381469727, 11.8125)
+  C (drone): (4.525000095367432, 11.850000381469727, 11.8125)
+  D (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  Turn angles: 55.219013 / 45.000000 degrees; AB/BC/CD lengths: 6.197896 / 1.944544 / 0.950000m
+  Outer infinite-line separation: 0.812524m
+  A-D direct segment: 7.711042m; signal visibility=False (diagnostic only)
+  Common rounded patterns at this B/C location:
+    55/45d 3D skew: 1,072 occurrences
+    55/35d 3D skew: 75 occurrences
+    55/40d 3D skew: 33 occurrences
+  Nearest authored feature envelopes (midpoint distance):
+    x-door(1, 2, 2): 1.091014m; lo=(4.875, 11.5, 10.0); hi=(5.125, 13.5, 13.5)
+    y-door(0, 2, 2): 1.091015m; lo=(1.5, 9.875, 10.0); hi=(3.5, 10.125, 13.5)
+    stairs(0, 1, 1) dir=1: 1.162500m; lo=(0.0, 5.0, 5.0); hi=(5.0, 10.0, 15.0)
+  Nearest physical solid boxes (midpoint distance, map-local solid index):
+    solid 30: 1.037500m; lo=(4.875, 10.0, 10.0); hi=(5.125, 11.5, 15.0)
+    solid 43: 1.037500m; lo=(3.5, 9.875, 10.0); hi=(5.0, 10.125, 15.0)
+    solid 17: 1.558144m; lo=(4.875, 5.0, 10.0); hi=(5.125, 10.0, 15.0)
+    solid 4: 1.687500m; lo=(0.0, 10.0, 9.875); hi=(5.0, 15.0, 10.125)
+
+Pair 3: representative sample index 3 (zero-based)
+  Agents: baseline 11 -> simplified 10; target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  A (drone): (3.1500000953674316, 10.475000381469727, 11.8125)
+  B (drone): (4.525000095367432, 11.850000381469727, 11.8125)
+  C (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  D (drone): (6.214198536917773, 6.29486470276995, 11.67167171677418)
+  Turn angles: 45.000000 / 82.422823 degrees; AB/BC/CD lengths: 1.944544 / 0.950000 / 5.605870m
+  Outer infinite-line separation: 0.021244m
+  A-D direct segment: 5.184851m; signal visibility=False (diagnostic only)
+  Common rounded patterns at this B/C location:
+    45/90d 3D skew: 87 occurrences
+    45/80d 3D skew: 53 occurrences
+    45/75d 3D skew: 50 occurrences
+  Nearest authored feature envelopes (midpoint distance):
+    x-door(1, 2, 2): 0.000000m; lo=(4.875, 11.5, 10.0); hi=(5.125, 13.5, 13.5)
+    stairs(0, 1, 1) dir=1: 1.850000m; lo=(0.0, 5.0, 5.0); hi=(5.0, 10.0, 15.0)
+    y-door(0, 2, 2): 2.285963m; lo=(1.5, 9.875, 10.0); hi=(3.5, 10.125, 13.5)
+  Nearest physical solid boxes (midpoint distance, map-local solid index):
+    solid 30: 0.350000m; lo=(4.875, 10.0, 10.0); hi=(5.125, 11.5, 15.0)
+    solid 31: 1.650000m; lo=(4.875, 13.5, 10.0); hi=(5.125, 15.0, 15.0)
+    solid 4: 1.687500m; lo=(0.0, 10.0, 9.875); hi=(5.0, 15.0, 10.125)
+    solid 10: 1.687500m; lo=(5.0, 10.0, 9.875); hi=(10.0, 15.0, 10.125)
+
+Pair 4: representative sample index 27 (zero-based)
+  Agents: baseline 10 -> simplified 9; target=(6.050699885210531, 9.542620159323947, 14.262162264249445)
+  A (drone): (3.1500000953674316, 10.475000381469727, 11.8125)
+  B (drone): (4.525000095367432, 11.850000381469727, 13.149999618530273)
+  C (drone): (5.474999904632568, 11.850000381469727, 13.149999618530273)
+  D (target): (6.050699885210531, 9.542620159323947, 14.262162264249445)
+  Turn angles: 54.366514 / 77.332842 degrees; AB/BC/CD lengths: 2.360118 / 0.950000 / 2.625327m
+  Outer infinite-line separation: 0.715112m
+  A-D direct segment: 3.909506m; signal visibility=False (diagnostic only)
+  Common rounded patterns at this B/C location:
+    55/50d 3D skew: 7 occurrences
+    55/30d 3D skew: 6 occurrences
+    55/55d 3D skew: 5 occurrences
+  Nearest authored feature envelopes (midpoint distance):
+    x-door(1, 2, 2): 0.000000m; lo=(4.875, 11.5, 10.0); hi=(5.125, 13.5, 13.5)
+    stairs(0, 1, 1) dir=1: 1.850000m; lo=(0.0, 5.0, 5.0); hi=(5.0, 10.0, 15.0)
+    y-door(0, 2, 2): 2.285963m; lo=(1.5, 9.875, 10.0); hi=(3.5, 10.125, 13.5)
+  Nearest physical solid boxes (midpoint distance, map-local solid index):
+    solid 30: 0.350000m; lo=(4.875, 10.0, 10.0); hi=(5.125, 11.5, 15.0)
+    solid 32: 0.350000m; lo=(4.875, 11.5, 13.5); hi=(5.125, 13.5, 15.0)
+    solid 31: 1.650000m; lo=(4.875, 13.5, 10.0); hi=(5.125, 15.0, 15.0)
+    solid 43: 1.725000m; lo=(3.5, 9.875, 10.0); hi=(5.0, 10.125, 15.0)
+
+Pair 5: representative sample index 18 (zero-based)
+  Agents: baseline 12 -> simplified 11; target=(4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  A (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  B (drone): (5.474999904632568, 3.1500000953674316, 13.149999618530273)
+  C (drone): (4.525000095367432, 3.1500000953674316, 13.149999618530273)
+  D (target): (4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  Turn angles: 90.000000 / 79.527184 degrees; AB/BC/CD lengths: 8.802211 / 0.950000 / 1.212629m
+  Outer infinite-line separation: 0.790914m
+  A-D direct segment: 10.021795m; signal visibility=False (diagnostic only)
+  Common rounded patterns at this B/C location:
+    90/30d 3D skew: 7 occurrences
+    90/35d 3D skew: 5 occurrences
+    90/15d 3D skew: 5 occurrences
+  Nearest authored feature envelopes (midpoint distance):
+    x-door(1, 0, 2): 0.000000m; lo=(4.875, 1.5, 10.0); hi=(5.125, 3.5, 13.5)
+    stairs(0, 1, 1) dir=1: 1.850000m; lo=(0.0, 5.0, 5.0); hi=(5.0, 10.0, 15.0)
+    x-door(1, 0, 1): 4.650000m; lo=(4.875, 1.5, 5.0); hi=(5.125, 3.5, 8.5)
+  Nearest physical solid boxes (midpoint distance, map-local solid index):
+    solid 37: 0.350000m; lo=(4.875, 3.5, 10.0); hi=(5.125, 5.0, 15.0)
+    solid 38: 0.350000m; lo=(4.875, 1.5, 13.5); hi=(5.125, 3.5, 15.0)
+    solid 36: 1.650000m; lo=(4.875, 0.0, 10.0); hi=(5.125, 1.5, 15.0)
+    solid 22: 1.725000m; lo=(0.0, 4.875, 10.0); hi=(5.0, 5.125, 15.0)
+
+All coordinates and bounds are metres; groups use exact ordered coordinate tuples.
+Nearest envelopes are context, not a confirmed doorway/stair classification.
+Only the existing simplification is applied; this step proposes no new drone positions.
+
+Preparation: 0.19s; target inspection: 6.59s

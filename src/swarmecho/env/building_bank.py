@@ -1,11 +1,33 @@
 """Immutable, padded map bank indexed by a persistent environment map ID."""
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+import hashlib
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from swarmecho.env.buildings import make_cuboid_building
 from swarmecho.env.obstacles import building_roadmap
+
+
+_RELAY_BANK_CACHE = {}
+
+
+def _relay_bank_key(records, cfg, extras=()):
+    digest = hashlib.sha256()
+    settings = (cfg.drone_radius, cfg.obstacle_planning_clearance_m, cfg.roadmap_approach,
+                cfg.roadmap_node_density, cfg.roadmap_merge_wall_end_nodes,
+                cfg.target_wall_buffer_fraction, cfg.coverage_voxel_size, cfg.success_condition, extras)
+    digest.update(repr(settings).encode())
+    for record in records:
+        values = record.items() if isinstance(record, dict) else ((f.name, getattr(record, f.name)) for f in fields(record))
+        for name, value in values:
+            digest.update(name.encode())
+            if isinstance(value, np.ndarray):
+                digest.update(str((value.shape, value.dtype.str)).encode())
+                digest.update(value.tobytes())
+            else:
+                digest.update(repr(value).encode())
+    return digest.hexdigest()
 
 
 @jax.tree_util.register_pytree_node_class
@@ -32,15 +54,21 @@ def balanced_map_ids(num_envs: int, num_maps: int) -> np.ndarray:
     return np.arange(num_envs, dtype=np.int32) % num_maps
 
 
-def prepare_bank(buildings, cfg, *, plan, corner_bonus_m=0., log=lambda message: None):
+def prepare_bank(buildings, cfg, *, plan, corner_bonus_m=0., dynamic_max_geo_distance=False, log=lambda message: None):
     from swarmecho.env.buildings import target_spawn_boxes
     first = buildings[0]
+    cache_key = None
+    if dynamic_max_geo_distance:
+        cache_key = _relay_bank_key(buildings, cfg, (plan, corner_bonus_m))
+        if cache_key in _RELAY_BANK_CACHE:
+            log("Reusing prepared relay map bank for the next agent stage.")
+            return _RELAY_BANK_CACHE[cache_key]
     maps = []
     for i, building in enumerate(buildings):
         if any(getattr(building, key) != getattr(first, key) for key in
                ("cell_size_m", "wall_thickness_m", "tile_thickness_m")):
             raise ValueError("A training map bank must use the same cell size and wall/tile thicknesses.")
-        graph = building_roadmap(building, cfg, plan=plan, corner_bonus_m=corner_bonus_m)
+        graph = building_roadmap(building, cfg, plan=plan or dynamic_max_geo_distance, corner_bonus_m=corner_bonus_m)
         if plan and not len(graph.vertices):
             raise ValueError(f"Training map {i} has no planning nodes (roadmap_approach={cfg.roadmap_approach}); inspect its geometry and roadmap settings.")
         if plan and np.any(graph.distances[0] >= 1e6):
@@ -57,17 +85,33 @@ def prepare_bank(buildings, cfg, *, plan, corner_bonus_m=0., log=lambda message:
         for prefix, boxes in boxes_to_store:
             for suffix, value in zip(("lower", "upper", "volumes"), boxes):
                 record[f"{prefix}_{suffix}"] = np.asarray(value)
+        if dynamic_max_geo_distance:
+            from swarmecho.env.relay import prepare_record
+            record = prepare_record(record, cfg, building)
         maps.append(record)
         if i == 0 or (i + 1) % 100 == 0 or i + 1 == len(buildings):
             log(f"Compiled map bank {i + 1}/{len(buildings)}; {len(graph.vertices)} roadmap nodes")
-    return prepare_bank_from_records(maps, first, cfg, interiors=[b.interior_cells for b in buildings], log=log)
+    result = prepare_bank_from_records(maps, first, cfg, interiors=[b.interior_cells for b in buildings], log=log)
+    if cache_key is not None:
+        _RELAY_BANK_CACHE[cache_key] = result
+    return result
 
 
-def prepare_bank_from_records(maps, first, cfg, *, interiors=None, log=lambda message: None):
+def prepare_bank_from_records(maps, first, cfg, *, interiors=None, dynamic_max_geo_distance=False, log=lambda message: None):
     """Pad already compiled per-map records for the JAX training batch."""
     if not maps:
         raise ValueError("A training map bank must contain at least one map.")
     maps = [dict(record, world_size=record.get("world_size", first.world_size_m)) for record in maps]
+    cache_key = None
+    if dynamic_max_geo_distance:
+        cache_key = _relay_bank_key(maps, cfg, (first.cell_size_m, first.wall_thickness_m,
+            first.tile_thickness_m, first.interior_cells.tobytes() if interiors is None
+            else tuple(np.asarray(interior).tobytes() for interior in interiors)))
+        if cache_key in _RELAY_BANK_CACHE:
+            log("Reusing prepared relay records for the next agent stage.")
+            return _RELAY_BANK_CACHE[cache_key]
+        from swarmecho.env.relay import prepare_record
+        maps = [record if "relay_predecessors" in record else prepare_record(record, cfg) for record in maps]
     dimensions = (first.interior_cells.shape if interiors is None else
                   tuple(max(interior.shape[axis] for interior in interiors) for axis in range(3)))
     envelope = make_cuboid_building(dimensions, cell_size_m=first.cell_size_m,
@@ -93,8 +137,10 @@ def prepare_bank_from_records(maps, first, cfg, *, interiors=None, log=lambda me
     arrays = {"coverage_eligible": masks}
     for key in maps[0]:
         shape = tuple(max(m[key].shape[d] for m in maps) for d in range(maps[0][key].ndim))
-        fill = 1e6 if key in {"solid_min", "solid_max", "distances", "corner_distances", "vertices"} else 0.
-        value = np.full((len(maps),) + shape, fill, dtype=np.float32)
+        fill = (1e6 if key in {"solid_min", "solid_max", "distances", "corner_distances", "vertices", "relay_distances"}
+                else -1 if key == "relay_predecessors" else 0.)
+        dtype = np.int32 if key in {"relay_predecessors", "relay_nodes", "relay_edges", "relay_edge_count", "relay_opening_count"} else np.float32
+        value = np.full((len(maps),) + shape, fill, dtype=dtype)
         for i, record in enumerate(maps):
             value[(i,) + tuple(slice(0, n) for n in record[key].shape)] = record[key]
         arrays[key] = value
@@ -103,4 +149,7 @@ def prepare_bank_from_records(maps, first, cfg, *, interiors=None, log=lambda me
         + (f", roadmaps {arrays['distances'].shape}" if "distances" in arrays else ", targetless"))
     # Transfer once. These are closed-over device arrays, never rollout leaves.
     device_arrays = {key: jnp.asarray(value) for key, value in arrays.items()}
-    return BuildingBank(envelope, device_arrays)
+    result = BuildingBank(envelope, device_arrays)
+    if cache_key is not None:
+        _RELAY_BANK_CACHE[cache_key] = result
+    return result

@@ -37,7 +37,7 @@ component and do not add another payout.
 | `rewards/coverage` | Exploration credit before the drone knows the target |
 | `rewards/collision` | Collision penalties across drones and steps |
 | `rewards/finder` | Individual finder/delivery bonuses |
-| `rewards/target_found` | Shared target-found/delivery bonuses |
+| `rewards/target_found` | Full configured target-found/delivery bonus per active drone; the event's team total is `target_found_bonus * active_agents` |
 | `rewards/time_penalty` | Accumulated team time cost |
 | `rewards/gap_reduction` | Configured recurring gap reward or signed changes in gap credit |
 | `rewards/peer_informing` | Bonuses for newly informing peers |

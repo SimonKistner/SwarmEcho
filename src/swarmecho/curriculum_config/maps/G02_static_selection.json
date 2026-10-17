@@ -1,0 +1,481 @@
+{
+  "seed": 456789,
+  "maps": [
+    {
+      "name": "G02_static_map_01",
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_03054.yaml",
+      "source_sha256": "197e52105c8ab25c1f2b9fadb6e346970988668015450ca2a163c0ea5164fc98",
+      "base_position_m": [
+        12.5,
+        2.5,
+        0.125
+      ],
+      "target_exclusion_cells": [
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ],
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "direct_los_cells": [
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ],
+        [
+          2,
+          2,
+          0
+        ]
+      ],
+      "around_corner_cell": [
+        1,
+        1,
+        0
+      ],
+      "around_corner_via": [
+        2,
+        1,
+        0
+      ],
+      "representative_points_m": {
+        "[2, 0, 0]": [
+          12.5,
+          2.8125,
+          2.5
+        ],
+        "[2, 1, 0]": [
+          12.5,
+          7.5,
+          2.5
+        ],
+        "[2, 2, 0]": [
+          12.5,
+          12.1875,
+          2.5
+        ],
+        "[1, 1, 0]": [
+          9.0625,
+          7.5,
+          3.6875
+        ]
+      },
+      "cpu_two_agent_starter_witness": {
+        "relay_m": [
+          11.1875,
+          12.1875,
+          1.1875
+        ],
+        "finder_and_target_m": [
+          2.8125,
+          12.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "name": "G02_static_map_02",
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_01807.yaml",
+      "source_sha256": "4d41c21c2d7326341f3fee5f7e79a2cb4b6faedfab31f2e18edc486eaa0e4dc8",
+      "base_position_m": [
+        2.5,
+        12.5,
+        0.125
+      ],
+      "target_exclusion_cells": [
+        [
+          0,
+          2,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "direct_los_cells": [
+        [
+          0,
+          2,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ],
+      "around_corner_cell": [
+        1,
+        1,
+        0
+      ],
+      "around_corner_via": [
+        0,
+        1,
+        0
+      ],
+      "representative_points_m": {
+        "[0, 2, 0]": [
+          2.5,
+          12.5,
+          2.5
+        ],
+        "[0, 1, 0]": [
+          2.5,
+          7.1875,
+          2.5
+        ],
+        "[0, 0, 0]": [
+          2.5,
+          2.8125,
+          2.5
+        ],
+        "[1, 1, 0]": [
+          7.5,
+          7.1875,
+          2.5
+        ]
+      },
+      "cpu_two_agent_starter_witness": {
+        "relay_m": [
+          3.8125,
+          8.71875,
+          1.1875
+        ],
+        "finder_and_target_m": [
+          7.5,
+          2.8125,
+          2.5
+        ]
+      }
+    },
+    {
+      "name": "G02_static_map_03",
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_02953.yaml",
+      "source_sha256": "4638ad20217fab7a30e78849141801488b55cd69442f8321f960ad8e410a4632",
+      "base_position_m": [
+        12.5,
+        12.5,
+        0.125
+      ],
+      "target_exclusion_cells": [
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          1,
+          2,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "direct_los_cells": [
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          1,
+          2,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ]
+      ],
+      "around_corner_cell": [
+        1,
+        1,
+        0
+      ],
+      "around_corner_via": [
+        2,
+        1,
+        0
+      ],
+      "representative_points_m": {
+        "[2, 2, 0]": [
+          12.5,
+          12.1875,
+          2.5
+        ],
+        "[1, 2, 0]": [
+          9.0625,
+          12.5,
+          3.6875
+        ],
+        "[2, 1, 0]": [
+          12.5,
+          7.5,
+          2.5
+        ],
+        "[1, 1, 0]": [
+          7.1875,
+          7.1875,
+          2.5
+        ]
+      },
+      "cpu_two_agent_starter_witness": {
+        "relay_m": [
+          7.1875,
+          1.28125,
+          1.1875
+        ],
+        "finder_and_target_m": [
+          2.8125,
+          2.8125,
+          2.5
+        ]
+      }
+    },
+    {
+      "name": "G02_static_map_04",
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_04456.yaml",
+      "source_sha256": "bac9be076ee7c26e1e2ac69664f04b9fdaa3c975b59c36ead13f1271701d452d",
+      "base_position_m": [
+        12.5,
+        12.5,
+        0.125
+      ],
+      "target_exclusion_cells": [
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "direct_los_cells": [
+        [
+          2,
+          2,
+          0
+        ],
+        [
+          2,
+          1,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "around_corner_cell": [
+        1,
+        1,
+        0
+      ],
+      "around_corner_via": [
+        2,
+        1,
+        0
+      ],
+      "representative_points_m": {
+        "[2, 2, 0]": [
+          12.5,
+          12.1875,
+          2.5
+        ],
+        "[2, 1, 0]": [
+          12.5,
+          7.5,
+          2.5
+        ],
+        "[2, 0, 0]": [
+          12.5,
+          2.8125,
+          2.5
+        ],
+        "[1, 1, 0]": [
+          7.1875,
+          7.1875,
+          2.5
+        ]
+      },
+      "cpu_two_agent_starter_witness": {
+        "relay_m": [
+          7.1875,
+          1.28125,
+          1.1875
+        ],
+        "finder_and_target_m": [
+          2.8125,
+          2.8125,
+          2.5
+        ]
+      }
+    },
+    {
+      "name": "G02_static_map_05",
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_02628.yaml",
+      "source_sha256": "2d6161759a573f67b2a034786063848ce6bccccc96a01d318908a3952993b335",
+      "base_position_m": [
+        2.5,
+        2.5,
+        0.125
+      ],
+      "target_exclusion_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "direct_los_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "around_corner_cell": [
+        1,
+        1,
+        0
+      ],
+      "around_corner_via": [
+        0,
+        1,
+        0
+      ],
+      "representative_points_m": {
+        "[0, 0, 0]": [
+          2.5,
+          2.5,
+          2.5
+        ],
+        "[0, 1, 0]": [
+          2.5625,
+          7.5,
+          2.5
+        ],
+        "[1, 0, 0]": [
+          7.8125,
+          2.5,
+          2.5
+        ],
+        "[1, 1, 0]": [
+          5.3125,
+          7.5,
+          3.0625
+        ]
+      },
+      "cpu_two_agent_starter_witness": {
+        "relay_m": [
+          1.1875,
+          1.1875,
+          1.1875
+        ],
+        "finder_and_target_m": [
+          2.8125,
+          12.5,
+          2.5
+        ]
+      }
+    }
+  ],
+  "skipped_candidates": [
+    {
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_00609.yaml",
+      "reason": "No conservative sampled two-agent starter placement after noSpawn exclusions."
+    },
+    {
+      "source": "src/swarmecho/curriculum_config/maps/random_building_bank/pools/pool_20261004T134135Z_fc3b8c1a74ee_seed1596660188_bbf0b7/maps/map_02455.yaml",
+      "reason": "No adjacent, connected cell around a LOS-breaking turn."
+    }
+  ],
+  "rule": "Three nearest representative-cell base LOS cells including base, plus one face-adjacent non-LOS cell visible from one of those three. Cell representatives are largest legal spawn-box centres; this is not an all-points LOS guarantee. Retain only candidates with a sampled two-agent physical starter placement; production JAX certification is still required."
+}

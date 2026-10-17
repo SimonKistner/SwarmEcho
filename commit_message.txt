@@ -1,4 +1,50 @@
-feat: add C relay curriculum and decaying reinforcement reference rewards
+feat: add optional adaptive map sampling with persistent per-map curricula
+
+- Make target-found/delivery bonuses fixed per active drone instead of splitting a team budget
+  - Preserve one-shot discovery/delivery gates and inactive masking; document population scaling and remaining shared reward terms
+
+- Record named per-drone reward components in every policy and recorded-action replay path
+  - Preserve aggregate rewards, omit duplicate diagnostics, and validate component totals before saving
+  - Add a default stacked reward breakdown with active-drone selection, hover labels and a component legend; retain the relative advantage view and show an explicit legacy-data message
+  - Retain component data and labels in public inspector exports
+
+- Add an optional final agent-curriculum early-exit success threshold
+  - Set G02 to 99% only when both target budget and population cap reach seven; retain 95% for intermediate stages
+
+- Add default-off adaptive_map_sampling and enable it in G02 with a 30% uniform floor
+  - Use independent packed map success windows, require one full window on every map before adaptation, and smooth failure-based episode assignments
+  - Switch map geometry and episode memory at reset while retaining the original fixed-lane path when disabled
+  - Support authored suites and persistent generated/saved banks, with lane-independent target-cell support discovery
+  - Freeze random-bank identities across curriculum handoffs and OOM lane reductions; reserve ten held-out evaluation maps by default
+  - Publish map and packed cell state atomically with model checkpoints and add balanced-success/allocation diagnostics
+  - Keep small-suite cell dashboards and bound large-bank histories and warning output; document pending GPU profiling
+
+- Add G02 with five frozen 15x15x15 bank maps, G01 training settings and replays for every map
+  - Assign equal persistent training lanes and prepare inspectable three-LOS-plus-one-turn noSpawn regions
+  - Preserve seeded selection, source hashes and sampled two-agent starter placements in a map manifest
+- Extend adaptive target spawning to independent per-map cell controllers in static suites
+  - Apply map-local startup eligibility, success windows, probability floors and smoothing through one padded device table
+  - Checkpoint every map together and expose separate dashboard histories with compatible single-map persistence
+  - Report per-map and worst-map evaluation success and document inherited mean mastery, evaluation cost and large-bank limits
+  - Record the route to 4000 maps, including discovery coverage, packed statistics, batched updates and bounded diagnostics
+
+- Add spare-agent capacity and progress-weighted local cluster credit to G01
+  - Keep geometric target budgets independent of deployable population across training, evaluation, adaptive spawning and curriculum resume
+  - Add default-zero additional_agents and enable spare G01 slots within the hard env.num_agents cap, with no spare in the final stage
+  - Add default-off progress_based_cluster_tiebreaker_soft, enabled in G01, with equal-hop local shares scored as hypothetical frontier leaders
+  - Preserve full credit on shared mandatory links, independent cluster budgets and matching recurring/change/vesting credit semantics
+  - Document settings, scoring, persistence and pending WSL runtime verification
+
+- Add default-off training-only adaptive target spawning for fixed 3D maps
+  - Use per-cell success windows, volume-aware probability floors and smoothed redistribution while preserving disabled sampling and evaluation
+  - Add configurable plateau warnings and checkpointed controller state for resume
+  - Document the formulation in a dedicated reference and add focused probability/reset checks for WSL verification
+  - Enable adaptive target spawning in G01_static with every feature parameter declared explicitly
+- Add an independent adaptive-spawn browser dashboard with aligned cell bars, timeline playback and per-cell probability histories
+  - Persist a small append-only local record per PPO update without per-cell W&B logging or callbacks inside JAX rollouts
+
+- Add default-off observe_seeing_target observation for current direct visual target sighting
+  - Enable it in G01_static, document its semantics, and add one small visibility/toggle test
 
 - Separate wall sensing layout, ray count and range from drone radar and target visibility
   - Rename wall_radar_bins to wall_sensing_rays; retain legacy Fibonacci with 16 rays as defaults
@@ -28,3 +74,73 @@ feat: add C relay curriculum and decaying reinforcement reference rewards
 - Give C01/C02 tight map bounds with per-map runtime bounds and internal bank padding; use equal four-cell C02 legs sharing one corner
 - Add a checkpoint-based C geometry preview command with the requested six-replay sample, one inspector navigator group with map choices, and curriculum documentation
 - Replace reinforcement/decommission costs with signed individual event rewards; pay every qualified deployment voter in full and migrate legacy cost configs
+
+- Add a self-contained Phase 0 target diagnostic suite under geo_experiments
+  - Collect matched frozen finder GRU, outgoing message and base-stored message snapshots from successful static-map evaluations
+  - Train target-cell and target-storey MLPs sequentially with shared held-out episodes and configurable seed repetitions
+  - Use exact 10k training, 1k validation and 5k held-out evaluation splits shared by all fits
+  - Report overall accuracy with expandable storey details and normalized histograms of incorrect cell/storey predictions
+  - Compare spawned, successful and collected target distributions by storey and cell
+  - Embed comparable charts in a dark HTML report with consistent input colours and consolidate reproducible numeric data and provenance into two companion files
+  - Save named, timestamped run folders without W&B, copied scripts or separate figure exports
+  - Load normal named levels directly for probes; use G01_static with a 700-step horizon, preserving authored YAML without expanding defaults
+  - Keep G01_static policy training as a normal W&B run under outputs; geo diagnostics save local artifacts without initializing W&B
+
+- Maintain geo research records in docs/geo/Phase0.md, Phase1.md and Phase2.md
+  - Record baseline protocols, both completed runs, exact-state ambiguity diagnostics and competing interpretations
+  - Propose a reproducible full-history audit and a masked target-cell auxiliary head integrated with recurrent PPO
+  - Preserve continuous localization, map generalization, geometry, own-position, path and replay ideas as an unscoped future backlog
+  - Add repository instructions to update experiment designs, actual results, provenance and interpretations for future geo work
+  - Replace the extensive audit proposal with a console-only 5k-episode observation variability script
+  - Compare raw observations, encoder outputs and received-context GRU inputs within identical finder hidden states, with exact matches, reference similarity and target separation
+  - Reuse the static collector with optional histories while keeping normal probe collection unchanged
+  - Close and condense Phase 0 with the completed 5k audit, preserving its original console output
+  - Record identical raw and encoded histories across all conflicting-cell pairs and make observation ambiguity an explicit dependency of Phase 1
+
+- Add default-off visually gated target displacement and enable it in G01_static
+  - Expose three visual-radius-normalized XYZ offsets only during direct, unobstructed sighting, with zero values after sight is lost
+  - Track the toggle and enabled normalization radius in checkpoint compatibility while preserving disabled legacy configurations
+  - Document the idealized stereo/depth sensor, the new 139-input G01 baseline and its separate Phase 1 training/probe workflow
+
+- Integrate the ambiguity audit into main geo experiments and their reports
+  - Audit the first matched collection episodes with bounded reference memory and retain compact source data
+  - Import the supplied historical console audit into the 16k report with explicit separate-run provenance
+- Add a static geo report browser with sidebar selection and in-report comparison
+  - Compare only matching numeric table metrics by section, table, row, column, units and version; ignore figures and absent values
+  - Preserve self-contained per-run reports and refresh one shared index without extra per-run exports
+  - Default report measures to counts and link the selector to incorrect-prediction histograms
+  - Colour positive comparison deltas green and negative deltas red
+
+- Add frozen whole-episode own-cell diagnostics for all active agents
+  - Share the sequential MLP/report pipeline; probe GRU and outgoing messages with configurable cell-travel-time sampling
+  - Use separate episode pools and exact input-prefix deduplication to prevent repeated-prefix leakage while preserving conflicting labels
+  - Add own-cell ambiguity and filtering tables, source fingerprints and coverage data to the shared dark report browser
+  - Record the completed visual-target baseline and scoped own-cell protocol in the geo research documents
+  - Balance each own-cell split with uniform per-cell buckets; reject full buckets without claiming prefix ownership
+  - Persist bucket limits/counts/rejections and report underfilled cells instead of relaxing the quotas
+  - Support explicit map-cell exclusions for sparse occupancy; rebalance quotas over eligible cells and label report coverage
+  - Extend the static exclusion list to the ten logged slow cells, retaining fixed sample budgets over 17 cells
+
+- Restart max-geo-distance work in max_geo_distance with console-only 4000-target path inspection; remove the misplaced relay-atlas prototype and research-phase records
+  - Add an optional corrected placement-count baseline and original-path turn-pattern inventory using the same sampled targets and roadmap paths
+  - Separate the three inspections into independent modules, chain selected inspections through one shared preparation, and archive their console sections as timestamped text results
+  - Add a standalone horizontal two-corner replacement inspection with one calculated connector, geometry/range acceptance checks, and paired corrected-baseline agent counts
+  - Archive a focused inventory of remaining short 3D corner locations, target impact, representative coordinates, and nearby authored geometry after the existing simplification
+  - Add a deterministic doorway-plane connector from common visibility bounds, with saved three-stage baseline comparisons and representative acceptance/rejection geometry
+  - Add a lifted corner connector using one horizontal intersection and analytic safe-height intervals, with archived comparisons against all prior stages
+  - Add exact bypass-link relay removal and repeat existing local rules until stable, with archived stage comparisons and full chain witnesses for further analysis
+  - Generalize the same analytic connector beyond experimental gap and orientation filters, memoize shared windows, and archive comparisons with prior stable chains
+  - Certify injected simplified assignments in real float32 JAX environments with exactly their reported agent counts, actual chain-hold success, and archived failure geometry
+  - Compare the unchanged relay rules on 4000 targets per numbered B02c map, print pooled geometric counts before checking the same assignments on GPU, and archive per-map failures and aggregate certification tables
+  - Correct experimental drone starts, enforce rounded placement/link margins with conservative chain fallback, and recover or diagnose missing target routes through existing visible finder attachments before production integration
+  - Integrate default-off JAX relay-budget filtering into training/evaluation resets, static/random map banks and randomized bases, with bounded rejection and geometry cache reuse across agent stages
+  - Add cumulative agent-count stages with evaluation-only mastery, separate branching runs, resume provenance and adaptive population caps; compose feasibility filtering with adaptive target proposals and checkpoint their budget identity
+  - Document defaults and adaptive semantics, and add a standalone production-query/reference comparison with real hold certification, timing and optional adaptive reset compatibility inspection
+  - Enable the relay filter, cumulative two-through-seven agent curriculum and both adaptive mechanisms in G01_static, with one initial agent and stage-eligible replay sampling
+  - Add default-off OOM recovery with fresh training workers, fixed 500-environment reductions, completed-checkpoint resume or incoming-stage fallback, and persistent curriculum environment counts
+  - Allow null evaluation parallelism to follow effective training counts; enable it and OOM recovery in G01_static starting at 4000 environments
+  - Publish model/controller checkpoints together and preserve actual accumulated steps and remaining budgets across batch-size changes
+  - Keep the agent curriculum journal inside the first stage folder, with automatic migration from the previous output-root location and stable lookup on later-stage resume
+  - Initialize adaptive relay spawn support from the existing uniform accepted startup batch, retain cells with at least 1% of targets, and normalize full-volume adaptive weights over that support
+  - Persist cell eligibility across checkpoint resume and pre-checkpoint OOM retries, refresh it for each agent stage, and publish masked probabilities through the unchanged spawn dashboard
+  - Add a standalone G02 map-04 benchmark comparing the existing relay simplifier, whole-map radio graph and a shortest-path candidate tube with spherical corner samples on identical 4k/10k legal targets, with console distributions, timing and compact investigation results

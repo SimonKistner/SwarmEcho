@@ -125,7 +125,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                   **({"checkpoint": str(checkpoint)} if checkpoint is not None else {}),
                   **({"eval_name": eval_name} if eval_name else {})}
         if eval_due:
-            metrics, info = evaluate_suite(model, level, episodes=evaluation.eval_parallel_envs,
+            metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
                                           return_episode_info=True, action_noise_max=0.)
             results.append(metrics)
             if on_run:
@@ -166,6 +166,9 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                      eval_success_length_reduction=1.0 - successful_length / levels[0].env.max_steps)
     aggregate.update({"eval_static_maps" if static else "eval_random_maps": len(levels),
                       "eval_robustness_runs": 1})
+    aggregate["eval_worst_map_success"] = min(metrics["eval_success"] for metrics in results)
+    aggregate.update({f"eval_map/{level.map_source_name or level.building_name}/success_rate": metrics["eval_success"]
+                      for level, metrics in zip(levels, results)})
     write_manifest(artifact_root / "manifests" / f"{'static_eval' if static else 'random_eval'}_{suffix}.json",
                    {"type": "static_map_evaluation" if static else "random_map_evaluation",
                     "update": update, "steps": steps,

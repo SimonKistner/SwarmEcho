@@ -1,0 +1,155 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Doorway connector versus corrected and horizontal-only baselines ---
+Rule: one point on the shared opening plane, projected into its common visible rectangle.
+Matches actual door/window crossings with B-C gap <2m; no angle-bin requirement.
+ Agents | Baseline | Horizontal | Combined | New change | Final % | visual
+--------+----------+------------+----------+------------+---------+----------------------------------------
+      0 |        0 |          0 |        0 |         +0 |   0.00% | 
+      1 |        5 |          5 |      216 |       +211 |   5.40% | IIIII
+      2 |      481 |        481 |    1,164 |       +683 |  29.10% | IIIIIIIIIIIIIIIIIIIIIIIIIIIII
+      3 |      992 |        992 |      443 |       -549 |  11.07% | IIIIIIIIIII
+      4 |      288 |        288 |      313 |        +25 |   7.83% | IIIIIIII
+      5 |      175 |        175 |      337 |       +162 |   8.43% | IIIIIIII
+      6 |      268 |        392 |      238 |       -154 |   5.95% | IIIIII
+      7 |      264 |        378 |      254 |       -124 |   6.35% | IIIIII
+      8 |      238 |         78 |      621 |       +543 |  15.53% | IIIIIIIIIIIIIIII
+      9 |       78 |        503 |      324 |       -179 |   8.10% | IIIIIIII
+     10 |      503 |        618 |       90 |       -528 |   2.25% | II
+     11 |      618 |         90 |        0 |        -90 |   0.00% | 
+     12 |       90 |          0 |        0 |         +0 |   0.00% | 
+
+Targets additionally improved by doorway rule: 3,608/4,000 (90.20%)
+Additional drones saved: 4,489; maximum additional saving on one target: 2
+Mean agents (baseline -> horizontal -> combined): 6.235 -> 5.822 -> 4.700
+Targets requiring >7 agents (baseline -> horizontal -> combined): 1,527 (38.17%) -> 1,289 (32.23%) -> 1,035 (25.88%)
+Additional targets moved to <=7 agents: 254
+No roadmap route: 0/4,000
+Existing horizontal replacements reproduced: 1,651
+
+Doorway scan windows (including revisits): 21,051
+Eligible doorway attempts: 4,827; accepted: 4,489; rejected: 338
+  no common visible aperture: 229
+  right endpoint too far from opening plane: 49
+  range bounds exclude common visible aperture: 35
+  right link exceeds range: 25
+
+ Opening | Attempts | Accepted | Distinct targets improved
+ y-door(2, 2, 0)        |    3,154 |    3,136 |    3,136
+ y-door(1, 2, 0)        |      531 |      472 |      472
+ x-door(1, 2, 2)        |      631 |      470 |      470
+ y-door(1, 2, 1)        |      263 |      252 |      252
+ x-door(1, 0, 1)        |       96 |       96 |       96
+ x-door(1, 2, 1)        |       63 |       63 |       63
+ x-door(1, 0, 2)        |       89 |        0 |        0
+
+--- Accepted placement examples: up to 5 ---
+y-door(2, 2, 0); sample 3 (zero-based); accepted
+  Agents baseline/horizontal/combined: 11/10/8; target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (11.850000381469727, 10.475000381469727, 3.1500000953674316)
+  C (drone): (11.850000381469727, 9.524999618530273, 3.1500000953674316)
+  D (drone): (10.475000381469727, 4.650000095367432, 6.824999809265137)
+  Opening lo=(11.5, 9.875, 0.0); hi=(13.5, 10.125, 3.5)
+  Tangential bounds low=(11.973685263157895, 0.375); high=(13.149999000000001, 3.1499989999999998)
+  P: (11.973685263157895, 10.0, 3.1499989999999998)
+  A-P/P-D lengths: 10.254332 / 6.661395m
+y-door(1, 2, 0); sample 20 (zero-based); accepted
+  Agents baseline/horizontal/combined: 3/3/2; target=(0.8301581388913262, 5.232540453281274, 2.4131733710607173)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (6.849999904632568, 10.475000381469727, 0.4749999940395355)
+  C (drone): (6.849999904632568, 9.524999618530273, 0.4749999940395355)
+  D (drone): (4.768137283530137, 8.040523674395539, 1.145285171600083)
+  Opening lo=(6.5, 9.875, 0.0); hi=(8.5, 10.125, 3.5)
+  Tangential bounds low=(6.850001, 0.375); high=(8.149999000000001, 3.1499989999999998)
+  P: (6.850001, 10.0, 0.4749999940395355)
+  A-P/P-D lengths: 5.029414 / 2.936492m
+x-door(1, 2, 2); sample 3 (zero-based); accepted
+  Agents baseline/horizontal/combined: 11/10/8; target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  A (drone): (3.1500000953674316, 10.475000381469727, 11.8125)
+  B (drone): (4.525000095367432, 11.850000381469727, 11.8125)
+  C (drone): (5.474999904632568, 11.850000381469727, 11.8125)
+  D (drone): (6.214198536917773, 6.29486470276995, 11.67167171677418)
+  Opening lo=(4.875, 11.5, 10.0); hi=(5.125, 13.5, 13.5)
+  Tangential bounds low=(12.097359530240915, 10.350000999999999); high=(13.149999000000001, 13.149999000000001)
+  P: (5.0, 12.097359530240915, 11.8125)
+  A-P/P-D lengths: 2.460599 / 5.929845m
+y-door(1, 2, 1); sample 45 (zero-based); accepted
+  Agents baseline/horizontal/combined: 7/7/5; target=(12.975590547869256, 13.864309329450812, 7.344072305131887)
+  A (drone): (9.524999618530273, 4.650000095367432, 6.824999809265137)
+  B (drone): (8.149999618530273, 9.524999618530273, 6.8125)
+  C (drone): (8.149999618530273, 10.475000381469727, 6.8125)
+  D (drone): (8.90049958105195, 11.00212260871219, 6.895172775401145)
+  Opening lo=(6.5, 9.875, 5.0); hi=(8.5, 10.125, 8.5)
+  Tangential bounds low=(6.850001, 5.350001); high=(8.149999000000001, 8.149999000000001)
+  P: (8.149999000000001, 10.0, 6.8125)
+  A-P/P-D lengths: 5.523883 / 1.254725m
+x-door(1, 0, 1); sample 7 (zero-based); accepted
+  Agents baseline/horizontal/combined: 5/5/3; target=(3.70128120902719, 3.5480730430411995, 8.079875464620196)
+  A (drone): (10.475000381469727, 4.650000095367432, 6.824999809265137)
+  B (drone): (5.474999904632568, 3.1500000953674316, 8.149999618530273)
+  C (drone): (4.525000095367432, 3.1500000953674316, 8.149999618530273)
+  D (target): (3.70128120902719, 3.5480730430411995, 8.079875464620196)
+  Opening lo=(4.875, 1.5, 5.0); hi=(5.125, 3.5, 8.5)
+  Tangential bounds low=(1.850001, 5.350001); high=(3.1499989999999998, 8.149999000000001)
+  P: (5.0, 3.1499989999999998, 8.149999000000001)
+  A-P/P-D lengths: 5.829344 / 1.360166m
+
+--- Rejected attempt examples: up to 5 ---
+y-door(2, 2, 0); sample 193 (zero-based); range bounds exclude common visible aperture
+  Agents baseline/horizontal/combined: 2/2/2; target=(12.301059188606615, 9.22540416171446, 8.001390206587788)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (11.850000381469727, 10.475000381469727, 3.1500000953674316)
+  C (drone): (11.850000381469727, 9.524999618530273, 3.1500000953674316)
+  D (target): (12.301059188606615, 9.22540416171446, 8.001390206587788)
+  Opening lo=(11.5, 9.875, 0.0); hi=(13.5, 10.125, 3.5)
+  Tangential bounds low=(11.973685263157895, 3.061754462192183); high=(13.149999000000001, 2.6338082585252356)
+  P: not constructed
+y-door(2, 2, 0); sample 607 (zero-based); right link exceeds range
+  Agents baseline/horizontal/combined: 2/2/2; target=(10.831785638646231, 6.808199336032172, 6.952253193919196)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (11.850000381469727, 10.475000381469727, 3.1500000953674316)
+  C (drone): (11.850000381469727, 9.524999618530273, 3.1500000953674316)
+  D (target): (10.831785638646231, 6.808199336032172, 6.952253193919196)
+  Opening lo=(11.5, 9.875, 0.0); hi=(13.5, 10.125, 3.5)
+  Tangential bounds low=(11.973685263157895, 3.103563998687327); high=(13.149999000000001, 3.1499989999999998)
+  P: (11.973685263157895, 10.0, 3.1499989999999998)
+  A-P/P-D lengths: 10.254332 / 5.093983m
+y-door(1, 2, 0); sample 1418 (zero-based); range bounds exclude common visible aperture
+  Agents baseline/horizontal/combined: 2/2/2; target=(4.222549506520394, 5.624487922334979, 0.6261802370470841)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (6.849999904632568, 10.475000381469727, 0.4749999940395355)
+  C (drone): (6.849999904632568, 9.524999618530273, 0.4749999940395355)
+  D (target): (4.222549506520394, 5.624487922334979, 0.6261802370470841)
+  Opening lo=(6.5, 9.875, 0.0); hi=(8.5, 10.125, 3.5)
+  Tangential bounds low=(6.850001, 0.375); high=(6.6422383415170625, 3.045869072043753)
+  P: not constructed
+y-door(1, 2, 0); sample 1 (zero-based); right endpoint too far from opening plane
+  Agents baseline/horizontal/combined: 2/2/2; target=(7.125523875728325, 4.027253470194328, 3.9909395612597636)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (6.849999904632568, 10.475000381469727, 1.8125)
+  C (drone): (6.923271356887409, 8.760319157611274, 2.3918232061373965)
+  D (target): (7.125523875728325, 4.027253470194328, 3.9909395612597636)
+  Opening lo=(6.5, 9.875, 0.0); hi=(8.5, 10.125, 3.5)
+  Tangential bounds low=(6.850001, 0.375); high=(8.149999000000001, 3.1499989999999998)
+  P: not constructed
+y-door(1, 2, 0); sample 629 (zero-based); right link exceeds range
+  Agents baseline/horizontal/combined: 2/2/2; target=(2.846107818495705, 7.008626644656491, 2.5973714346668153)
+  A (base): (2.5, 12.5, 0.125)
+  B (drone): (6.849999904632568, 10.475000381469727, 1.8125)
+  C (drone): (6.849999904632568, 9.524999618530273, 1.8125001192092896)
+  D (target): (2.846107818495705, 7.008626644656491, 2.5973714346668153)
+  Opening lo=(6.5, 9.875, 0.0); hi=(8.5, 10.125, 3.5)
+  Tangential bounds low=(6.850001, 0.375); high=(6.852563290473513, 3.1499989999999998)
+  P: (6.850001, 10.0, 1.8125000596046448)
+  A-P/P-D lengths: 5.293408 / 5.059199m
+
+Each accepted replacement passes clearance, full link range/visibility, and local reachability checks.
+A failed single point is retained as a rejection; no alternative connector is searched.
+Counts describe constructed geometric chains, not global minima or policy success.
+Prior rules are preprocessing only; no earlier inspection reports are run.
+
+Preparation: 0.19s; target inspection: 6.92s

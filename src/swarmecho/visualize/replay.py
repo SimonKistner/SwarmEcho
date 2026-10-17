@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import time
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print
@@ -18,9 +18,30 @@ from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 REPLAY_FORMAT = "swarmecho-replay/v1"
 
 
+@dataclass(frozen=True)
+class ReplayRewards:
+    """Recorded totals and additive components, aligned by frame and drone.
+
+    Array conversion retains the historical totals-only consumer interface.
+    Components come directly from compute_rewards during replay collection.
+    """
+
+    totals: np.ndarray
+    components: dict[str, np.ndarray]
+
+    @property
+    def shape(self):
+        return self.totals.shape
+
+    def __array__(self, dtype=None, copy=None):
+        values = np.asarray(self.totals, dtype=dtype)
+        return values.copy() if copy else values
+
+
 def planner_metadata(cfg) -> dict:
     """Keep roadmap assumptions and sensor settings alongside inspector replays."""
     names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
+             "relay_agent_budget",
              "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m",
              "wall_sensing_layout", "wall_sensing_rays", "wall_sensing_ray_max_distance")
     return {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
@@ -35,7 +56,7 @@ def write_replay(
     *,
     map_name: str,
     dt: float,
-    reward_terms: np.ndarray | None = None,
+    reward_terms: np.ndarray | ReplayRewards | None = None,
     metadata: dict | None = None,
     progress: bool = True,
     building: BuildingArrays | None = None,
@@ -118,6 +139,26 @@ def write_replay(
         if rewards.shape[0] != len(state_list):
             raise ValueError("reward_terms first dimension must match replay frames.")
         arrays["reward_terms"] = rewards
+    component_names = []
+    if isinstance(reward_terms, ReplayRewards):
+        component_names = list(reward_terms.components)
+        expected_shape = arrays["position"].shape[:2]
+        if not component_names or any(
+            np.asarray(value).shape != expected_shape
+            for value in reward_terms.components.values()
+        ):
+            raise ValueError("Reward components must have shape (frames, agents).")
+        components = np.stack([
+            np.asarray(reward_terms.components[name]) for name in component_names
+        ], axis=-1)
+        # JAX adds terms in reward order; NumPy may sum in another order.
+        # Allow float32 rounding even when large rewards and costs cancel.
+        tolerance = 1e-5 + 4 * np.finfo(np.float32).eps * np.abs(components).sum(axis=-1, dtype=np.float64)
+        if not np.all(np.isfinite(components)) or not np.all(
+            np.abs(components.sum(axis=-1, dtype=np.float64) - rewards.reshape(expected_shape)) <= tolerance
+        ):
+            raise ValueError("Recorded reward components must sum to the recorded totals.")
+        arrays["reward_components"] = components
 
     data_path = destination.with_suffix(".npz")
     manifest_path = destination.with_suffix(".json")
@@ -149,9 +190,10 @@ def write_replay(
         "agents": int(arrays["position"].shape[1]),
         "coverage_shape": list(arrays["coverage"].shape[1:]),
         "fields": sorted(arrays),
+        "reward_component_names": component_names,
     }
     if metadata:
-        protected = {"format", "data_file", "frames", "agents", "fields"}
+        protected = {"format", "data_file", "frames", "agents", "fields", "reward_component_names"}
         if protected & set(metadata):
             raise ValueError(f"Replay metadata cannot replace protected keys: {sorted(protected & set(metadata))}")
         manifest.update(metadata)
