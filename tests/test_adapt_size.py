@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from swarmecho.core.config import AdaptSizeConfig, EnvConfig, RewardConfig, load_level, validate_adapt_size
+from swarmecho.core.config import (
+    AdaptSizeConfig, EnvConfig, RewardConfig, Level, TrainingConfig, NetworkConfig,
+    EvaluationConfig, LoggingConfig, validate_adapt_size,
+)
 from swarmecho.env.adapt_size import initial_state, transition, available_votes, apply_vote, lifetime_ended, policy_resets
 from swarmecho.env.buildings import load_building
 from swarmecho.env.environment import make_env_fns, make_autoreset_fns, observation_dim, compute_rewards, success_contributors, _contributing_chain_agents
@@ -63,7 +66,7 @@ def test_disabled_defaults_and_validation():
     enabled = replace(cfg, adapt_size=replace(cfg.adapt_size, enabled=True))
     assert observation_dim(enabled) == observation_dim(cfg) + 2
     for field, value in (("initial_agents", 0), ("initial_agents", cfg.num_agents + 1),
-                         ("vote_holding", 0), ("quorum_fraction", 1), ("quorum_hold", -1),
+                         ("vote_holding", 0), ("quorum_fraction", 1.01), ("quorum_hold", -1),
                          ("decommission_radius_m", 0), ("vote_mode", "toggle")):
         with pytest.raises(ValueError):
             validate_adapt_size(replace(cfg, adapt_size=replace(cfg.adapt_size, **{field: value})))
@@ -294,7 +297,7 @@ def test_delayed_initial_drone_is_not_charged_as_a_reinforcement():
 def test_all_decommissioned_terminal_info_survives_sparse_and_dense_autoreset(terminated_lanes):
     cfg = env_config(spawn_delay=0, adapt_size=replace(env_config().adapt_size,
                                                        decommission_hold_steps=1))
-    reward = RewardConfig(all_decommissioned_penalty=60., time_penalty_per_step=3.)
+    reward = RewardConfig(all_decommissioned_penalty=-60., time_presure_reward=-3.)
     reset, step, _, _ = make_autoreset_fns(BUILDING, cfg, reward)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(2), 3))
     inside = jnp.broadcast_to(states.adaptive.zone_center[:, None, :], states.pos.shape)
@@ -305,14 +308,14 @@ def test_all_decommissioned_terminal_info_survives_sparse_and_dense_autoreset(te
     np.testing.assert_array_equal(info["adapt_end_agents"][:terminated_lanes], 0)
     np.testing.assert_array_equal(info["adapt_decommissions"][:terminated_lanes], 2)
     np.testing.assert_array_equal(info["adapt_all_decommissioned"][:terminated_lanes], True)
-    np.testing.assert_allclose(info["all_decommissioned_penalty"][:terminated_lanes].sum(-1), -60.)
-    np.testing.assert_allclose(info["time_penalty"][:terminated_lanes].sum(-1), -3.)
+    np.testing.assert_allclose(info["all_decommissioned_penalty"][:terminated_lanes].sum(-1), -120.)
+    np.testing.assert_allclose(info["time_presure_reward"][:terminated_lanes].sum(-1), -6.)
     np.testing.assert_array_equal(fresh.active.sum(-1), 2)
     np.testing.assert_array_equal(fresh.adaptive.calls, 0)
     np.testing.assert_array_equal(fresh.adaptive.vote, False)
 
 
-def test_capacity_and_success_penalties_have_correct_recipients_and_team_total():
+def test_capacity_and_useless_agent_rewards_have_correct_individual_recipients():
     cfg = env_config(comm_radius=4.1, comm_radius_base=4.1, visual_radius=2.1)
     reset, step, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(3))
@@ -325,15 +328,13 @@ def test_capacity_and_success_penalties_have_correct_recipients_and_team_total()
     np.testing.assert_array_equal(success_contributors(connected, cfg), [1, 1, 0])
     successful = connected._replace(success=jnp.bool_(True), done=jnp.bool_(True),
         adaptive=connected.adaptive._replace(rejected_voters=jnp.array([1, 1, 0], bool)))
-    reward = RewardConfig(success_unused_agent_penalty=30., rejected_call_penalty=7.)
+    reward = RewardConfig(useless_agent_at_success_reward=-30., rejected_call_reward=-7., success_reward=120.)
     _, terms = compute_rewards(state, successful, reward, cfg)
-    np.testing.assert_allclose(terms["useless_agetnst_at_success_penalty"], [-10., -10., -10.])
-    np.testing.assert_allclose(terms["rejected_call_penalty"], [-7., -7., 0.])
-    contributor_bonus = replace(reward, success_bonus=120., success_bonus_contributors_only=True)
-    _, bonus_terms = compute_rewards(state, successful, contributor_bonus, cfg)
-    np.testing.assert_allclose(bonus_terms["success"], [60., 60., 0.])
+    np.testing.assert_allclose(terms["useless_agent_at_success_reward"], [0., 0., -30.])
+    np.testing.assert_allclose(terms["rejected_call_reward"], [-7., -7., 0.])
+    np.testing.assert_allclose(terms["success_reward"], [120., 120., 120.])
     _, repeated = compute_rewards(successful, successful, reward, cfg)
-    np.testing.assert_array_equal(repeated["useless_agetnst_at_success_penalty"], 0)
+    np.testing.assert_array_equal(repeated["useless_agent_at_success_reward"], 0)
 
 
 def test_complete_chain_excludes_redundant_frontier_leader():
@@ -364,7 +365,12 @@ def test_gae_does_not_cross_decommission_replacement_boundary():
 
 
 def tiny_level(mode="hold"):
-    level = load_level("M00_no_maze_open_cuboid")
+    # Use the small map directly; its historical level reward block is unsupported.
+    level = Level(
+        name="test", map_names=["M00_no_maze_open_cuboid"], building=BUILDING,
+        env=EnvConfig(), reward=RewardConfig(), training=TrainingConfig(),
+        network=NetworkConfig(), evaluation=EvaluationConfig(), logging=LoggingConfig(),
+    )
     return replace(level, env=env_config(max_steps=6, adapt_size=AdaptSizeConfig(
         enabled=True, initial_agents=2, vote_mode=mode, vote_holding=1)),
         network=replace(level.network, hidden_dim=8, num_layers=1, actor_num_layers=1,

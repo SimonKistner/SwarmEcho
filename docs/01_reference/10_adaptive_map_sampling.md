@@ -1,7 +1,13 @@
 # Adaptive map sampling
 
-An independent, default-off training feature selects a building for each new
-episode. It works with authored static suites, saved random-building banks and
+For G03, [independent validation](12_validation.md) now owns the 400-map holdout;
+three inspection maps are selected from it. `training.num_maps` fixes the random
+training dataset independently of lane count. `held_out_maps` below remains the
+legacy inspection-count fallback for random runs without the new validation
+pipeline. Prefer `inspection_evaluation.inspection_maps` in new configurations.
+
+An independent, default-off training feature weights the building choice for each
+new episode by map performance. It works with authored static suites, saved random-building banks and
 buildings generated once at startup. Buildings retain stable IDs; they are not
 regenerated at each episode. G02 explicitly enables it.
 
@@ -19,17 +25,24 @@ adaptive_map_sampling:
   held_out_maps: 10
 ```
 
-These are also the config dataclass defaults; G02 uses the same values with
-`enabled: true`. The enabled toggle must be boolean. When false, other known
-parameters are neither validated nor used, no map controller/journal is created,
-and the block is omitted from saved config snapshots. The original fixed lane
-assignment, reset key handling, evaluation selection and adaptive-cell behavior
-are retained. Misspelled/unknown config keys remain errors.
+These are also the config dataclass defaults; G02 overrides the smoothing
+half-life to 1.0 and sets `enabled: true`. The enabled toggle must be boolean.
+When false, no adaptive map controller, outcome windows, warmup or journal is
+created. Random-map runs still select uniformly from their full training dataset
+at episode boundaries, retain their frozen training/validation split and can
+independently enable adaptive target spawning. Such runs keep this block in
+saved config snapshots. Authored suites retain their original fixed-lane path
+when disabled and omit the inactive block from snapshots.
+
+Inactive weighting parameters are neither validated nor used. The existing
+`eligibility_samples_per_map` field remains the support-discovery budget when
+adaptive target spawning is enabled on random maps, independent of map weighting;
+in that combination it must be a positive integer. Misspelled/unknown keys remain errors.
 
 Start a new G02 run with `uv run swarmecho-train level=G02_static
 logging.run_name=G02_adaptive_maps`. To retain the old fixed map allocation, add
 `training.adaptive_map_sampling.enabled=false`; the remaining map-sampling
-parameters then have no effect. Use a new run name or explicit branch when
+weighting parameters then have no effect. Use a new run name or explicit branch when
 changing the feature state on an existing model.
 
 With the feature enabled, window/sample/evaluation counts must be positive;
@@ -78,10 +91,12 @@ occupy more lanes. Their success estimate updates only when they finish.
 
 ## Episode-boundary reset and JAX
 
-The device receives one fixed-shape map CDF. On episode completion, a separate
-random key selects the next map through a CDF search. Reset fetches that map's
+With adaptation enabled, the device receives one fixed-shape map CDF. On episode completion, a separate
+random key selects the next map through a CDF search. Without adaptation, random
+datasets use a uniform integer draw over the entire training bank. Reset fetches that map's
 base, solids, roadmap, coverage mask and target distribution. Sparse resets
-refresh geometry/map ID fields that were invariant in the disabled path.
+refresh geometry/map ID fields in both random-map modes. Only authored suites
+with adaptation disabled retain invariant lane geometry.
 Actor/critic recurrent state and communication/base memory reset through the
 existing episode-done masks. No active episode is interrupted.
 
@@ -93,9 +108,9 @@ rejection and large-bank throughput still require GPU profiling.
 
 The two toggles are independent. Map selection decides **which building** to
 sample; adaptive cells decide **where inside that building** to propose a target.
-Both use distinct windows and floors. Enabling map sampling permits the existing
-adaptive-cell feature on persistent random maps, with fixed bases and its other
-existing restrictions still enforced.
+Both use distinct windows and floors. Adaptive cells work on persistent random
+maps with either uniform or adaptive map choice, with fixed bases and their
+other existing restrictions still enforced.
 
 For relay-filtered adaptive cells, support discovery uses exactly
 `eligibility_samples_per_map` accepted uniform targets per map, independent of
@@ -107,21 +122,25 @@ proposal attempts fail explicitly, naming the map; there is no unfiltered
 fallback and warmup does not silently wait forever on a failed discovery.
 
 Cell windows use packed storage in the enabled path, and completed outcomes are
-grouped by map before updating cells. Up to 32 maps retain ordinary per-map
+grouped by map before updating cells. With
+`logging.adaptive_cell_diagnostics: true`, up to 32 maps retain ordinary per-map
 dashboard journals. Larger banks use one bounded history with eight sampled
 maps per update, capped console warnings and complete checkpoint state. The
 small-suite dashboard does not display this large-bank aggregate journal.
 Existing per-cell plateau histories still have host storage/CPU costs that
-must be profiled at 4k.
+must be profiled at 4k. Setting `logging.adaptive_cell_diagnostics: false` skips
+these journals and cell diagnostic rows/reports entirely, while retaining
+support masks, adaptive weights, outcome windows and checkpoint state.
 
 ## Stable banks, checkpoints and evaluation
 
-Random training maps are initially selected/generated using the configured lane
-count. Their count and ordered identities are then frozen independently of later
+Random training maps are initially selected/generated using `training.num_maps`,
+falling back to the configured lane count when null. Their count and ordered identities are then frozen independently of later
 lane reductions. `adaptive_maps/selection.json` persists the bank choice or
 generation count, and is copied into checkpoints. Later curriculum stages reuse
 the selection through the incoming checkpoint. OOM recovery can therefore retain
-4000 maps with fewer than 4000 live lanes. Missing/corrupt frozen banks fail
+3600 training maps with fewer than 3600 live lanes. This persistence works with
+adaptive weighting disabled as well. Missing/corrupt frozen banks fail
 instead of silently replacing the dataset.
 
 `adaptive_maps_state.npz` stores packed windows, counters, probabilities and
@@ -149,13 +168,25 @@ W&B receives:
   watch observed/warmup fractions until all maps have measurements.
 - `train/worst_map_success_rate` and `adaptive_maps/ready`, `warmup_fraction`,
   `observed_fraction`, `min_probability`, `max_probability`.
-- For up to 32 maps, `adaptive_maps/<map>/probability`, `success_rate`, cumulative
+- With `logging.individual_map_diagnostics: true`, for up to 32 maps,
+  `adaptive_maps/<map>/probability`, `success_rate`, cumulative
   `step_share` and `episode_start_share`.
 
 The existing pooled `train/success_rate` is preserved for comparison. Map
 metadata and append-only history live in `adaptive_maps/`; resume sessions mark
-history rollback boundaries. Large banks log summaries and the ten most probable
-maps rather than thousands of W&B series. Checkpoints retain every map.
+history rollback boundaries. With individual diagnostics enabled, large banks
+log summaries and the ten most probable maps rather than thousands of W&B
+series. `logging.individual_map_diagnostics: false` keeps only summaries in
+the map history and W&B, omitting per-map arrays, per-map series and top-map
+entries. Evaluation also omits individual map statistics while retaining mean,
+worst, best, median and p10 success. Static map identities in metadata/manifests
+and complete checkpoint state remain available; they are not diagnostic traces.
+Both logging switches default to `true` globally, and G03 sets both to `false`.
+Reporting switches are outside sampler identities and can change on resume.
+Summary-only mode adds `train/best_map_success_rate`, `median_map_success_rate`
+and `p10_map_success_rate`, with matching evaluation summaries. With the defaults
+enabled, the existing detailed metric keys and journal schemas are preserved;
+G02's five-map reporting is unchanged.
 
 CPU checks passed for inactive-parameter isolation, enabled validation, packed
 ring ordering, warmup, floors, all-success normalization, compact-cell equivalence,

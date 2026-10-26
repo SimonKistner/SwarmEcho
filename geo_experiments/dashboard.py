@@ -6,10 +6,19 @@ from html.parser import HTMLParser
 import json
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
 from geo_experiments.common import ROOT, json_value
+from geo_experiments.naming import display_name, report_subtitle
+
+
+def relabel_document(document, manifest):
+    """Update presentation only: embedded figures, metrics and report IDs are kept."""
+    name = html.escape(display_name(manifest))
+    document = re.sub(r"<h1>.*?</h1>", lambda _: f"<h1>{name}</h1>", document, count=1, flags=re.DOTALL)
+    return re.sub(r"<title>.*?</title>", lambda _: f"<title>Geo diagnostics · {name}</title>", document, count=1, flags=re.DOTALL)
 
 
 def dashboard_path():
@@ -94,10 +103,16 @@ def report_controls(run_dir):
 
 
 def decorate_report(document, run_dir, manifest):
+    document = relabel_document(document, manifest)
     parser = TableMetrics()
     parser.feed(document)
+    own = manifest["config"].get("experiment") == "own_cell"
+    maps = manifest.get("provenance", {}).get("identity", {}).get("maps", [])
+    family = "own_cell" if own else "target_multimap" if len(maps) > 1 else "target_singlemap"
     metadata = {"format": "swarmecho-report-tables/v1", "id": report_id(run_dir),
-                "name": manifest["config"]["run"]["name"], "folder": Path(run_dir).name,
+                "name": display_name(manifest), "folder": Path(run_dir).name,
+                "subtitle": report_subtitle(manifest, run_dir),
+                "comparison_family": family,
                 "metrics": parser.metrics}
     script = Path(__file__).with_name("dashboard.js").read_text(encoding="utf-8")
     addition = f'<script id="geo-report-data" type="application/json">{safe_json(metadata)}</script><script>{script}</script>'
@@ -123,6 +138,38 @@ class ReportMetadata(HTMLParser):
             self.capture = False
 
 
+def refresh_saved_report_names():
+    """Retitle existing reports without recomputing any scientific results."""
+    from geo_experiments.artifacts import update_run
+
+    root = ROOT / "geo_experiments" / "outputs"
+    count = 0
+    for path in root.rglob("report.html"):
+        if not path.resolve().is_relative_to(root.resolve()):
+            continue
+        source = path.parent / "run.json"
+        if not source.is_file():
+            continue
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+        document = relabel_document(path.read_text(encoding="utf-8"), manifest)
+        parser = ReportMetadata()
+        parser.feed(document)
+        if parser.parts:
+            metadata = json.loads(''.join(parser.parts))
+            metadata.update(name=display_name(manifest), subtitle=report_subtitle(manifest, path.parent))
+            script = Path(__file__).with_name("dashboard.js").read_text(encoding="utf-8")
+            addition = f'<script id="geo-report-data" type="application/json">{safe_json(metadata)}</script><script>{script}</script>'
+            document = re.sub(r'<script id="geo-report-data" type="application/json">.*?</script><script>.*?</script>',
+                              lambda _: addition, document, count=1, flags=re.DOTALL)
+        temporary = path.with_name(".report.names.tmp.html")
+        temporary.write_text(document, encoding="utf-8")
+        temporary.replace(path)
+        update_run(path.parent, display_name=display_name(manifest))
+        count += 1
+    build_dashboard()
+    return count
+
+
 def build_dashboard():
     root = ROOT / "geo_experiments"
     target = dashboard_path()
@@ -143,6 +190,10 @@ def build_dashboard():
         data["document_id"] = data["id"]
         data["id"] = report_id(path.parent)
         data["folder"] = path.parent.name
+        manifest_path = path.parent / "run.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            data.update(name=display_name(manifest), subtitle=report_subtitle(manifest, path.parent))
         metrics = TableMetrics()
         try:
             metrics.feed(document)

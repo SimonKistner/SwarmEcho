@@ -8,9 +8,10 @@ import numpy as np
 
 from geo_experiments.common import ROOT, SOURCES, fingerprint, resolve_path, sample_count
 from geo_experiments.artifacts import add_group, archive, group, save_data, update_run
+from geo_experiments.console import terminal_print as print
 
 
-def prepare_policy(config, run_dir=None):
+def prepare_policy(config, run_dir=None, *, allow_suite=False):
     # Import the existing runtime only here: plotting saved results needs no JAX.
     from swarmecho.core.config import LEVEL_DIR, MAP_DIR, load_level, resolve_evaluation_level
     from swarmecho.core.compatibility import resolve_level_file, resolve_map_file
@@ -22,12 +23,14 @@ def prepare_policy(config, run_dir=None):
     checkpoint = resolve_path(config["policy"]["checkpoint"])
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-    source = resolve_level_file(config["policy"]["level"], LEVEL_DIR).resolve()
-    configured_level = load_level(source)
+    from geo_experiments.policy import load_probe_level
+    configured_level, source, original, ignored = load_probe_level(config, checkpoint, run_dir)
     level = resolve_evaluation_level(configured_level)
-    if (configured_level.random_buildings.enabled or configured_level.static_map_suite
+    if allow_suite and configured_level.evaluation.eval_differes_from_training_map:
+        raise ValueError("Suite probes use the authored training map list; separate evaluation-map substitution is unsupported.")
+    if (configured_level.random_buildings.enabled or (configured_level.static_map_suite and not allow_suite)
             or configured_level.evaluation.random_eval or level.env.num_obstacles
-            or level.env.adapt_size.enabled or level.training.randomize_base):
+            or (level.env.adapt_size.enabled and not allow_suite) or level.training.randomize_base):
         raise ValueError("Phase 0 supports one authored static map, fixed base, fixed population, no random obstacles.")
     if level.env.success_condition == "coverage" or not level.network.memory_comm_enabled:
         raise ValueError("Target probes require a target mission with learned communication enabled.")
@@ -56,17 +59,24 @@ def prepare_policy(config, run_dir=None):
         "success_condition": level.env.success_condition, "num_agents": level.env.num_agents,
         "communication_every_k_steps": model.memory_comm_every_k_steps,
     }
+    if allow_suite:
+        identity["maps"] = [{"name": name, "sha256": fingerprint(path)}
+                            for name, path in zip(configured_level.map_names, configured_level.map_paths, strict=True)]
+        identity["probe_collection_files"] = {name: fingerprint(ROOT / "geo_experiments" / name)
+            for name in ("collection.py", "target_collection.py", "labels.py", "auditing.py", "policy.py", "common.py", "geometry.py")}
     if run_dir is not None:
         update_run(run_dir, provenance={"identity": identity, "checkpoint": str(checkpoint),
                    "level": level.name, "level_source": str(source), "map_source": str(map_path),
                    "runtime_files": runtime_files,
                    "experiment_files": {p.name: fingerprint(p) for p in (ROOT / "geo_experiments").glob("*.py")}},
-                   definitions={"level.yaml": source.read_text(encoding="utf-8"),
+                   definitions={"level.yaml": original, "ignored_legacy_reward_payouts": ignored,
+                                **{f"maps/{i}.yaml": path.read_text(encoding="utf-8")
+                                   for i, path in enumerate(configured_level.map_paths)},
                                 "map.yaml": map_path.read_text(encoding="utf-8")})
     return model, level, identity
 
 
-def make_collector(level, *, history_stride=None, own_stride=None):
+def make_collector(level, *, history_stride=None, own_stride=None, stop_after_finder=False):
     """Shared evaluation rollout; finder prefixes or full-team own-cell snapshots."""
     if history_stride is not None and (type(history_stride) is not int or history_stride < 1):
         raise ValueError("history_stride must be a positive integer or None.")
@@ -80,7 +90,7 @@ def make_collector(level, *, history_stride=None, own_stride=None):
 
     from swarmecho.env.adapt_size import policy_resets
     from swarmecho.env.obstacles import segments_blocked
-    from swarmecho.models.actions import physical_actions
+    from swarmecho.models.actions import physical_actions, deterministic_actions
     from swarmecho.training.train import _evaluation_env_fns, communication_due
 
     reset, step, observations, _ = _evaluation_env_fns(level)
@@ -104,6 +114,7 @@ def make_collector(level, *, history_stride=None, own_stride=None):
                 "finder_gru": jnp.zeros(model.hidden_dim),
                 "finder_message": jnp.zeros(model.tarmac_sig_dim + model.tarmac_val_dim),
                 "finder_position": jnp.zeros(3), "reporter_position": jnp.zeros(3),
+                "finder_active_agents": jnp.int32(-1), "base_active_agents": jnp.int32(-1),
             }
             if history_stride is not None:
                 slots = (cfg.max_steps + history_stride - 1) // history_stride + 1
@@ -162,7 +173,8 @@ def make_collector(level, *, history_stride=None, own_stride=None):
                 reporters = state.target_known & base_range
                 reporter = jnp.argmax(reporters.astype(jnp.int32))
                 take_base = ~c["base_valid"] & jnp.any(reporters) & share
-                next_state = step(state, jnp.where(state.active[:, None], physical_actions(means), 0.0))
+                actions = deterministic_actions(model.actor, hidden, means)
+                next_state = step(state, jnp.where(state.active[:, None], physical_actions(actions), 0.0))
                 updated = {
                     "state": next_state, "hidden": hidden, "signature": signature, "value": value,
                     "base_valid": c["base_valid"] | take_base,
@@ -176,6 +188,8 @@ def make_collector(level, *, history_stride=None, own_stride=None):
                     "finder_message": jnp.where(take_finder, jnp.concatenate((signature[safe_finder], value[safe_finder])), c["finder_message"]),
                     "finder_position": jnp.where(take_finder, state.pos[safe_finder], c["finder_position"]),
                     "reporter_position": jnp.where(take_base, state.pos[reporter], c["reporter_position"]),
+                    "finder_active_agents": jnp.where(take_finder, jnp.sum(state.active, dtype=jnp.int32), c["finder_active_agents"]),
+                    "base_active_agents": jnp.where(take_base, jnp.sum(state.active, dtype=jnp.int32), c["base_active_agents"]),
                 }
                 if history_stride is not None:
                     # Use the actor's existing context helper with its exact reset and
@@ -222,15 +236,19 @@ def make_collector(level, *, history_stride=None, own_stride=None):
                                                lambda _: {k: c[k] for k in names}, None))
                 return updated
 
-            result = jax.lax.while_loop(lambda c: ~c["state"].done & (c["state"].step < cfg.max_steps), advance, initial)
+            result = jax.lax.while_loop(lambda c: ~c["state"].done & (c["state"].step < cfg.max_steps)
+                & ((c["finder_step"] < 0) if stop_after_finder else jnp.bool_(True)), advance, initial)
             state = result.pop("state")
             output = {name: result[name] for name in (
                 "finder_gru", "finder_message", "finder_id", "discovery_step", "finder_step",
                 "base_step", "reporter_id", "finder_position", "reporter_position",
+                "finder_active_agents", "base_active_agents",
             )} | {
                 "base_message": jnp.concatenate((result["base_sig"], result["base_val"])),
                 "target_position": state.target_pos, "base_position": state.base_pos,
                 "success": state.success, "episode_length": state.step,
+                "delivered": state.base_target_known,
+                "target_required_agents": state.target_required_agents,
                 "spawn_pair_attempts": state.spawn_pair_attempts,
                 "complete_sample": (result["finder_step"] >= 0) & result["base_valid"],
             }
@@ -257,12 +275,12 @@ def collect_dataset(model, level, config, run_dir, identity):
     d = config["dataset"]
     collect = make_collector(level)
     audit_config = config["audit"]
-    audit = Audit() if audit_config["enabled"] else None
+    audit = Audit() if audit_config["enabled"] and audit_config.get("mode", "full") == "full" else None
     audit_target = min(audit_config["samples"], sample_count(d)) if audit is not None else 0
     collect_history = make_collector(level, history_stride=audit_config["every"]) if audit is not None else None
     chunks, evaluation_chunks = [], []
     requested = sample_count(d)
-    attempted = accepted = succeeded = missing = 0
+    attempted = accepted = succeeded = missing = delivered = 0
     started = time.monotonic()
     while accepted < requested and attempted < d["max_episodes"]:
         auditing = audit is not None and audit.samples < audit_target
@@ -273,7 +291,8 @@ def collect_dataset(model, level, config, run_dir, identity):
         print(f"[collect] episodes {attempted + 1}–{attempted + count}; matched successes {accepted}/{requested}", flush=True)
         batch = jax.device_get((collect_history if auditing else collect)(model, keys))
         _validate_evaluation_pairs(level, batch["spawn_pair_attempts"])
-        mask = batch["success"] & batch["complete_sample"]
+        eligible = batch["delivered"] if config.get("protocol", {}).get("eligibility") == "delivered" else batch["success"]
+        mask = eligible & batch["complete_sample"]
         needed = requested - accepted
         selected = np.flatnonzero(mask)[:needed]
         if auditing:
@@ -283,8 +302,9 @@ def collect_dataset(model, level, config, run_dir, identity):
                           if not name.startswith("history_")},
                        "episode_id": ids[selected]})
         evaluation_chunks.append({"episode_id": ids, **{name: np.asarray(batch[name]) for name in
-                                  ("success", "complete_sample", "episode_length", "target_position")}})
+                                  ("success", "delivered", "target_required_agents", "complete_sample", "episode_length", "target_position")}})
         succeeded += int(batch["success"].sum())
+        delivered += int(batch["delivered"].sum())
         missing += int((batch["success"] & ~batch["complete_sample"]).sum())
         attempted += count
         accepted += len(selected)
@@ -295,6 +315,8 @@ def collect_dataset(model, level, config, run_dir, identity):
     episodes = {name: np.concatenate([c[name] for c in evaluation_chunks]) for name in evaluation_chunks[0]}
     metadata = {"num_samples": accepted,
                 "attempted_episodes": attempted, "successful_episodes": succeeded,
+                "delivered_episodes": delivered,
+                "eligibility": config.get("protocol", {}).get("eligibility", "success"),
                 "success_rate": succeeded / attempted, "successful_missing_snapshot": missing,
                 "collection_seconds": time.monotonic() - started,
                 "input_dimensions": {s: int(dataset[s].shape[1]) for s in SOURCES},
@@ -303,6 +325,15 @@ def collect_dataset(model, level, config, run_dir, identity):
                 "snapshot_rule": "updated actor GRU/current emitted token on first communication tick after discovery",
                 "base_rule": "first current emitted token stored by base, potentially from a relay"}
     audit_result = None
+    if audit_config["enabled"] and audit_config.get("mode") == "conditional" and accepted == requested:
+        from geo_experiments.auditing import audit_targets
+        temporary = {}
+        temporary["geometry/cell_size_m"] = np.asarray(level.building.cell_size_m)
+        add_group(temporary, "dataset", {**dataset, "map_id": np.zeros(accepted, dtype=np.int32)})
+        summary = audit_targets(model, [level], config, temporary)
+        audit_result = (summary, {**group(temporary, "audit"),
+                        **{"pretest/" + k: v for k, v in group(temporary, "audit_pretest").items()},
+                        **{"collisions/" + k: v for k, v in group(temporary, "audit_collisions").items()}})
     if audit is not None:
         summary = audit.summary()
         summary.update(settings={"samples": audit_target, "every": audit_config["every"],
@@ -336,7 +367,8 @@ def reuse_dataset(path, config, run_dir, identity):
     dataset, episodes = group(arrays, "dataset"), group(arrays, "episodes")
     if len(dataset["episode_id"]) != sample_count(config["dataset"]):
         raise ValueError("Cached dataset size must match train + validation + test samples.")
-    if not np.all(dataset["success"] & dataset["complete_sample"]):
+    eligible = dataset["delivered"] if config.get("protocol", {}).get("eligibility") == "delivered" else dataset["success"]
+    if not np.all(eligible & dataset["complete_sample"]):
         raise ValueError("Cached dataset contains failed episodes or missing event snapshots.")
     metadata = dict(manifest["collection"])
     metadata["reused_from"] = str(path)
@@ -344,6 +376,17 @@ def reuse_dataset(path, config, run_dir, identity):
     if config["audit"]["enabled"]:
         summary = manifest.get("ambiguity_audit")
         wanted = min(config["audit"]["samples"], sample_count(config["dataset"]))
+        if config["audit"].get("mode") == "conditional":
+            if summary and summary.get("format") == "swarmecho-target-audit/v2":
+                from geo_experiments.auditing import audit_is_current
+                if not audit_is_current(summary, config, ("map_specific",)):
+                    raise ValueError("Cached collection has a different source-specific audit pipeline/settings.")
+                return dataset, metadata, episodes, (summary, group(arrays, "audit"))
+            if (not summary or summary.get("format") != "swarmecho-conditional-audit/v1"
+                    or summary["pretest"]["samples"] != wanted
+                    or manifest["config"]["audit"] != config["audit"]):
+                raise ValueError("Cached collection has no matching conditional latent screen.")
+            return dataset, metadata, episodes, (summary, group(arrays, "audit"))
         if (not summary or summary.get("source", {}).get("kind") != "integrated"
                 or summary.get("samples") != wanted
                 or summary.get("settings", {}).get("every") != config["audit"]["every"]

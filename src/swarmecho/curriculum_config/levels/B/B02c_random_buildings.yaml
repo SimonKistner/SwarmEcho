@@ -89,6 +89,42 @@ reward:
   delivery_gap_vesting_enabled: false
   delivery_gap_vesting_steps: 10
 
+# TODO: The reward system changed; this level's legacy rewards are no longer supported.
+# Replace the original reward block above with these RewardConfig defaults, then retune this level.
+# Optional switches below are global defaults; restore level-specific choices as needed.
+# reward:
+#   reinforcement_reward: 1.0 # Full amount to each qualified deployment voter.
+#   decommission_reward: 0.0 # Full amount to each removed drone, on removal.
+#   rejected_call_reward: -200.0 # Each qualified YES voter on a rejected batch.
+#   all_decommissioned_penalty: -1000.0 # Full signed amount to each last acting drone.
+#   useless_agent_at_success_reward: -3000.0 # Each active drone outside the selected success chain.
+#   useless_agent_at_success_all_agents_reward: -750.0 # Each active drone per useless drone at terminal chain success; no population divisor.
+#   useless_agent_at_success_all_agents_reward_cap: 2000.0 # Limits the absolute adjustment per active drone so useful success remains rewarding.
+#   target_found_requires_delivery: true
+#   chain_reward_system: euclidean
+#   progress_based_cluster_tiebreaker_soft: false
+
+#   allow_redundancy_reward: false
+#   enable_chain_efficiency_reward: false
+#   chain_efficiency_reward: 0.0 # Per eligible drone times its path efficiency; no population divisor.
+
+#   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
+#   finder_reward: 100.0 # Each direct base deliverer, or first visual finder without delivery gating.
+#   target_found_reward: 125.0 # Full one-shot amount to every active drone at delivery/discovery.
+#   success_reward: 3000.0 # Full amount to every active drone at first success; no population divisor.
+#   success_reward_as_hold_record: false
+#   peer_informing_reward_enabled: false
+#   peer_informing_reward: 50.0
+
+#   collision_reward: -0.5 # Per colliding drone per transition.
+#   time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
+#   gap_progress_reward_per_meter: 0.2
+#   gap_reward_uses_change: false
+#   gap_change_reward_per_meter: 3.0 # Multiplies signed changes in each drone's credited metres.
+#   delivery_gap_vesting_enabled: false
+#   delivery_gap_vesting_steps: 10
+#   no_movement_termination_penalty: 0.0 # Full signed amount to each active drone at idle failure.
+
 training:
   total_timesteps: 200000000
   num_envs: 2000

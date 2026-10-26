@@ -23,7 +23,7 @@ def atomic_json(path: Path, payload: dict) -> None:
 
 
 class AdaptiveTargetSpawnController:
-    def __init__(self, building, env, config, *, feasibility_budget=None):
+    def __init__(self, building, env, config, *, feasibility_budget=None, relay_options=None):
         from swarmecho.env.buildings import target_spawn_boxes
 
         self.config = config
@@ -49,6 +49,9 @@ class AdaptiveTargetSpawnController:
                             f"{env.obstacle_planning_clearance_m}:{env.comm_radius_base}:"
                             f"{env.comm_radius}:{env.visual_radius}:{env.roadmap_approach}:"
                             f"{env.roadmap_node_density}:{env.roadmap_merge_wall_end_nodes}").encode("utf-8"))
+            if relay_options is not None and relay_options.mode == "global_candidates":
+                from swarmecho.env.relay_candidates import settings
+                identity.update(json.dumps(settings(relay_options), sort_keys=True).encode())
         self.sampler_identity = identity.hexdigest()
         self.cell_volumes = np.bincount(self.box_cell_indices, weights=self.box_volumes,
                                        minlength=len(self.cells))
@@ -172,11 +175,11 @@ class AdaptiveTargetSpawnController:
                                  sum(window) / len(window) if window else 0.
                                  for window in self.windows])
 
-    def advance(self, update, steps):
-        """Compute next-rollout probabilities once, returning a truthful history row."""
+    def advance(self, update, steps, *, diagnostics=True):
+        """Always adapt; optionally build the cell history row and plateau reports."""
         if not self.eligibility_ready:
             raise ValueError("Initialize adaptive spawn eligibility before advancing the controller.")
-        applied = self.probabilities.copy()
+        applied = self.probabilities.copy() if diagnostics else None
         failure = np.where(self.eligible, 1. - self.rates, 0.)
         worst_failure = float(failure.max())
         if worst_failure == 0.:
@@ -193,6 +196,8 @@ class AdaptiveTargetSpawnController:
         # Convex interpolation preserves the floor, including after resume.
         self.probabilities /= self.probabilities.sum()
         self.update, self.steps = int(update), int(steps)
+        if not diagnostics:
+            return None, []
         row = {"kind": "update", "update": self.update, "steps": self.steps,
                "probabilities": applied.tolist(), "success_rates": self.rates.tolist(),
                "next_probabilities": self.probabilities.tolist(),
@@ -307,14 +312,14 @@ class MapAdaptiveTargetSpawnController:
     Intended for small persistent static suites. The map dimension is indexed
     inside JAX reset; success windows and probability updates stay on the host.
     """
-    def __init__(self, buildings, map_names, env, config, *, feasibility_budget=None, compact=False):
+    def __init__(self, buildings, map_names, env, config, *, feasibility_budget=None, compact=False, relay_options=None):
         if len(buildings) != len(map_names) or len(buildings) < (1 if compact else 2):
             raise ValueError("A map spawn controller requires matching names for at least two maps.")
         if len(set(map_names)) != len(map_names):
             raise ValueError("Adaptive spawn map names must be unique.")
         self.map_names = tuple(map_names)
         self.controllers = tuple(AdaptiveTargetSpawnController(
-            building, env, config, feasibility_budget=feasibility_budget) for building in buildings)
+            building, env, config, feasibility_budget=feasibility_budget, relay_options=relay_options) for building in buildings)
         self.feasibility_budget = feasibility_budget
         self.update = self.steps = 0
         self.compact = compact
@@ -395,15 +400,18 @@ class MapAdaptiveTargetSpawnController:
             selected = ids == index
             controller.observe(positions[selected], successes[selected])
 
-    def advance(self, update, steps):
+    def advance(self, update, steps, *, diagnostics=True):
         rows, warnings = [], []
         for name, controller in zip(self.map_names, self.controllers):
-            row, messages = controller.advance(update, steps)
-            rows.append(row)
+            row, messages = controller.advance(update, steps, diagnostics=diagnostics)
+            if diagnostics:
+                rows.append(row)
             warnings.extend(f"[{name}] {message}" for message in messages)
         if self.compact and len(self.controllers) > 32 and len(warnings) > 20:
             warnings = [f"[WARNING] {len(warnings)} adaptive cell warning lines; showing the first 20.", *warnings[:20]]
         self.update, self.steps = int(update), int(steps)
+        if not diagnostics:
+            return None, []
         return {"kind": "map_update", "update": self.update, "steps": self.steps, "maps": rows}, warnings
 
     def save(self, checkpoint_path):

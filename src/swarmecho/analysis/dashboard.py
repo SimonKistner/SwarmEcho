@@ -473,16 +473,16 @@ if len(selected_operations) == 1:
     ]
 
     rew_items = [
-        ("collision_penalty", str(rew_cfg.get("collision_penalty", "N/A"))),
-        ("exploration_bonus", str(rew_cfg.get("exploration_bonus", "N/A"))),
-        ("success_bonus", str(rew_cfg.get("success_bonus", "0")))
+        ("collision_reward", str(rew_cfg.get("collision_reward", "N/A"))),
+        ("exploration_reward", str(rew_cfg.get("exploration_reward", "N/A"))),
+        ("success_reward", str(rew_cfg.get("success_reward", "0")))
     ]
     if "max_gap_penalty" in rew_cfg:
         rew_items.append(("max_gap_penalty (legacy)", str(rew_cfg["max_gap_penalty"])))
     else:
         rew_items.extend([
-            ("time_penalty_per_step", str(rew_cfg.get("time_penalty_per_step", "5.0"))),
-            ("gap_reduction_meter_bonus", str(rew_cfg.get("gap_reduction_meter_bonus", "0.125"))),
+            ("time_presure_reward", str(rew_cfg.get("time_presure_reward", "5.0"))),
+            ("gap_progress_reward_per_meter", str(rew_cfg.get("gap_progress_reward_per_meter", "0.2"))),
         ])
 
     render_vertical_card("Env", env_items)

@@ -38,13 +38,16 @@ class ReplayRewards:
         return values.copy() if copy else values
 
 
-def planner_metadata(cfg) -> dict:
+def planner_metadata(cfg, *, reward_cfg=None) -> dict:
     """Keep roadmap assumptions and sensor settings alongside inspector replays."""
     names = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
              "relay_agent_budget",
              "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m",
              "wall_sensing_layout", "wall_sensing_rays", "wall_sensing_ray_max_distance")
-    return {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
+    metadata = {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
+    if reward_cfg is not None and reward_cfg.priveleged_vote_reward.enabled:
+        metadata["reward"] = {"priveleged_vote_reward": asdict(reward_cfg.priveleged_vote_reward)}
+    return metadata
 
 
 from swarmecho.env.buildings import building_snapshot
@@ -107,7 +110,8 @@ def write_replay(
         for name in ("vote", "ids", "round", "known_round", "source_yes", "spent",
                      "dwell", "zone_center", "zone_valid", "spawned", "decommissioned",
                      "rejected_voters", "calls", "decommissions", "rejected_calls",
-                     "reference_callers", "reference_age"):
+                     "reference_callers", "reference_age", "packet_round", "packet_count",
+                     "packet_bits", "decision_step", "decision_yes", "vote_step"):
             arrays[f"adapt_{name}"] = np.stack([
                 np.asarray(getattr(state.adaptive, name)) for state in state_list
             ])
@@ -117,6 +121,12 @@ def write_replay(
         ])
         arrays["adapt_available_votes"] = np.maximum(
             arrays["adapt_base_votes"] - arrays["adapt_spent"], 0)
+        if state_list[0].adaptive.vote_shaping is not None:
+            for name in state_list[0].adaptive.vote_shaping._fields:
+                arrays[f"adapt_vote_shaping_{name}"] = np.stack([
+                    np.asarray(getattr(state.adaptive.vote_shaping, name)) for state in state_list
+                ])
+            arrays["target_required_agents"] = stack("target_required_agents")
     if building is not None:
         shape = arrays["coverage"].shape[1:]
         voxel_size = np.asarray(building.world_size_m) / np.asarray(shape)

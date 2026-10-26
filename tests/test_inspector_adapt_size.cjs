@@ -6,7 +6,7 @@ const {test} = require('node:test');
 
 const source = readFileSync(join(__dirname, '../src/swarmecho/visualize/inspector.py'), 'utf8');
 const script = source.split('</aside></div><script>')[1].split('</script></body>')[0];
-const statusFunctions = 'function renderKnownList' + script.split('function renderKnownList')[1].split('const REWARD_COLORS')[0];
+const statusFunctions = 'function renderKnownList' + script.split('function renderKnownList')[1].split('const rewardDebugPanel')[0];
 
 test('adaptive replay inspector shows current lifetimes, votes, dwell and base receipts', () => {
     const elements = new Map();
@@ -17,6 +17,11 @@ test('adaptive replay inspector shows current lifetimes, votes, dwell and base r
             classList: {toggle() {}},
             replaceChildren(...items) {this.children = items;},
             appendChild(item) {this.children.push(item); if (item.id) elements.set(item.id, item);},
+            insertBefore(item, before) {
+                const index = this.children.indexOf(before);
+                this.children.splice(index < 0 ? this.children.length : index, 0, item);
+                if (item.id) elements.set(item.id, item);
+            },
             querySelectorAll() {return this.children;},
         };
     }

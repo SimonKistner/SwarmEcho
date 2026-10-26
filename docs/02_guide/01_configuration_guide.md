@@ -15,11 +15,38 @@ explicitly.
 | `training` | `TrainingConfig`: PPO, noise, rollout sizes, and checkpoint loading |
 | `training.adaptive_map_sampling` | Default-off map-selection probabilities, per-map windows, warmup, floor, smoothing and support/evaluation budgets; enabled in G02; see the [reference](../01_reference/10_adaptive_map_sampling.md) |
 | `network` | `NetworkConfig`: actor/critic memory, architecture, and TarMAC |
-| `evaluation` | `EvaluationConfig`: schedules, robustness, maps, and artifacts |
+| `inspection_evaluation` | Visual inspection schedules, maps, robustness and artifacts; `evaluation` remains a legacy alias |
+| `validation` | Independent held-out statistical episodes, batching, result tables and best-model selection |
 | `logging` | `LoggingConfig`: run names, output roots, W&B, and terminal output |
 
 There is no visualization configuration section in a level. Inspector controls
 belong to the independent inspector.
+
+`training.num_maps` separates persistent random training-map count from
+`training.num_envs` (parallel lanes). Its `null` default preserves the old
+lane-count fallback; authored levels keep their configured map list.
+`inspection_evaluation.inspection_maps` replaces `random_eval_envs`; random
+buildings automatically use a persistent inspection subset. G03 reserves 400
+validation maps beside 3600 training maps, using three held-out maps for visual
+inspection. See [inspection and validation](../01_reference/12_validation.md)
+for the independent 10000-episode validation pass, fixed targets and checkpoint
+selection. G02 keeps inspection-based stopping and disables validation.
+Random training maps are sampled uniformly at episode resets when adaptive map
+sampling is disabled. The split and validation remain available independently;
+enabling adaptation only changes training map probabilities.
+
+### Optional reinforcement vote rewards
+
+G02 enables `reward.priveleged_vote_reward.enabled=true`; the global
+default is false. It requires `adapt_size.enabled=true` and
+`adapt_size.vote_protocol=latest_decision`. Set it to false to retain the old
+reinforcement reward calculation and voting behavior, without remembered budgets
+or shaping arrays. The two signed coefficients are
+`reward.priveleged_vote_reward.withheld_reinforcement_vote_reward=-1.0` per eligible communication tick
+and `reward.priveleged_vote_reward.unnecessary_reinforcement_call_reward=-200.0` per responsible YES
+source on an unnecessary grant. No new observations or timing settings are
+introduced. See [adaptive size](../01_reference/06_adaptive_swarm_size.md#optional-reinforcement-vote-shaping)
+for decision-time attribution, observed-chain budgets and replacement calls.
 
 ### Training-only adaptive target spawning
 
@@ -92,6 +119,34 @@ configuration and geometry; `branch` and `init` start new controller windows.
 Resuming an older checkpoint without controller state prints a warning and starts
 from the baseline. A new branch should use a new run name.
 
+For large banks, detailed diagnostics can be disabled independently of the
+adaptive samplers:
+
+```yaml
+logging:
+  adaptive_cell_diagnostics: false
+  individual_map_diagnostics: false
+```
+
+Both switches default to `true` globally and are `false` in G03. The cell switch
+disables dashboard metadata/history creation, per-update cell diagnostic rows,
+individual cell plateau reports and per-map cell-support startup messages.
+Cell-level metrics were already absent from W&B. The map switch suppresses
+individual-map W&B series, full map-statistic history arrays, top-map history
+entries and per-map evaluation statistics. Summary history and W&B retain
+map-balanced mean, worst, best, median and lower-decile (p10) success, plus map
+warmup/coverage and probability-range metrics. Training map success summaries
+use only maps with completed outcomes; monitor `adaptive_maps/observed_fraction`.
+The best/median/p10 summaries are added only in summary-only mode; G02 keeps its
+existing detailed W&B keys and journal formats with the default switches on.
+
+These are reporting switches: map/cell selection, support discovery, outcome
+windows and complete checkpoint state remain active. They are outside sampler
+identity checks, so changing reporting does not require discarding adaptive
+state on resume. Existing historical files are preserved; disabling cell
+diagnostics stops new dashboard data but does not erase earlier charts.
+Evaluation heatmaps and replays retain their own `evaluation` switches.
+
 Wall sensing has three independent controls: `env.wall_sensing_layout`
 (`fibonacci`, the legacy default, or `xyz`), `env.wall_sensing_rays` (default 16),
 and `env.wall_sensing_ray_max_distance` (default 8.0 metres). Fibonacci accepts
@@ -104,54 +159,79 @@ still readable and preserve their original wall range from `visual_radius`.
 New explicit settings take precedence. Wall count, layout and range must match
 a loaded checkpoint; renaming an old count does not change its sensor semantics.
 
-Reward switches `success_bonus_as_hold_record`, `success_bonus_contributors_only`, `gap_reward_uses_change`,
-`delivery_gap_vesting_enabled`, and `peer_informing_reward_enabled` default to
-`false`. Delivery gap vesting requires gap-change reward and delivery gating;
-`delivery_gap_vesting_steps` defaults to 10 and must be positive.
-`gap_change_meter_bonus` and `peer_informing_bonus` set the respective enabled
-reward amounts. The hold-record switch spreads the existing `success_bonus`
-across first achieved consecutive chain-hold lengths rather than adding to it.
-`success_bonus_contributors_only` keeps the terminal success bonus total unchanged
-but distributes it only among selected chain contributors; it is enabled in
-`B02c_random_buildings_small` and requires `chain_held` success.
-The current B02c level enables peer informing and terminal success reward
-while keeping the per-step absolute gap reward. Its time cost is 3 per step;
-hold records and delivery gap vesting are disabled.
+Rewards now use signed individual amounts: positive rewards, negative subtracts,
+and zero disables a term. No reward divides by active-agent count. The names
+`all_decommissioned_penalty` and `no_movement_termination_penalty` are retained,
+but their values are signed too. `time_presure_reward` is the public field name.
 
-`B02c_random_buildings` also enables adaptive population control, starting with
-two reserved drones staggered by `env.spawn_delay` and capacity nine. Its
-voted reinforcements arrive immediately. Other levels keep their previous
-population behavior unless `adapt_size.enabled=true` is set. See the
-[adaptive swarm reference](../01_reference/06_adaptive_swarm_size.md) for settings
-and [diagnostics guide](../01_reference/07_adaptive_swarm_diagnostics.md) for W&B curves.
+Global numeric defaults follow G02 with a four-agent reference: success +3000,
+target delivery +125, and time pressure -0.75 per acting drone per step.
+`useless_agent_at_success_reward=-3000` applies only to each useless active
+agent at terminal chain success. In addition,
+`useless_agent_at_success_all_agents_reward=-750` applies to every active drone
+per useless active drone at that success, without dividing by population.
+`useless_agent_at_success_all_agents_reward_cap=2000` limits the absolute amount
+per recipient: each gets `-min(750 * useless_count, 2000)`. The min cap leaves a
+useful drone at least +1000 from success and this adjustment, so completing still
+pays even with many unused drones. For two useless drones each active drone gets
+-1500 from this term; useless drones also receive their separate -3000 adjustment.
+The cap is a finite nonnegative magnitude. Zero disables either
+term independently. Contributors-only success remains removed. Local voxel, peer-sender and soft
+cluster attribution remain. See [signed individual rewards](../01_reference/11_individual_rewards.md).
 
-`reward.reinforcement_reward` and `reward.decommission_reward` default to zero.
-Positive values reward; negative values punish. Each qualified deployment voter
-receives the full reinforcement amount, and each removed drone receives the full
-decommission amount. Neither is divided across agents. Legacy saved cost fields
-are converted by negating their values.
+Optional `success_reward_as_hold_record` and `peer_informing_reward_enabled`
+default to false. Each new hold record pays every qualifying holder
+`success_reward / hold_chain_for`, without dividing by holder count.
 
-`adapt_size.reward_by_reference_enabled` defaults to `false` and requires adaptive
-size. When enabled, each qualified caller receives an additional signed share
-of a voted recruit's normal reward, excluding reference bonuses. Set
-`adapt_size.reward_by_reference_fraction` (default `0.10`, range `[0, 1]`) and
-`adapt_size.reward_by_reference_steps` (default `200`, positive integer) to control
-the initial share and linear decay window in environment steps. The recruit's
-reward is unchanged, each caller receives the full share, and references stop
-on decommissioning or episode reset. The separate W&B reward curve is
-`rewards/reward_by_reference`.
+For relay-filtered adaptive-size training,
+`logging.required_agents_metrics_window_episodes: 500` controls separate
+completed-episode windows for each exact target estimator count. W&B's
+`req_agent_K/active_agents_at_EP_end_mean` tracks actual active population at
+episode end across successes and failures. `req_agent_K/success_rate` uses the
+same smaller window. `req_agent_K/total_eps_in_eps_window` measures the category's
+fraction in the ordinary `training.num_envs` completed-episode window. The
+curriculum's spare slot does not change `K`. See
+[adaptive diagnostics](../01_reference/07_adaptive_swarm_diagnostics.md).
 
-**First visual sighting is not a reward event in delivery-gated missions.**
-Coverage rewards the exploration pattern; randomized target placement makes
-the identity of the first drone to see the target incidental. `finder_bonus`
-rewards a target-aware drone that delivers knowledge directly to the base,
-while `target_found_bonus` pays its full configured value once to every active
-drone at delivery, independent of the number of active drones. With
-`target_found_requires_delivery=false`, it pays the same way at first discovery.
-Existing configured amounts are now per drone, so total team payout grows with
-the active population. See
-[First visual sighting is not rewarded](../01_reference/02_environment_and_physics.md#first-visual-sighting-is-not-rewarded)
-for the intended exploration, handoff, and relay sequence.
+Adaptive-size actors default to `env.observe_base_vote_ratio: false` and
+`env.observe_base_population: false`; only G02 enables both. While connected to the base network they
+observe qualified base voters divided by the currently active population, and
+active population divided by the global `DEPLOYED_AGENTS_OBS_REF = 10.0` in
+`core/config.py`. A qualified voter has at least `adapt_size.vote_holding`
+unspent YES credits delivered in the current base round. Successful deployment
+clears the base credits, so the vote ratio starts at zero in the next round. Both inputs become
+zero immediately off-network. Disable both observation flags to evaluate an
+older checkpoint with its original adaptive observation layout; fresh training
+is required to use the two added input channels.
+
+`gap_reward_uses_change`, `gap_change_reward_per_meter` and delivery-gap vesting
+are **legacy diagnostic tools only**, retained for historical debugging. Do not
+consider or recommend them as training design/tuning settings or plateau
+remedies. Normal training uses recurring gap shaping. Diagnostic vesting
+requires gap-change reward and delivery gating; its step count defaults to 10.
+G02 keeps peer informing and soft cluster credit enabled, uses
+obstacle-geodesic geometry, and leaves hold records and vesting disabled.
+
+G02 is the migrated level. Every other level's original reward block remains
+untouched and unsupported, with a TODO and commented global-default replacement
+underneath. Replace that original block before using the level. Old reward
+names, old cost aliases and removed switches are rejected rather than converted.
+
+`reinforcement_reward` defaults to +1 per qualified deployment voter,
+`decommission_reward` to 0 per removed drone, and `rejected_call_reward` to -200
+per qualified rejected voter. Removal events pay the lifetime that acted.
+
+Reference rewards remain optional under `adapt_size`: defaults are disabled,
+0.10 initial fraction and 200 transitions. G02 keeps them enabled at 0.20 over
+500 transitions. Each caller receives its full decaying share independently,
+without deducting it from the recruit or cascading reference rewards. See the
+[adaptive swarm reference](../01_reference/06_adaptive_swarm_size.md).
+
+First visual sighting is not rewarded in delivery-gated missions. At delivery,
+`finder_reward` pays each eligible direct base deliverer and
+`target_found_reward` pays every active drone once. Without delivery gating,
+they use first discovery instead. See
+[First visual sighting is not rewarded](../01_reference/02_environment_and_physics.md#first-visual-sighting-is-not-rewarded).
 
 ## Levels and maps
 
@@ -237,7 +317,7 @@ The W&B metric `train/visually_found_rate` is the fraction of the last
 target. It uses the same sliding window as `train/target_found_rate`.
 
 When `reward.enable_chain_efficiency_reward=true`, W&B logs
-`rewards/efficiency` alongside the other reward components. It sums the paid
+`rewards/chain_efficiency_reward` alongside the other reward components. It sums the paid
 reward across agents and steps per episode, then averages over the last
 `training.num_envs` completed episodes. Logging starts once that window is
 full, including both successful and failed episodes.
@@ -317,15 +397,13 @@ certificates, budgets and preview command.
 
 ## Reward defaults
 
-The defaults live in `RewardConfig`: delivery required; Euclidean chain
-distance; exploration 0.25; collision 0.5; finder 0; target found 100;
-success 500; idle termination -1000. Each active drone shares a team time
-penalty of 5 per step. A contributing drone on a target mission earns a
-per-step gap reduction bonus of 0.125 per metre of the selected base-to-target
-distance already closed. Coverage missions, including B02a training, receive
-the time penalty but no gap bonus. Optional redundancy and efficiency rewards
-are disabled by default; the efficiency bonus is 0.5. Level overrides take
-precedence. B02c explicitly sets the 0.2 per-metre bonus.
-At a 40 m roadmap distance, closing 1 m pays the default 0.125 to each
-contributing drone each step; a held zero-gap chain pays 5 to each contributor
-each step. With B02c's 0.2 setting, those amounts are 0.2 and 8.
+`RewardConfig` contains the commented source of truth. Defaults include
+exploration +2 per credited voxel, collision -0.5, finder +100, target delivery
++125, success +3000, time pressure -0.75 per acting drone per step, useless agent
+at success -3000, and idle termination 0. Gap progress pays +0.2 per credited
+closed metre per step; a 40 m fully credited route pays +8 per contributor per
+step. Coverage missions have no gap reward. Efficiency is disabled with a zero
+coefficient; change mode is disabled with coefficient 3. Optional switches keep
+their normal global defaults; G02 explicitly overrides its geometry and enabled
+features. The full list and exact triggers are in
+[signed individual rewards](../01_reference/11_individual_rewards.md).

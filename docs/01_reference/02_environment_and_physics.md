@@ -77,10 +77,22 @@ view, missed detections or depth noise. A single monocular image requires scale
 assumptions to estimate metric distance. The legacy debugging target vector above
 is not this sensor: it is gated by persistent knowledge instead of direct sight.
 
-G01 observation width is now **139**, versus **136** for the Phase 0 checkpoint.
+With both base-feedback channels disabled, G01's target-displacement sensor
+increases observation width to **139**, versus **136** for the Phase 0 checkpoint.
 Checkpoint contracts record the new toggle and its enabled normalization radius;
 older contracts interpret a missing toggle as false. Sensor-enabled loading requires
 matching metadata and input width; disabled old configurations retain their layout.
+
+### Base-network feedback
+
+Adaptive-size episodes also provide optional base-network feedback after the
+drone's own vote and decommission-zone inputs. Both flags default to false
+globally; G02 enables `observe_base_vote_ratio` and `observe_base_population`. The actor then sees
+qualified base voters / active population and active population / the global
+`DEPLOYED_AGENTS_OBS_REF = 10.0`. Both are zero unless the drone currently has a
+physical radio path to the base. These observations are not latched; no path
+means zero on that observation. See [adaptive swarm size](06_adaptive_swarm_size.md)
+for receipt semantics, layout and legacy-checkpoint handling.
 
 ### Wall and drone radar
 
@@ -168,127 +180,104 @@ cell size and must evenly divide all world dimensions.
 
 ## Relay task and rewards
 
-Communication depends on range and visibility. Target knowledge and delivery
-to the base persist within an episode. Reward settings govern exploration,
-collisions, discovery, delivery, chain success, gap shaping, idle termination,
-and optional redundancy/chain-efficiency bonuses.
+Communication depends on range and unobstructed visibility. Target knowledge
+and delivery to the base persist within an episode. All reward amounts are
+signed individual coefficients: negative values subtract reward directly.
+No payout is divided by the active population. See
+[signed individual rewards](11_individual_rewards.md) for every default,
+recipient, calibration choice and supported level.
 
 ### First visual sighting is not rewarded
 
-In a delivery-gated target mission, the first visual sighting updates the
-drone's target knowledge but pays no `finder_bonus` or `target_found_bonus`.
-Exploration already earns coverage reward. The team can learn where and how to
-spread out, but with randomized target placement it cannot reliably control
-which drone happens to see the target first. Rewarding that identity would add
-noisy credit to the exploration policy. Despite its name, `finder_bonus` is
-paid to a target-aware drone directly linked to the base when target knowledge
-first reaches the base; each active drone receives the full `target_found_bonus`
-once at that delivery event, independent of the active population. Inactive
-drones receive zero. With `target_found_requires_delivery=false`, the same
-per-active-drone payout occurs at the first discovery instead. A configured
-bonus of 500 therefore pays 500 to each active drone, and the total team payout
-is 500 times the active population. Existing configured bonus values now have
-this per-drone meaning. Peer informing is rewarded separately when a previously
-uninformed drone first learns the target through a direct peer link.
+In a delivery-gated mission, seeing the target first updates the drone's
+knowledge but pays neither `finder_reward` nor `target_found_reward`.
+Exploration already rewards coverage; the identity of the first visual finder
+is incidental under randomized target placement. At first delivery,
+`finder_reward` pays each target-aware direct base neighbor, while every active
+drone receives the full `target_found_reward` once. Inactive slots receive zero.
+Without delivery gating, both events instead use first visual discovery.
+Re-entry into sight or reconnecting after delivery cannot pay the events again.
 
-The intended team behavior is to spread out and explore, then have the first
-drone that sees the target inform at least one peer. Informed drones propagate
-that knowledge toward the base and to other drones. The first drone may stay
-near the target as an endpoint or return there after a handoff. Once the base
-and other drones are informed, shared and recurrent memory should help some
-drones form the target-side relay while others build from the base. The two
-sides then meet and hold the connection. These are desired roles, not fixed
-drone assignments or a guaranteed result of the current rewards.
+The intended behavior is to explore, inform peers, propagate knowledge toward
+the base, and form a relay with drones working from both endpoints. These are
+learned roles rather than fixed assignments. Peer informing rewards eligible
+direct senders when a previously uninformed drone first learns the target;
+direct sighting and base replay take precedence. Simultaneous senders split
+that peer's credit, while simultaneous viewers split a new voxel's exploration
+credit. These are local contribution shares, not population-split budgets.
 
-`chain_reward_system` supports `euclidean` and `obstacle_geodesic`.
-For a partial chain, `euclidean` chooses the base-connected drone closest in
-straight-line distance to the target and the target-connected drone closest to
-the base. `obstacle_geodesic` jointly selects both leaders by the smallest
-free-space roadmap gap. The team pays `time_penalty_per_step` on every step,
-divided equally among active drones. For a target mission, after the required
-target knowledge reaches the base, each contributing drone receives
-`gap_reduction_meter_bonus * max(L - gap, 0)` per step,
-where `L` is the selected system's base-to-target distance. In obstacle mode,
-both `L` and the gap use the free-space roadmap. The bonus scales with the
-actual route length and reaches its maximum at zero gap, including during the
-chain hold. Only drones on the shortest communication paths from the respective
-endpoint to its selected leader receive the bonus. When redundancy reward is
-enabled and the chain is complete, all drones on a valid complete path can
-receive it. Coverage missions have no gap bonus or chain-gap computation. The optional
-chain-contributor observation uses the same mode-specific selection once a
-complete chain exists.
+### Chain geometry and progress credit
 
-Additional reward switches default to `false`. With
-`progress_based_cluster_tiebreaker_soft`, gap credit can additionally be shared
-among equal-hop alternatives, weighted by their hypothetical frontier-leader
-progress. Shared mandatory links keep full credit and separate clusters split
-independently. This defaults off and is enabled in G01; terminal contributor
-selection and actor observations remain unchanged. See
-[soft cluster credit](09_soft_cluster_credit.md) for its formula.
+`chain_reward_system` supports `euclidean` and `obstacle_geodesic`. Euclidean
+partial chains select the base-connected drone closest to the target and the
+target-connected drone closest to the base. Obstacle-geodesic selection jointly
+minimizes the free-space roadmap gap. After the information gate opens, a
+contributing drone receives `gap_progress_reward_per_meter * max(L - gap, 0)`
+per step, where both `L` and the gap use the selected distance system.
 
-With
-`gap_reward_uses_change`, each drone instead receives
-`gap_change_meter_bonus` times the change in its own credited closed metres.
-Joining a selected relay path can produce a positive reward; leaving or breaking
-it can produce a negative reward. Without delivery vesting, the first transition
-that opens the delivery or discovery gate pays no accumulated gap reward.
-`delivery_gap_vesting_enabled` requires the change reward and target delivery.
-At delivery, it records each drone's credited metres and releases that existing
-credit over `delivery_gap_vesting_steps` subsequent steps while the contribution
-persists. Newly made progress pays immediately. Losing progress cancels unpaid
-credit first; only credit already paid can be reclaimed. Episode termination
-releases any remaining credit to current contributors. With
-`success_bonus_as_hold_record`, each new episode record for consecutive full-chain
-hold steps releases `success_bonus / hold_chain_for` to current complete-chain
-contributors, divided among them. The terminal success payout is then omitted;
-repeating an already achieved hold length pays nothing. This mode requires
-`success_condition: chain_held`. With `peer_informing_reward_enabled`, a drone
-earns a share of `peer_informing_bonus` when a previously uninformed peer first
-learns the target through a direct communication link. Multiple senders split
-one recipient's bonus; direct sighting and base replay take precedence.
+Only drones on the selected shortest communication paths from each endpoint to
+its frontier leader receive credit. A complete chain selects a shortest-hop
+base-target path. Optional redundancy credit allows complete-path alternatives.
+Coverage missions calculate no target-chain gap reward. The contributor
+observation follows the same geometry once a complete chain exists.
 
-### Reward scaling with population
+With `progress_based_cluster_tiebreaker_soft`, equal-hop alternatives share
+local credit according to hypothetical frontier progress. Mandatory links keep
+full credit, and independent clusters split independently. Terminal usefulness
+selection and actor observations remain unchanged; see
+[soft cluster credit](09_soft_cluster_credit.md).
 
-`target_found_bonus` is a fixed amount per active drone. The following terms
-still divide a team amount by a recipient count; their behavior is unchanged.
-Here `N` is the current active population and `N_previous` is the population
-that acted before deployment or decommissioning on this transition.
+`gap_reward_uses_change`, its coefficient `gap_change_reward_per_meter`, and
+delivery-gap vesting are legacy diagnostic tools only. They are retained for
+historical debugging, not training design, tuning or plateau remedies. Normal
+training uses recurring gap shaping.
 
-| Setting | Per-recipient amount before event gates |
-| --- | --- |
-| `success_bonus` (ordinary success, including coverage) | `success_bonus / N` |
-| `success_bonus_contributors_only` | `success_bonus / contributor_count`, paid only to selected contributors |
-| `success_bonus_as_hold_record` | `success_bonus / hold_chain_for / holder_count`, paid only on new hold records |
-| `chain_efficiency_bonus` | `chain_efficiency_bonus * individual_efficiency_credit / N`; even active noncontributors increase the divisor |
-| `time_penalty_per_step` | `-time_penalty_per_step / N`; adaptive missions instead charge the acting population using `N_previous` |
-| `no_movement_termination_penalty` | Signed configured amount divided by `N` at idle termination |
-| `all_decommissioned_penalty` | `-all_decommissioned_penalty / N_previous` to the last acting drones |
-| `success_unused_agent_penalty` | `-success_unused_agent_penalty * unused_active_count / N` to every active drone at success |
+In this diagnostic mode, each drone receives
+`gap_change_reward_per_meter` times its change in credited metres instead of
+recurring progress reward. Without vesting, gate activation pays no accumulated
+credit. `delivery_gap_vesting_enabled` requires change mode and delivery gating:
+it records pre-delivery credit and releases it over
+`delivery_gap_vesting_steps`, while new progress pays immediately. Loss cancels
+unpaid credit first; only paid credit can be reclaimed. Termination releases
+remaining current credited progress.
 
-Success and efficiency rewards therefore still become smaller per recipient
-as their divisor grows. The shared penalties likewise become smaller in
-magnitude per recipient for the same team cost; the unused-agent team cost
-also grows with the number of unused drones.
+### Success and time pressure
 
-Other rewards split local contribution credit rather than dividing by the
-whole active population: exploration splits each newly covered voxel among
-its simultaneous viewers, peer informing splits each newly informed peer's
-bonus among its senders, and optional soft cluster credit splits gap credit
-among local equal-hop alternatives. Additional active drones elsewhere do not
-directly dilute these credits. Gap shaping otherwise pays per contributing
-drone and credited metre. Finder, reinforcement, decommission, rejected-call,
-and individual noncontributor amounts are also paid in full per eligible
-recipient. Reference rewards pay each caller its own decaying share of a
-recruit's normal reward and inherit any population scaling in that reward.
+The legacy idle shortcut is separate from successful chain holding.
+`env.no_movement_termination_steps` must currently be a positive integer: zero
+does not disable it and is rejected. To prevent idle termination within an
+episode, set it strictly above `env.max_steps` (for example, 701 for a 700-step
+episode, or 10000000). This leaves the ordinary episode time limit and
+`chain_held` success check active. If the idle and chain-hold thresholds are
+reached on the same transition, successful completion still takes precedence
+and no idle-failure reward is paid.
 
-Training logs report peer-transfer counts, the best hold, and positive and
-negative gap reward totals separately. The current B02c level enables peer
-informing, pays success at completion, uses the per-step absolute gap reward,
-and leaves delivery gap vesting disabled.
+Every active drone receives the full `success_reward` at first success. At
+terminal chain success, each active drone outside the selected success chain
+also receives `useless_agent_at_success_reward`. In addition, every active
+drone receives `useless_agent_at_success_all_agents_reward` per useless active
+drone, without a population divisor, capped in absolute amount per recipient by
+`useless_agent_at_success_all_agents_reward_cap`. Defaults are success +3000,
+the individual adjustment -3000, and the all-agents adjustment `-min(750 * U, 2000)`
+for `U` useless drones. Contributors receive `3000 - min(750 * U, 2000)` and
+useless drones receive `-min(750 * U, 2000)` from these terminal components.
+The cap leaves useful drones at least +1000 from success and this adjustment,
+preserving an incentive to finish even with many unused drones. Inactive drones receive zero.
+Both adjustments trigger only once at terminal chain success; zero disables
+either independently. There is no contributors-only success switch.
 
-Authored buildings and generated obstacles share the planning machinery.
-Episode completion can depend on holding a chain, finding/delivering the target,
-idleness, or the episode length, according to the selected level.
+`success_reward_as_hold_record` instead pays each qualifying holder
+`success_reward / hold_chain_for` on each new episode hold record. Repeated
+records do not pay, and no extra terminal success payout is added. Holders do
+not divide a shared budget. This requires `success_condition: chain_held`.
 
-Authoritative behavior remains in `env/environment.py`, `env/obstacles.py`,
-and the chosen level YAML.
+Each acting drone receives `time_presure_reward` every transition, including
+its removal transition. The default is -0.75 regardless of population. The
+critic learns per-agent returns and PPO averages active-agent samples; the
+summed team return in telemetry is not the training target.
+
+G02 enables peer informing and soft cluster credit, uses recurring progress
+reward and terminal success, and disables delivery vesting and hold records.
+Other authored levels retain unsupported legacy reward blocks with commented
+replacement defaults beneath them. Code in `env/environment.py`, the current
+`RewardConfig`, and G02 define the current behavior.

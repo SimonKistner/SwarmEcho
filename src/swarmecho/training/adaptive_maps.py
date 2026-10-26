@@ -10,53 +10,10 @@ from pathlib import Path
 import numpy as np
 
 from swarmecho.training.adaptive_spawn import atomic_json
-
-
-def load_selection(destination, checkpoint):
-    candidates = [Path(destination) / 'adaptive_maps' / 'selection.json']
-    if checkpoint:
-        candidates.append(Path(checkpoint) / 'adaptive_map_selection.json')
-        marker = Path(checkpoint) / 'recovery_ready.json'
-        if marker.is_file():
-            source_run = json.loads(marker.read_text()).get('run_dir')
-            if source_run:
-                candidates.append(Path(source_run) / 'adaptive_maps' / 'selection.json')
-        candidates.append(Path(checkpoint).parents[1] / 'adaptive_maps' / 'selection.json')
-    for path in candidates:
-        if path.is_file():
-            return json.loads(path.read_text(encoding='utf-8'))
-    return None
-
-
-def save_selection(destination, payload):
-    path = Path(destination) / 'adaptive_maps' / 'selection.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json(path, payload)
-
-
-def verify_selection_geometry(destination, identities, *, version=None, evaluation_identities=None):
-    selection = load_selection(destination, None)
-    if (selection.get('identities') is not None and selection['identities'] != identities
-            or version is not None and selection.get('version', version) != version):
-        raise ValueError('Frozen random map geometry or generator version changed.')
-    selection['identities'] = identities
-    if evaluation_identities is not None:
-        if selection.get('evaluation_identities', evaluation_identities) != evaluation_identities:
-            raise ValueError('Frozen held-out map geometry changed.')
-        selection['evaluation_identities'] = evaluation_identities
-    if version is not None:
-        selection['version'] = version
-    save_selection(destination, selection)
-
-
-def building_identity(building, name):
-    digest = hashlib.sha256()
-    for field in ('tiles', 'x_walls', 'y_walls', 'target_exclusion', 'interior_cells',
-                  'solid_min_m', 'solid_max_m', 'base_position_m', 'world_size_m'):
-        value = np.asarray(getattr(building, field))
-        digest.update(str((value.shape, value.dtype)).encode())
-        digest.update(value.tobytes())
-    return {'name': name, 'sha256': digest.hexdigest()}
+# Backward-compatible imports for callers predating independent dataset splits.
+from swarmecho.training.map_selection import (
+    load_selection, save_selection, verify_selection_geometry, building_identity,
+)
 
 
 def discover_cell_support(reset, controller, states, sample_count, seed, log):
@@ -222,8 +179,8 @@ class AdaptiveMapSampler:
                 raise ValueError('Invalid map exposure IDs.')
             total += np.bincount(ids, minlength=len(total))
 
-    def advance(self, update, steps, active_map_ids):
-        applied = self.selection_probabilities.copy()
+    def advance(self, update, steps, active_map_ids, *, individual_diagnostics=True):
+        applied = self.selection_probabilities.copy() if individual_diagnostics else None
         active = np.bincount(np.asarray(active_map_ids), minlength=len(self.identities))
         if self.ready:
             failure = 1. - self.windows.rates
@@ -245,19 +202,19 @@ class AdaptiveMapSampler:
                 demand = remaining
             self.selection_probabilities = demand / demand.sum()
         self.update, self.steps = int(update), int(steps)
-        metrics = self.metrics()
+        metrics = self.metrics(individual_diagnostics=individual_diagnostics)
         row = {'kind': 'update', 'update': self.update, 'steps': self.steps, **metrics}
-        if len(self.identities) <= 32:
+        if individual_diagnostics and len(self.identities) <= 32:
             row.update(probabilities=applied.tolist(), next_probabilities=self.selection_probabilities.tolist(),
                        success_rates=self.windows.rates.tolist(), completed_counts=self.windows.total.tolist(),
                        step_counts=self.step_counts.tolist(), episode_starts=self.episode_starts.tolist())
-        else:
+        elif individual_diagnostics:
             indices = np.argsort(-self.selection_probabilities)[:10]
             row['most_sampled_maps'] = [{'index': int(i), 'probability': float(self.selection_probabilities[i]),
                                         'success': float(self.windows.rates[i])} for i in indices]
         return row, metrics
 
-    def metrics(self):
+    def metrics(self, *, individual_diagnostics=True):
         observed = self.windows.counts > 0
         rates = self.windows.rates[observed]
         result = {'adaptive_maps/ready': float(self.ready),
@@ -269,7 +226,11 @@ class AdaptiveMapSampler:
         if len(rates):
             result.update({'train/map_balanced_success_rate': float(rates.mean()),
                            'train/worst_map_success_rate': float(rates.min())})
-        if len(self.identities) <= 32:
+            if not individual_diagnostics:
+                result.update({'train/best_map_success_rate': float(rates.max()),
+                               'train/median_map_success_rate': float(np.median(rates)),
+                               'train/p10_map_success_rate': float(np.quantile(rates, .10))})
+        if individual_diagnostics and len(self.identities) <= 32:
             for i, identity in enumerate(self.identities):
                 prefix = f"adaptive_maps/{identity['name']}"
                 result.update({f'{prefix}/probability': float(self.selection_probabilities[i]),

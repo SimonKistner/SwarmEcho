@@ -24,7 +24,8 @@ from dataclasses import asdict, fields, replace
 from swarmecho.models.actions import physical_actions, deterministic_actions
 from swarmecho.env.adapt_size import policy_resets
 from swarmecho.training.adapt_size_metrics import (
-    AdaptiveWindow, REWARD_NAMES, REFERENCE_DIAGNOSTIC_NAMES, INFO_NAMES, validate_zones,
+    AdaptiveWindow, RequiredAgentsDeploymentWindow,
+    REWARD_NAMES, VOTE_SHAPING_REWARD_NAMES, REFERENCE_DIAGNOSTIC_NAMES, INFO_NAMES, validate_zones,
 )
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print, display_path, evaluation_row, init_logging
@@ -36,11 +37,13 @@ import yaml
 from flax import nnx
 
 from swarmecho.core.config import (
+    DEPLOYED_AGENTS_OBS_REF,
     Level,
     evaluation_minimum_geodesic_separation,
     evaluation_dynamic_max_geo_distance,
     load_level_cli,
     resolve_evaluation_level,
+    inspection_config_dict,
 )
 from swarmecho.env.environment import (
     chain_diagnostics,
@@ -129,13 +132,20 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "gamma": level.training.gamma,
         "gae_lambda": level.training.gae_lambda,
         "progress_based_cluster_tiebreaker_soft": level.reward.progress_based_cluster_tiebreaker_soft,
+        "reward_system": "signed_individual_v1",
         "communication_clock": "episode",
         "inactive_agents": "excluded",
+        **({"relay_estimator": json.dumps(_global_relay_identity(level.training.dynamic_max_geo_distance), sort_keys=True)}
+           if level.training.dynamic_max_geo_distance.enabled
+           and level.training.dynamic_max_geo_distance.mode == "global_candidates" else {}),
         "visually_gated_target_displacement_scale_m": (
             cfg.visual_radius if cfg.observe_visually_gated_target_displacement else None
         ),
         "adaptive_size": cfg.adapt_size.enabled,
         "vote_mode": cfg.adapt_size.vote_mode if cfg.adapt_size.enabled else None,
+        "vote_protocol": cfg.adapt_size.vote_protocol if cfg.adapt_size.enabled else None,
+        **({"priveleged_vote_reward_enabled": True}
+           if level.reward.priveleged_vote_reward.enabled else {}),
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
            if field.name.startswith("observe_") or field.name in {
                "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
@@ -145,11 +155,34 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "radar_layout": ("band_counts_v2" if cfg.radar_mode == "band_sep_counting"
                          else "legacy_interleaved" if cfg.wall_sensing_rays == cfg.drone_radar_bins
                          else "radar_blocks_v1"),
+        "observe_base_vote_ratio": cfg.adapt_size.enabled and cfg.observe_base_vote_ratio,
+        "observe_base_population": cfg.adapt_size.enabled and cfg.observe_base_population,
+        "base_population_observation_reference": (
+            DEPLOYED_AGENTS_OBS_REF if cfg.adapt_size.enabled and cfg.observe_base_population else None
+        ),
     }.items()))
     return model
 
 
 _EVALUATION_ENV_CACHE = OrderedDict()
+
+
+def _global_relay_identity(options):
+    from swarmecho.env.relay_candidates import settings
+    return settings(options)
+
+
+def _validate_relay_resume(training, checkpoint):
+    if not checkpoint or training.ckpt_loading_mode != "resume":
+        return
+    source = Path(str(checkpoint).replace("\\", "/")) / "training_contract.json"
+    actual = json.loads(source.read_text()).get("relay_estimator") if source.is_file() else None
+    options = training.dynamic_max_geo_distance
+    expected = (json.dumps(_global_relay_identity(options), sort_keys=True)
+                if options.enabled and options.mode == "global_candidates" else None)
+    if actual != expected:
+        raise ValueError("Relay estimator mode, resolution or implementation changed. Use ckpt_loading_mode=branch "
+                         "and a new run name to retain weights with fresh adaptive support and statistics.")
 
 
 def _evaluation_env_fns(level: Level):
@@ -176,6 +209,7 @@ def _evaluation_env_fns(level: Level):
         level.reward.allow_redundancy_reward,
         level.reward.target_found_requires_delivery,
         level.reward.delivery_gap_vesting_enabled,
+        level.reward.priveleged_vote_reward,
         level.network.memory_comm_every_k_steps,
         apply_separation,
         apply_dynamic,
@@ -183,6 +217,8 @@ def _evaluation_env_fns(level: Level):
         level.training.minimum_geodesic_separation_multiplier,
         level.training.spawn_pair_max_attempts,
     )
+    if apply_dynamic and level.training.dynamic_max_geo_distance.mode == "global_candidates":
+        key += (level.training.dynamic_max_geo_distance,)
     if key not in _EVALUATION_ENV_CACHE:
         with init_logging(level.logging.terminal_log_init):
             _EVALUATION_ENV_CACHE[key] = make_env_fns(
@@ -191,6 +227,7 @@ def _evaluation_env_fns(level: Level):
                 target_found_requires_delivery=level.reward.target_found_requires_delivery,
                 minimum_geodesic_separation=apply_separation,
                 dynamic_max_geo_distance=apply_dynamic,
+                relay_options=level.training.dynamic_max_geo_distance,
                 randomize_base=level.training.randomize_base if apply_dynamic else False,
                 minimum_geodesic_separation_multiplier=level.training.minimum_geodesic_separation_multiplier,
                 spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
@@ -198,6 +235,7 @@ def _evaluation_env_fns(level: Level):
                 chain_reward_system=level.reward.chain_reward_system,
                 progress_based_cluster_tiebreaker_soft=level.reward.progress_based_cluster_tiebreaker_soft,
                 delivery_gap_vesting_enabled=level.reward.delivery_gap_vesting_enabled,
+                priveleged_vote_reward=level.reward.priveleged_vote_reward,
             )
         if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.random_eval_envs):
             _EVALUATION_ENV_CACHE.popitem(last=False)
@@ -303,6 +341,8 @@ def _evaluate_training_metrics(model, level, hold, *, eval_due, on_run=None):
 
 def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run, history_path, hold):
     """Publish one measurement with explicit provenance to all logging sinks."""
+    if not level.logging.individual_map_diagnostics:
+        metrics = {name: value for name, value in metrics.items() if not name.startswith("eval_map/")}
     runs = int(metrics.get("eval_robustness_runs", 1))
     prefix = "FINAL" if phase == "final_eval" else "EVAL"
     tail = (
@@ -312,6 +352,8 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
     )
     if level.evaluation.early_exit and level.evaluation.early_exit_source == "training":
         tail = "early-exit source=training (diagnostic eval)"
+    if level.evaluation.early_exit and level.evaluation.early_exit_source == "validation":
+        tail = "early-exit source=validation (inspection only)"
     if phase == "final_eval" and level.evaluation.early_exit:
         tail += " (unchanged)"
     evaluation_row(
@@ -337,8 +379,10 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
         "robustness_runs": runs,
     }
     logs = {f"{phase}/{key}": value for key, value in values.items()}
-    if "eval_worst_map_success" in metrics:
-        logs[f"{phase}/worst_map_success_rate"] = metrics["eval_worst_map_success"]
+    for statistic in ("worst", "best", "median", "p10"):
+        key = f"eval_{statistic}_map_success"
+        if key in metrics:
+            logs[f"{phase}/{statistic}_map_success_rate"] = metrics[key]
     logs.update({f"{phase}/{name.removeprefix('eval_')}": value
                  for name, value in metrics.items() if name.startswith("eval_map/")})
     if wandb_run is not None and phase != "final_eval":
@@ -443,10 +487,15 @@ def train(
     training = level.training
     network = level.network
     evaluation = level.evaluation
-    if training.adaptive_map_sampling.enabled and level.random_buildings.enabled:
+    if level.random_buildings.enabled:
+        inspection_count = evaluation.inspection_maps
+        if inspection_count is None:
+            inspection_count = (training.adaptive_map_sampling.held_out_maps
+                                if training.adaptive_map_sampling.enabled else evaluation.random_eval_envs)
         evaluation = replace(evaluation, random_eval=True,
-                             random_eval_envs=training.adaptive_map_sampling.held_out_maps,
-                             random_eval_maps=None)
+                             random_eval_envs=inspection_count,
+                             random_eval_maps=(None if level.validation.enabled or training.adaptive_map_sampling.enabled
+                                               else evaluation.random_eval_maps))
         level = replace(level, evaluation=evaluation)
     evaluation_level = resolve_evaluation_level(level)
     logging = level.logging
@@ -477,25 +526,31 @@ def train(
     map_metrics = {}
     map_identities = None
     map_names = level.map_names
+    # Random datasets always choose a map at episode boundaries. Adaptation
+    # changes only their probabilities; authored suites retain legacy opt-out.
+    resample_maps = level.random_buildings.enabled or training.adaptive_map_sampling.enabled
+    if resample_maps and evaluation.early_exit and evaluation.early_exit_source == "training":
+        raise ValueError("Episode map resampling requires inspection- or validation-based early exit.")
     frozen_selection = None
+    if level.random_buildings.enabled or training.adaptive_map_sampling.enabled:
+        from swarmecho.training.map_selection import (
+            load_selection, save_selection, building_identity, verify_selection_geometry)
+        frozen_selection = load_selection(destination, checkpoint_path or training.checkpoint_path)
     if training.adaptive_map_sampling.enabled:
         from swarmecho.core.config import validate_adaptive_map_sampling
-        from swarmecho.training.adaptive_maps import (
-            load_selection, save_selection, building_identity, verify_selection_geometry)
         validate_adaptive_map_sampling(training.adaptive_map_sampling)
-        if evaluation.early_exit_source != "evaluation":
+        if evaluation.early_exit_source not in {"evaluation", "validation"}:
             raise ValueError("Adaptive map sampling requires evaluation-based early exit.")
-        frozen_selection = load_selection(destination, checkpoint_path or training.checkpoint_path)
     if training.adaptive_target_spawn.enabled and (
-        (level.random_buildings.enabled and not training.adaptive_map_sampling.enabled) or cfg.num_obstacles
-        or training.randomize_base or training.minimum_geodesic_separation
+        cfg.num_obstacles or training.randomize_base or training.minimum_geodesic_separation
         or cfg.success_condition == "coverage"
     ):
         raise ValueError("Adaptive target spawning requires static target maps and fixed bases, "
                          "without generated obstacles or minimum geodesic separation.")
     bank_eval_maps = None
+    validation_map_paths = None
     adaptive_spawn_buildings = None
-    bank_map_count = training.num_envs
+    bank_map_count = level.training_map_count
     if level.static_map_suite:
         import hashlib
         from swarmecho.env.buildings import load_building
@@ -531,6 +586,7 @@ def train(
         init_log(f"Compiling {len(buildings)} static maps for {training.num_envs} training lanes...")
         building_bank = prepare_bank(buildings, cfg,
             dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+            relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
             plan=cfg.success_condition != "coverage" and (level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward),
             corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
         write_manifest(manifest_path, static_manifest)
@@ -546,27 +602,29 @@ def train(
                 DEFAULT_POOL_SIZE, build_pool, ensure_pool, load_records, select_maps, required_settings)
             from swarmecho.env.building_bank import prepare_bank_from_records
 
-            eval_count = (evaluation.random_eval_envs if evaluation.random_eval
+            eval_count = (level.validation.num_maps if level.validation.enabled else
+                          evaluation.random_eval_envs if evaluation.random_eval
                           and evaluation.random_eval_maps is None else 0)
-            required = training.num_envs + eval_count
-            if training.adaptive_map_sampling.enabled and frozen_selection is not None:
+            required = level.training_map_count + eval_count
+            if frozen_selection is not None:
                 if (frozen_selection.get("kind") != "bank" or frozen_selection.get("seed") != training.seed
                         or frozen_selection.get("settings") != required_settings(level)):
-                    raise ValueError("Frozen adaptive training bank settings changed; use a new run without the old selection.")
+                    raise ValueError("Frozen training bank settings changed; use a new run without the old selection.")
                 pool = Path(frozen_selection["pool"])
                 metadata = json.loads((pool / "metadata.json").read_text(encoding="utf-8"))
                 if metadata["settings"] != frozen_selection["settings"]:
                     raise ValueError("Frozen map bank metadata changed.")
                 train_maps, eval_maps = frozen_selection["maps"], frozen_selection["evaluation_maps"]
+                if training.num_maps is not None and len(train_maps) != training.num_maps:
+                    raise ValueError("Frozen training map count differs from training.num_maps; use a new run.")
                 if len(eval_maps) != eval_count:
                     raise ValueError("Held-out map count changed; choose a new bank selection.")
             else:
                 pool, metadata = ensure_pool(level, required, log=init_log)
-                train_maps, eval_maps = select_maps(pool, metadata, training.seed, training.num_envs, eval_count)
-            if training.adaptive_map_sampling.enabled:
-                save_selection(destination, {**(frozen_selection or {}),
-                    "kind": "bank", "seed": training.seed, "pool": str(pool.resolve()),
-                    "settings": metadata["settings"], "maps": train_maps, "evaluation_maps": eval_maps})
+                train_maps, eval_maps = select_maps(pool, metadata, training.seed, level.training_map_count, eval_count)
+            selected_ids = [item["id"] for item in (*train_maps, *eval_maps)]
+            if len(set(selected_ids)) != len(selected_ids):
+                raise ValueError("Training and held-out map selections must contain distinct, disjoint map IDs.")
             try:
                 records = load_records(pool, train_maps,
                     require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]) and cfg.success_condition != "coverage",
@@ -575,38 +633,56 @@ def train(
                        for item in (*train_maps, *eval_maps)):
                     raise FileNotFoundError("A selected building map is missing from the pool.")
             except (OSError, ValueError, EOFError, BadZipFile) as exc:
-                if training.adaptive_map_sampling.enabled:
-                    raise RuntimeError("Frozen adaptive map bank cannot be loaded; refusing to replace its map identities.") from exc
+                if frozen_selection is not None:
+                    raise RuntimeError("Frozen map bank cannot be loaded; refusing to replace its map identities.") from exc
                 message = f"Map pool {pool.name} cannot be loaded ({exc}); generating a new pool."
                 terminal_print(f"[BANK WARNING] {message}")
                 pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, required),
                                             avoid_pool=pool, log=init_log)
-                train_maps, eval_maps = select_maps(pool, metadata, training.seed, training.num_envs, eval_count)
+                train_maps, eval_maps = select_maps(pool, metadata, training.seed, level.training_map_count, eval_count)
                 records = load_records(pool, train_maps,
                     require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]) and cfg.success_condition != "coverage",
                     include_target=cfg.success_condition != "coverage")
+                if any(not (pool / "maps" / f"{item['id']}.yaml").is_file()
+                       for item in (*train_maps, *eval_maps)):
+                    raise FileNotFoundError("A selected building map is missing from the replacement pool.")
+            save_selection(destination, {**(frozen_selection or {}),
+                "kind": "bank", "seed": training.seed, "pool": str(pool.resolve()),
+                "settings": metadata["settings"], "maps": train_maps, "evaluation_maps": eval_maps})
             init_log(f"Loaded {len(records)} precompiled random buildings from {pool}")
-            if training.adaptive_map_sampling.enabled:
-                import hashlib
-                map_names = [item["id"] for item in train_maps]
-                paths = [pool / "maps" / f"{name}.yaml" for name in map_names]
-                map_identities = [{"name": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                                  for name, path in zip(map_names, paths)]
-                verify_selection_geometry(destination, map_identities)
-                if training.adaptive_target_spawn.enabled:
-                    from swarmecho.env.buildings import load_building
-                    adaptive_spawn_buildings = [load_building(path) for path in paths]
-                bank_map_count = len(records)
-            if training.dynamic_max_geo_distance.enabled:
+            bank_map_count = len(records)
+            import hashlib
+            map_names = [item["id"] for item in train_maps]
+            paths = [pool / "maps" / f"{name}.yaml" for name in map_names]
+            map_identities = [{"name": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                              for name, path in zip(map_names, paths)]
+            validation_identities = [
+                {"name": item["id"], "sha256": hashlib.sha256(
+                    (pool / "maps" / f"{item['id']}.yaml").read_bytes()).hexdigest()}
+                for item in eval_maps]
+            verify_selection_geometry(destination, map_identities)
+            selection = load_selection(destination, None)
+            if selection.get("held_out_identities", validation_identities) != validation_identities:
+                raise ValueError("Frozen held-out bank map geometry changed.")
+            save_selection(destination, {**selection, "held_out_identities": validation_identities})
+            if training.adaptive_target_spawn.enabled:
+                from swarmecho.env.buildings import load_building
+                adaptive_spawn_buildings = [load_building(path) for path in paths]
+            if training.dynamic_max_geo_distance.enabled and training.dynamic_max_geo_distance.mode == "simplifier":
                 from swarmecho.env.buildings import load_building
                 from swarmecho.env.relay import opening_arrays
                 for record, item in zip(records, train_maps):
                     record["relay_openings"] = opening_arrays(load_building(pool / "maps" / f"{item['id']}.yaml"))
             building_bank = prepare_bank_from_records(records, level.building, cfg,
-                dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled, log=init_log)
+                dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+                relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
+                relay_cache_dir=pool / "relay_cache", log=init_log)
             del records
             bank_eval_maps = ([pool / "maps" / f"{item['id']}.yaml" for item in eval_maps]
                               if eval_maps else None)
+            if level.validation.enabled:
+                validation_map_paths = bank_eval_maps
+                bank_eval_maps = validation_map_paths[:evaluation.random_eval_envs]
             if level.random_buildings.save_training_maps:
                 saved = destination / "generated_maps"
                 saved.mkdir(parents=True, exist_ok=True)
@@ -620,33 +696,44 @@ def train(
         else:
             from swarmecho.env.random_buildings import generate_maps
             from swarmecho.env.building_bank import prepare_bank
-            generated_count = training.num_envs
-            if training.adaptive_map_sampling.enabled:
-                if frozen_selection is not None:
-                    if (frozen_selection.get("kind") != "generated" or frozen_selection.get("seed") != training.seed
-                            or frozen_selection.get("settings") != asdict(level.random_buildings)):
-                        raise ValueError("Frozen generated-map settings changed.")
-                    generated_count = frozen_selection["count"]
-                save_selection(destination, {**(frozen_selection or {}), "kind": "generated", "seed": training.seed,
-                    "settings": asdict(level.random_buildings), "count": generated_count})
+            generated_count = level.training_map_count
+            if frozen_selection is not None:
+                if (frozen_selection.get("kind") != "generated" or frozen_selection.get("seed") != training.seed
+                        or frozen_selection.get("settings") != asdict(level.random_buildings)):
+                    raise ValueError("Frozen generated-map settings changed.")
+                generated_count = frozen_selection["count"]
+                if training.num_maps is not None and generated_count != training.num_maps:
+                    raise ValueError("Frozen generated-map count changed; use a new run.")
+            save_selection(destination, {**(frozen_selection or {}), "kind": "generated", "seed": training.seed,
+                "settings": asdict(level.random_buildings), "count": generated_count})
             init_log(f"Generating {generated_count} persistent random buildings...")
             buildings, generation_manifest = generate_maps(
                 level.random_buildings, training.seed, generated_count,
                 directory=destination / "generated_maps" if level.random_buildings.save_training_maps else None,
                 log=init_log, drone_clearance=cfg.drone_radius + cfg.obstacle_planning_clearance_m)
             write_manifest(destination / "random_buildings.json", generation_manifest)
-            if training.adaptive_map_sampling.enabled:
-                map_names = [item["id"] for item in generation_manifest["maps"]]
-                map_identities = [building_identity(building, name) for building, name in zip(buildings, map_names)]
-                verify_selection_geometry(destination, map_identities, version=generation_manifest["version"])
-                bank_map_count = len(buildings)
-                if training.adaptive_target_spawn.enabled:
-                    adaptive_spawn_buildings = buildings
+            bank_map_count = len(buildings)
+            map_names = [item["id"] for item in generation_manifest["maps"]]
+            map_identities = [building_identity(building, name) for building, name in zip(buildings, map_names)]
+            verify_selection_geometry(destination, map_identities, version=generation_manifest["version"])
+            if training.adaptive_target_spawn.enabled:
+                adaptive_spawn_buildings = buildings
             building_bank = prepare_bank(buildings, cfg,
                 dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+                relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
                 plan=cfg.success_condition != "coverage" and (level.reward.chain_reward_system == "obstacle_geodesic" or level.reward.enable_chain_efficiency_reward),
                 corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
+            if level.validation.enabled:
+                from swarmecho.training.validation import prepare_generated_validation_maps
+                validation_map_paths = prepare_generated_validation_maps(level, destination, init_log,
+                                                                         training_buildings=buildings)
+                bank_eval_maps = validation_map_paths[:evaluation.random_eval_envs]
             del buildings
+    validation_runner = None
+    if level.validation.enabled:
+        from swarmecho.training.validation import ValidationRunner
+        validation_runner = ValidationRunner(level, destination, validation_map_paths,
+            checkpoint_path=checkpoint_path or training.checkpoint_path, checkpoint_dir=checkpoint_dir, log=init_log)
     map_suite_levels = None
     if evaluation.random_eval or level.static_map_suite:
         from swarmecho.training.random_evaluation import prepare_evaluation_maps
@@ -654,7 +741,7 @@ def train(
         map_suite_levels = prepare_evaluation_maps(level, suite_dir,
             bank_maps=bank_eval_maps, static_maps=level.map_paths if level.static_map_suite else None,
             log=init_log)
-        if training.adaptive_map_sampling.enabled and level.random_buildings.enabled:
+        if level.random_buildings.enabled:
             verify_selection_geometry(destination, map_identities, evaluation_identities=[
                 building_identity(item.building, item.building_name) for item in map_suite_levels])
     init_log("Initializing JAX devices...")
@@ -674,12 +761,13 @@ def train(
             randomize_base=training.randomize_base,
             minimum_geodesic_separation=training.minimum_geodesic_separation,
             dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+            relay_options=training.dynamic_max_geo_distance,
             minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
             skip_on_no_pair_found=training.skip_on_no_pair_found,
             spawn_pair_max_attempts=training.spawn_pair_max_attempts,
             building_bank=building_bank,
             memory_comm_every_k_steps=network.memory_comm_every_k_steps,
-            **({"adaptive_map_sampling": True} if training.adaptive_map_sampling.enabled else {}),
+            **({"resample_maps": True} if resample_maps else {}),
         )
     obs_dim = observation_dim(cfg)
     sig_dim = network.tarmac_sig_dim
@@ -688,6 +776,7 @@ def train(
     model = build_model(level)
     init_log("Model constructed. Preparing checkpoint, optimizer and rollout buffer...")
     resume_from = checkpoint_path or training.checkpoint_path
+    _validate_relay_resume(training, resume_from)
     resume = resolve_resume_state(training, run_name, training.num_envs, training.num_steps)
     completed_checkpoint = {}
     if resume_from and training.ckpt_loading_mode == "resume":
@@ -708,18 +797,21 @@ def train(
             MapAdaptiveTargetSpawnController, AdaptiveMapSpawnJournal,
         )
         feasibility_budget = cfg.geometric_agent_budget if training.dynamic_max_geo_distance.enabled else None
-        if level.static_map_suite or (training.adaptive_map_sampling.enabled and building_bank is not None):
+        if building_bank is not None:
             adaptive_spawn = MapAdaptiveTargetSpawnController(
                 adaptive_spawn_buildings, map_names, cfg, training.adaptive_target_spawn,
-                compact=training.adaptive_map_sampling.enabled,
-                feasibility_budget=feasibility_budget)
+                compact=resample_maps,
+                feasibility_budget=feasibility_budget, relay_options=training.dynamic_max_geo_distance)
         else:
             adaptive_spawn = AdaptiveTargetSpawnController(level.building, cfg, training.adaptive_target_spawn,
-                feasibility_budget=feasibility_budget)
+                feasibility_budget=feasibility_budget, relay_options=training.dynamic_max_geo_distance)
         resume_controller = bool(resume_from and training.ckpt_loading_mode == "resume")
         spawn_history_path = destination / "adaptive_spawn" / "history.jsonl"
-        spawn_history_paths = [spawn_history_path, *destination.glob(
-            "adaptive_spawn_maps/*/adaptive_spawn/history.jsonl")]
+        spawn_history_paths = [
+            spawn_history_path,
+            destination / "adaptive_spawn_maps" / "history.jsonl",
+            *destination.glob("adaptive_spawn_maps/*/adaptive_spawn/history.jsonl"),
+        ]
         if (not resume_controller and os.environ.get("SWARMECHO_RECOVERY_RETRY") != "1"
                 and any(path.is_file() and path.stat().st_size for path in spawn_history_paths)):
             raise ValueError("Adaptive spawn history already exists; resume explicitly or choose a new run name.")
@@ -764,7 +856,7 @@ def train(
         if building_bank is not None:
             from swarmecho.env.building_bank import balanced_map_ids
             lane_ids = (np.arange(training.num_envs, dtype=np.int32) % bank_map_count
-                        if training.adaptive_map_sampling.enabled else balanced_map_ids(training.num_envs, bank_map_count))
+                        if resample_maps else balanced_map_ids(training.num_envs, bank_map_count))
             padded_ids = np.pad(lane_ids, (0, reset_padded_count - training.num_envs), mode="edge")
             ids = jnp.asarray(padded_ids).reshape(reset_batch_count, reset_batch_size)
             reset_batches = jax.lax.map(lambda pair: jax.vmap(lambda key, index: reset(
@@ -804,7 +896,7 @@ def train(
         check_spawn_pairs(states.spawn_pair_attempts)
     if adaptive_spawn is not None:
         if not adaptive_spawn.eligibility_ready:
-            if training.adaptive_map_sampling.enabled:
+            if resample_maps:
                 from swarmecho.training.adaptive_maps import discover_cell_support
                 discover_cell_support(reset, adaptive_spawn, states,
                     training.adaptive_map_sampling.eligibility_samples_per_map,
@@ -816,22 +908,37 @@ def train(
         eligibility_path = destination / "adaptive_spawn" / "eligibility.json"
         eligibility_path.parent.mkdir(parents=True, exist_ok=True)
         adaptive_spawn.save_eligibility(eligibility_path)
-        journal_type = AdaptiveMapSpawnJournal if level.static_map_suite else AdaptiveSpawnJournal
-        adaptive_spawn_journal = journal_type(
-            destination, adaptive_spawn, run_name,
-            resume=resume_controller or os.environ.get("SWARMECHO_RECOVERY_RETRY") == "1",
-            steps=resume.step_offset + resume.start_update * training.num_envs * training.num_steps,
-            update=resume.start_update,
-            **({"compact": True} if training.adaptive_map_sampling.enabled else {}),
-        )
         spawn_controllers = getattr(adaptive_spawn, "controllers", (adaptive_spawn,))
-        for map_name, controller in zip(map_names, spawn_controllers):
-            if controller.eligibility is not None:
-                discovery = controller.eligibility
-                init_log(f"Adaptive target spawning [{map_name}]: {np.count_nonzero(controller.eligible)}/{len(controller.cells)} cells retained; "
-                         f"at least {discovery['minimum_count']}/{discovery['sample_count']} accepted startup targets (1%); "
-                         "excluded cells have zero proposal probability.")
-        init_log(f"Adaptive target spawning history: {display_path(adaptive_spawn_journal.directory)} (no W&B metrics).")
+        if logging.adaptive_cell_diagnostics:
+            # Authored suites and persistent random banks use the same map controller.
+            map_spawn_controller = isinstance(adaptive_spawn, MapAdaptiveTargetSpawnController)
+            journal_type = AdaptiveMapSpawnJournal if map_spawn_controller else AdaptiveSpawnJournal
+            adaptive_spawn_journal = journal_type(
+                destination, adaptive_spawn, run_name,
+                resume=resume_controller or os.environ.get("SWARMECHO_RECOVERY_RETRY") == "1",
+                steps=resume.step_offset + resume.start_update * training.num_envs * training.num_steps,
+                update=resume.start_update,
+                **({"compact": adaptive_spawn.compact} if map_spawn_controller else {}),
+            )
+            for map_name, controller in zip(map_names, spawn_controllers):
+                if controller.eligibility is not None:
+                    discovery = controller.eligibility
+                    init_log(f"Adaptive target spawning [{map_name}]: {np.count_nonzero(controller.eligible)}/{len(controller.cells)} cells retained; "
+                             f"at least {discovery['minimum_count']}/{discovery['sample_count']} accepted startup targets (1%); "
+                             "excluded cells have zero proposal probability.")
+            init_log(f"Adaptive target spawning history: {display_path(adaptive_spawn_journal.directory)} (no W&B metrics).")
+        else:
+            # Journal constructors normally align fresh controller counters on resume/branch.
+            for controller in spawn_controllers:
+                if controller.update == 0 and not np.any(controller.total_episodes):
+                    controller.update = resume.start_update
+                    controller.steps = resume.step_offset + resume.start_update * training.num_envs * training.num_steps
+                    controller.warning_history[0]["update"] = controller.update
+            adaptive_spawn.update, adaptive_spawn.steps = spawn_controllers[0].update, spawn_controllers[0].steps
+            retained = sum(np.count_nonzero(controller.eligible) for controller in spawn_controllers)
+            total = sum(len(controller.cells) for controller in spawn_controllers)
+            init_log(f"Adaptive target spawning: {retained}/{total} cells retained across {len(spawn_controllers)} maps; "
+                     "individual-cell diagnostics disabled.")
     if training.adaptive_map_sampling.enabled:
         from swarmecho.training.adaptive_maps import AdaptiveMapSampler, AdaptiveMapJournal
         if building_bank is None or map_identities is None:
@@ -843,7 +950,10 @@ def train(
                             "minimum_geodesic_separation": training.minimum_geodesic_separation,
                             "minimum_geodesic_separation_multiplier": training.minimum_geodesic_separation_multiplier,
                             "adaptive_cells": asdict(training.adaptive_target_spawn)
-                                if training.adaptive_target_spawn.enabled else None})
+                                if training.adaptive_target_spawn.enabled else None,
+                            **({"relay_estimator": _global_relay_identity(training.dynamic_max_geo_distance)}
+                               if training.dynamic_max_geo_distance.enabled
+                               and training.dynamic_max_geo_distance.mode == "global_candidates" else {})})
         resume_maps = bool(resume_from and training.ckpt_loading_mode == "resume")
         if resume_maps:
             if not adaptive_maps.restore(resume_from):
@@ -858,6 +968,9 @@ def train(
             resume=resume_maps or os.environ.get("SWARMECHO_RECOVERY_RETRY") == "1")
         init_log(f"Adaptive map sampling: {bank_map_count} maps, {training.adaptive_map_sampling.min_probability_fraction:.0%} "
                  "uniform floor; independent success windows and episode-boundary map selection.")
+    elif resample_maps:
+        init_log(f"Uniform map sampling: all {bank_map_count} training maps available at each episode reset; "
+                 "adaptive weighting and map warmup disabled.")
     init_log("Initial reset complete on device. Preparing recurrent state and logging...")
     if cfg.adapt_size.enabled:
         validate_zones(jax.device_get(states.adaptive.zone_valid))
@@ -898,20 +1011,31 @@ def train(
     episode_gap_loss = np.zeros(training.num_envs, dtype=np.float64)
     episode_rewards = {
         name: np.zeros(training.num_envs, dtype=np.float64)
-        for name in ("coverage", "collision", "finder", "time_penalty", "gap_reduction",
-                     "peer_informing", "target_found", "success",
-                     "success_noncontributor_penalty",
-                     "no_movement_termination")
+        for name in ("exploration_reward", "collision_reward", "finder_reward", "time_presure_reward", "gap_reward",
+                     "peer_informing_reward", "target_found_reward", "success_reward",
+                     "useless_agent_at_success_reward",
+                     "useless_agent_at_success_all_agents_reward",
+                     "no_movement_termination_penalty")
     }
     if level.reward.enable_chain_efficiency_reward:
-        episode_rewards["efficiency"] = np.zeros(training.num_envs, dtype=np.float64)
+        episode_rewards["chain_efficiency_reward"] = np.zeros(training.num_envs, dtype=np.float64)
     # Collect one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
     window_size = training.num_envs
-    adaptive_window = AdaptiveWindow(window_size) if cfg.adapt_size.enabled else None
+    adaptive_window = (AdaptiveWindow(
+        window_size, target_agents=cfg.geometric_agent_budget,
+        max_agents=cfg.num_agents, initial_agents=cfg.adapt_size.initial_agents,
+    ) if cfg.adapt_size.enabled else None)
+    required_agents_window = (RequiredAgentsDeploymentWindow(
+        logging.required_agents_metrics_window_episodes,
+        episode_window_size=window_size, max_required_agents=cfg.geometric_agent_budget,
+    ) if cfg.adapt_size.enabled and training.dynamic_max_geo_distance.enabled else None)
+    adaptive_reward_names = REWARD_NAMES + (
+        VOTE_SHAPING_REWARD_NAMES if level.reward.priveleged_vote_reward.enabled else ()
+    )
     if cfg.adapt_size.enabled:
         episode_rewards.update({name: np.zeros(training.num_envs)
-                                for name in (*REWARD_NAMES, *REFERENCE_DIAGNOSTIC_NAMES)})
+                                for name in (*adaptive_reward_names, *REFERENCE_DIAGNOSTIC_NAMES)})
     window_ret: deque[float] = deque(maxlen=window_size)
     window_len: deque[int] = deque(maxlen=window_size)
     window_succ: deque[float] = deque(maxlen=window_size)
@@ -937,8 +1061,10 @@ def train(
     training_snapshot = asdict(training)
     if not training.adaptive_target_spawn.enabled:
         training_snapshot.pop("adaptive_target_spawn")
-    if not training.adaptive_map_sampling.enabled:
+    if not training.adaptive_map_sampling.enabled and not level.random_buildings.enabled:
         training_snapshot.pop("adaptive_map_sampling")
+    elif level.validation.enabled:
+        training_snapshot["adaptive_map_sampling"].pop("held_out_maps", None)
     config_snapshot = {
         "name": level.name,
         "building": level.building_name,
@@ -947,7 +1073,8 @@ def train(
         "reward": asdict(level.reward),
         "training": training_snapshot,
         "network": asdict(network),
-        "evaluation": asdict(evaluation),
+        "inspection_evaluation": inspection_config_dict(evaluation),
+        "validation": asdict(level.validation),
         "random_buildings": asdict(level.random_buildings),
         "logging": asdict(logging),
     }
@@ -957,6 +1084,35 @@ def train(
     init_log("State and configuration prepared. Initializing W&B...")
     wandb_run = init_wandb(logging, training, run_name, destination, config_snapshot)
     init_log("W&B initialization returned. Preparing first rollout...")
+
+    def perform_validation(update, steps):
+        metrics = validation_runner.run(model, update=update, steps=steps)
+        stop = validation_runner.observe_gate(metrics)
+        values = {f"validation/{key}": value for key, value in metrics.items()}
+        latest_stats.update(values)
+        terminal_print(f"[VALIDATION update={update}] success={metrics['success_rate']:.2%}; "
+                       f"maps={metrics['maps_evaluated']}/{metrics['maps_total']}; "
+                       f"episodes={metrics['episodes']}; hold={validation_runner.hold_count}", flush=True)
+        if validation_runner.config.save_best_checkpoint and (
+                validation_runner.best_success_rate is None
+                or metrics["success_rate"] > validation_runner.best_success_rate):
+            previous_best = validation_runner.best_success_rate
+            validation_runner.best_success_rate = metrics["success_rate"]
+            try:
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                save_training_checkpoint(model, checkpoint_dir / "best_val_checkpoint",
+                    run_name=run_name, update=update, num_envs=training.num_envs,
+                    num_steps=training.num_steps, prior_history=resume.prior_history,
+                    total_steps=steps, adaptive_spawn=adaptive_spawn, adaptive_maps=adaptive_maps,
+                    validation=validation_runner, run_dir=destination, metrics=latest_stats)
+            except BaseException:
+                validation_runner.best_success_rate = previous_best
+                raise
+            terminal_print(f"[VALIDATION] saved best actor and critic: {metrics['success_rate']:.2%}", flush=True)
+        if wandb_run is not None:
+            import wandb
+            wandb.log(values, step=steps, commit=False)
+        return stop
 
     _, params = nnx.split(model)
     parameter_count = sum(value.size for value in jax.tree_util.tree_leaves(params))
@@ -1104,7 +1260,7 @@ def train(
             else:
                 executed_actions = actions
             executed_actions = jnp.where(states.active[..., None], executed_actions, 0.0)
-            if training.adaptive_map_sampling.enabled:
+            if resample_maps:
                 next_states, rewards, dones, info = env_step.batched(
                     states, physical_actions(executed_actions), target_spawn_weights,
                     map_sampling_cdf=map_sampling_cdf)
@@ -1139,26 +1295,27 @@ def train(
                 "comm_masks": comm_masks,
                 "active_masks": states.active,
                 "agent_terminated": info["agent_terminated"],
-                **({name: info[name] for name in (*INFO_NAMES, *REWARD_NAMES, *REFERENCE_DIAGNOSTIC_NAMES)}
+                **({name: info[name] for name in (*INFO_NAMES, *adaptive_reward_names, *REFERENCE_DIAGNOSTIC_NAMES)}
                    if cfg.adapt_size.enabled else {}),
                 "base_signatures": base_sig_in,
                 "base_values": base_val_in,
                 "base_memory_masks": base_masks,
-                "coverage": info["coverage"],
-                "collision": info["collision"],
-                "finder": info["finder"],
-                "time_penalty": info["time_penalty"],
-                "gap_reduction": info["gap_reduction"],
+                "exploration_reward": info["exploration_reward"],
+                "collision_reward": info["collision_reward"],
+                "finder_reward": info["finder_reward"],
+                "time_presure_reward": info["time_presure_reward"],
+                "gap_reward": info["gap_reward"],
                 "gap_gain": info["gap_gain"],
                 "gap_loss": info["gap_loss"],
-                "peer_informing": info["peer_informing"],
+                "peer_informing_reward": info["peer_informing_reward"],
                 "peer_informed_count": info["peer_informed_count"],
                 "best_chain_held_steps": info["best_chain_held_steps"],
-                "target_found": info["target_found"],
-                "reward_success": info["reward_success"],
-                "success_noncontributor_penalty": info["success_noncontributor_penalty"],
-                "no_movement_termination": info["no_movement_termination"],
-                **({"efficiency": info["efficiency"]}
+                "target_found_reward": info["target_found_reward"],
+                "success_reward": info["success_reward"],
+                "useless_agent_at_success_reward": info["useless_agent_at_success_reward"],
+                "useless_agent_at_success_all_agents_reward": info["useless_agent_at_success_all_agents_reward"],
+                "no_movement_termination_penalty": info["no_movement_termination_penalty"],
+                **({"chain_efficiency_reward": info["chain_efficiency_reward"]}
                    if level.reward.enable_chain_efficiency_reward else {}),
                 "success": info["success"],
                 "global_target_found": info["global_target_found"],
@@ -1168,9 +1325,11 @@ def train(
                 "chain_progress_pct": info["chain_progress_pct"],
                 "global_coverage": info["global_coverage"],
                 "terminal_target_pos": info["terminal_target_pos"],
+                **({"terminal_required_agents": info["terminal_required_agents"]}
+                   if required_agents_window is not None else {}),
                 **({"terminal_map_id": states.map_id}
                    if training.adaptive_map_sampling.enabled or
-                      (training.adaptive_target_spawn.enabled and level.static_map_suite) else {}),
+                      (training.adaptive_target_spawn.enabled and building_bank is not None) else {}),
                 **({"started_map_id": next_states.map_id} if training.adaptive_map_sampling.enabled else {}),
                 "terminal_base_pos": states.base_pos,
                 "spawn_pair_attempts": states.spawn_pair_attempts,
@@ -1301,8 +1460,7 @@ def train(
             episode_gap_gain += rollout_host["gap_gain"][step_index].sum(axis=-1)
             episode_gap_loss += rollout_host["gap_loss"][step_index].sum(axis=-1)
             for reward_name, accumulator in episode_rewards.items():
-                info_name = "reward_success" if reward_name == "success" else reward_name
-                accumulator += rollout_host[info_name][step_index].sum(axis=-1)
+                accumulator += rollout_host[reward_name][step_index].sum(axis=-1)
             buffer.add(
                 MAPPOTransition(
                     obs=rollout_host["obs"][step_index],
@@ -1327,6 +1485,12 @@ def train(
                 if adaptive_window is not None:
                     adaptive_window.append(
                         {name: rollout_host[name][step_index, index] for name in INFO_NAMES},
+                        success=bool(episode_success[index]),
+                    )
+                if required_agents_window is not None:
+                    required_agents_window.append(
+                        rollout_host["terminal_required_agents"][step_index, index],
+                        rollout_host["adapt_end_agents"][step_index, index],
                         success=bool(episode_success[index]),
                     )
                 window_ret.append(float(episode_returns[index]))
@@ -1402,7 +1566,8 @@ def train(
             adaptive_maps.observe(rollout_host["terminal_map_id"][completed], rollout_host["success"][completed],
                 step_map_ids=rollout_host["terminal_map_id"],
                 started_map_ids=rollout_host["started_map_id"][completed])
-            map_row, map_metrics = adaptive_maps.advance(update, steps_done, jax.device_get(states.map_id))
+            map_row, map_metrics = adaptive_maps.advance(update, steps_done, jax.device_get(states.map_id),
+                individual_diagnostics=logging.individual_map_diagnostics)
             adaptive_map_journal.append(map_row)
             map_sampling_cdf = jnp.asarray(adaptive_maps.cdf)
         if adaptive_spawn is not None:
@@ -1411,8 +1576,10 @@ def train(
                                    rollout_host["success"][completed],
                                    map_ids=(rollout_host["terminal_map_id"][completed]
                                             if "terminal_map_id" in rollout_host else None))
-            spawn_row, spawn_warnings = adaptive_spawn.advance(update, steps_done)
-            adaptive_spawn_journal.append(spawn_row)
+            spawn_row, spawn_warnings = adaptive_spawn.advance(update, steps_done,
+                diagnostics=logging.adaptive_cell_diagnostics)
+            if adaptive_spawn_journal is not None:
+                adaptive_spawn_journal.append(spawn_row)
             for message in spawn_warnings:
                 terminal_print(message)
             target_spawn_weights = jnp.asarray(adaptive_spawn.box_weights)
@@ -1529,6 +1696,8 @@ def train(
                 })
                 if adaptive_window is not None:
                     wandb_logs.update(adaptive_window.metrics())
+            if required_agents_window is not None:
+                wandb_logs.update(required_agents_window.metrics())
             for name, window in window_path_stats.items():
                 if len(window) == window.maxlen:
                     wandb_logs[f"train/{name}"] = float(np.mean(window))
@@ -1537,6 +1706,11 @@ def train(
             wandb_logs.update(map_metrics)
             # Keep this step open for evaluation metrics from the same update.
             wandb.log(wandb_logs, step=steps_done, commit=False)
+        validation_stop = False
+        if validation_runner is not None and (
+                update % level.validation.val_freq == 0
+                or (update == num_updates and level.validation.val_on_finalization)):
+            validation_stop = perform_validation(update, steps_done)
         checkpoint_due = evaluation.save_model and schedule_due(
             update, evaluation.checkpoint_freq, evaluation.checkpoint_offset
         )
@@ -1553,6 +1727,7 @@ def train(
                 total_steps=steps_done,
                 adaptive_spawn=adaptive_spawn,
                 adaptive_maps=adaptive_maps,
+                validation=validation_runner,
                 run_dir=destination,
                 metrics=latest_stats,
             )
@@ -1572,7 +1747,7 @@ def train(
                 f"{evaluation.eval_min_train_success:.1%} required.",
                 flush=True,
             )
-        eval_due = is_final_update or train_stop or (
+        eval_due = is_final_update or train_stop or validation_stop or (
             schedule_due(update, evaluation.eval_freq, evaluation.eval_offset)
             and evaluation_enabled
         )
@@ -1607,11 +1782,12 @@ def train(
                     model, evaluation_level, eval_hold,
                     eval_due=eval_due, on_run=report_run,
                 )
-            stop_training = stop_training or train_stop
+            stop_training = stop_training or train_stop or validation_stop
             if (
                 stop_training
                 and map_suite_levels is not None
                 and not replay_due
+                and evaluation.eval_video
             ):
                 # Early exit can happen between scheduled replay updates. Make
                 # sure the stopping checkpoint still has representative suite
@@ -1723,7 +1899,7 @@ def train(
                     dt=cfg.dt,
                     reward_terms=eval_rewards,
                     metadata={
-                        **planner_metadata(evaluation_level.env),
+                        **planner_metadata(evaluation_level.env, reward_cfg=evaluation_level.reward),
                         "world_size_m": evaluation_level.building.world_size_m.tolist(),
                         "cell_size_m": evaluation_level.building.cell_size_m,
                         "coverage_voxel_size_m": (
@@ -1772,6 +1948,9 @@ def train(
     checkpoint = None
     if num_updates == resume.start_update:
         latest_stats = dict(completed_checkpoint.get("metrics", {}))
+    if (validation_runner is not None and level.validation.val_on_finalization
+            and validation_runner.last_update != num_updates):
+        perform_validation(num_updates, resume.step_offset + num_updates * training.num_envs * training.num_steps)
     latest_stats["effective_num_envs"] = training.num_envs
     if evaluation.save_model:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1786,6 +1965,7 @@ def train(
             total_steps=resume.step_offset + num_updates * training.num_envs * training.num_steps,
             adaptive_spawn=adaptive_spawn,
             adaptive_maps=adaptive_maps,
+            validation=validation_runner,
             run_dir=destination,
             metrics=latest_stats,
             final=True,
@@ -2092,6 +2272,7 @@ def evaluate_model(
         "capture_result",
         "capture_offset",
         "fixed_layout",
+        "return_population",
     ),
 )
 def _run_parallel_evaluation_jit(
@@ -2116,21 +2297,27 @@ def _run_parallel_evaluation_jit(
     fixed_obstacle_max: jax.Array | None = None,
     fixed_roadmap_vertices: jax.Array | None = None,
     fixed_roadmap_distances: jax.Array | None = None,
+    case_map_ids: jax.Array | None = None,
+    case_keys: jax.Array | None = None,
+    case_targets: jax.Array | None = None,
+    return_population: bool = False,
 ):
     """Run deterministic metrics and optionally retain one lane's actions."""
-    env_keys = jax.random.split(key, num_envs)
+    if return_population and capture_actions:
+        raise ValueError("Population summaries and action capture must be collected separately.")
+    env_keys = jax.random.split(key, num_envs) if case_keys is None else case_keys
     env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
     comm_cadence = int(model.memory_comm_every_k_steps)
 
-    def run_single_environment(env_key, env_action_noise_key):
-        state = reset(
-            env_key,
-            obstacle_min=fixed_obstacle_min,
-            obstacle_max=fixed_obstacle_max,
-            stored_vertices=fixed_roadmap_vertices,
-            stored_distances=fixed_roadmap_distances,
-        ) if fixed_layout else reset(env_key)
+    def run_single_environment(env_key, env_action_noise_key, case_map_id=None, case_target=None):
+        if case_map_id is not None:
+            state = reset(env_key, map_id=case_map_id, target_pos=case_target)
+        elif fixed_layout:
+            state = reset(env_key, obstacle_min=fixed_obstacle_min, obstacle_max=fixed_obstacle_max,
+                          stored_vertices=fixed_roadmap_vertices, stored_distances=fixed_roadmap_distances)
+        else:
+            state = reset(env_key)
         actor_hidden = model.initial_actor_hidden((), num_agents=cfg.num_agents)
         actor_signature = model.initial_actor_signature((), num_agents=cfg.num_agents)
         actor_value = model.initial_actor_value((), num_agents=cfg.num_agents)
@@ -2155,6 +2342,8 @@ def _run_parallel_evaluation_jit(
             jnp.bool_(False),  # target seen/known by any agent
             jnp.bool_(False),  # target delivered to base before termination
         )
+        if return_population:
+            initial_carry = (*initial_carry, jnp.sum(state.active))
 
         def evaluation_step(carry, step_index):
             (
@@ -2174,7 +2363,7 @@ def _run_parallel_evaluation_jit(
                 terminal_coverage,
                 visually_found,
                 base_delivered,
-            ) = carry
+            ) = carry[:16]
 
             delta = state.pos[:, None, :] - state.pos[None, :, :]
             comm_mask = (
@@ -2291,6 +2480,8 @@ def _run_parallel_evaluation_jit(
                 visually_found | (live & jnp.any(next_state.target_known)),
                 base_delivered | (live & next_state.base_target_known),
             )
+            if return_population:
+                next_carry = (*next_carry, jnp.where(live, jnp.sum(next_state.active), carry[16]))
             return next_carry, executed_actions if capture_actions else None
 
         final_carry, action_history = jax.lax.scan(
@@ -2308,11 +2499,16 @@ def _run_parallel_evaluation_jit(
             final_carry[15],
             state.adaptive.zone_valid if cfg.adapt_size.enabled else jnp.bool_(True),
         )
+        if return_population:
+            metrics = (*metrics, final_carry[16])
         return (*metrics, action_history) if capture_actions else metrics
 
-    batched = jax.vmap(run_single_environment)(
-        env_keys, env_action_noise_keys
-    )
+    if case_map_ids is None:
+        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys)
+    elif case_targets is None:
+        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys, case_map_ids)
+    else:
+        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys, case_map_ids, case_targets)
     if not capture_actions:
         return batched
 

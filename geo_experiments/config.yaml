@@ -8,7 +8,14 @@ run:
 
 policy:
   level: G01_static # Normal level definition supplies map and policy settings.
-  checkpoint: outputs\G01_static\checkpoints\ckpt_000330 # Historical Phase 0 (136 inputs); replace with a new visual G01 checkpoint (139 inputs).
+  checkpoint: outputs\G01_static\checkpoints\ckpt_000330
+  from_run_config: true # Restore its original observation/model/evaluation settings, not today's G01 defaults.
+
+# Historical G01 semantics remain the default. probes.yaml defines the G02 suite.
+protocol:
+  decoder: legacy
+  eligibility: success # G02 uses delivered instead; keep original G01 inclusion reproducible.
+  target_storey: true
 
 dataset:
   train_samples: 10000
@@ -34,6 +41,8 @@ probe:
 
 audit:
   enabled: true
+  mode: full # G02 uses conditional: cheap exact-latent screen before full histories.
+  duplicate_threshold: 0.01
   samples: 5000 # First matched collection episodes; capped at total dataset size.
   every: 1 # Record every step through finder capture.
   batch_size: 32 # Smaller history batches; ordinary collection resumes afterwards.

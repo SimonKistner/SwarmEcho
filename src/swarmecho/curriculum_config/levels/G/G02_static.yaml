@@ -1,4 +1,3 @@
-# G02: five frozen 15x15x15 maps; G01 settings plus adaptive map sampling and five-map replays.
 env:
   map_names:
     - G02_static_map_01
@@ -30,13 +29,15 @@ env:
   success_condition: chain_held # coverage | discovery | delivery | chain_held
 
   observe_chain_contributor: true
+  observe_base_vote_ratio: true # Qualified base voters / active population; zero off the base network.
+  observe_base_population: true # Active population / global DEPLOYED_AGENTS_OBS_REF (10); zero off-network.
   observe_seeing_target: false
   observe_visually_gated_target_displacement: true
   observe_current_timestep: false
   observe_coverage_probe: false # Debugging-only legacy; never a design choice or candidate for any design question.
   coverage_voxel_size: 2.5
 
-  roadmap_approach: full # Interior cell/portal nodes represent all vertical turns and keep these banks small.
+  roadmap_approach: full # Wall/opening/stair features supply the geodesic roadmap and relay anchors.
   roadmap_node_density: 0.5
   roadmap_merge_wall_end_nodes: true
   roadmap_corner_bonus_m: 0.0
@@ -48,52 +49,58 @@ adapt_size:
   enabled: true
   initial_agents: 1 # Each episode starts with one agent; voting can recruit up to the stage cap.
   vote_mode: hold # hold | keep_yes_no (KEEP=0, YES=1, NO=2)
-  vote_holding: 3 # Delivered YES credits; isolated YES ticks do not count, NO does not erase receipts.
-  quorum_fraction: 0.49 # Strict >; 4/8 and 5/9 qualify.
+  vote_protocol: latest_decision # credits | latest_decision; newest timestamped YES/NO per drone.
+  vote_holding: 1 # Used only by credits; latest_decision always uses the latest YES/NO.
+  quorum_fraction: 1.0 # Unanimity: every active drone must have qualified approval at the base.
   quorum_hold: 0 # Minimum consecutive environment steps with quorum; 0 acts immediately.
   decommission_radius_m: 0.75 # Fits above a centred base inside a sealed 5 m shaft.
   decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
-  reward_by_reference_enabled: true # Extra signed reward for qualified reinforcement callers.
+  reward_by_reference_enabled: false # Extra signed reward for qualified reinforcement callers.
   reward_by_reference_fraction: 0.20 # Full share per caller; linearly decays to zero.
   reward_by_reference_steps: 500 # Environment transitions including the recruit's activation.
 
 
 reward:
-  reinforcement_reward: 1
-  decommission_reward: 0.0
-  rejected_call_penalty: 200.0 # Per qualified YES voter, per fresh rejected batch.
-  all_decommissioned_penalty: 1000.0 # Team cost, paid to the last acting drones.
-  success_unused_agent_penalty: 300.0 # Team cost per active non-contributor at success.
-  success_noncontributor_penalty: 2000.0 # Each active non-contributor pays this individually at terminal chain success.
+  reinforcement_reward: 10 # Full amount to each qualified deployment voter.
+  priveleged_vote_reward: # Estimator/chain-aware vote penalties; suppress bonuses on unnecessary calls.
+    enabled: true # false preserves existing rewards; requires latest_decision.
+    withheld_reinforcement_vote_reward: -1.0 # Per informed, connected NO on an eligible communication tick.
+    unnecessary_reinforcement_call_reward: -200 # Responsible YES sources on an unnecessary grant; replaces +10.
+  decommission_reward: 0 # Full amount to each removed drone, on removal.
+  rejected_call_reward: -200 # Each qualified YES voter on a rejected batch.
+  all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
+  useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
+  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; -min(750 * useless_count, 2000). min caps the loss
+  useless_agent_at_success_all_agents_reward_cap: 2000
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
   progress_based_cluster_tiebreaker_soft: true
 
   allow_redundancy_reward: false
   enable_chain_efficiency_reward: false
-  chain_efficiency_bonus: 0
+  chain_efficiency_reward: 0.0 # Per eligible drone times its path efficiency; no population divisor.
 
-  exploration_bonus: 2.0
-  target_found_bonus: 125.0
-  finder_bonus: 100
-  success_bonus: 12000.0
-  success_bonus_as_hold_record: false
-  success_bonus_contributors_only: false
-  peer_informing_reward_enabled: true
-  peer_informing_bonus: 50.0
+  exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
+  finder_reward: 100 # Each direct base deliverer, or first visual finder without delivery gating.
+  target_found_reward: 100 # Full one-shot amount to every active drone at delivery/discovery.
+  success_reward: 3000 # Full amount to every active drone at first success; no population divisor.
+  success_reward_as_hold_record: false # If enabled: each qualifying holder gets success_reward / hold_chain_for per new record.
+  peer_informing_reward_enabled: false
+  peer_informing_reward: 50 # One newly informed peer's credit, split locally among direct senders.
 
-  collision_penalty: 0.5
-  time_penalty_per_step: 3.0
-  no_movement_termination_penalty: 0.0
-  gap_reduction_meter_bonus: 0.2
-  gap_reward_uses_change: false
-  gap_change_meter_bonus: 3.0
-  delivery_gap_vesting_enabled: false
+  collision_reward: -0.5 # Per colliding drone per transition.
+  time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
+  gap_progress_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
+  gap_reward_uses_change: false # Legacy diagnostic only; not a training design/tuning option.
+  gap_change_reward_per_meter: 3.0 # Legacy diagnostic change-mode coefficient.
+  delivery_gap_vesting_enabled: false # Legacy diagnostic companion to change mode.
   delivery_gap_vesting_steps: 10
+  no_movement_termination_penalty: 0.0 # Full signed amount to each active drone at idle failure.
 
 training:
-  total_timesteps: 500000000
-  num_envs: 4000
+  total_timesteps: 1300000000
+  num_envs: 3000
+  num_maps: null # Authored map list remains authoritative.
   oom_recovery:
     enabled: true
   num_steps: 100
@@ -103,11 +110,14 @@ training:
 
   randomize_base: false
   minimum_geodesic_separation: false
-  minimum_geodesic_separation_multiplier: 0.5 # (15 comm + 4 visual + 1 buffer) / 15 = 20 m.
+  minimum_geodesic_separation_multiplier: 0.5 # Inactive above; if enabled, minimum separation is 7.5 m.
   skip_on_no_pair_found: true
 
   dynamic_max_geo_distance:
     enabled: true
+    mode: global_candidates # Cached whole-map radio graph; simplifier retains the previous estimator.
+    candidate_spacing_fraction: 0.5 # 216 accepted uniform-random points on a 15 m cube, plus legal roadmap/launch anchors.
+    max_candidates_per_map: 4096 # Explicit preparation limit, never silent truncation.
   agent_count_curriculum:
     enabled: true
     start_agents: 2
@@ -140,25 +150,24 @@ network:
   tarmac_val_dim: 64
   tarmac_include_self: false
 
-evaluation:
+inspection_evaluation:
   num_agents: null # Use the training agent cap in every eval/replay.
   dynamic_max_geo_distance: null # Follow the training filter; false explicitly disables it for diagnostic evaluation.
   apply_trainings_min_geo_separation: false
   eval_parallel_envs: null # Follow effective training.num_envs, including OOM reductions.
-  random_eval: false
   replay_targets_from_storey: null # Sample the current stage's eligible targets across storeys.
-  random_eval_envs: 5
+  inspection_maps: null # All five configured authored maps.
 
   early_exit: true
-  early_exit_source: evaluation
-  early_exit_success_rate: 0.95
+  early_exit_source: inspection_evaluation
+  early_exit_success_rate: 0.93
   final_early_exit_success_rate: 0.99 # Only when target budget and population cap both reach seven.
   early_exit_min_success_length_reduction: null # Success alone controls progression.
   early_exit_hold_evals: 1 # Fresh windows per map for training source; eval calls otherwise.
 
   save_model: true
   checkpoint_freq: 30
-  eval_freq: 30
+  eval_freq: 100
   eval_min_train_success: 0.0 # Skip scheduled metrics/replays below this rolling training success.
   training_robustness: false
   final_robustness: false # Reuse the single noise-free metric pass at completion.
@@ -167,10 +176,14 @@ evaluation:
   training_heatmap_creation: true
 
   eval_video: true
-  eval_video_freq: 30
+  eval_video_freq: 100
   eval_video_offset: 1
   map_suite_replay_limit: 5
 
 logging:
+  required_agents_metrics_window_episodes: 500 # Independent population/success window per exact target estimator count.
   terminal_log_warmup: true
   terminal_log_init: true
+
+validation:
+  enabled: false

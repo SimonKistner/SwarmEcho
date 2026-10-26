@@ -51,7 +51,14 @@ def load_run(run_dir):
         manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         if manifest.get("format") != FORMAT:
             raise ValueError("Unsupported experiment data format.")
-        return manifest, archive(run_dir / "data.npz"), False
+        arrays = {}
+        if manifest.get("shared_data"):
+            shared = (run_dir / manifest["shared_data"]).resolve()
+            if not shared.is_relative_to((ROOT / "geo_experiments").resolve()):
+                raise ValueError("Shared collections must stay inside geo_experiments/.")
+            arrays.update(archive(shared))
+        arrays.update(archive(run_dir / "data.npz"))
+        return manifest, arrays, False
 
     import yaml
     config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))

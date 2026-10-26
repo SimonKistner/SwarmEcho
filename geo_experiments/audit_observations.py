@@ -17,6 +17,7 @@ STAGES = ("Raw observation", "Encoded observation", "GRU input (encoding + recei
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from geo_experiments.console import terminal_print as print
 
 
 def digest(*arrays):

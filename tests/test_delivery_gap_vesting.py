@@ -26,12 +26,12 @@ BUILDING = load_building(
 def test_delivery_gap_vesting_config_requires_change_reward_and_positive_steps():
     with pytest.raises(ValueError, match="requires gap-change reward"):
         load_level_cli([
-            "level=M00_no_maze_open_cuboid",
+            "level=G02_static",
             "reward.delivery_gap_vesting_enabled=true",
         ])
     with pytest.raises(ValueError, match="positive integer"):
         load_level_cli([
-            "level=M00_no_maze_open_cuboid",
+            "level=G02_static",
             "reward.delivery_gap_vesting_steps=0",
         ])
 
@@ -45,10 +45,10 @@ def _scenario(*, hold_chain_for=50, second_agent_x=9.0):
     )
     reward_cfg = RewardConfig(
         chain_reward_system="euclidean", gap_reward_uses_change=True,
-        gap_change_meter_bonus=3.0, delivery_gap_vesting_enabled=True,
-        delivery_gap_vesting_steps=10, exploration_bonus=0.0,
-        finder_bonus=0.0, target_found_bonus=0.0, success_bonus=0.0,
-        time_penalty_per_step=0.0, collision_penalty=0.0,
+        gap_change_reward_per_meter=3.0, delivery_gap_vesting_enabled=True,
+        delivery_gap_vesting_steps=10, exploration_reward=0.0,
+        finder_reward=0.0, target_found_reward=0.0, success_reward=0.0,
+        time_presure_reward=0.0, collision_reward=0.0,
     )
     reset, step, _, _ = make_env_fns(
         BUILDING, env_cfg, plan_geodesic=False,
@@ -73,14 +73,14 @@ def _scenario(*, hold_chain_for=50, second_agent_x=9.0):
 
 def _gap_reward(before, after, reward_cfg, env_cfg):
     _, terms = compute_rewards(before, after, reward_cfg, env_cfg)
-    return np.asarray(terms["gap_reduction"])
+    return np.asarray(terms["gap_reward"])
 
 
 def test_pre_delivery_gap_credit_vests_to_the_same_total_as_later_construction():
     env_cfg, reward_cfg, state, step = _scenario()
     step = jax.jit(step)
     gap_reward = jax.jit(
-        lambda before, after: compute_rewards(before, after, reward_cfg, env_cfg)[1]["gap_reduction"]
+        lambda before, after: compute_rewards(before, after, reward_cfg, env_cfg)[1]["gap_reward"]
     )
     delivered = step(state, jnp.zeros((2, 3)))
     assert delivered.base_target_known

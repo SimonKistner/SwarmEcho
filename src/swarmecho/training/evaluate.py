@@ -589,7 +589,7 @@ def render_csv_replays(
             reward_terms=rewards,
             progress=False,
             metadata={
-                **planner_metadata(level.env),
+                **planner_metadata(level.env, reward_cfg=level.reward),
                 "world_size_m": level.building.world_size_m.tolist(),
                 "cell_size_m": level.building.cell_size_m,
                 "coverage_voxel_size_m": level.building.cell_size_m
@@ -905,7 +905,7 @@ def main() -> None:
         reward_terms=rewards,
         progress=False,
         metadata={
-            **planner_metadata(level.env),
+            **planner_metadata(level.env, reward_cfg=level.reward),
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "coverage_voxel_size_m": (

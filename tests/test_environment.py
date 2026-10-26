@@ -616,10 +616,10 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
     current = step(previous, jnp.ones((cfg.num_agents, 3)))
     reward, terms = compute_rewards(previous, current, RewardConfig(), cfg)
     assert reward.shape == (cfg.num_agents,)
-    assert terms["coverage"].shape == (cfg.num_agents,)
-    assert terms["collision"].shape == (cfg.num_agents,)
-    assert terms["time_penalty"].shape == (cfg.num_agents,)
-    assert terms["gap_reduction"].shape == (cfg.num_agents,)
+    assert terms["exploration_reward"].shape == (cfg.num_agents,)
+    assert terms["collision_reward"].shape == (cfg.num_agents,)
+    assert terms["time_presure_reward"].shape == (cfg.num_agents,)
+    assert terms["gap_reward"].shape == (cfg.num_agents,)
     assert jnp.isfinite(reward).all()
     assert jnp.sum(current.coverage_credit) == pytest.approx(
         jnp.sum(current.coverage & ~previous.coverage), abs=1e-5
@@ -638,23 +638,23 @@ def test_coverage_pays_time_cost_without_chain_gap_computation(monkeypatch):
     monkeypatch.setattr("swarmecho.env.environment.chain_distance_matrix", unexpected_gap_calculation)
     monkeypatch.setattr("swarmecho.env.environment.obstacle_chain_diagnostics", unexpected_gap_calculation)
     _, terms = compute_rewards(state, state, reward_cfg, cfg)
-    np.testing.assert_allclose(jnp.sum(terms["time_penalty"]), -5.0)
-    assert jnp.all(terms["time_penalty"][~state.active] == 0.0)
-    np.testing.assert_array_equal(terms["gap_reduction"], [0., 0.])
+    np.testing.assert_allclose(jnp.sum(terms["time_presure_reward"]), -0.75)
+    assert jnp.all(terms["time_presure_reward"][~state.active] == 0.0)
+    np.testing.assert_array_equal(terms["gap_reward"], [0., 0.])
 
     both_active = state._replace(active=jnp.ones(2, dtype=jnp.bool_))
     _, terms = compute_rewards(both_active, both_active, reward_cfg, cfg)
-    np.testing.assert_allclose(terms["time_penalty"], [-2.5, -2.5])
-    np.testing.assert_array_equal(terms["gap_reduction"], [0., 0.])
+    np.testing.assert_allclose(terms["time_presure_reward"], [-0.75, -0.75])
+    np.testing.assert_array_equal(terms["gap_reward"], [0., 0.])
 
 
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     """must retain 2D's delivery milestone and resist finder farming."""
     reward_cfg = RewardConfig(
         target_found_requires_delivery=True,
-        finder_bonus=50.0,
-        target_found_bonus=100.0,
-        success_bonus=500.0,
+        finder_reward=50.0,
+        target_found_reward=100.0,
+        success_reward=500.0,
     )
     base = jnp.asarray([1.0, 1.0, 1.0])
     target = jnp.asarray([11.0, 1.0, 1.0])
@@ -687,9 +687,9 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         base_target_known=jnp.bool_(True),
     )
     _, delivered_terms = compute_rewards(previous, delivered, reward_cfg, env_cfg)
-    np.testing.assert_allclose(delivered_terms["target_found"], [100.0, 100.0])
-    np.testing.assert_allclose(delivered_terms["finder"], [50.0, 0.0])
-    np.testing.assert_allclose(delivered_terms["success"], [0.0, 0.0])
+    np.testing.assert_allclose(delivered_terms["target_found_reward"], [100.0, 100.0])
+    np.testing.assert_allclose(delivered_terms["finder_reward"], [50.0, 0.0])
+    np.testing.assert_allclose(delivered_terms["success_reward"], [0.0, 0.0])
 
     # A later visual re-entry, and a reconnection after the base already
     # knows the target, cannot earn delivery or finder reward again.
@@ -698,19 +698,19 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         fully_connected=jnp.bool_(False),
     )
     _, reentry_terms = compute_rewards(delivered, reentry, reward_cfg, env_cfg)
-    np.testing.assert_allclose(reentry_terms["finder"], [0.0, 0.0])
+    np.testing.assert_allclose(reentry_terms["finder_reward"], [0.0, 0.0])
     reconnected = reentry._replace(
         directly_sees_target=jnp.asarray([False, False]),
         fully_connected=jnp.bool_(True),
     )
     _, reconnected_terms = compute_rewards(reentry, reconnected, reward_cfg, env_cfg)
-    np.testing.assert_allclose(reconnected_terms["target_found"], [0.0, 0.0])
-    np.testing.assert_allclose(reconnected_terms["finder"], [0.0, 0.0])
+    np.testing.assert_allclose(reconnected_terms["target_found_reward"], [0.0, 0.0])
+    np.testing.assert_allclose(reconnected_terms["finder_reward"], [0.0, 0.0])
 
     succeeded = delivered._replace(success=jnp.bool_(True))
     _, success_terms = compute_rewards(delivered, succeeded, reward_cfg, env_cfg)
-    np.testing.assert_allclose(success_terms["success"], [250.0, 250.0])
-    np.testing.assert_allclose(success_terms["target_found"], [0.0, 0.0])
+    np.testing.assert_allclose(success_terms["success_reward"], [500.0, 500.0])
+    np.testing.assert_allclose(success_terms["target_found_reward"], [0.0, 0.0])
 
 
 def test_post_delivery_gap_credit_is_limited_to_relay_route():
@@ -721,7 +721,7 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         comm_radius=4.0,
         visual_radius=4.0,
     )
-    reward_cfg = RewardConfig(time_penalty_per_step=5.0, gap_reduction_meter_bonus=0.125)
+    reward_cfg = RewardConfig(time_presure_reward=-1.25, gap_progress_reward_per_meter=0.125)
     state = EnvState(
         pos=jnp.asarray(
             [[4.5, 1.0, 1.0], [8.5, 1.0, 1.0], [12.5, 1.0, 1.0], [1.0, 4.5, 1.0]]
@@ -746,8 +746,8 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         base_target_known=jnp.bool_(True),
     )
     _, terms = compute_rewards(state, state, reward_cfg, env_cfg)
-    np.testing.assert_allclose(terms["time_penalty"], [-1.25] * 4)
-    np.testing.assert_allclose(terms["gap_reduction"], [1.75] * 3 + [0.0])
+    np.testing.assert_allclose(terms["time_presure_reward"], [-1.25] * 4)
+    np.testing.assert_allclose(terms["gap_reward"], [1.75] * 3 + [0.0])
 
 
 def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
@@ -784,25 +784,26 @@ def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
     np.testing.assert_allclose(gap, 12.)
 
     obstacle_cfg = RewardConfig(chain_reward_system="obstacle_geodesic",
+                                time_presure_reward=-1., gap_progress_reward_per_meter=0.125,
                                 allow_redundancy_reward=True)
     _, obstacle_terms = compute_rewards(
         state, state, obstacle_cfg, env_cfg, roadmap_distances,
     )
-    np.testing.assert_allclose(obstacle_terms["time_penalty"], [-1.] * 5)
-    np.testing.assert_allclose(obstacle_terms["gap_reduction"],
+    np.testing.assert_allclose(obstacle_terms["time_presure_reward"], [-1.] * 5)
+    np.testing.assert_allclose(obstacle_terms["gap_reward"],
                                [2., 2., 2., 2., 0.], rtol=1e-6)
     _, longer_terms = compute_rewards(
         state, state, obstacle_cfg, env_cfg, roadmap_distances * 2.,
     )
-    np.testing.assert_allclose(longer_terms["gap_reduction"],
+    np.testing.assert_allclose(longer_terms["gap_reward"],
                                [4., 4., 4., 4., 0.], rtol=1e-6)
     _, unknown_terms = compute_rewards(
         state._replace(base_target_known=jnp.bool_(False)),
         state._replace(base_target_known=jnp.bool_(False)),
         obstacle_cfg, env_cfg, roadmap_distances,
     )
-    np.testing.assert_array_equal(unknown_terms["gap_reduction"], [0.] * 5)
-    np.testing.assert_allclose(unknown_terms["time_penalty"], [-1.] * 5)
+    np.testing.assert_array_equal(unknown_terms["gap_reward"], [0.] * 5)
+    np.testing.assert_allclose(unknown_terms["time_presure_reward"], [-1.] * 5)
 
     # With no target-connected drone, the target endpoint is leader -1.
     # Only the route from the base to D1 earns the partial-chain bonus.
@@ -815,13 +816,12 @@ def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
     _, endpoint_terms = compute_rewards(
         no_target_front, no_target_front, obstacle_cfg, env_cfg, roadmap_distances,
     )
-    np.testing.assert_allclose(endpoint_terms["gap_reduction"],
+    np.testing.assert_allclose(endpoint_terms["gap_reward"],
                                [1., 1., 0., 0., 0.], rtol=1e-6)
 
-    euclidean_cfg = RewardConfig(chain_reward_system="euclidean",
-                                 allow_redundancy_reward=True)
+    euclidean_cfg = replace(obstacle_cfg, chain_reward_system="euclidean")
     _, euclidean_terms = compute_rewards(state, state, euclidean_cfg, env_cfg)
-    np.testing.assert_allclose(euclidean_terms["gap_reduction"],
+    np.testing.assert_allclose(euclidean_terms["gap_reward"],
                                [1., 0., 1., 0., 0.], rtol=1e-6)
 
 
@@ -839,8 +839,8 @@ def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
     assert info["global_target_found"].shape == ()
     assert info["chain_gap_dist"].shape == ()
     assert info["chain_progress_pct"].shape == ()
-    assert info["time_penalty"].shape == (cfg.num_agents,)
-    assert info["gap_reduction"].shape == (cfg.num_agents,)
+    assert info["time_presure_reward"].shape == (cfg.num_agents,)
+    assert info["gap_reward"].shape == (cfg.num_agents,)
     assert info["global_coverage"].shape == ()
     assert reward.shape == (cfg.num_agents,)
     assert next_state.step == 0
@@ -855,13 +855,13 @@ def test_idle_termination_applies_configured_penalty():
         no_movement_termination_steps=1,
     )
     reward_cfg = RewardConfig(
-        exploration_bonus=0.0,
-        collision_penalty=0.0,
-        finder_bonus=0.0,
-        time_penalty_per_step=0.0,
-        gap_reduction_meter_bonus=0.0,
-        target_found_bonus=0.0,
-        success_bonus=0.0,
+        exploration_reward=0.0,
+        collision_reward=0.0,
+        finder_reward=0.0,
+        time_presure_reward=0.0,
+        gap_progress_reward_per_meter=0.0,
+        target_found_reward=0.0,
+        success_reward=0.0,
         no_movement_termination_penalty=-300.0,
     )
     reset, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
@@ -873,7 +873,7 @@ def test_idle_termination_applies_configured_penalty():
     assert done
     assert info["idle_terminated"]
     np.testing.assert_allclose(reward, [-300.0])
-    np.testing.assert_allclose(info["no_movement_termination"], [-300.0])
+    np.testing.assert_allclose(info["no_movement_termination_penalty"], [-300.0])
 
 
 @pytest.mark.parametrize("obstacles", [0, 1])
@@ -985,20 +985,23 @@ def test_redundancy_and_efficiency_reward_modes():
     for redundancy in (False, True):
         for efficiency in (False, True):
             reward_cfg = RewardConfig(allow_redundancy_reward=redundancy,
+                                               time_presure_reward=-1.25,
+                                               gap_progress_reward_per_meter=0.125,
+                                               chain_efficiency_reward=0.125,
                                                enable_chain_efficiency_reward=efficiency)
             reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
-            np.testing.assert_allclose(terms["time_penalty"], [-1.25] * 4)
-            np.testing.assert_allclose(terms["gap_reduction"],
+            np.testing.assert_allclose(terms["time_presure_reward"], [-1.25] * 4)
+            np.testing.assert_allclose(terms["gap_reward"],
                                        [.75, .75, .75 if redundancy else 0., 0.])
-            credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .5 / 4
+            credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .125
             if efficiency:
-                np.testing.assert_allclose(terms["efficiency"], credit, rtol=1e-6)
+                np.testing.assert_allclose(terms["chain_efficiency_reward"], credit, rtol=1e-6)
                 _, disconnected = compute_rewards(state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference)
-                np.testing.assert_array_equal(disconnected["efficiency"], np.zeros(4))
+                np.testing.assert_array_equal(disconnected["chain_efficiency_reward"], np.zeros(4))
             else:
-                assert "efficiency" not in terms
+                assert "chain_efficiency_reward" not in terms
                 credit = np.zeros(4)
-            np.testing.assert_allclose(reward, terms["time_penalty"] + terms["gap_reduction"] + credit, rtol=1e-6)
+            np.testing.assert_allclose(reward, terms["time_presure_reward"] + terms["gap_reward"] + credit, rtol=1e-6)
         _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False,
                                               allow_redundancy_reward=redundancy)
         np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., float(redundancy), 0.])
@@ -1009,13 +1012,13 @@ def test_redundancy_and_efficiency_reward_modes():
 def test_autoreset_step_uses_the_configured_reward_terms():
     cfg = replace(EnvConfig(), max_steps=1)
     zero_reward = RewardConfig(
-        exploration_bonus=0.0,
-        collision_penalty=0.0,
-        finder_bonus=0.0,
-        time_penalty_per_step=0.0,
-        gap_reduction_meter_bonus=0.0,
-        target_found_bonus=0.0,
-        success_bonus=0.0,
+        exploration_reward=0.0,
+        collision_reward=0.0,
+        finder_reward=0.0,
+        time_presure_reward=0.0,
+        gap_progress_reward_per_meter=0.0,
+        target_found_reward=0.0,
+        success_reward=0.0,
     )
     reset, autoreset_step, _, _ = make_autoreset_fns(
         BUILDING, cfg, zero_reward

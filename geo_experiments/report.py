@@ -19,6 +19,7 @@ from geo_experiments.common import SOURCES, SOURCE_LABELS, TASKS, fingerprint, r
 from geo_experiments.geometry import prediction_errors
 from geo_experiments.dashboard import numeric_cell, report_controls, decorate_report, build_dashboard
 from geo_experiments.audit_results import audit_section, attach_console_audit
+from geo_experiments.console import terminal_print as print
 
 # One palette throughout tables, learning curves, comparisons and matrices.
 BACKGROUND, PANEL, TEXT, MUTED, GRID = "#0b1220", "#111c2e", "#e4edf7", "#9aacc3", "#2b3b53"
@@ -33,6 +34,9 @@ def _results(arrays, config):
     test = splits["test"]
     floors = np.unique(graph["cells"][:, 2] + 1)
     masks = {"overall": np.ones(len(test), dtype=bool)}
+    required = arrays.get("dataset/target_required_agents")
+    if required is not None and "own_cell" not in labels:
+        masks.update({f"required-{int(k)}": required[test] == k for k in np.unique(required)})
     masks.update({f"storey-{floor}": labels["actual_storey"][test] == floor for floor in floors})
     records = {}
     for task in tasks:
@@ -78,8 +82,8 @@ def _histogram(errors, bins, color, unit, measure="count", count_limit=1):
         percentage = 100 * count / len(errors)
         height = (bottom - top) * (percentage if measure == "share" else count) / limit
         x = left + i * step
-        label = str(int(value)) if np.isfinite(value) else "No route"
-        bars.append(f'<g><title>{label} {unit} off: {count:,} wrong predictions '
+        label = "Wrong map" if value == -1 else str(int(value)) if np.isfinite(value) else "No route"
+        bars.append(f'<g><title>{label}{"" if value == -1 else " " + unit + " off"}: {count:,} wrong predictions '
                     f'({percentage:.1f}% of errors, pooled across seeds)</title>'
                     f'<rect x="{x + step * .15:.2f}" y="{bottom - height:.2f}" '
                     f'width="{step * .7:.2f}" height="{height:.2f}" rx="2" fill="{color}"/>'
@@ -98,15 +102,17 @@ def _histogram(errors, bins, color, unit, measure="count", count_limit=1):
             f'{unit} off · {axis_label}</text></g></svg>')
 
 
-def _table(records, floors, tasks=TASKS, sources=SOURCES):
+def _table(records, floors, tasks=TASKS, sources=SOURCES, *, detail_groups=None, metric_version="heldout-accuracy/v1"):
     parts = ['<div class="table-scroll"><table class="results"><thead><tr>'
              '<th>Probe / input</th><th>Accuracy</th><th>Incorrect predictions</th></tr></thead><tbody>']
     for task in tasks:
         all_errors = np.concatenate([records[task, source, "overall"]["errors"] for source in sources])
-        finite = all_errors[np.isfinite(all_errors)]
+        finite = all_errors[np.isfinite(all_errors) & (all_errors > 0)]
         maximum = (int(floors.max() - floors.min()) if task == "target_storey"
                    else int(finite.max()) if len(finite) else 1)
         bins = list(range(1, max(maximum, 1) + 1))
+        if (all_errors == -1).any():
+            bins.insert(0, -1)
         if np.isinf(all_errors).any():
             bins.append(np.inf)
         unit = "storeys" if task == "target_storey" else "cells"
@@ -123,7 +129,7 @@ def _table(records, floors, tasks=TASKS, sources=SOURCES):
                 key = f"{TASK_LABELS[task]} / {SOURCE_LABELS[source]} / {scope}"
                 return (numeric_cell(key, "Accuracy", 100 * row["accuracy"] if row["n"] else None,
                                      unit="percent", decimals=1, suffix="%", css="accuracy", title=tooltip,
-                                     version="heldout-accuracy/v1") + '<td>'
+                                     version=metric_version) + '<td>'
                         + "".join(f'<div class="error-histogram-view" data-measure="{measure}"'
                                   + (" hidden" if measure == "share" else "") + ">"
                                   + _histogram(row["errors"] if row["n"] else None, bins, color, unit,
@@ -133,10 +139,12 @@ def _table(records, floors, tasks=TASKS, sources=SOURCES):
             parts.append(f'<tr class="overall"><td><strong>{TASK_LABELS[task]}</strong>'
                          f'<span class="source"><i style="background:{color}"></i>{SOURCE_LABELS[source]}</span></td>'
                          + cells(record, "Overall") + "</tr>")
-            parts.append('<tr class="detail-row"><td colspan="3"><details><summary>Per-storey details</summary>'
+            parts.append('<tr class="detail-row"><td colspan="3"><details><summary>'
+                         + (('Target-required agents, storeys and maps' if any(k.startswith('map-') for k, _ in detail_groups)
+                             else 'Target-required agents and storeys') if detail_groups else 'Per-storey details') + '</summary>'
                          '<div class="secondary"><table><tbody>')
-            for floor in floors:
-                parts.append(f'<tr><td>Storey {floor}</td>' + cells(records[task, source, f"storey-{floor}"], f"Storey {floor}") + "</tr>")
+            for key, title in (detail_groups or [(f"storey-{floor}", f"Storey {floor}") for floor in floors]):
+                parts.append(f'<tr><td>{html.escape(title)}</td>' + cells(records[task, source, key], title) + "</tr>")
             parts.append("</tbody></table></div></details></td></tr>")
     return "".join(parts) + "</tbody></table></div>"
 
@@ -184,6 +192,9 @@ def generate_report(run_dir, dpi=None, audit_console=None):
     if audit_console is not None:
         attach_console_audit(run_dir, audit_console, manifest)
     config = manifest["config"]
+    if "geometry/map_offsets" in arrays:
+        from geo_experiments.target_report import generate_target_report
+        return generate_target_report(run_dir, manifest, arrays, dpi=dpi)
     tasks, sources = experiment_axes(config)
     own = "own_cell" in tasks
     dpi = dpi or manifest.get("report", {}).get("dpi", config["report"]["dpi"])
@@ -228,17 +239,25 @@ def generate_report(run_dir, dpi=None, audit_console=None):
                                       f'data-measure="{measure}"{hidden}>' + legend + embed(fig, "Sample distribution by storey and cell") + "</div>")
 
     source_legend = _legend([(SOURCE_LABELS[s], COLORS[s]) for s in sources])
-    groups = ["overall", *(f"storey-{floor}" for floor in floors)]
+    required = arrays.get("dataset/target_required_agents") if not own else None
+    required_values = np.unique(required) if required is not None else []
+    from geo_experiments.target_report import required_label
+    detail_groups = ([(f"required-{int(k)}", required_label(int(k))) for k in required_values]
+                     + [(f"storey-{floor}", f"Storey {floor}") for floor in floors]) if len(required_values) else None
+    groups = ["overall", *(f"required-{int(k)}" for k in required_values), *(f"storey-{floor}" for floor in floors)]
     fig, axes = plt.subplots(1, len(tasks), figsize=(7.5 * len(tasks), 4.8), layout="constrained", squeeze=False)
     for task, axis in zip(tasks, axes[0], strict=True):
-        x = np.arange(len(groups))
+        x = np.arange(len(groups), dtype=float)
+        if len(required_values):
+            x[1 + len(required_values):] += .9
+            axis.axvline(x[1 + len(required_values)] - .9, color=GRID, linestyle="--")
         for i, source in enumerate(sources):
             rows = [records[task, source, name] for name in groups]
             axis.bar(x + (i - (len(sources) - 1) / 2) * .23, [100 * row["accuracy"] for row in rows], width=.22,
                      yerr=[100 * row["std"] for row in rows], color=COLORS[source],
                      error_kw={"ecolor": TEXT, "elinewidth": 1, "capsize": 3}, zorder=3)
         axis.set_title(TASK_LABELS[task])
-        axis.set_xticks(x, ["Overall", *(f"Storey {floor}" for floor in floors)])
+        axis.set_xticks(x, ["Overall", *(required_label(int(k)) for k in required_values), *(f"Storey {floor}" for floor in floors)])
         axis.set_ylabel("Exact prediction accuracy (%)")
         axis.set_ylim(0, 100)
         axis.grid(axis="y", alpha=.7, zorder=0)
@@ -397,7 +416,7 @@ td{{padding:12px 20px;vertical-align:middle}}.overall td{{border-top:1px solid v
 <label>Measure<select id="distribution-measure" onchange="updateDistribution()"><option value="count">{measure_count}</option><option value="share">Share (%)</option></select></label></div>
 {''.join(distribution_parts)}
 <p class="note">{distribution_note}</p></section>
-<section><h2>Held-out results</h2>{_table(records, floors, tasks, sources)}
+<section><h2>Held-out results</h2>{_table(records, floors, tasks, sources, detail_groups=detail_groups)}
 <p class="note">Accuracy is the mean across initialization seeds. The Measure selector above also controls these histograms.
 They include only incorrect predictions, pooled across seeds: counts are prediction counts, and shares sum to 100% of errors.
 Count scales are shared across inputs and storey details for each probe; hover a bar for its count and share.
@@ -408,13 +427,42 @@ respecting solid walls. {'Storey error is the number of storeys off. ' if not ow
 <section><h2>Overall and per-storey accuracy</h2>{source_legend}{comparison}
 <p class="note">Error bars show standard deviation across initialization seeds, using the same held-out episodes for every fit.</p></section>
 <section><h2>Validation learning curves</h2>{source_legend}{learning}
-<p class="note">Each line is one seed. Early stopping selects the lowest validation loss; evaluation episodes are used only after training.</p></section>
+<p class="note">Each line is one decoder initialization; colours identify the input feature source. An epoch is one pass through probe training examples. These curves train the small MLP, while the drone policy stays frozen.
+Accuracy is the share of exact correct labels, so higher is better. Cross-entropy loss measures probability assigned to the true label, so lower is better; confident mistakes can raise loss even when accuracy stays flat.
+Normally loss falls and accuracy rises before levelling off. Early stopping selects validation-loss improvements under min_delta and stops after the configured patience. Evaluation episodes are used only after this selection.</p></section>
 <section><h2>Confusion matrices</h2><p class="note">Rows are actual classes; columns are predictions. Each row sums to 100%, pooled across seeds.
 Colours use the same 0–100% scale; grey rows have no evaluation samples. Cell coordinates and storey offsets are relative to the base.</p>{''.join(confusion)}</section>
 </main><script>function updateDistribution(){{const category=document.getElementById('distribution-category').value;
 const measure=document.getElementById('distribution-measure').value;document.querySelectorAll('.distribution-view').forEach(view=>{{
 view.hidden=view.dataset.category!==category||view.dataset.measure!==measure;}});
 document.querySelectorAll('.error-histogram-view').forEach(view=>{{view.hidden=view.dataset.measure!==measure;}});}}</script></body></html>'''
+    if not own:
+        # Fresh single-map collections can show required-agent counts and success
+        # highlights. Historical archives lack those fields; never invent counts.
+        if all(k in arrays for k in ("episodes/target_required_agents", "episodes/delivered", "dataset/target_required_agents")):
+            from geo_experiments.target_report import distributions
+            from geo_experiments.report_layout import distribution_panel, DISTRIBUTION_STYLE
+            chart_graph = {**graph, "map_names": np.asarray([config["policy"]["level"]])}
+            requirements = np.unique(arrays["episodes/target_required_agents"])
+            replacement = distribution_panel(distributions(arrays, chart_graph, labels, splits, floors, requirements), single_map=True,
+                                             eligibility=config.get("protocol", {}).get("eligibility", "success"))
+            begin = document.index('<section><h2>Sample distributions</h2>')
+            end = document.index('</section>', begin) + len('</section>')
+            document = document[:begin] + replacement + document[end:]
+            document = document.replace('</head>', f'<style>{DISTRIBUTION_STYLE}</style></head>')
+            document = document.replace('<h2>Overall and per-storey accuracy</h2>', '<h2>Overall accuracy</h2>')
+            script = document.rfind('<script>function updateDistribution()')
+            if script >= 0:
+                end = document.index('</script>', script) + len('</script>')
+                document = document[:script] + document[end:]
+        begin = document.index('<section><h2>Validation learning curves</h2>')
+        confusion_begin = document.index('<section><h2>Confusion matrices</h2>', begin)
+        end = document.index('</section>', confusion_begin) + len('</section>')
+        document = document[:begin] + document[confusion_begin:end] + document[begin:confusion_begin] + document[end:]
+        from geo_experiments.auditing import footer_note
+        note = footer_note(manifest.get("ambiguity_audit"))
+        if note:
+            document = document.replace('</main>', f'<footer><p class="note">{html.escape(note)}</p></footer></main>')
     document = decorate_report(document, run_dir, manifest)
     # Save the archive/manifest before deleting any original generated files.
     if legacy:

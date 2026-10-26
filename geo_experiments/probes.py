@@ -6,9 +6,10 @@ import time
 import numpy as np
 
 from geo_experiments.artifacts import HISTORY_COLUMNS
+from geo_experiments.console import terminal_print as print
 
 
-def train_probe(task, source, seed, dataset, labels, splits, graph, config):
+def train_probe(task, source, seed, dataset, labels, splits, graph, config, *, class_values=None):
     import jax
     import jax.numpy as jnp
     import optax
@@ -22,7 +23,11 @@ def train_probe(task, source, seed, dataset, labels, splits, graph, config):
         raise ValueError(f"Non-finite {source} features.")
     y = labels[task]
     cell_task = task in ("target_cell", "own_cell")
-    classes = len(graph["cells"]) if cell_task else len(labels["storey_offsets"])
+    if class_values is None:
+        class_values = labels["cell_offsets"] if cell_task else labels["storey_offsets"]
+    classes = len(class_values)
+    if any(not len(splits[key]) for key in ("train", "validation", "test")):
+        raise ValueError("Every fitted decoder needs nonempty training, validation and evaluation splits.")
     widths = [features.shape[1], *settings["hidden_sizes"], classes]
     keys = jax.random.split(jax.random.PRNGKey(seed), len(widths) - 1)
     params = tuple({"weight": jax.random.normal(key, (left, right)) * np.sqrt(2.0 / left),
@@ -80,13 +85,14 @@ def train_probe(task, source, seed, dataset, labels, splits, graph, config):
     if best_params is None:
         raise RuntimeError("No finite validation loss; inspect feature data and probe settings.")
     weights = {"feature_mean": mean, "feature_std": std,
-               "class_values": labels["cell_offsets"] if cell_task else labels["storey_offsets"]}
+               "class_values": class_values}
     for i, layer in enumerate(best_params):
         weights[f"weight_{i}"] = layer["weight"]
         weights[f"bias_{i}"] = layer["bias"]
     test = splits["test"]
     probabilities = predict_indices(best_params, test)
     saved = {"predicted": probabilities.argmax(axis=1), "probabilities": probabilities,
+             "best_epoch": np.asarray(best_epoch, dtype=np.int32),
              "history": np.asarray([[row[key] for key in HISTORY_COLUMNS] for row in history])}
     saved.update({f"model/{key}": value for key, value in weights.items()})
     metadata = {"task": task, "source": source, "seed": seed, "best_epoch": best_epoch,

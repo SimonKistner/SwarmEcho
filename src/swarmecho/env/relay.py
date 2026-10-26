@@ -39,8 +39,12 @@ def opening_arrays(building):
 _RECORD_CACHE = {}
 
 
-def prepare_record(record, cfg, building=None):
+def prepare_record(record, cfg, building=None, *, options=None, randomize_base=False, cache_dir=None):
     """Reuse map-bank geometry; add predecessor routes and opening metadata once."""
+    if options is not None and options.mode == "global_candidates":
+        from swarmecho.env.relay_candidates import prepare_record as prepare_global
+        return prepare_global(record, cfg, building, options,
+                              randomize_base=randomize_base, cache_dir=cache_dir)
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import dijkstra
     from swarmecho.env.roadmap_cpu import _visible_from
@@ -88,8 +92,13 @@ def prepare_record(record, cfg, building=None):
     return result
 
 
-def make_calculator(cfg, geometry, building, bank=None, *, return_witness=False):
+def make_calculator(cfg, geometry, building, bank=None, *, return_witness=False,
+                    options=None, randomize_base=False, cache_dir=None):
     """Return (base,target,map_id)->(constructed k, valid), using static map data."""
+    if options is not None and options.mode == "global_candidates":
+        from swarmecho.env.relay_global import make_calculator as make_global
+        return make_global(cfg, geometry, building, bank, options,
+                           randomize_base=randomize_base, return_witness=return_witness, cache_dir=cache_dir)
     if bank is None:
         record = prepare_record(dict(vertices=geometry.vertices, solid_min=geometry.solid_min,
                                      solid_max=geometry.solid_max), cfg, building)

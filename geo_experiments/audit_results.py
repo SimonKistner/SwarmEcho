@@ -12,6 +12,8 @@ from geo_experiments.dashboard import numeric_cell
 
 
 def parse_console(text):
+    # Accept both historical bare output and the training-style clock prefixes.
+    text = re.sub(r"(?m)^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\]\s?", "", text)
     def required(pattern):
         match = re.search(pattern, text, re.MULTILINE)
         if not match:
@@ -118,6 +120,9 @@ def attach_console_audit(run_dir, path, manifest):
 
 
 def audit_section(summary):
+    if summary and summary.get("format") in ("swarmecho-conditional-audit/v1", "swarmecho-target-audit/v2"):
+        from geo_experiments.target_report import detailed_audit
+        return detailed_audit(summary)
     if not summary:
         return '<section><h2>Ambiguity audit</h2><p class="note">No audit was collected for this run.</p></section>'
     if summary.get("format") == "swarmecho-own-cell-audit/v1":

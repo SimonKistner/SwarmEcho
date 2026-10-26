@@ -1,14 +1,24 @@
 # C relay curriculum
 
+The C levels retain their historical reward blocks and are currently unsupported
+by the signed individual reward system. Each YAML contains a TODO and a
+commented default replacement immediately below its original reward block.
+Migrate and retune that block before running a C level; see
+[signed individual rewards](../01_reference/11_individual_rewards.md).
+
 The sequence is C01 → C02 → C03 → C05a → C05b. C04 is intentionally skipped:
 the station introduces vertical flight, then the existing cellar introduces
 stairs. All stages start with one drone and can recruit up to their agent cap.
 Policy, reward, drone radar, communication and optimizer settings follow B02cs1.
-Every C level adds `reward.success_noncontributor_penalty: 4000.0`: on terminal
-chain success each active noncontributing drone receives an additional `-4000`
-itself. The existing shared unused-agent penalty and all other terms still apply.
-The global config default is zero; W&B exposes the separate
-`rewards/success_noncontributor_penalty` component.
+The historical C reward blocks include individual and shared useless-agent
+costs in the former positive-magnitude convention. These settings are preserved
+in the YAML for retuning, but do not describe the current runtime. The new
+individual `useless_agent_at_success_reward` defaults to -3000. The separate
+`useless_agent_at_success_all_agents_reward` defaults to -750 per useless drone
+for each active drone, without dividing by population. Its absolute amount is
+capped at 2000 per recipient by `useless_agent_at_success_all_agents_reward_cap`.
+These current settings
+are included in the commented replacement blocks.
 Every C level uses `wall_sensing_layout: xyz`, `wall_sensing_rays: 26`, and
 `wall_sensing_ray_max_distance: 8.0` m: six exact axis rays, twelve plane
 diagonals and eight corner diagonals. XYZ also supports 14 (axes plus corners)

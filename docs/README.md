@@ -15,6 +15,8 @@ The [repository README](../README.md) is the entry point for the current runtime
 - [Adaptive target spawning: rules, formula and dashboard](01_reference/08_adaptive_target_spawning.md)
 - [Progress-based soft cluster credit](01_reference/09_soft_cluster_credit.md)
 - [Adaptive map sampling](01_reference/10_adaptive_map_sampling.md)
+- [Inspection evaluation and held-out validation](01_reference/12_validation.md)
+- [Signed individual rewards and G02 defaults](01_reference/11_individual_rewards.md)
 
 ## Operational guides
 
@@ -24,6 +26,7 @@ The [repository README](../README.md) is the entry point for the current runtime
 - [Public inspector exports and GitHub Pages](02_guide/04_public_inspector.md)
 - [C relay curriculum and geometry previews](02_guide/05_C_curriculum.md)
 - [G curriculum: five static maps and independent adaptive spawning](02_guide/06_G_curriculum.md)
+- [G03: 4000 random buildings, configuration and remaining runtime work](02_guide/07_G03_random_buildings.md)
 
 The general run-analysis dashboard remains available for runs.
 The separate inspector handles replay and evaluation visualization.

@@ -6,6 +6,12 @@ schedule. [Phase 0](Phase0.md) is the original frozen baseline; [Phase 1](Phase1
 records the visual baseline, scoped own-cell diagnostic and proposed static
 target-cell auxiliary intervention.
 
+Update 2026-10-24: the frozen five-map target diagnostics have been scoped and
+implemented separately in [G02 probes](G02_probes.md). That execution plan compares
+map-specific, joint map+cell and shared-coordinate readouts on the two recent G02
+policies. Multi-map own-cell diagnostics, auxiliary training and the broader mapping
+ideas below remain backlog items; no new GPU results are recorded yet.
+
 ## Intended longer-term progression
 
 The research vision discussed so far is:

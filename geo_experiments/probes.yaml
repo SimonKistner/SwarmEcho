@@ -1,0 +1,71 @@
+# Sequential execution plan. Budgets below are TOTALS PER POLICY, divided evenly
+# across maps for every split. All alternatives reuse that exact collection.
+run:
+  name: G02_target_ablations
+  output_root: geo_experiments/outputs
+  timezone: Europe/Berlin
+
+defaults:
+  experiment: target
+  policy:
+    from_run_config: true
+  protocol:
+    eligibility: delivered
+    target_storey: false
+  dataset:
+    train_samples: 10000
+    validation_samples: 1000
+    test_samples: 5000
+    eval_batch_size: 256
+    max_episodes: 100000
+    seed: 467789
+    split_seed: 20261013
+    path: null
+  probe:
+    hidden_sizes: [256, 128]
+    seeds: [0, 1, 2]
+    epochs: 150
+    batch_size: 256
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    patience: 15
+    min_delta: 0.00001
+  audit:
+    enabled: true
+    mode: conditional
+    samples: 5000
+    every: 1
+    batch_size: 16
+    duplicate_threshold: 0.01 # Per-input trigger: packet profiles use saved data; only conflicting finder GRUs need histories.
+  distance:
+    clearance_m: null
+  report:
+    dpi: 160
+
+policies:
+  solo:
+    run: outputs/G02_unanimity_YesNo_solo
+    checkpoint: latest # Resolved ONCE at suite startup and frozen in config.yaml.
+  curriculum_final:
+    run: outputs/G02_unanimity_YesNo_agents_7
+    checkpoint: latest
+
+experiments:
+  specialists:
+    protocol:
+      decoder: map_specific
+  map_and_cell:
+    protocol:
+      decoder: map_cell
+  shared_coordinates:
+    protocol:
+      decoder: shared_cell
+
+# Only target experiments are scheduled. Own-cell adapters remain future work.
+execute:
+  - {policy: solo, experiment: specialists}
+  - {policy: solo, experiment: map_and_cell}
+  - {policy: solo, experiment: shared_coordinates}
+  - {policy: curriculum_final, experiment: specialists}
+  - {policy: curriculum_final, experiment: map_and_cell}
+  - {policy: curriculum_final, experiment: shared_coordinates}

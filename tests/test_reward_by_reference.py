@@ -49,9 +49,11 @@ def _tick(cfg, adaptive, active, yes, *, communicate=True, pos=None, peers=None,
 
 def _reward(**settings):
     cfg = RewardConfig(
-        exploration_bonus=1., collision_penalty=100.,
-        finder_bonus=0., target_found_bonus=0., success_bonus=0.,
-        time_penalty_per_step=0., gap_reduction_meter_bonus=0.,
+        exploration_reward=1., collision_reward=-100.,
+        finder_reward=0., target_found_reward=0., success_reward=0.,
+        time_presure_reward=0., gap_progress_reward_per_meter=0.,
+        reinforcement_reward=0., decommission_reward=0., rejected_call_reward=0.,
+        all_decommissioned_penalty=0., useless_agent_at_success_reward=0.,
     )
     return replace(cfg, **settings)
 
@@ -220,11 +222,10 @@ def test_terminal_success_and_useless_recruit_rewards_go_to_each_caller(
         fully_connected=jnp.bool_(True), success=jnp.bool_(True), done=jnp.bool_(True),
     )
     np.testing.assert_array_equal(success_contributors(after, cfg), contributors)
-    reward = _reward(success_bonus=120., success_bonus_contributors_only=True,
-                     success_unused_agent_penalty=30.)
+    reward = _reward(success_reward=50., useless_agent_at_success_reward=-60.)
     total, terms = compute_rewards(before, after, reward, cfg)
-    np.testing.assert_allclose(terms["success"], [60, 0, 60] if recruit_contributes else [60, 60, 0])
-    np.testing.assert_allclose(terms["useless_agetnst_at_success_penalty"], [-10, -10, -10])
+    np.testing.assert_allclose(terms["success_reward"], [50, 50, 50])
+    np.testing.assert_allclose(terms["useless_agent_at_success_reward"], [0, -60, 0] if recruit_contributes else [0, 0, -60])
     np.testing.assert_allclose(terms["reward_by_reference"], [extra_reward, extra_reward, 0])
     expected = [55, -5, 50] if recruit_contributes else [50 + extra_reward, 50 + extra_reward, -10]
     np.testing.assert_allclose(total, expected)

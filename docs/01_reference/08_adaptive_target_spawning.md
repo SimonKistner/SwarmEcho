@@ -1,5 +1,9 @@
 # Adaptive target spawning
 
+Relay-filtered support uses the selected [relay estimator mode and resolution](11_global_relay_candidates.md).
+The default `simplifier` retains the existing sampler identity; changing to
+`global_candidates` requires fresh support discovery in a branched run.
+
 This opt-in training curriculum allocates more target samples to cells with lower
 recent mission success. It preserves continuous target positions, valid geometry
 and evaluation's ordinary free-volume distribution. It is independent of the geo
@@ -15,9 +19,10 @@ Implementation: [controller and local journal](../../src/swarmecho/training/adap
 The implementation supports static authored 3D target maps, including small
 multi-map suites, a fixed base per map, no generated obstacles and no
 minimum-geodesic-separation filtering. Persistent random-map banks are supported
-when [adaptive map sampling](10_adaptive_map_sampling.md) is enabled, supplying
-stable map IDs and lane-independent eligibility discovery. Without that toggle,
-the original restriction against random banks remains.
+with either uniform or [adaptive map sampling](10_adaptive_map_sampling.md).
+Stable map IDs and lane-independent eligibility discovery do not depend on
+adaptive map weighting. The existing `eligibility_samples_per_map` field supplies
+the per-map support-discovery budget in both modes.
 Enabling it with unsupported settings fails explicitly, before training.
 Coverage-only missions have no target and are unsupported.
 
@@ -209,6 +214,17 @@ sampler or halt training. It identifies a condition to investigate, not proof of
 an impossible task. No maximum-probability cap beyond the baseline floor is added.
 
 ## Persistence, resume and visualization
+
+`logging.adaptive_cell_diagnostics` defaults to `true`. Set it to `false` to
+keep adaptive target selection and checkpoint state while skipping all cell
+dashboard journals/metadata, per-update diagnostic rows and individual-cell
+plateau reports. G03 disables it by default. There are no per-cell W&B series
+in either mode. Startup prints one support total instead of one line per map
+when detail is disabled. This does not reduce the discovery sample budget or
+discard the outcome windows used by the sampler. Existing journal files remain
+readable as historical data; no new rows are appended while detail is off.
+
+With diagnostics enabled, the following journal behavior applies.
 
 An enabled single-map run saves `adaptive_spawn/metadata.json` and
 `adaptive_spawn/history.jsonl`. A suite saves one ordinary journal per map under

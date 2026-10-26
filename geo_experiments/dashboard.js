@@ -2,7 +2,7 @@
 (() => {
   "use strict";
   const identity = x => JSON.stringify([x.section, x.table || "", x.row, x.column, x.unit, x.version]);
-  const title = x => `${x.name} · ${x.folder}`;
+  const title = x => [x.name, x.subtitle].filter(Boolean).join(" · ");
   const catalogNode = document.getElementById("geo-report-catalog");
   if (catalogNode) {
     const catalog = JSON.parse(catalogNode.textContent);
@@ -32,7 +32,7 @@
       button.dataset.report = report.id;
       button.textContent = report.name;
       const detail = document.createElement("small");
-      detail.textContent = report.folder;
+      detail.textContent = report.subtitle || report.folder;
       button.append(detail);
       button.onclick = () => {
         const p = params(); p.set("report", report.id);
@@ -107,10 +107,11 @@
   window.addEventListener("message", event => {
     if (window.parent === window || event.source !== window.parent || event.data?.type !== "geo-report-catalog" || event.data.document_id !== own.id) return;
     activeId = event.data.report_id;
-    catalog = Array.isArray(event.data.reports) ? event.data.reports : [];
+    catalog = (Array.isArray(event.data.reports) ? event.data.reports : []).filter(report =>
+      own.comparison_family !== "target_multimap" || report.comparison_family === "target_multimap");
     selector.replaceChildren(new Option("No comparison", ""));
     for (const report of catalog) if (report.id !== activeId) selector.add(new Option(title(report), report.id));
-    selector.disabled = catalog.length < 2;
+    selector.disabled = !catalog.some(report => report.id !== activeId);
     selector.value = event.data.compare_id || "";
     document.getElementById("report-browser-link").hidden = true;
     compare();

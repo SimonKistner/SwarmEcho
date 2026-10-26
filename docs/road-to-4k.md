@@ -1,5 +1,20 @@
 # Road to 4k maps
 
+G03 now uses a 4000-map dataset split into 3600 training and 400 held-out
+validation maps, independently of its initial 4000 training lanes. The separate
+[statistical validation pipeline](01_reference/12_validation.md) runs 10000 total
+episodes in bounded batches; visual inspection retains a three-map subset.
+Dataset assignment and episode map selection are independent of adaptive
+weighting: with adaptation disabled, random training episodes sample uniformly
+from all 3600 training maps and retain the same held-out validation pool.
+Older 4000-training-map estimates below describe the earlier scaling target.
+
+The [G03 configuration and implementation checklist](02_guide/07_G03_random_buildings.md)
+defines the 4000-map, 15 m random-building level. Random-bank adaptive-target
+journal dispatch is corrected but still needs project-environment verification.
+The existing pool's source fingerprint requires regeneration or a validated
+migration for exact reuse.
+
 Status: core adaptive map sampling is implemented, with CPU controller checks;
 the full 4000-map GPU workload remains unbenchmarked. The grouped, default-off
 `training.adaptive_map_sampling` feature supports authored suites and persistent
@@ -139,6 +154,12 @@ statistics for every map, but use sampled/coarser history and selectable
 diagnostic detail. The enabled path now bounds large-bank journals and W&B
 series, while preserving complete controller state in checkpoints. Per-cell
 plateau metadata remains an overhead to measure.
+
+G03 disables `logging.adaptive_cell_diagnostics` and
+`logging.individual_map_diagnostics`: no cell journals, per-cell report rows,
+per-map series or top-map traces are written. Mean/worst/best/median/p10 map
+success and sampling/warmup summaries remain. These reporting switches leave
+adaptive outcome windows, discovery and checkpoint state intact.
 
 G02 evaluates 4000 episodes per building. Applying that unchanged to 4000 maps
 would mean 16 million episodes per evaluation call. Define a representative

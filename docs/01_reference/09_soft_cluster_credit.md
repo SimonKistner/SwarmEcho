@@ -1,7 +1,7 @@
 # Progress-based soft cluster credit
 
 `reward.progress_based_cluster_tiebreaker_soft` defaults to `false` and is
-explicitly `true` in `G01_static`, directly below `chain_reward_system`.
+explicitly `true` in the migrated `G02_static` level, below `chain_reward_system`.
 It changes gap-reward allocation only. No leader labels, target positions,
 vote information or other observations are added.
 
@@ -52,10 +52,11 @@ metres. Delivery vesting records the same weighted credit at delivery, so its
 initial snapshot and subsequent changes use matching units.
 
 The toggle requires a target mission and `allow_redundancy_reward=false`.
-Terminal success allocation, unused-agent penalties, the chain-contributor
-observation and the `useless_agents_at_success` diagnostic continue to use the
-existing single selected complete chain. A redundant drone can therefore receive
-some gap reward while still counting as unused at success.
+The individual useless-agent adjustment, chain-contributor observation and
+`useless_agents_at_success` diagnostic continue to use the existing single
+selected complete chain. A redundant drone can therefore receive some gap
+reward while still counting as useless at success. The fixed success reward
+itself is paid to every active drone.
 
 The feature changes rewards without changing model shapes. Checkpoint contracts
 record it as a behavioral setting; loading older weights is supported with a

@@ -20,11 +20,15 @@ SOURCE_LABELS = {
 
 
 def experiment_axes(config):
-    return (("own_cell",), ("agent_gru", "agent_message")) if config.get("experiment") == "own_cell" else (TASKS, SOURCES)
+    if config.get("experiment") == "own_cell":
+        return ("own_cell",), ("agent_gru", "agent_message")
+    return (TASKS if config.get("protocol", {}).get("target_storey", True) else ("target_cell",)), SOURCES
 
 
 def resolve_path(value):
     raw = str(value).replace("\\", "/")
+    if os.name == "nt" and re.match(r"^/mnt/[A-Za-z]/", raw):
+        raw = raw[5].upper() + ":/" + raw[7:]
     if os.name != "nt" and re.match(r"^[A-Za-z]:/", raw):
         raw = f"/mnt/{raw[0].lower()}/{raw[3:]}"
     path = Path(raw).expanduser()
@@ -60,15 +64,22 @@ def write_json(path, value):
 def validate_config(config):
     # Existing experiment YAML files gain the audit defaults on the next run.
     config.setdefault("audit", {"enabled": True, "samples": 5000, "every": 1, "batch_size": 32})
+    config["audit"].setdefault("mode", "full")
+    config["audit"].setdefault("duplicate_threshold", 0.01)
+    config.setdefault("protocol", {})
+    for key, value in {"decoder": "legacy", "target_storey": True, "eligibility": "success"}.items():
+        config["protocol"].setdefault(key, value)
+    config["policy"].setdefault("from_run_config", False)
     expected = {
         "run": {"name", "output_root", "timezone"},
-        "policy": {"checkpoint", "level"},
+        "policy": {"checkpoint", "level", "from_run_config"},
         "dataset": {"train_samples", "validation_samples", "test_samples", "eval_batch_size",
                     "max_episodes", "seed", "path", "split_seed"},
         "probe": {"hidden_sizes", "seeds", "epochs", "batch_size", "learning_rate", "weight_decay",
                   "patience", "min_delta"},
         "distance": {"clearance_m"}, "report": {"dpi"},
-        "audit": {"enabled", "samples", "every", "batch_size"},
+        "audit": {"enabled", "samples", "every", "batch_size", "mode", "duplicate_threshold"},
+        "protocol": {"decoder", "target_storey", "eligibility"},
     }
     own = config.get("experiment") == "own_cell"
     if "experiment" in config:
@@ -99,6 +110,16 @@ def validate_config(config):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{section}.{key} must be a positive integer.")
     d, p = config["dataset"], config["probe"]
+    if config["protocol"]["decoder"] not in ("legacy", "map_specific", "map_cell", "shared_cell"):
+        raise ValueError("protocol.decoder must be legacy, map_specific, map_cell or shared_cell.")
+    if config["protocol"]["eligibility"] not in ("success", "delivered"):
+        raise ValueError("protocol.eligibility must be success or delivered.")
+    if type(config["protocol"]["target_storey"]) is not bool or type(config["policy"]["from_run_config"]) is not bool:
+        raise ValueError("target_storey and from_run_config must be boolean.")
+    if config["audit"]["mode"] not in ("full", "conditional"):
+        raise ValueError("audit.mode must be full or conditional.")
+    if not 0 <= config["audit"]["duplicate_threshold"] <= 1:
+        raise ValueError("audit.duplicate_threshold must be a fraction in [0, 1].")
     if type(config["audit"]["enabled"]) is not bool:
         raise ValueError("audit.enabled must be boolean.")
     if not own and d["max_episodes"] < sample_count(d):

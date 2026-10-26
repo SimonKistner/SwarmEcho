@@ -26,6 +26,18 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
         raise ValueError("An evaluation suite cannot use both static and random bank maps.")
     count = len(static_maps) if static_maps is not None else level.evaluation.random_eval_envs
     prefix = "static_eval" if static_maps is not None else "random_eval"
+    if bank_maps is None and static_maps is None and level.random_buildings.enabled:
+        from swarmecho.training.map_selection import load_selection
+        selection = load_selection(directory.parent, level.training.checkpoint_path)
+        if selection is not None and selection.get("kind") == "bank":
+            pool = Path(selection["pool"])
+            bank_maps = [pool / "maps" / f"{item['id']}.yaml"
+                         for item in selection["evaluation_maps"][:count]]
+        elif level.validation.enabled and selection is not None and selection.get("kind") == "generated":
+            from swarmecho.training.validation import prepare_generated_validation_maps
+            bank_maps = prepare_generated_validation_maps(level, directory.parent, log)[:count]
+        elif level.validation.enabled:
+            raise ValueError("Inspection requires this run's frozen validation selection; refusing a new split.")
     if (bank_maps is None and level.random_buildings.enabled
             and getattr(level.random_buildings, "load_maps_from_bank", False)
             and level.evaluation.random_eval_maps is None
@@ -34,14 +46,14 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
         from swarmecho.curriculum_config.maps.random_building_bank.generate_bank import (
             DEFAULT_POOL_SIZE, build_pool, ensure_pool, select_maps)
         count = level.evaluation.random_eval_envs
-        pool, metadata = ensure_pool(level, level.training.num_envs + count, log=log)
-        _, selection = select_maps(pool, metadata, level.training.seed, level.training.num_envs, count)
+        pool, metadata = ensure_pool(level, level.training_map_count + count, log=log)
+        _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
         bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
         if any(not source.is_file() for source in bank_maps):
             terminal_print(f"[BANK WARNING] Selected evaluation map is missing from {pool}; generating a new pool.")
-            pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, level.training.num_envs + count),
+            pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, level.training_map_count + count),
                                         avoid_pool=pool, log=log)
-            _, selection = select_maps(pool, metadata, level.training.seed, level.training.num_envs, count)
+            _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
             bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
     if bank_maps is not None and len(bank_maps) != level.evaluation.random_eval_envs:
         raise ValueError("bank_maps must contain exactly random_eval_envs maps.")
@@ -166,13 +178,21 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                      eval_success_length_reduction=1.0 - successful_length / levels[0].env.max_steps)
     aggregate.update({"eval_static_maps" if static else "eval_random_maps": len(levels),
                       "eval_robustness_runs": 1})
-    aggregate["eval_worst_map_success"] = min(metrics["eval_success"] for metrics in results)
-    aggregate.update({f"eval_map/{level.map_source_name or level.building_name}/success_rate": metrics["eval_success"]
-                      for level, metrics in zip(levels, results)})
+    rates = np.asarray([metrics["eval_success"] for metrics in results])
+    aggregate["eval_worst_map_success"] = float(rates.min())
+    individual_diagnostics = levels[0].logging.individual_map_diagnostics
+    if individual_diagnostics:
+        aggregate.update({f"eval_map/{level.map_source_name or level.building_name}/success_rate": metrics["eval_success"]
+                          for level, metrics in zip(levels, results)})
+    else:
+        aggregate.update(eval_best_map_success=float(rates.max()),
+                         eval_median_map_success=float(np.median(rates)),
+                         eval_p10_map_success=float(np.quantile(rates, .10)))
     write_manifest(artifact_root / "manifests" / f"{'static_eval' if static else 'random_eval'}_{suffix}.json",
                    {"type": "static_map_evaluation" if static else "random_map_evaluation",
                     "update": update, "steps": steps,
-                    "maps": [{"id": level.building_name, **metrics} for level, metrics in zip(levels, results)], **aggregate})
+                    "maps": [{"id": level.building_name, **(metrics if individual_diagnostics else {})}
+                             for level, metrics in zip(levels, results)], **aggregate})
     return aggregate
 
 

@@ -12,6 +12,7 @@ from geo_experiments.artifacts import add_group, save_data, update_run
 from geo_experiments.audit_observations import STAGES, cross_cell_pairs, digest
 from geo_experiments.collection import make_collector
 from geo_experiments.geometry import target_labels
+from geo_experiments.console import terminal_print as print
 
 
 def episode_samples(batch, row, episode_id, stride, cell_size, lookup):

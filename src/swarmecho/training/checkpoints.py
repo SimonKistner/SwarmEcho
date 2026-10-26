@@ -59,8 +59,21 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
         contract.setdefault("adaptive_size", False)
         contract.setdefault("vote_mode", None)
+        # Contracts predating timestamped decisions used accumulating credits.
+        contract.setdefault("vote_protocol", "credits" if contract["adaptive_size"] else None)
+        # Retain the behavior identity across the move into the reward section.
+        contract.setdefault("priveleged_vote_reward_enabled",
+                            contract.pop("reinforcement_vote_shaping_enabled", False))
         contract.setdefault("observe_seeing_target", False)
         contract.setdefault("observe_visually_gated_target_displacement", False)
+        contract.setdefault("observe_base_vote_ratio", False)
+        contract.setdefault("observe_base_population", False)
+        contract.setdefault("base_population_observation_reference", None)
+        if not contract["adaptive_size"]:
+            contract["vote_protocol"] = None
+            contract["observe_base_vote_ratio"] = False
+            contract["observe_base_population"] = False
+            contract["base_population_observation_reference"] = None
         # Normalize both generations of renamed counts without changing rays.
         old_wall_rays = contract.pop("wall_radar_bins", None)
         if old_wall_rays is not None:
@@ -88,13 +101,14 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         else:
             contract["distance_bands"] = max(1, contract["distance_bands"])
     critical = {
-        "adaptive_size", "vote_mode",
+        "adaptive_size", "vote_mode", "vote_protocol",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
         "drone_radar_bins", "radar_mode", "radar_layout",
         "distance_bands", "radar_count_cap",
         "visually_gated_target_displacement_scale_m",
+        "base_population_observation_reference",
         *[name for name in expected if name.startswith("observe_")],
     }
     critical.intersection_update(expected)
@@ -201,7 +215,7 @@ def save_model_checkpoint(
     return path
 
 
-def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=None, final=False,
+def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=None, validation=None, final=False,
                              metrics=None, run_dir=None, **kwargs):
     """Publish model, history and adaptive state together before marking ready."""
     path = Path(path).absolute()
@@ -211,10 +225,14 @@ def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=
         adaptive_spawn.save(pending)
     if adaptive_maps is not None:
         adaptive_maps.save(pending)
-        if run_dir is not None:
-            selection = Path(run_dir) / "adaptive_maps" / "selection.json"
-            if selection.is_file():
-                shutil.copy2(selection, pending / "adaptive_map_selection.json")
+    # Dataset assignment belongs to every random-map checkpoint, including
+    # uniformly sampled runs with no adaptive sampler/controller state.
+    if run_dir is not None:
+        selection = Path(run_dir) / "adaptive_maps" / "selection.json"
+        if selection.is_file():
+            shutil.copy2(selection, pending / "adaptive_map_selection.json")
+    if validation is not None:
+        validation.save(pending)
     if not (pending / "step_history.json").is_file():
         raise RuntimeError("Checkpoint step history was not saved; recovery checkpoint cannot be published.")
     (pending / "recovery_ready.json").write_text(json.dumps({

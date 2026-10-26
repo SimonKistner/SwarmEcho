@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from geo_experiments.common import ROOT, experiment_axes, resolve_path, split_episodes, validate_config
 from geo_experiments.artifacts import HISTORY_COLUMNS, add_group, save_data, update_run
+from geo_experiments.console import terminal_print as print
 
 
 def main(default_config="config.yaml"):
@@ -45,6 +46,7 @@ def main(default_config="config.yaml"):
     stamp = datetime.now(ZoneInfo(config["run"]["timezone"])).strftime("%Y%m%d_%H%M%S_%f")
     run_dir = output_root / f"{config['run']['name']}_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=False)
+    OmegaConf.save(OmegaConf.create(config), run_dir / "config.yaml")
     update_run(run_dir, config=config, jobs=[], history_columns=HISTORY_COLUMNS, progress={"stage": "starting"})
     print(f"[experiment] {run_dir}", flush=True)
     try:
@@ -52,6 +54,11 @@ def main(default_config="config.yaml"):
         from geo_experiments.geometry import build_cell_graph, target_labels
         from geo_experiments.probes import train_probe
 
+        if config["protocol"]["decoder"] != "legacy":
+            if own:
+                raise ValueError("Multi-map own-cell collection is not scheduled yet; use the historical own-cell workflow.")
+            run_target_experiment(config, run_dir)
+            return
         model, level, identity = prepare_policy(config, run_dir)
         clearance = config["distance"]["clearance_m"]
         if clearance is None:
@@ -107,6 +114,57 @@ def main(default_config="config.yaml"):
     except Exception as exc:
         update_run(run_dir, progress={"stage": "failed", "error": str(exc), "type": type(exc).__name__})
         raise
+
+
+def run_target_experiment(config, run_dir):
+    """Standalone modern readout; the suite calls these same collection/fit primitives."""
+    import gc
+    import jax
+    from geo_experiments.collection import prepare_policy
+    from geo_experiments.policy import map_levels
+    from geo_experiments.labels import suite_geometry
+    from geo_experiments.target_collection import collect_targets
+    from geo_experiments.auditing import audit_targets, audit_is_current
+    from geo_experiments.cache import snapshot_identity_matches
+    from geo_experiments.experiments import fit_experiment
+    from geo_experiments.report import generate_report
+    from geo_experiments.artifacts import load_run
+
+    model, level, identity = prepare_policy(config, run_dir, allow_suite=True)
+    if config["dataset"]["path"]:
+        path = resolve_path(config["dataset"]["path"])
+        source = path.parent if path.is_file() else path
+        previous, shared, _ = load_run(source)
+        if not snapshot_identity_matches(previous["provenance"]["identity"], identity):
+            raise ValueError("Cached multi-map data has a different checkpoint/config/runtime identity.")
+        for section in ("dataset", "distance"):
+            expected = {k: v for k, v in config[section].items() if k != "path"}
+            actual = {k: v for k, v in previous["config"][section].items() if k != "path"}
+            if expected != actual:
+                raise ValueError(f"Cached collection has different {section} settings.")
+        if previous["config"]["protocol"]["eligibility"] != config["protocol"]["eligibility"]:
+            raise ValueError("Cached collection has a different episode eligibility rule.")
+        shared = {k: v for k, v in shared.items() if not k.startswith("probes/")}
+        collection, audit = previous["collection"], previous.get("ambiguity_audit")
+        if not audit_is_current(audit, config, (config["protocol"]["decoder"],)):
+            audit = audit_targets(model, map_levels(level), config, shared)
+    else:
+        levels = map_levels(level)
+        graph = suite_geometry(levels, config["distance"]["clearance_m"])
+        shared, collection = collect_targets(model, levels, config, run_dir, graph)
+        save_data(run_dir, shared)
+        update_run(run_dir, progress={"stage": "collected"})
+        audit = audit_targets(model, levels, config, shared)
+    save_data(run_dir, shared)
+    update_run(run_dir, kind="target_probe", collection=collection, ambiguity_audit=audit)
+    del model
+    gc.collect()
+    jax.clear_caches()
+    fitted, jobs = fit_experiment(config, shared, run_dir, shared_reference=False)
+    shared.update(fitted)
+    save_data(run_dir, shared)
+    generate_report(run_dir)
+    update_run(run_dir, progress={"stage": "complete", "completed": len(jobs), "total": len(jobs)})
 
 
 if __name__ == "__main__":

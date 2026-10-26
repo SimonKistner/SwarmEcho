@@ -57,6 +57,13 @@ building visibility controls, replay inspection, target selection, and a
 command for generating a replay at the selected XYZ position. Existing spatial
 artifacts and compatibility fallbacks remain supported.
 
+The artifact picker initially loads the three most recent runs. **Load 10 more
+runs and tests** adds the next ten unloaded run/test groups, ordered by their
+newest artifact, or the remaining groups if fewer than ten are available.
+Each group includes all its artifacts. The button remains available until the
+inventory is exhausted; refreshing the list keeps the loaded group limit.
+Loading more preserves the selected artifact, camera, and playback position.
+
 The replay sidebar places **Episode** on the left, beside **Checkpoint
 configuration** and **Building visibility** stacked on the right. The
 configuration panel automatically shows the producing run's training map
@@ -99,7 +106,20 @@ For a replay, the frame row beneath the artifact and map selectors contains
 previous/next frame buttons, a timeline slider, and the current/last frame
 count. Select that row with Up/Down, then use Left/Right to step through frames;
 the playback controls retain Play, time, speed, and loop. The Episode summary
-is above Building visibility in the left sidebar.
+is above Building visibility in the left sidebar. **Base votes** appears above
+**Episode**, with **Carried votes** immediately below **Episode**.
+
+The separate **Vote visualization** box below **Building visibility** has a
+**Show vote icons** checkbox. Active drones show a plain ➕ for YES and a plus
+with a red prohibition overlay for NO. Names and icons use world-space anchors
+relative to each drone. Physical clearance selects above, below or a side;
+rotating the camera never changes that placement. Displayed walls, floors,
+roofs and obstacles cover only the portions of a name or icon behind them,
+including partial views at edges and through openings. Building transparency
+also applies to this occlusion; hidden storeys do not block labels. Turning off
+vote icons keeps the drone names. Names and icons have no hover popup. Hover a
+drone dot to see its **Vote round ID** and any carried votes; empty or unavailable
+carried-vote records are omitted from this popup.
 
 The 3D camera keeps its current angle, pan, and zoom when playing or stepping
 through replay frames, including the first mouse adjustment after loading.
@@ -129,16 +149,16 @@ change during an episode, the reference stays tied to the first frame and the
 sidebar labels it as such.
 
 Reward debug plots are off by default and can be enabled in Playback. Leave them off to
-give the 3D view the full centre area. The left plot defaults to **Reward
-breakdown (alternative)**. Select one drone from those active at the displayed
+give the 3D view the full centre area. The left plot shows cumulative reward for
+every drone. The right plot defaults to **Reward breakdown**. Select one drone from those active at the displayed
 frame to see its cumulative reward components as colored stacked areas. Positive
-components stack above zero and penalties below it; the dotted net reward curve
-shows their sum. The legend below the chart identifies each color, and hovering
+components stack above zero and negative components below it, with no net-reward
+overlay. Components that stay zero for that drone throughout the entire episode
+are omitted from both the plot and its legend. The legend below the chart identifies each color, and hovering
 an area shows its reward name without permanent labels inside the plot. The drone
-selection is retained while it remains active. **Relative advantage (current)**
+selection is retained while it remains active. **Relative advantage**
 in the View dropdown restores the previous comparison: at every step it subtracts
-the lowest drone reward before accumulating. The right plot shows cumulative
-reward for every drone.
+the lowest drone reward before accumulating.
 Both plots advance with the frame controls and playback speed. Their x axis
 uses replay steps; the Episode reward remains the aggregate reward for the
 selected frame. Replays without per-drone reward data show an unavailable
@@ -239,4 +259,22 @@ for the report sidebar and the in-report comparison dropdown. Numeric table valu
 are matched by section/table/row/column meaning, units and version; figures are
 unchanged. See the [geo runner guide](../../geo_experiments/README.md) for settings,
 historical audit import and compact source-data conventions.
+
+The G02 sequential plan lives in `geo_experiments/probes.yaml`:
+
+```bash
+uv run python geo_experiments/suite.py plan=true
+uv run python geo_experiments/suite.py
+```
+
+It shares delivery-eligible collection across map-specific, map+cell and
+shared-coordinate target readouts for the two configured YES/NO runs. Each has
+its own report, required-agent target groups, chain-success distribution highlights
+and an optional storey head. The cheap latent screen routes packet collisions to
+saved-snapshot similarity reports; only conflicting finder GRUs can trigger
+observation replay. With all inputs below threshold, a footer gives the rates.
+`geo_experiments/auditing.py run=<suite collection>` can refresh these diagnostics
+without a policy. Probe console output uses the training clock-prefix formatter. Historical G01
+features/splits can be refitted with `geo_experiments/reproduce.py run=<folder>`.
+See the [scoped G02 protocol](../geo/G02_probes.md) for interpretation and limits.
 

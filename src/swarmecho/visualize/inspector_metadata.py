@@ -69,7 +69,8 @@ def artifact_configuration(source: Path, payload: dict) -> dict:
         summary["training_maps"] = {"kind": "static", "count": len(maps) or None}
     elif settings.get("enabled") is True:
         training = config.get("training") if isinstance(config.get("training"), dict) else {}
-        summary["training_maps"] = {"kind": "random", "count": positive_integer(training.get("num_envs"))}
+        summary["training_maps"] = {"kind": "random", "count": positive_integer(training.get("num_maps"))
+                                   or positive_integer(training.get("num_envs"))}
     elif config.get("building") and config["building"] != "random_buildings":
         names = env.get("map_names")
         count = len(set(names)) if isinstance(names, list) and all(isinstance(name, str) for name in names) and names else 1

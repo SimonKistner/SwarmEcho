@@ -2,6 +2,10 @@
 
 SwarmEcho is a **JAX-accelerated multi-agent reinforcement learning** project that trains a drone swarm to explore an environment and form a communication relay between a base and a discovered target. The current runtime supports **3D buildings and cuboid worlds**, using recurrent MAPPO (Multi-Agent PPO with a centralised critic) and optional TarMAC communication.
 
+G02 is the migrated reference for [signed individual rewards](docs/01_reference/11_individual_rewards.md).
+Other authored levels keep unsupported legacy reward blocks, with TODOs and
+commented default replacements beneath them for manual migration.
+
 The demos show the project's progression from 2D to 3D. The 2D implementation is available on the [`2d_core_features_only` branch](https://github.com/M4GI3R/SwarmEcho/tree/2d_core_features_only).
 
 <p align="center"><strong>Earlier 2D demo</strong></p>

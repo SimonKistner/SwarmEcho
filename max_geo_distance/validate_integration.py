@@ -26,14 +26,17 @@ def reset_smoke(prepared, args, device):
     level = load_level(args.level)
     graph = building_roadmap(prepared.building, prepared.cfg, corner_bonus_m=0.)
     cfg = replace(level.env, num_agents=2)
-    calculate = make_calculator(cfg, graph, prepared.building)
+    options = level.training.dynamic_max_geo_distance
+    calculate = make_calculator(cfg, graph, prepared.building, options=options)
     verify = jax.jit(jax.vmap(lambda base, target: calculate(base, target)))
     print("\n--- Actual reset compatibility: budget 2, four adaptive combinations ---", flush=True)
     for weighted in (False, True):
         for adaptive in (False, True):
             config = replace(cfg, adapt_size=replace(cfg.adapt_size, enabled=adaptive,
-                                                     initial_agents=min(cfg.adapt_size.initial_agents, 2)))
+                initial_agents=min(cfg.adapt_size.initial_agents, 2),
+                reward_by_reference_enabled=adaptive and cfg.adapt_size.reward_by_reference_enabled))
             reset, _, _, _ = make_env_fns(prepared.building, config, dynamic_max_geo_distance=True,
+                relay_options=options,
                 spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
                 target_found_requires_delivery=level.reward.target_found_requires_delivery,
                 memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
@@ -41,7 +44,7 @@ def reset_smoke(prepared, args, device):
             weights = None
             if weighted:
                 controller = AdaptiveTargetSpawnController(prepared.building, config,
-                    level.training.adaptive_target_spawn, feasibility_budget=2)
+                    level.training.adaptive_target_spawn, feasibility_budget=2, relay_options=options)
                 discovery_keys = jax.random.split(jax.random.PRNGKey(args.seed + 200 + int(adaptive)), 4)
                 discovery = jax.jit(jax.vmap(reset))(discovery_keys)
                 if np.any(np.asarray(jax.device_get(discovery.spawn_pair_attempts)) == 0):
@@ -72,7 +75,7 @@ def main():
     parser.add_argument("--runtime-batch-size", type=int, default=16)
     parser.add_argument("--geometry-details", type=int, default=5)
     parser.add_argument("--reset-smoke", action="store_true",
-                        help="Also exercise real reset with adaptive spawning and adaptive size on the first map.")
+                        help="Also exercise real reset with adaptive spawning and adaptive size on every selected map.")
     args = parser.parse_args()
     if args.targets < 1 or args.runtime_batch_size < 1 or args.geometry_details < 0:
         parser.error("Targets/batch size must be positive; details must be nonnegative.")
@@ -93,6 +96,9 @@ def main():
                 import jax
                 import jax.numpy as jnp
                 from swarmecho.env.relay import make_calculator
+                from swarmecho.core.config import load_level
+                options = load_level(args.level).training.dynamic_max_geo_distance
+                print(f"Production estimator: {options.mode}; fraction {options.candidate_spacing_fraction:g}", flush=True)
                 jax.config.update("jax_enable_x64", False)
                 device = jax.devices("gpu")[0]
                 print(f"Production JAX query / CPU reference / independent real hold; device={device.device_kind}")
@@ -118,7 +124,8 @@ def main():
                             reference[sample] = agents
                     graph = building_roadmap(prepared.building, prepared.cfg, corner_bonus_m=0.)
                     with jax.default_device(device):
-                        query = make_calculator(prepared.cfg, graph, prepared.building, return_witness=True)
+                        query = make_calculator(prepared.cfg, graph, prepared.building,
+                                                options=options, return_witness=True)
                         kernel = jax.jit(jax.vmap(lambda target: query(jnp.asarray(prepared.base, jnp.float32), target)))
                         inspection.groups = defaultdict(list)
                         inspection.no_assignment = []
@@ -161,7 +168,7 @@ def main():
                               f"JAX={np.sum((predicted > 0) & (predicted <= budget)):,}")
                     print("The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.")
                     inspection.report()
-                    if args.reset_smoke and map_index == 0:
+                    if args.reset_smoke:
                         with jax.default_device(device):
                             reset_smoke(prepared, args, device)
                     runs.append((name, inspection))

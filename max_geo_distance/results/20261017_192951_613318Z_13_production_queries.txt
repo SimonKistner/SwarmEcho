@@ -1,0 +1,502 @@
+Production estimator: global_candidates; fraction 0.5
+Production JAX query / CPU reference / independent real hold; device=NVIDIA GeForce RTX 4090
+Maps=['G02_static_map_01', 'G02_static_map_02', 'G02_static_map_03', 'G02_static_map_04', 'G02_static_map_05']; targets/map=32; seed=456789; level=G02_static
+Map: G02_static_map_01; settings: G02_static; seed: 456789
+Targets: 32; fixed base (m): [12.5, 2.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [12.5, 2.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 150 nodes; inspecting targets...
+Hold certificate: fixed population at exactly k; adaptive reset is checked separately by --reset-smoke.
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 150/150
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 0
+Unresolved zero-based indices: none
+
+G02_static_map_01: production queries including first compilation: 1.16s
+Warm batch (32 queries): 0.002131s
+Assignments: CPU=32; JAX=32; CPU-valid lost=0; newly recovered=0
+Counts among common assignments: equal=31; JAX fewer=1; JAX more=0
+  Budget 2: eligible CPU=14; JAX=14
+  Budget 3: eligible CPU=20; JAX=20
+  Budget 4: eligible CPU=20; JAX=20
+  Budget 5: eligible CPU=30; JAX=31
+  Budget 6: eligible CPU=32; JAX=32
+  Budget 7: eligible CPU=32; JAX=32
+The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.
+
+--- Actual-runtime static chain-hold certification ---
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 32
+  final accepted: 32
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 32; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 1 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 1/1; chain-hold success 1/1; strictly certified 1/1; 10.81s
+
+Checking k=2: 13 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 13/13; chain-hold success 13/13; strictly certified 13/13; 8.62s
+
+Checking k=3: 6 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 6/6; chain-hold success 6/6; strictly certified 6/6; 8.84s
+
+Checking k=5: 11 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 11/11; chain-hold success 11/11; strictly certified 11/11; 8.83s
+
+Checking k=6: 1 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 1/1; chain-hold success 1/1; strictly certified 1/1; 8.89s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |       1 |               1 |                    1 |                 1
+      2 |      13 |              13 |                   13 |                13
+      3 |       6 |               6 |                    6 |                 6
+      5 |      11 |              11 |                   11 |                11
+      6 |       1 |               1 |                    1 |                 1
+
+Certified assignments: 32/32 (100.00%)
+Runtime hold successes: 32/32 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.463240 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 5:20, 6:25
+Runtime checking time, including first compilation: 45.99s
+
+Failure reasons (may overlap):
+  none
+Failed zero-based sample indices: none
+
+--- Failed assignment examples: up to 0 ---
+  none
+
+Status: all_sampled_assignments_certified
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- Actual reset compatibility: budget 2, four adaptive combinations ---
+adaptive spawn=False; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 1, 3, 4]; 4.62s including compilation
+adaptive spawn=False; adaptive size=True: 4/4 certified pairs <=2; attempts=[9, 1, 1, 4]; 3.50s including compilation
+adaptive spawn=True; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.55s including compilation
+adaptive spawn=True; adaptive size=True: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.48s including compilation
+Map: G02_static_map_02; settings: G02_static; seed: 456789
+Targets: 32; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [2.5, 12.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 154 nodes; inspecting targets...
+Hold certificate: fixed population at exactly k; adaptive reset is checked separately by --reset-smoke.
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 154/154
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 0
+Unresolved zero-based indices: none
+
+G02_static_map_02: production queries including first compilation: 1.09s
+Warm batch (32 queries): 0.008897s
+Assignments: CPU=32; JAX=32; CPU-valid lost=0; newly recovered=0
+Counts among common assignments: equal=25; JAX fewer=7; JAX more=0
+  Budget 2: eligible CPU=3; JAX=3
+  Budget 3: eligible CPU=6; JAX=6
+  Budget 4: eligible CPU=10; JAX=11
+  Budget 5: eligible CPU=13; JAX=14
+  Budget 6: eligible CPU=18; JAX=21
+  Budget 7: eligible CPU=24; JAX=25
+  Budget 8: eligible CPU=27; JAX=28
+  Budget 9: eligible CPU=32; JAX=32
+The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.
+
+--- Actual-runtime static chain-hold certification ---
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 32
+  final accepted: 32
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 32; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=2: 3 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 10.50s
+
+Checking k=3: 3 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 7.66s
+
+Checking k=4: 5 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 8.77s
+
+Checking k=5: 3 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 7.99s
+
+Checking k=6: 7 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 7/7; chain-hold success 7/7; strictly certified 7/7; 7.69s
+
+Checking k=7: 4 targets; preparing/compiling runtime kernel...
+k=7: connected on first tick 4/4; chain-hold success 4/4; strictly certified 4/4; 9.32s
+
+Checking k=8: 3 targets; preparing/compiling runtime kernel...
+k=8: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 9.27s
+
+Checking k=9: 4 targets; preparing/compiling runtime kernel...
+k=9: connected on first tick 4/4; chain-hold success 4/4; strictly certified 4/4; 9.10s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      2 |       3 |               3 |                    3 |                 3
+      3 |       3 |               3 |                    3 |                 3
+      4 |       5 |               5 |                    5 |                 5
+      5 |       3 |               3 |                    3 |                 3
+      6 |       7 |               7 |                    7 |                 7
+      7 |       4 |               4 |                    4 |                 4
+      8 |       3 |               3 |                    3 |                 3
+      9 |       4 |               4 |                    4 |                 4
+
+Certified assignments: 32/32 (100.00%)
+Runtime hold successes: 32/32 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.463240 micrometres
+Activation clocks by k: 2:5, 3:10, 4:15, 5:20, 6:25, 7:30, 8:35, 9:40
+Runtime checking time, including first compilation: 70.30s
+
+Failure reasons (may overlap):
+  none
+Failed zero-based sample indices: none
+
+--- Failed assignment examples: up to 0 ---
+  none
+
+Status: all_sampled_assignments_certified
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- Actual reset compatibility: budget 2, four adaptive combinations ---
+adaptive spawn=False; adaptive size=False: 4/4 certified pairs <=2; attempts=[15, 4, 3, 7]; 4.75s including compilation
+adaptive spawn=False; adaptive size=True: 4/4 certified pairs <=2; attempts=[10, 3, 6, 2]; 3.35s including compilation
+adaptive spawn=True; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.54s including compilation
+adaptive spawn=True; adaptive size=True: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.90s including compilation
+Map: G02_static_map_03; settings: G02_static; seed: 456789
+Targets: 32; fixed base (m): [12.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [12.5, 12.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 150 nodes; inspecting targets...
+Hold certificate: fixed population at exactly k; adaptive reset is checked separately by --reset-smoke.
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 150/150
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 0
+Unresolved zero-based indices: none
+
+G02_static_map_03: production queries including first compilation: 0.75s
+Warm batch (32 queries): 0.003232s
+Assignments: CPU=32; JAX=32; CPU-valid lost=0; newly recovered=0
+Counts among common assignments: equal=24; JAX fewer=7; JAX more=1
+  Budget 2: eligible CPU=17; JAX=21
+  Budget 3: eligible CPU=26; JAX=25
+  Budget 4: eligible CPU=28; JAX=28
+  Budget 5: eligible CPU=29; JAX=29
+  Budget 6: eligible CPU=31; JAX=32
+  Budget 7: eligible CPU=32; JAX=32
+The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.
+
+--- Actual-runtime static chain-hold certification ---
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 32
+  final accepted: 32
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 32; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 9 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 9/9; chain-hold success 9/9; strictly certified 9/9; 9.80s
+
+Checking k=2: 12 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 12/12; chain-hold success 12/12; strictly certified 12/12; 7.95s
+
+Checking k=3: 4 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 4/4; chain-hold success 4/4; strictly certified 4/4; 7.43s
+
+Checking k=4: 3 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 7.91s
+
+Checking k=5: 1 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 1/1; chain-hold success 1/1; strictly certified 1/1; 8.34s
+
+Checking k=6: 3 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 7.65s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |       9 |               9 |                    9 |                 9
+      2 |      12 |              12 |                   12 |                12
+      3 |       4 |               4 |                    4 |                 4
+      4 |       3 |               3 |                    3 |                 3
+      5 |       1 |               1 |                    1 |                 1
+      6 |       3 |               3 |                    3 |                 3
+
+Certified assignments: 32/32 (100.00%)
+Runtime hold successes: 32/32 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.474376 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25
+Runtime checking time, including first compilation: 49.09s
+
+Failure reasons (may overlap):
+  none
+Failed zero-based sample indices: none
+
+--- Failed assignment examples: up to 0 ---
+  none
+
+Status: all_sampled_assignments_certified
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- Actual reset compatibility: budget 2, four adaptive combinations ---
+adaptive spawn=False; adaptive size=False: 4/4 certified pairs <=2; attempts=[2, 1, 2, 4]; 4.16s including compilation
+adaptive spawn=False; adaptive size=True: 4/4 certified pairs <=2; attempts=[3, 1, 3, 1]; 3.60s including compilation
+adaptive spawn=True; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.45s including compilation
+adaptive spawn=True; adaptive size=True: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.99s including compilation
+Map: G02_static_map_04; settings: G02_static; seed: 456789
+Targets: 32; fixed base (m): [12.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [12.5, 12.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 152 nodes; inspecting targets...
+Hold certificate: fixed population at exactly k; adaptive reset is checked separately by --reset-smoke.
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 152/152
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 0
+Unresolved zero-based indices: none
+
+G02_static_map_04: production queries including first compilation: 0.89s
+Warm batch (32 queries): 0.004557s
+Assignments: CPU=32; JAX=32; CPU-valid lost=0; newly recovered=0
+Counts among common assignments: equal=6; JAX fewer=26; JAX more=0
+  Budget 2: eligible CPU=8; JAX=9
+  Budget 3: eligible CPU=10; JAX=14
+  Budget 4: eligible CPU=14; JAX=20
+  Budget 5: eligible CPU=20; JAX=22
+  Budget 6: eligible CPU=22; JAX=30
+  Budget 7: eligible CPU=27; JAX=32
+The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.
+
+--- Actual-runtime static chain-hold certification ---
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 32
+  final accepted: 32
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 32; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 5 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 10.28s
+
+Checking k=2: 4 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 4/4; chain-hold success 4/4; strictly certified 4/4; 8.39s
+
+Checking k=3: 5 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 7.58s
+
+Checking k=4: 6 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 6/6; chain-hold success 6/6; strictly certified 6/6; 8.10s
+
+Checking k=5: 2 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 2/2; chain-hold success 2/2; strictly certified 2/2; 7.73s
+
+Checking k=6: 8 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 8/8; chain-hold success 8/8; strictly certified 8/8; 8.32s
+
+Checking k=7: 2 targets; preparing/compiling runtime kernel...
+k=7: connected on first tick 2/2; chain-hold success 2/2; strictly certified 2/2; 8.47s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |       5 |               5 |                    5 |                 5
+      2 |       4 |               4 |                    4 |                 4
+      3 |       5 |               5 |                    5 |                 5
+      4 |       6 |               6 |                    6 |                 6
+      5 |       2 |               2 |                    2 |                 2
+      6 |       8 |               8 |                    8 |                 8
+      7 |       2 |               2 |                    2 |                 2
+
+Certified assignments: 32/32 (100.00%)
+Runtime hold successes: 32/32 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.474376 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25, 7:30
+Runtime checking time, including first compilation: 58.87s
+
+Failure reasons (may overlap):
+  none
+Failed zero-based sample indices: none
+
+--- Failed assignment examples: up to 0 ---
+  none
+
+Status: all_sampled_assignments_certified
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- Actual reset compatibility: budget 2, four adaptive combinations ---
+adaptive spawn=False; adaptive size=False: 4/4 certified pairs <=2; attempts=[5, 1, 3, 5]; 4.36s including compilation
+adaptive spawn=False; adaptive size=True: 4/4 certified pairs <=2; attempts=[4, 6, 16, 3]; 3.47s including compilation
+adaptive spawn=True; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 2, 1, 1]; 3.72s including compilation
+adaptive spawn=True; adaptive size=True: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.53s including compilation
+Map: G02_static_map_05; settings: G02_static; seed: 456789
+Targets: 32; fixed base (m): [2.5, 2.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [2.5, 2.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 184 nodes; inspecting targets...
+Hold certificate: fixed population at exactly k; adaptive reset is checked separately by --reset-smoke.
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 184/184
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 0
+Unresolved zero-based indices: none
+
+G02_static_map_05: production queries including first compilation: 0.87s
+Warm batch (32 queries): 0.006223s
+Assignments: CPU=32; JAX=32; CPU-valid lost=0; newly recovered=0
+Counts among common assignments: equal=13; JAX fewer=19; JAX more=0
+  Budget 2: eligible CPU=7; JAX=7
+  Budget 3: eligible CPU=10; JAX=12
+  Budget 4: eligible CPU=15; JAX=18
+  Budget 5: eligible CPU=18; JAX=22
+  Budget 6: eligible CPU=22; JAX=27
+  Budget 7: eligible CPU=27; JAX=29
+  Budget 8: eligible CPU=29; JAX=32
+The following guard counters describe the CPU reference; the actual checked poses are production JAX witnesses.
+
+--- Actual-runtime static chain-hold certification ---
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 32
+  final accepted: 32
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 32; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 5 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 10.24s
+
+Checking k=2: 2 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 2/2; chain-hold success 2/2; strictly certified 2/2; 7.67s
+
+Checking k=3: 5 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 8.00s
+
+Checking k=4: 6 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 6/6; chain-hold success 6/6; strictly certified 6/6; 7.78s
+
+Checking k=5: 4 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 4/4; chain-hold success 4/4; strictly certified 4/4; 7.98s
+
+Checking k=6: 5 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 7.72s
+
+Checking k=7: 2 targets; preparing/compiling runtime kernel...
+k=7: connected on first tick 2/2; chain-hold success 2/2; strictly certified 2/2; 8.36s
+
+Checking k=8: 3 targets; preparing/compiling runtime kernel...
+k=8: connected on first tick 3/3; chain-hold success 3/3; strictly certified 3/3; 7.96s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |       5 |               5 |                    5 |                 5
+      2 |       2 |               2 |                    2 |                 2
+      3 |       5 |               5 |                    5 |                 5
+      4 |       6 |               6 |                    6 |                 6
+      5 |       4 |               4 |                    4 |                 4
+      6 |       5 |               5 |                    5 |                 5
+      7 |       2 |               2 |                    2 |                 2
+      8 |       3 |               3 |                    3 |                 3
+
+Certified assignments: 32/32 (100.00%)
+Runtime hold successes: 32/32 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.474376 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25, 7:30, 8:35
+Runtime checking time, including first compilation: 65.72s
+
+Failure reasons (may overlap):
+  none
+Failed zero-based sample indices: none
+
+--- Failed assignment examples: up to 0 ---
+  none
+
+Status: all_sampled_assignments_certified
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- Actual reset compatibility: budget 2, four adaptive combinations ---
+adaptive spawn=False; adaptive size=False: 4/4 certified pairs <=2; attempts=[3, 2, 1, 1]; 4.32s including compilation
+adaptive spawn=False; adaptive size=True: 4/4 certified pairs <=2; attempts=[2, 17, 3, 6]; 3.41s including compilation
+adaptive spawn=True; adaptive size=False: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.97s including compilation
+adaptive spawn=True; adaptive size=True: 4/4 certified pairs <=2; attempts=[1, 1, 1, 1]; 3.58s including compilation
+
+--- GPU aggregate: actual environment, exactly the proposed k ---
+ Map                         | Targets | Tested | First connected | Hold success | Certified | Failures |  Pass % | GPU seconds
+-----------------------------+---------+--------+-----------------+--------------+-----------+----------+---------+------------
+ G02_static_map_01           |      32 |     32 |              32 |           32 |        32 |        0 | 100.00% |      45.99
+ G02_static_map_02           |      32 |     32 |              32 |           32 |        32 |        0 | 100.00% |      70.30
+ G02_static_map_03           |      32 |     32 |              32 |           32 |        32 |        0 | 100.00% |      49.09
+ G02_static_map_04           |      32 |     32 |              32 |           32 |        32 |        0 | 100.00% |      58.87
+ G02_static_map_05           |      32 |     32 |              32 |           32 |        32 |        0 | 100.00% |      65.72
+ ALL MAPS                    |     160 |    160 |             160 |          160 |       160 |        0 | 100.00% |     289.97
+Pass percentages include targets without assignments as failures; GPU seconds include first compilation per map/k.
+
+ Agents | Tested | First connected | Hold success | Certified | Failures |  Pass %
+--------+--------+-----------------+--------------+-----------+----------+--------
+      1 |     20 |              20 |           20 |        20 |        0 | 100.00%
+      2 |     34 |              34 |           34 |        34 |        0 | 100.00%
+      3 |     23 |              23 |           23 |        23 |        0 | 100.00%
+      4 |     20 |              20 |           20 |        20 |        0 | 100.00%
+      5 |     21 |              21 |           21 |        21 |        0 | 100.00%
+      6 |     24 |              24 |           24 |        24 |        0 | 100.00%
+      7 |      8 |               8 |            8 |         8 |        0 | 100.00%
+      8 |      6 |               6 |            6 |         6 |        0 | 100.00%
+      9 |      4 |               4 |            4 |         4 |        0 | 100.00%
+
+Pooled failure reasons (may overlap):
+  none
+Checks confirm sampled placed assignments only; navigation and policy success remain untested.
+CPU-valid assignments lost by production query: 0
+Unresolved pairs are rejected, never accepted as certified; known unresolved CPU pairs do not fail the port gate.
+Production port gate: passed; unresolved pairs remain rejected
