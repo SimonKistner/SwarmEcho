@@ -1,0 +1,12 @@
+{
+  "master": "https://login01.ai.tu-darmstadt.de:8080",
+  "determined_version": "0.35.0",
+  "workspace": "RAI_WS",
+  "project": "swarm_echo",
+  "project_id": 367,
+  "resource_pool": "42_Compute",
+  "slots_per_trial": 1,
+  "pfss_mount": "/pfss/mlde/workspaces/mlde_wsp_RAI_WS",
+  "persist_root": "/pfss/mlde/workspaces/mlde_wsp_RAI_WS/ar44ruca/swarm_echo",
+  "image_repository": "ghcr.io/simonkistner/swarmecho-deps"
+}

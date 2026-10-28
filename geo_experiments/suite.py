@@ -1,7 +1,6 @@
 """Plan and sequentially execute configured readouts, sharing collection by policy."""
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import os
@@ -17,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omegaconf import OmegaConf
 
-from geo_experiments.artifacts import HISTORY_COLUMNS, archive, save_data, update_run
+from geo_experiments.artifacts import update_run
 from geo_experiments.common import ROOT, resolve_path, validate_config
 from geo_experiments.labels import DECODERS
 from geo_experiments.console import terminal_print as print
@@ -37,7 +36,6 @@ def latest_checkpoint(run):
 def execution_plan(settings):
     if set(settings) != {"run", "defaults", "policies", "experiments", "execute"}:
         raise ValueError("Suite sections must be run, defaults, policies, experiments, execute.")
-    base = OmegaConf.load(Path(__file__).with_name("config.yaml"))
     selected, resolved = [], {}
     for entry in settings["execute"]:
         if set(entry) != {"policy", "experiment"}:
@@ -50,9 +48,18 @@ def execution_plan(settings):
             if not checkpoint.is_dir():
                 raise FileNotFoundError(checkpoint)
             resolved[name] = {"run": str(run), "checkpoint": str(checkpoint)}
-        config = OmegaConf.to_container(OmegaConf.merge(base, settings["defaults"],
+            if "map_source" in policy:
+                resolved[name]["map_source"] = policy["map_source"]
+            if policy.get("map_source") == "validation":
+                from geo_experiments.validation_maps import frozen_validation_maps
+                paths, _ = frozen_validation_maps(checkpoint)
+                print(f"[suite] {run.name}: {len(paths)} verified frozen validation maps", flush=True)
+        config = OmegaConf.to_container(OmegaConf.merge(settings["defaults"],
                    settings["experiments"][experiment], {"run": {**settings["run"], "name": f"{name}_{experiment}"},
-                   "policy": {"checkpoint": resolved[name]["checkpoint"], "level": "G02_static"}}), resolve=True)
+                   "policy": {k: v for k, v in resolved[name].items() if k != "run"}}), resolve=True)
+        # Historical saved suite configs omitted this unused field.
+        # Modern policies load the checkpoint config rather than a named level.
+        config["policy"].setdefault("level", None)
         config["run"]["name"] = run_slug(config)
         validate_config(config)
         if config.get("experiment", "target") != "target" or config["protocol"]["decoder"] not in DECODERS:
@@ -63,6 +70,11 @@ def execution_plan(settings):
         # are included because conditional history collection is shared too.
         collection_settings = {k: config[k] for k in ("policy", "dataset", "audit", "distance")}
         collection_settings["eligibility"] = config["protocol"]["eligibility"]
+        if config["protocol"]["decoder"] == "shared_cell":
+            # Small per-map quotas may share coordinate support across maps.
+            # Preserve the historical collection key whenever coverage fits.
+            if config["policy"].get("map_source") == "validation":
+                collection_settings["training_class_coverage"] = "pooled_coordinates"
         key = hashlib.sha256(json.dumps(collection_settings, sort_keys=True).encode()).hexdigest()[:16]
         selected.append({**entry, "collection_key": key, "config": config})
     if not selected:
@@ -74,78 +86,24 @@ def execution_plan(settings):
 
 
 def execute_suite(settings, root, plan):
-    from geo_experiments.collection import prepare_policy
-    from geo_experiments.policy import map_levels
-    from geo_experiments.labels import suite_geometry
-    from geo_experiments.target_collection import collect_targets
-    from geo_experiments.auditing import audit_targets, audit_is_current
-    from geo_experiments.cache import snapshot_identity_matches
-    from geo_experiments.experiments import fit_experiment
-    from geo_experiments.report import generate_report
+    from geo_experiments.execution import prepare_collection, fit_and_report
 
-    shared_paths = {}
+    prepared = set()
     for index, job in enumerate(plan):
         config, key = job["config"], job["collection_key"]
-        decoders = tuple(sorted({j["config"]["protocol"]["decoder"] for j in plan if j["collection_key"] == key}))
         run_dir = root / "runs" / config["run"]["name"]
         if (run_dir / "run.json").is_file():
             previous = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             if previous.get("progress", {}).get("stage") == "complete" and (run_dir / "report.html").is_file():
                 print(f"[suite] completed, skipping {display_name(previous)}", flush=True)
                 continue
-        shared_dir = root / "collections" / key
-        if key not in shared_paths:
-            shared_dir.mkdir(parents=True, exist_ok=True)
-            existing = json.loads((shared_dir / "run.json").read_text(encoding="utf-8")) if (shared_dir / "run.json").is_file() else {}
-            ready = existing.get("progress", {}).get("stage") == "complete"
-            collected = existing.get("progress", {}).get("stage") in ("collected", "complete") and (shared_dir / "data.npz").is_file()
-            if ready and not collected:
-                raise FileNotFoundError(f"Completed collection archive is missing: {shared_dir / 'data.npz'}")
-            if not collected:
-                OmegaConf.save(OmegaConf.create(config), shared_dir / "config.yaml")
-                update_run(shared_dir, config=config, kind="target_collection")
-            model, level, identity = prepare_policy(config, None if collected else shared_dir, allow_suite=True)
-            if collected:
-                if not snapshot_identity_matches(existing.get("provenance", {}).get("identity"), identity):
-                    raise ValueError("Shared collection checkpoint/config/runtime changed. Start a new suite.")
-                print(f"[suite] reusing {shared_dir}", flush=True)
-            if not ready or not audit_is_current(existing.get("ambiguity_audit"), config, decoders):
-                levels = map_levels(level)
-                if collected:
-                    shared, collection = archive(shared_dir / "data.npz"), existing["collection"]
-                else:
-                    graph = suite_geometry(levels, config["distance"]["clearance_m"])
-                    shared, collection = collect_targets(model, levels, config, shared_dir, graph)
-                    save_data(shared_dir, shared)
-                    update_run(shared_dir, progress={"stage": "collected"})
-                audit = audit_targets(model, levels, config, shared, decoders=decoders)
-                save_data(shared_dir, shared)
-                update_run(shared_dir, collection=collection, ambiguity_audit=audit, progress={"stage": "complete"})
-            del model
-            import jax
-            gc.collect()
-            jax.clear_caches()
-            shared_paths[key] = shared_dir
-        shared_manifest = json.loads((shared_dir / "run.json").read_text(encoding="utf-8"))
-        shared = archive(shared_dir / "data.npz")
-        run_dir.mkdir(parents=True, exist_ok=True)
-        OmegaConf.save(OmegaConf.create(config), run_dir / "config.yaml")
-        update_run(run_dir, config=config, kind="target_probe", history_columns=HISTORY_COLUMNS,
-                   shared_data=os.path.relpath(shared_dir / "data.npz", run_dir).replace("\\", "/"),
-                   collection=shared_manifest["collection"], ambiguity_audit=shared_manifest.get("ambiguity_audit"),
-                   provenance=shared_manifest["provenance"], jobs=[], progress={"stage": "starting"})
-        try:
-            _, jobs = fit_experiment(config, shared, run_dir)
-            generate_report(run_dir)
-            update_run(run_dir, progress={"stage": "complete", "completed": len(jobs), "total": len(jobs)})
-        except Exception as exc:
-            update_run(run_dir, progress={"stage": "failed", "error": str(exc), "type": type(exc).__name__})
-            raise
+        collection_dir = root / "collections" / key
+        if key not in prepared:
+            decoders = tuple(sorted({j["config"]["protocol"]["decoder"] for j in plan if j["collection_key"] == key}))
+            prepare_collection(config, collection_dir, decoders)
+            prepared.add(key)
+        fit_and_report(config, run_dir, collection_dir)
         update_run(root, progress={"stage": "experiments", "completed": index + 1, "total": len(plan)})
-        del shared
-        gc.collect()
-        import jax
-        jax.clear_caches()
     update_run(root, progress={"stage": "complete", "completed": len(plan), "total": len(plan)})
 
 

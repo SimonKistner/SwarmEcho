@@ -1,0 +1,6 @@
+{
+  "description": "One-slot full G03 training with W&B and persistent map bank",
+  "level": "G03_random_buildings",
+  "wandb_mode": "online",
+  "overrides": []
+}

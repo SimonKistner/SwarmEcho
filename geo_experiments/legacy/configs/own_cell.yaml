@@ -1,4 +1,4 @@
-# Inherits common probe/report defaults from config.yaml.
+# Inherits common probe/report defaults from g01_target.yaml.
 experiment: own_cell
 run:
   name: own_cell_probes

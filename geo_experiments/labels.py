@@ -21,9 +21,17 @@ def suite_geometry(levels, clearance=None):
         raise ValueError("Shared cell coordinates require a common cell size.")
     offsets = np.cumsum([0, *(len(g["cells"]) for g in graphs)]).astype(np.int32)
     count = int(offsets[-1])
-    distances = np.full((count, count), np.inf, dtype=np.float32)
-    for i, graph in enumerate(graphs):
-        distances[offsets[i]:offsets[i + 1], offsets[i]:offsets[i + 1]] = graph["distances"]
+    # Preserve old small-suite archives; large banks store only within-map blocks.
+    if count <= 1024:
+        distances = np.full((count, count), np.inf, dtype=np.float32)
+        for i, graph in enumerate(graphs):
+            distances[offsets[i]:offsets[i + 1], offsets[i]:offsets[i + 1]] = graph["distances"]
+    else:
+        width = max(len(g["cells"]) for g in graphs)
+        distances = np.full((len(graphs), width, width), np.inf, dtype=np.float32)
+        for i, graph in enumerate(graphs):
+            n = len(graph["cells"])
+            distances[i, :n, :n] = graph["distances"]
     cells = np.concatenate([g["cells"] for g in graphs])
     coordinates = np.asarray(sorted(set(map(tuple, cells)), key=lambda p: (p[2], p[1], p[0])), dtype=np.int32)
     lookup = {tuple(cell): i for i, cell in enumerate(coordinates)}
@@ -85,6 +93,11 @@ def cell_errors(predicted, true, graph):
     result = np.full(len(true), np.inf, dtype=np.float32)
     wrong_map = valid & (graph["cell_map_id"][np.maximum(predicted, 0)] != graph["cell_map_id"][true])
     same_map = valid & ~wrong_map
-    result[same_map] = graph["distances"][true[same_map], predicted[same_map]]
+    if graph["distances"].ndim == 3:
+        maps = graph["cell_map_id"][true[same_map]]
+        offsets = graph["map_offsets"][maps]
+        result[same_map] = graph["distances"][maps, true[same_map] - offsets, predicted[same_map] - offsets]
+    else:
+        result[same_map] = graph["distances"][true[same_map], predicted[same_map]]
     result[wrong_map] = -1
     return result

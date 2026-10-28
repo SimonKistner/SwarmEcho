@@ -1,0 +1,10 @@
+# Zero-GPU shell for checking the RAI_WS persistent workspace mount.
+# Keep SwarmEcho files under the swarm_echo subdirectory inside this mount.
+resources:
+  resource_pool: 42_Compute
+  slots: 0
+
+bind_mounts:
+  - host_path: /pfss/mlde/workspaces/mlde_wsp_RAI_WS
+    container_path: /pfss/mlde/workspaces/mlde_wsp_RAI_WS
+    read_only: false

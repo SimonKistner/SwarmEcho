@@ -1,3 +1,4 @@
+# Historical G01 template only. The active suite uses geo_experiments/probes.yaml.
 # Set policy.checkpoint below, then run from the repository root:
 # uv run python geo_experiments/run.py run.name=first_target_probes
 # All relative paths are resolved against the repository, not the shell cwd.
@@ -11,7 +12,7 @@ policy:
   checkpoint: outputs\G01_static\checkpoints\ckpt_000330
   from_run_config: true # Restore its original observation/model/evaluation settings, not today's G01 defaults.
 
-# Historical G01 semantics remain the default. probes.yaml defines the G02 suite.
+# Historical G01 reproduction only; the active suite uses ../../probes.yaml.
 protocol:
   decoder: legacy
   eligibility: success # G02 uses delivered instead; keep original G01 inclusion reproducible.

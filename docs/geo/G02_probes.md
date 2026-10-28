@@ -28,7 +28,13 @@ reported separately, not silently reassigned to the true map.
 
 ## Default execution and controls
 
-[`geo_experiments/probes.yaml`](../../geo_experiments/probes.yaml) schedules all
+As of 2026-10-26 the checked-in default selects the separate
+[G03 validation-map shared-coordinate experiment](G03_probes.md). Existing G02
+suite folders retain their frozen execution plans; resume them normally or pass
+their saved `config.yaml` to start another suite with the same choices. The
+authored-map protocol below is unchanged and does not opt into validation maps.
+
+The original [`geo_experiments/probes.yaml`](../../geo_experiments/probes.yaml) scheduled all
 three alternatives for the newest solo YES/NO checkpoint and the newest final
 seven-agent curriculum YES/NO checkpoint. The local plan check selected solo
 `ckpt_004230` and curriculum `ckpt_001666`. Latest choices are resolved once and
@@ -81,7 +87,7 @@ reused without generating histories to recover missing population metadata.
 
 ## Saved solo collection audit (2026-10-24)
 
-The [actual collection audit](../../geo_experiments/outputs/G02_target_ablations_20261024_154056_513705/collections/31984fcb8f77c0eb/audit.html)
+The [actual collection audit](../../geo_experiments/outputs/archive/G02_target_ablations_20261024_154056_513705/collections/31984fcb8f77c0eb/audit.html)
 uses 16,000 retained episodes from solo checkpoint `ckpt_004230`. The 5,000-sample
 screen found 0% repeated finder GRUs/messages and 3.940% repeated base messages.
 Across the full collection, 635 samples (3.969%) belong to 27 repeated base-packet

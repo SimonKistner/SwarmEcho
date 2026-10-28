@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from geo_experiments.audit_observations import digest, cross_cell_pairs
+from geo_experiments.audit_common import digest, cross_cell_pairs
 
 DECODERS = ("map_specific", "map_cell", "shared_cell")
 

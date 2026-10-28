@@ -13,7 +13,7 @@ from geo_experiments.auditing import footer_note
 from geo_experiments.common import SOURCES, SOURCE_LABELS, experiment_axes, fingerprint
 from geo_experiments.dashboard import build_dashboard, decorate_report, numeric_cell, report_controls
 from geo_experiments.labels import DECODERS, cell_errors, display_predictions
-from geo_experiments.report import COLORS, GRID, MUTED, PANEL, TEXT, TASK_LABELS, _legend, _table
+from geo_experiments.report_components import COLORS, GRID, MUTED, PANEL, TEXT, TASK_LABELS, _legend, _table
 from geo_experiments.report_layout import distribution_panel, document
 from geo_experiments.console import terminal_print as print
 
@@ -29,11 +29,14 @@ def results(arrays, config):
     requirements = np.unique(group(arrays, "episodes")["target_required_agents"])
     detail = [(f"required-{int(k)}", required_label(int(k))) for k in requirements]
     detail += [(f"storey-{int(f)}", f"Storey {f}") for f in floors]
-    detail += [(f"map-{m}", str(name)) for m, name in enumerate(graph["map_names"])]
+    show_maps = not (len(graph["map_names"]) >= 20 and config["policy"].get("map_source") == "validation")
+    if show_maps:
+        detail += [(f"map-{m}", str(name)) for m, name in enumerate(graph["map_names"])]
     masks = {"overall": np.ones(len(test), dtype=bool)}
     masks.update({f"required-{int(k)}": labels["required_agents"][test] == k for k in requirements})
     masks.update({f"storey-{int(f)}": labels["actual_storey"][test] == f for f in floors})
-    masks.update({f"map-{m}": labels["map_id"][test] == m for m in range(len(graph["map_names"]))})
+    if show_maps:
+        masks.update({f"map-{m}": labels["map_id"][test] == m for m in range(len(graph["map_names"]))})
     records, diagnostics = {}, {}
     decoder = config["protocol"]["decoder"]
     tasks, sources = experiment_axes(config)
@@ -166,10 +169,17 @@ def generate_target_report(run_dir, manifest, arrays, dpi=None):
             f'<p class="note">{collection["delivered_episodes"]:,} deliveries / {collection["attempted_episodes"]:,} attempted episodes; '
             f'{collection["successful_episodes"]:,} chain successes. {condition} No policy gradients or map IDs are added to the features.</p>'
             f'<div class="pills">{pills}</div>{report_controls(run_dir)}</header>')
+    if config["policy"].get("map_source") == "validation":
+        body += ('<p class="note">These frozen buildings were held out from policy training. '
+                 'Fresh probe episodes are collected on them, with each building represented in training, '
+                 'validation and evaluation. This measures coordinate decoding on policy-held-out buildings; '
+                 'it does not measure transfer to buildings excluded from decoder training. '
+                 'Per-map evaluation counts are small; use the pooled results for the main interpretation.</p>')
     body += distribution_panel(distributions(arrays, graph, labels, splits, floors, requirements),
                                single_map=len(graph["map_names"]) == 1, eligibility=collection["eligibility"])
     body += '<section><h2>Held-out results</h2>' + _table(records, floors, tasks, sources, detail_groups=detail, metric_version="suite-cell-accuracy/v1")
-    body += ('<p class="note">Accuracy averages decoder initialization seeds over the same held-out episodes. Details group by target-required agents, then actual target storey, then map. '
+    detail_order = 'target-required agents, then actual target storey' + (', then map' if any(k.startswith('map-') for k, _ in detail) else '')
+    body += (f'<p class="note">Accuracy averages decoder initialization seeds over the same held-out episodes. Details group by {detail_order}. '
              'Histograms contain incorrect predictions only, pooled across seeds; the Measure selector also switches their counts/shares. '
              'Cell distance uses the true map’s obstacle-aware cell graph. Wrong-map predictions have their own bucket and are never assigned a fabricated route distance. '
              'No route includes disconnected or invalid predicted cells. Map identity is supplied for expert selection and for evaluating shared coordinates, but must be inferred by the map+cell decoder.</p>')

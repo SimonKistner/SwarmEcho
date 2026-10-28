@@ -25,17 +25,20 @@ def prepare_policy(config, run_dir=None, *, allow_suite=False):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     from geo_experiments.policy import load_probe_level
     configured_level, source, original, ignored = load_probe_level(config, checkpoint, run_dir)
-    level = resolve_evaluation_level(configured_level)
-    if allow_suite and configured_level.evaluation.eval_differes_from_training_map:
+    validation_maps = config["policy"].get("map_source", "training") == "validation"
+    if validation_maps and not allow_suite:
+        raise ValueError("Validation maps require a modern target probe.")
+    level = configured_level if validation_maps else resolve_evaluation_level(configured_level)
+    if allow_suite and not validation_maps and configured_level.evaluation.eval_differes_from_training_map:
         raise ValueError("Suite probes use the authored training map list; separate evaluation-map substitution is unsupported.")
-    if (configured_level.random_buildings.enabled or (configured_level.static_map_suite and not allow_suite)
-            or configured_level.evaluation.random_eval or level.env.num_obstacles
+    if ((configured_level.random_buildings.enabled and not validation_maps) or (configured_level.static_map_suite and not allow_suite)
+            or (configured_level.evaluation.random_eval and not validation_maps) or level.env.num_obstacles
             or (level.env.adapt_size.enabled and not allow_suite) or level.training.randomize_base):
         raise ValueError("Phase 0 supports one authored static map, fixed base, fixed population, no random obstacles.")
     if level.env.success_condition == "coverage" or not level.network.memory_comm_enabled:
         raise ValueError("Target probes require a target mission with learned communication enabled.")
     map_path = (resolve_map_file(configured_level.evaluation.eval_map, MAP_DIR).resolve()
-                if configured_level.evaluation.eval_differes_from_training_map
+                if not validation_maps and configured_level.evaluation.eval_differes_from_training_map
                 and configured_level.evaluation.eval_map else configured_level.map_paths[0])
     print(f"[policy] level={level.name}; agents={level.env.num_agents}; max_steps={level.env.max_steps}", flush=True)
     model = build_model(level)
@@ -60,10 +63,13 @@ def prepare_policy(config, run_dir=None, *, allow_suite=False):
         "communication_every_k_steps": model.memory_comm_every_k_steps,
     }
     if allow_suite:
+        if validation_maps:
+            identity["map_source"] = "validation"
         identity["maps"] = [{"name": name, "sha256": fingerprint(path)}
                             for name, path in zip(configured_level.map_names, configured_level.map_paths, strict=True)]
         identity["probe_collection_files"] = {name: fingerprint(ROOT / "geo_experiments" / name)
-            for name in ("collection.py", "target_collection.py", "labels.py", "auditing.py", "policy.py", "common.py", "geometry.py")}
+            for name in ("collection.py", "target_collection.py", "labels.py", "auditing.py", "policy.py", "common.py", "geometry.py",
+                         *(("validation_maps.py",) if validation_maps else ())) }
     if run_dir is not None:
         update_run(run_dir, provenance={"identity": identity, "checkpoint": str(checkpoint),
                    "level": level.name, "level_source": str(source), "map_source": str(map_path),
@@ -76,7 +82,7 @@ def prepare_policy(config, run_dir=None, *, allow_suite=False):
     return model, level, identity
 
 
-def make_collector(level, *, history_stride=None, own_stride=None, stop_after_finder=False):
+def make_collector(level, *, history_stride=None, own_stride=None, stop_after_finder=False, environment=None):
     """Shared evaluation rollout; finder prefixes or full-team own-cell snapshots."""
     if history_stride is not None and (type(history_stride) is not int or history_stride < 1):
         raise ValueError("history_stride must be a positive integer or None.")
@@ -93,13 +99,13 @@ def make_collector(level, *, history_stride=None, own_stride=None, stop_after_fi
     from swarmecho.models.actions import physical_actions, deterministic_actions
     from swarmecho.training.train import _evaluation_env_fns, communication_due
 
-    reset, step, observations, _ = _evaluation_env_fns(level)
+    reset, step, observations, _ = _evaluation_env_fns(level) if environment is None else environment
     cfg = level.env
 
     @nnx.jit
-    def collect_batch(model, keys):
-        def one(key):
-            state = reset(key)
+    def collect_batch(model, keys, map_ids=None):
+        def one(key, map_id=None):
+            state = reset(key) if map_id is None else reset(key, map_id=map_id)
             n = cfg.num_agents
             initial = {
                 "state": state, "hidden": model.initial_actor_hidden((), num_agents=n),
@@ -261,7 +267,7 @@ def make_collector(level, *, history_stride=None, own_stride=None, stop_after_fi
                 output.update({k: v for k, v in result.items() if k.startswith("sample_")})
             return output
 
-        return jax.vmap(one)(keys)
+        return jax.vmap(one)(keys) if map_ids is None else jax.vmap(one)(keys, map_ids)
 
     return collect_batch
 
@@ -358,10 +364,11 @@ def collect_dataset(model, level, config, run_dir, identity):
 
 def reuse_dataset(path, config, run_dir, identity):
     import json
+    from geo_experiments.cache import snapshot_identity_matches
 
     path = resolve_path(path)
     manifest = json.loads((path.parent / "run.json").read_text(encoding="utf-8"))
-    if manifest["provenance"]["identity"] != identity:
+    if not snapshot_identity_matches(manifest["provenance"]["identity"], identity):
         raise ValueError("Cached dataset checkpoint/level/map/collection identity does not match this run.")
     arrays = archive(path)
     dataset, episodes = group(arrays, "dataset"), group(arrays, "episodes")

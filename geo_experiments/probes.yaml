@@ -1,13 +1,14 @@
 # Sequential execution plan. Budgets below are TOTALS PER POLICY, divided evenly
 # across maps for every split. All alternatives reuse that exact collection.
 run:
-  name: G02_target_ablations
+  name: G03_random_4k_v1_agents_7_validation_shared_coordinates
   output_root: geo_experiments/outputs
   timezone: Europe/Berlin
 
 defaults:
   experiment: target
   policy:
+    level: null # Unused: policies are restored from their saved run config.
     from_run_config: true
   protocol:
     eligibility: delivered
@@ -43,12 +44,10 @@ defaults:
     dpi: 160
 
 policies:
-  solo:
-    run: outputs/G02_unanimity_YesNo_solo
-    checkpoint: latest # Resolved ONCE at suite startup and frozen in config.yaml.
-  curriculum_final:
-    run: outputs/G02_unanimity_YesNo_agents_7
-    checkpoint: latest
+  g03_agents_7:
+    run: outputs/G03_random_4k_v1_agents_7
+    checkpoint: outputs/G03_random_4k_v1_agents_7/checkpoints/best_val_checkpoint # Frozen in the suite's config.yaml at startup.
+    map_source: validation # All 400 frozen holdout maps, not the three inspection maps.
 
 experiments:
   specialists:
@@ -63,9 +62,4 @@ experiments:
 
 # Only target experiments are scheduled. Own-cell adapters remain future work.
 execute:
-  - {policy: solo, experiment: specialists}
-  - {policy: solo, experiment: map_and_cell}
-  - {policy: solo, experiment: shared_coordinates}
-  - {policy: curriculum_final, experiment: specialists}
-  - {policy: curriculum_final, experiment: map_and_cell}
-  - {policy: curriculum_final, experiment: shared_coordinates}
+  - {policy: g03_agents_7, experiment: shared_coordinates}

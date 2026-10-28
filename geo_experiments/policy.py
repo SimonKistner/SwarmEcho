@@ -14,19 +14,26 @@ def load_probe_level(config, checkpoint, run_dir):
     from swarmecho.core.config import LEVEL_DIR, MAP_DIR, RewardConfig, load_level
     from swarmecho.core.compatibility import resolve_level_file, resolve_map_file
 
-    source = resolve_level_file(config["policy"]["level"], LEVEL_DIR).resolve()
     if config["policy"].get("from_run_config", False):
         source = checkpoint.parent.parent / "config.yaml"
         if not source.is_file():
             raise FileNotFoundError(f"No saved training configuration beside {checkpoint}")
+    else:
+        source = resolve_level_file(config["policy"]["level"], LEVEL_DIR).resolve()
     original = source.read_text(encoding="utf-8")
     data = OmegaConf.to_container(OmegaConf.create(original), resolve=True)
     # Saved training configs contain descriptive fields outside load_level's schema.
     original_name = data.pop("name", None)
     data.pop("building", None)
     names = data.get("env", {}).get("map_names", [])
+    generated = data.get("random_buildings", {}).get("enabled", False)
+    validation_maps = config["policy"].get("map_source", "training") == "validation"
+    if validation_maps and (not generated or not config["policy"].get("from_run_config")):
+        raise ValueError("Validation-map probes require a saved generated-building run config.")
+    if generated and not validation_maps:
+        raise ValueError("Generated-building probes require policy.map_source=validation.")
     maps = []
-    for name in names:
+    for name in ([] if generated else names):
         explicit = resolve_path(name)
         path = explicit if explicit.is_file() else resolve_map_file(name, MAP_DIR).resolve()
         maps.append(str(path))
@@ -64,6 +71,19 @@ def load_probe_level(config, checkpoint, run_dir):
         level = load_level(snapshot)
     if original_name:
         level = replace(level, name=original_name)
+    if validation_maps:
+        from geo_experiments.validation_maps import frozen_validation_maps
+        from swarmecho.env.buildings import load_building
+        paths, metadata = frozen_validation_maps(checkpoint)
+        if not level.validation.enabled or len(paths) != level.validation.num_maps:
+            raise ValueError("The run config differs from its frozen validation map count.")
+        if metadata["stage"] != level.env.geometric_agent_budget:
+            raise ValueError("Frozen validation maps belong to a different agent stage.")
+        # Keep trained observation/population settings; inspection overrides must
+        # not substitute three inspection maps or disable the stage's target filter.
+        level = replace(level, building=load_building(paths[0]), map_paths=tuple(paths),
+                        map_names=[path.stem for path in paths])
+        print(f"[policy] verified {len(paths)} frozen validation maps", flush=True)
     return level, source, original, ignored
 
 

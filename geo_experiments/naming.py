@@ -39,6 +39,30 @@ def display_name(manifest):
     return training_run_name(manifest) + " — " + experiment_description(manifest["config"], manifest.get("collection"))
 
 
+def experiment_title(manifest):
+    """Short sidebar heading; the investigated run is shown on its own line."""
+    config = manifest["config"]
+    if config.get("experiment") == "own_cell":
+        balanced = manifest.get("collection", {}).get("uniform_cell_buckets",
+            config.get("sampling", {}).get("uniform_cells", False))
+        return "Balanced Own Cell Decoder" if balanced else "Visitation-Weighted Own Cell Decoder"
+    protocol = config.get("protocol", {})
+    return {"map_specific": "One Decoder per Map", "map_cell": "Joint Map and Cell Decoder",
+            "shared_cell": "One Shared Coordinate Decoder",
+            "legacy": "Single-Map Target Cell and Storey Decoder" if protocol.get("target_storey", True)
+                      else "Single-Map Target Cell Decoder"}[protocol.get("decoder", "legacy")]
+
+
+def report_timestamp(run_dir):
+    """Use creation time in the run/suite folder, unaffected by report refreshes."""
+    if run_dir is not None:
+        for path in (Path(run_dir), *Path(run_dir).parents):
+            match = re.search(r"_(\d{8})_(\d{6})_(\d{6})$", path.name)
+            if match:
+                return ''.join(match.groups())
+    return ""
+
+
 def report_subtitle(manifest, run_dir=None):
     checkpoint = manifest.get("provenance", {}).get("checkpoint") or manifest["config"].get("policy", {}).get("checkpoint", "")
     parts = [str(checkpoint).replace("\\", "/").rstrip("/").split("/")[-1]] if checkpoint else []
@@ -48,13 +72,10 @@ def report_subtitle(manifest, run_dir=None):
     count = manifest.get("collection", {}).get("num_samples")
     if count is not None:
         parts.append(f"{count:,} samples")
-    if run_dir is not None:
-        for path in (Path(run_dir), *Path(run_dir).parents):
-            match = re.search(r"_(\d{8})_(\d{6})_\d{6}$", path.name)
-            if match:
-                date = datetime.strptime(''.join(match.groups()), "%Y%m%d%H%M%S")
-                parts.append(date.strftime("%Y-%m-%d %H:%M"))
-                break
+    timestamp = report_timestamp(run_dir)
+    if timestamp:
+        date = datetime.strptime(timestamp, "%Y%m%d%H%M%S%f")
+        parts.append(date.strftime("%Y-%m-%d %H:%M"))
     return " · ".join(parts)
 
 

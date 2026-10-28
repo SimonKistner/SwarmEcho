@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from geo_experiments.artifacts import add_group, group
-from geo_experiments.audit_observations import STAGES, cross_cell_pairs, digest
+from geo_experiments.audit_common import STAGES, cross_cell_pairs, digest
 from geo_experiments.common import SOURCES
 from geo_experiments.common import fingerprint
 from geo_experiments.collisions import analyse_collisions, ambiguous_rows, locations, vector_groups
@@ -69,7 +69,7 @@ def pipeline_identity(config, decoders):
     decoders = ("map_specific" if d == "legacy" else d for d in decoders)
     return {"format": FORMAT, "settings": dict(config["audit"]), "decoders": sorted(set(decoders)),
             "sources": {name: fingerprint(Path(__file__).with_name(name))
-                        for name in ("auditing.py", "collisions.py", "audit_observations.py")}}
+                        for name in ("auditing.py", "collisions.py", "audit_common.py")}}
 
 
 def audit_is_current(summary, config, decoders):
@@ -149,12 +149,18 @@ def investigate_finder(model, levels, config, arrays, indices):
     records = {"finder_gru": defaultdict(list)}
     fingerprints, reproduced = [], {"finder_gru": 0}
     skipped = 0
+    bank_collector = None
+    if config["policy"].get("map_source") == "validation":
+        from geo_experiments.validation_maps import make_validation_environment
+        bank_collector = make_collector(levels[0], history_stride=settings["every"], stop_after_finder=True,
+            environment=make_validation_environment(levels[0], levels))
     for m, level in enumerate(levels):
         map_ids = dataset.get("map_id", np.zeros(len(dataset["finder_gru"]), dtype=np.int32))
         rows = indices[map_ids[indices] == m]
         if not len(rows):
             continue
-        collect = make_collector(level, history_stride=settings["every"], stop_after_finder=True)
+        collect = bank_collector if bank_collector is not None else make_collector(
+            level, history_stride=settings["every"], stop_after_finder=True)
         for start in range(0, len(rows), settings["batch_size"]):
             selected = rows[start:start + settings["batch_size"]]
             ids = dataset["episode_id"][selected]
@@ -163,7 +169,11 @@ def investigate_finder(model, levels, config, arrays, indices):
                 keys = jax.vmap(lambda i: jax.random.fold_in(jax.random.PRNGKey(config["dataset"]["seed"]), i))(jnp.asarray(ids))
             else:
                 keys = episode_keys(config["dataset"]["seed"], m, ids)
-            batch = jax.device_get(collect(model, keys))
+            if bank_collector is not None:
+                import jax.numpy as jnp
+                batch = jax.device_get(collect(model, keys, jnp.full(len(selected), m, dtype=jnp.int32)))
+            else:
+                batch = jax.device_get(collect(model, keys))
             for local, original in enumerate(selected):
                 if int(batch["finder_step"][local]) < 0:
                     skipped += 1

@@ -149,9 +149,10 @@ the revised list applies to a newly started run.
 
 Latest selection (2026-10-14): the 22-cell run still has uneven collection rates.
 The user's log reaches 7,491/10k training snapshots near episode 400. At the saved
-[v3 progress snapshot](../../geo_experiments/outputs/visual_own_cell_probes_v3_20261014_164812_062225/run.json)
-read during this discussion, collection had advanced to 7,946 samples / 524
-episodes. These are interim counts, not a completed result.
+v3 progress snapshot read during this discussion, collection had advanced to
+7,946 samples / 524 episodes. These are interim counts, not a completed result.
+The unfinished v3 output was removed during the 2026-10-28 cleanup; these counts
+remain the historical record of that attempt.
 
 The user explicitly **cancelled time caps and adaptive trimming** and selected
 static removal of the five newly printed slow cells: `[2,0,0]`, `[0,1,0]`,

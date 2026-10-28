@@ -1,64 +1,13 @@
-feat: replace population-split budgets with signed individual rewards
+feat: tbd
 
-- Add independent statistical validation and explicit random training-map counts
-  - Rename the canonical visual section to inspection_evaluation with legacy config/CLI aliases, automatic random inspection suites and unchanged G02 behavior; allow diagnostic filter/population overrides when validation controls curriculum progression
-  - Configure G03 for 3600 training plus 400 validation maps, 10000 uniform seeded cases in 500-lane batches, fixed targets, per-map tables and validation-driven stopping
-  - Persist stage-specific validation cases, best score and hold state in checkpoints; publish improved actor/critic models under best_val_checkpoint
-  - Decouple frozen train/validation splits and random episode map choice from adaptive weighting; support uniform sampling over the full bank, fewer lanes than maps, and independent adaptive cells without changing level parameters
-  - Show validation trends, map distributions and searchable per-map statistics in the inspector without geometry, heatmaps or replays
-  - Align G03 with current G02 voting, unanimity, base observations, privileged vote rewards, success thresholds and inspection cadence while retaining G03 scale settings
+- Add in-repository Determined zero-GPU shell configuration and PFSS access-check guide for RAI_WS
+- Prepare a minimal Determined model context and allow G03 map pools to use a persistent cluster path without changing local defaults
+- Add a one-slot G03 smoke/full experiment wrapper and dependency-image recipe while retaining W&B as the detailed logger
+- Centralize cluster settings and named run configs, and add single-command PowerShell submission with fresh source snapshots, offline dry runs and dependency-derived image tags
+- Publish dependency-tagged cluster images to GHCR through a default-branch GitHub Actions workflow using the built-in package token
+- Run frozen shared-coordinate probes on verified G03 validation-map banks with mixed-map collection, exact pooled budgets and compact distance scoring; retain historical one-map and five-map protocols
+- Simplify large random-bank report details and organize probe navigation by creation time, decoder title and shared training-run colors
+- Add slim colored title/run comparison choices and allow comparisons across runs and map counts while retaining metric matching
+- Consolidate geo probes around one suite configuration and shared execution, isolate historical workflows behind compatibility entry points, and archive superseded outputs while preserving completed results
 
-- Add a configurable sequential G02 target-probe suite with map-specific, joint map-cell and shared-coordinate readouts for the latest solo and final-curriculum YES/NO policies
-  - Share delivery-eligible multi-map collection, map-aware geometry and episode splits; execute adaptive vote actions and snapshot exact checkpoint/config/source identities with restartable collection caches
-  - Add conditional latent-duplication screening before optional history replay, required-agent target groups, chain-success highlights, decoder-specific confusion views and explained validation curves in separate comparable reports
-  - Preserve historical G01 target/own-cell protocols and add archived-feature refitting without policy collection; keep multi-map own-cell experiments outside the execution plan
-  - Route base/outgoing-message collisions to saved-data group profiles and reserve observation replay for ambiguous finder GRUs, stopping at capture; add task-aware report sections, capture-time population metadata and compatible resume of existing snapshots
-  - Use training-style timestamps throughout probe console output and retain timestamped-console compatibility in historical audit imports
-  - Name probe reports after the investigated training run and decoding task, refresh existing headers/navigation/comparison labels without refitting, and distinguish historical own-cell sampling protocols
-
-- Add opt-in budget-aware reinforcement vote shaping and enable it in G02
-  - Group its enabled switch and both signed coefficients under reward.priveleged_vote_reward, with a default-off nested config shared by training, evaluation and replay metadata
-  - Penalize informed connected NO decisions on communication ticks and responsible YES sources on unnecessary grants, replacing ordinary reinforcement reward for those grants
-  - Remember the smallest population that formed a valid chain, permit replacement recruitment within that budget, and carry decision-time provenance through timestamped vote transport
-  - Preserve existing behavior when disabled; wire signed coefficients through training metrics, checkpoint behavior metadata, replay records and inspector reward labels
-- Add selectable timestamped YES/NO reinforcement decisions and enable them in G02
-  - Support quorum_fraction=1.0 as unanimity for both vote protocols and enable it in G02, retaining strict greater-than thresholds below 100%
-  - Retain only the newest source decision per round, propagate one hop per communication tick, and require new approval after a grant or capacity rejection
-  - Preserve legacy accumulating credits as the default alternative and record protocol semantics in checkpoint compatibility metadata
-  - Save every drone's carried vote records in replays and expose them below Episode in the inspector sidebar; simplify drone-dot popups to Vote round ID and nonempty carried votes, and remove name/icon popups
-- Use G02 four-agent reference values as global numeric reward defaults
-- Keep local voxel, sender and soft-cluster attribution; remove the contributors-only success switch
-- Restore all-agents responsibility for useless drones as a separate signed individual reward at terminal chain success
-  - Pay each active drone -750 per useless active drone without a population divisor, capped at a configurable 2000 loss per drone alongside the existing individual adjustment
-  - Explain the min cap in G02 and reward-code comments: default useful-drone success components retain at least +1000 even with many unused drones
-  - Include the term in normal reference credit, training telemetry, recorded replay components and inspector labels
-- Rename reward coefficients, telemetry and replay labels while retaining signed all-decommissioned and no-movement penalty names
-- Migrate G02 and annotate 21 other levels with unsupported legacy blocks and commented default replacements
-- Document per-agent critic targets, full recipient payouts, reference credit and checkpoint behavior identity
-- Mark chain-change rewards and companion delivery-gap vesting as legacy diagnostic tools, excluded from training design/tuning recommendations
-- Refine inspector reward plots with cumulative totals on the left, the selectable view on the right, and component-only areas that omit rewards absent for the selected drone
-- Page inspector discovery through ten additional recent run/test groups per Load more click, retaining loaded artifacts and the current playback; refresh within the loaded group limit
-- Add an isolated G02 map-04 JAX/GPU relay benchmark with production simplification, cached global graphs and same-resolution path subsets; sweep candidate density and pruning on shared 4k/10k targets with console distributions, synchronized count-only timing and separate witness validation
-- Record the completed GPU comparison and select full-resolution cached radio graphs for relay-estimator integration, including parameter compatibility, persistent pool caches and adaptive-spawn migration requirements
-- Add selectable global-candidate relay filtering with cell-relative resolution, persistent map caches, randomized-base JAX searches and adaptive-state compatibility; retain the existing simplifier as the unchanged default
-- Restrict the GPU distribution experiment to G02 map 04 with shared 4k/10k targets, fraction-only columns, candidate counts and GPU query times; omit simplifier execution
-- Use requested global candidate spacing directly without power-of-two rounding, retaining the radio-range cap
-- Default the map-04 experiment to seeded continuous-uniform legal candidates with exact volume-based budgets, shared sample prefixes and retained roadmap anchors; feed prepared pools through the production calculator's map-bank interface and save sampling metadata, leaving production sampling unchanged
-- Report per-fraction preparation, compilation, warmup, query, validation and total costs with shared wall-time accounting; put candidate counts and summed absolute category-count errors above timing rows and compare total runtime against the smallest fraction at batch size 32
-- Enable the production global-candidate estimator at fraction 0.5 in G02; audit all five map caches and host witnesses, document filtered targets above seven agents, and make the existing integration check respect the selected mode and reset every requested map
-- Replace the global relay lattice entirely with shared seeded continuous-uniform legal pools and exact density budgets; promote the benchmark's lazy fixed-base searches, preserve randomized-base graphs, and version persistent caches/adaptive identities for the sampler change
-- Log completed-episode rates for adaptive-size calls reaching the stage target agent budget and its extra deployable slot
-- Group exact-target diagnostics under req_agent_K with category exposure in the ordinary episode window and population/success in independent logging-configured 500-episode windows
-  - Cache the accepted count through resets and terminal transitions without additional relay queries, observations or reward changes
-- Add instantaneous base-connected vote-ratio and normalized live-population observations with a shared global reference of ten
-  - Default both observations off globally and enable them only in G02
-  - Gate both inputs to zero on disconnection and record observation switches/normalization in checkpoint compatibility metadata
-- Add G03_random_buildings as a G02-derived 4000-map level with explicit existing-pool 15 m generation parameters, a 100-episode map window and ten held-out maps at 1000 evaluation episodes each
-  - Document exact old-pool migration versus regeneration, discovery cost and remaining GPU/continuation verification work
-- Add independent logging switches for adaptive-cell diagnostics and individual-map diagnostics, disabled by default in G03
-  - Skip cell dashboard journals, diagnostic row construction and individual-cell plateau reports while preserving adaptive sampling and checkpoint state
-  - Retain mean, worst, best, median and lower-decile map success summaries while suppressing per-map W&B/evaluation series, history arrays and top-map traces
-- Render inspector YES/NO decisions as browser emoji with uniformly bold drone names and camera-independent world-space anchors
-  - Use plain plus/prohibited-plus icons with an on/off checkbox below Building visibility and sufficient padding for the full prohibition ring
-  - Clip only the portions of labels covered by foreground building surfaces and obstacles, preserving partial views and building transparency during playback, orbit, zoom and auto-rotation
-  - Select above, below or X/Y side anchors from physical clearance as drones move near ceilings and walls; camera movement affects only occlusion
+(old commit features were removed)

@@ -260,15 +260,18 @@ are matched by section/table/row/column meaning, units and version; figures are
 unchanged. See the [geo runner guide](../../geo_experiments/README.md) for settings,
 historical audit import and compact source-data conventions.
 
-The G02 sequential plan lives in `geo_experiments/probes.yaml`:
+The sequential probe plan lives in `geo_experiments/probes.yaml`:
 
 ```bash
 uv run python geo_experiments/suite.py plan=true
 uv run python geo_experiments/suite.py
 ```
 
-It shares delivery-eligible collection across map-specific, map+cell and
-shared-coordinate target readouts for the two configured YES/NO runs. Each has
+The current default runs only shared-coordinate target decoding on the latest
+`G03_random_4k_v1_agents_4` checkpoint and all 400 verified frozen validation maps,
+with 10k/1k/5k total samples and nine fits. Historical G02 plans still share
+delivery-eligible collection across map-specific, map+cell and shared-coordinate
+readouts; their authored-map behaviour is unchanged. Each has
 its own report, required-agent target groups, chain-success distribution highlights
 and an optional storey head. The cheap latent screen routes packet collisions to
 saved-snapshot similarity reports; only conflicting finder GRUs can trigger
@@ -276,5 +279,5 @@ observation replay. With all inputs below threshold, a footer gives the rates.
 `geo_experiments/auditing.py run=<suite collection>` can refresh these diagnostics
 without a policy. Probe console output uses the training clock-prefix formatter. Historical G01
 features/splits can be refitted with `geo_experiments/reproduce.py run=<folder>`.
-See the [scoped G02 protocol](../geo/G02_probes.md) for interpretation and limits.
+See the [G03 protocol](../geo/G03_probes.md) and [scoped G02 protocol](../geo/G02_probes.md) for interpretation and limits.
 

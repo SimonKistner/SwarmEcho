@@ -37,13 +37,13 @@ without auxiliary supervision?
 
 Detailed settings, snapshot semantics and archive keys remain in the
 [code README](../../geo_experiments/README.md),
-[configuration](../../geo_experiments/config.yaml) and linked run manifests/data.
+[configuration](../../geo_experiments/legacy/configs/g01_target.yaml) and linked run manifests/data.
 
 ## Completed runs
 
 | Run | Samples / split | Mission success | Cell accuracy: GRU / finder packet / base packet |
 |---|---|---|---|
-| [Initial 10k report](../../geo_experiments/outputs/first_target_probes_20261013_173546_856092/report.html) | 10k; 7,997 / 1,001 / 1,002 | 10,131/10,240 = 98.94% | 78.38% / 78.38% / 75.82% |
+| [Initial 10k report](../../geo_experiments/outputs/archive/first_target_probes_20261013_173546_856092/report.html) | 10k; 7,997 / 1,001 / 1,002 | 10,131/10,240 = 98.94% | 78.38% / 78.38% / 75.82% |
 | [Main 16k report](../../geo_experiments/outputs/target_probes_16k_20261013_192420_964479/report.html) | 16k; 10,000 / 1,000 / 5,000 | 16,207/16,384 = 98.92% | 78.14% / 77.83% / 74.39% |
 | [Observation audit console](../../geo_experiments/outputs/observation_audit_5k_20261013_234801/console.txt) | 5k matched; no decoder fitting | 5,009/5,056 = 99.07% | History comparison, below |
 

@@ -86,7 +86,7 @@ reward:
   rejected_call_reward: -200 # Each qualified YES voter on a rejected batch.
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
   useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; -min(750 * useless_count, 2000). min caps the loss
+  useless_agent_at_success_all_agents_reward: 0 # Each active drone per useless drone at terminal chain success; -min(750 * useless_count, 2000). min caps the loss
   useless_agent_at_success_all_agents_reward_cap: 2000
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
@@ -175,7 +175,7 @@ inspection_evaluation:
 
   early_exit: true
   early_exit_source: validation
-  early_exit_success_rate: 0.85
+  early_exit_success_rate: 0.75
   final_early_exit_success_rate: 0.99 # Only when target budget and population cap both reach seven.
   early_exit_min_success_length_reduction: null # Success alone controls progression.
   early_exit_hold_evals: 1 # Fresh windows per map for training source; eval calls otherwise.

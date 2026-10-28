@@ -92,6 +92,13 @@ def validate_config(config):
         if config["audit"]["every"] != 1:
             raise ValueError("Own-cell prefix filtering requires audit.every=1 (full histories).")
         expected["sampling"] = {"buffer_seconds", "uniform_cells", "exclude_cells"}
+    if "map_source" in config["policy"]:
+        expected["policy"].add("map_source")
+        if config["policy"]["map_source"] not in ("training", "validation"):
+            raise ValueError("policy.map_source must be training or validation.")
+        if config["policy"]["map_source"] == "validation" and (
+                not config["policy"]["from_run_config"] or config["protocol"]["decoder"] == "legacy" or own):
+            raise ValueError("Validation maps require modern target probes and policy.from_run_config=true.")
     if set(config) != set(expected):
         raise ValueError(f"Expected config sections {sorted(expected)}; received {sorted(config)}")
     for section, keys in expected.items():
@@ -159,13 +166,13 @@ def sample_count(config):
     return sum(config[f"{split}_samples"] for split in ("train", "validation", "test"))
 
 
-def split_episodes(labels, config):
+def split_episodes(labels, config, *, require_class_coverage=True):
     """Cell-stratified splits with exact requested sizes, shared by all fits."""
     if len(labels) != sample_count(config):
         raise ValueError("Dataset size must equal train + validation + test samples.")
     rng = np.random.default_rng(config["split_seed"])
     classes, counts = np.unique(labels, return_counts=True)
-    if config["train_samples"] < len(classes):
+    if require_class_coverage and config["train_samples"] < len(classes):
         raise ValueError("Training sample count must cover every observed target cell.")
 
     def allocate(capacity, total, minimum):
@@ -182,7 +189,8 @@ def split_episodes(labels, config):
         allocation[order[:remainder]] += 1
         return allocation
 
-    train_counts = allocate(counts, config["train_samples"], np.ones(len(classes), dtype=int))
+    minimum = np.ones(len(classes), dtype=int) if require_class_coverage else np.zeros(len(classes), dtype=int)
+    train_counts = allocate(counts, config["train_samples"], minimum)
     remaining = counts - train_counts
     validation_counts = allocate(remaining, config["validation_samples"], np.zeros(len(classes), dtype=int))
     splits = {name: [] for name in ("train", "validation", "test")}
