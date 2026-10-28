@@ -26,6 +26,10 @@ IMPORTANT_AI-AGENT_MUST_READ/
 # uv cache
 .uv/
 
+# Generated, allowlisted Determined model contexts
+cluster/.context-*/
+cluster/.submissions/
+
 # Outputs — large binary artifacts, never commit
 outputs/
 src/swarmecho/curriculum_config/maps/random_building_bank/pools/

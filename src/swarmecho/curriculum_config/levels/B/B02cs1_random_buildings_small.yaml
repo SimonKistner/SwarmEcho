@@ -1,0 +1,187 @@
+env:
+  map_names:
+    - B02c_static_map_cellar.yaml
+    #- B02c_small_static/map_0001.yaml
+    #- B02c_small_static/map_0002.yaml
+    #- B02c_small_static/map_0003.yaml
+    #- B02c_small_static/map_0004.yaml
+    #- B02c_small_static/map_0005.yaml
+    #- B02c_small_static/map_0006.yaml
+    #- B02c_small_static/map_0007.yaml
+    #- B02c_small_static/map_0008.yaml
+    #- B02c_small_static/map_0009.yaml
+
+  num_agents: 5
+  spawn_delay: 5 # Initial agents retain the normal stagger; voted reinforcements arrive immediately.
+
+  max_force: 50.0
+  max_speed: 10.0
+  drone_radius: 0.25
+
+  comm_radius_base: 8.0
+  base_keeps_informing: false
+  comm_radius: 15.0
+  visual_radius: 4.0
+  wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
+  wall_sensing_rays: 16 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
+  wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
+  drone_radar_bins: 16
+  radar_mode: band_sep_counting #| legacy
+  distance_bands: 3
+  radar_count_cap: 3
+
+  max_steps: 500
+  success_condition: chain_held # coverage | discovery | delivery | chain_held
+
+  observe_chain_contributor: true
+  observe_current_timestep: false
+  observe_coverage_probe: false # Debugging-only legacy; never a design choice or candidate for any design question.
+  coverage_voxel_size: 2.5
+
+  roadmap_approach: "full" #"minimal"
+  roadmap_node_density: 0.5
+  roadmap_merge_wall_end_nodes: true
+  roadmap_corner_bonus_m: 0.0
+
+random_buildings:
+  enabled: false
+
+  length_m: 15.0
+  width_m: 10.0
+  stories: 2
+  cell_size_m: 5.0
+
+  rooms_per_story_min: 2
+  rooms_per_story_max: 3
+  staircase_max: 1
+
+  save_training_maps: false
+  load_maps_from_bank: false
+
+adapt_size:
+  enabled: true
+  initial_agents: 1 # Integer in [1, env.num_agents]; initial cohort follows env.spawn_delay.
+  vote_mode: hold # hold | keep_yes_no (KEEP=0, YES=1, NO=2)
+  vote_holding: 5 # Delivered YES credits; isolated YES ticks do not count, NO does not erase receipts.
+  quorum_fraction: 0.49 # Strict >; 4/8 and 5/9 qualify.
+  quorum_hold: 0 # Minimum consecutive environment steps with quorum; 0 acts immediately.
+  decommission_radius_m: 1.0 # Sphere above base, clear of the spawn point.
+  decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
+
+
+reward:
+  reinforcement_reward: 0.0
+  decommission_reward: 0.0
+  rejected_call_penalty: 500.0 # Per qualified YES voter, per fresh rejected batch.
+  all_decommissioned_penalty: 1000.0 # Team cost, paid to the last acting drones.
+  success_unused_agent_penalty: 500.0 # Team cost per active non-contributor at success.
+  target_found_requires_delivery: true
+  chain_reward_system: obstacle_geodesic
+
+  allow_redundancy_reward: false
+  enable_chain_efficiency_reward: true
+  chain_efficiency_bonus: 0.1
+
+  exploration_bonus: 2.0
+  target_found_bonus: 500.0
+  finder_bonus: 10
+  success_bonus: 12000.0
+  success_bonus_as_hold_record: false
+  success_bonus_contributors_only: true
+  peer_informing_reward_enabled: true
+  peer_informing_bonus: 50.0
+
+  collision_penalty: 0.5
+  time_penalty_per_step: 3.0
+  no_movement_termination_penalty: 0.0
+  gap_reduction_meter_bonus: 0.2
+  gap_reward_uses_change: false
+  gap_change_meter_bonus: 3.0
+  delivery_gap_vesting_enabled: false
+  delivery_gap_vesting_steps: 10
+
+# TODO: The reward system changed; this level's legacy rewards are no longer supported.
+# Replace the original reward block above with these RewardConfig defaults, then retune this level.
+# Optional switches below are global defaults; restore level-specific choices as needed.
+# reward:
+#   reinforcement_reward: 1.0 # Full amount to each qualified deployment voter.
+#   decommission_reward: 0.0 # Full amount to each removed drone, on removal.
+#   rejected_call_reward: -200.0 # Each qualified YES voter on a rejected batch.
+#   all_decommissioned_penalty: -1000.0 # Full signed amount to each last acting drone.
+#   useless_agent_at_success_reward: -3000.0 # Each active drone outside the selected success chain.
+#   useless_agent_at_success_all_agents_reward: -750.0 # Each active drone per useless drone at terminal chain success; no population divisor.
+#   useless_agent_at_success_all_agents_reward_cap: 2000.0 # Limits the absolute adjustment per active drone so useful success remains rewarding.
+#   target_found_requires_delivery: true
+#   chain_reward_system: euclidean
+#   progress_based_cluster_tiebreaker_soft: false
+
+#   allow_redundancy_reward: false
+#   enable_chain_efficiency_reward: false
+#   chain_efficiency_reward: 0.0 # Per eligible drone times its path efficiency; no population divisor.
+
+#   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
+#   finder_reward: 100.0 # Each direct base deliverer, or first visual finder without delivery gating.
+#   target_found_reward: 125.0 # Full one-shot amount to every active drone at delivery/discovery.
+#   success_reward: 3000.0 # Full amount to every active drone at first success; no population divisor.
+#   success_reward_as_hold_record: false
+#   peer_informing_reward_enabled: false
+#   peer_informing_reward: 50.0
+
+#   collision_reward: -0.5 # Per colliding drone per transition.
+#   time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
+#   gap_progress_reward_per_meter: 0.2
+#   gap_reward_uses_change: false
+#   gap_change_reward_per_meter: 3.0 # Multiplies signed changes in each drone's credited metres.
+#   delivery_gap_vesting_enabled: false
+#   delivery_gap_vesting_steps: 10
+#   no_movement_termination_penalty: 0.0 # Full signed amount to each active drone at idle failure.
+
+training:
+  total_timesteps: 200000000
+  num_envs: 3000
+  num_steps: 100
+  num_epochs: 4
+  num_minibatches: 20
+  seed: 35461354
+
+  randomize_base: false
+  minimum_geodesic_separation: true
+  minimum_geodesic_separation_multiplier: 0.5
+  skip_on_no_pair_found: true
+
+network:
+  hidden_dim: 256
+  num_layers: 3
+  actor_num_layers: 3
+  memory_comm_enabled: true
+  memory_comm_every_k_steps: 3
+  tarmac_sig_dim: 32
+  tarmac_val_dim: 64
+  tarmac_include_self: false
+
+evaluation:
+  num_agents: 7 # null uses env.num_agents from training; a number overrides all evaluation runs, heatmaps, and replays.
+  apply_trainings_min_geo_separation: true
+  eval_parallel_envs: 1000
+  random_eval: false
+  replay_targets_from_storey: 2
+  random_eval_envs: 3
+
+  early_exit: true
+  early_exit_success_rate: 0.99
+  early_exit_min_success_length_reduction: 0.3 # 0.25 -> mean completion by step 450 of 600 (750 of 1000 here); to_test: null
+  early_exit_hold_evals: 1
+
+  save_model: true
+  checkpoint_freq: 30
+  eval_freq: 50
+
+  training_heatmap_creation: true
+
+  eval_video: true
+  eval_video_freq: 50
+  eval_video_offset: 1
+
+logging:
+  terminal_log_warmup: true
+  terminal_log_init: true

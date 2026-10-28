@@ -47,7 +47,19 @@ def resolve_named_file(name_or_path: str | Path, directory: Path, *, aliases: di
 
 
 def resolve_level_file(name_or_path: str | Path, directory: Path) -> Path:
-    return resolve_named_file(name_or_path, directory, aliases=LEVEL_ALIASES)
+    """Resolve short names, grouped names, and pre-migration level paths."""
+    source = resolve_named_file(name_or_path, directory, aliases=LEVEL_ALIASES)
+    if source.is_file():
+        return source
+    requested = Path(str(name_or_path).replace("\\", "/"))
+    canonical = canonical_level_name(requested.stem)
+    grouped = Path(directory) / requested.with_name(canonical + ".yaml")
+    if grouped.is_file():
+        return grouped
+    matches = sorted(Path(directory).rglob(f"{canonical}.yaml"))
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous level name {canonical!r}; specify its family/path: {matches}")
+    return matches[0] if matches else source
 
 
 def resolve_map_file(name_or_path: str | Path, directory: Path) -> Path:

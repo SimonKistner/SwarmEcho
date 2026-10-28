@@ -23,6 +23,7 @@ from swarmecho.training.artifacts import load_eval_info_csv, parse_checkpoint_up
 from swarmecho.visualize.replay import load_replay
 from swarmecho.visualize.replay_path import cached_route, compute_and_cache, source_stamp
 from swarmecho.visualize.inspector_metadata import artifact_configuration
+from swarmecho.visualize.validation_view import discover_validations, validation_label, validation_payload
 
 
 HTML = r"""<!doctype html>
@@ -35,7 +36,9 @@ header{height:116px;display:grid;grid-template-columns:230px minmax(0,1fr) 310px
 header.has-map-navigation,header.has-frame-navigation{height:154px;grid-template-rows:40px 37px 38px 38px}header.has-map-navigation+#layout,header.has-frame-navigation+#layout{height:calc(100vh - 154px)}header.has-map-navigation.has-frame-navigation{height:192px;grid-template-rows:40px 37px 38px 38px 38px}header.has-map-navigation.has-frame-navigation+#layout{height:calc(100vh - 192px)}
 h1{font-size:18px;margin:0;letter-spacing:.04em}.tag{color:var(--cyan);font-weight:700}.meta{color:var(--muted)}
 #layout{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 116px)}#mainView{display:grid;grid-template-rows:minmax(0,2fr) minmax(0,1fr);min-width:0;min-height:0}#mainView.plots-hidden{grid-template-rows:minmax(0,1fr)}#scene{min-width:0;min-height:0}#rewardPlots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:auto minmax(0,1fr);column-gap:8px;min-width:0;min-height:0;padding:5px 8px 7px;border-top:1px solid var(--line);background:#0c1422}.reward-plots-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;font-size:11px;color:var(--muted)}#rewardPlotLegend{display:flex;flex-wrap:wrap;gap:3px 12px;justify-content:flex-end}.reward-key{white-space:nowrap}.reward-key i{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:5px}.reward-chart{min-width:0;min-height:0}.reward-unavailable{align-self:center;text-align:center;color:var(--muted);font-size:13px}.panel{padding:18px;background:var(--panel);border-left:1px solid var(--line);overflow:auto}
+.reward-plots-head{order:-1}#absoluteRewardPlot{order:1}.reward-debug-panel{order:2;display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}.reward-debug-controls{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;padding:4px 0;font-size:11px;color:var(--muted)}.reward-debug-controls label{display:flex;align-items:center;gap:5px}.reward-debug-controls select{width:auto;max-width:100%;padding:3px 5px;font-size:11px}#rewardComponentLegend{display:flex;flex-wrap:wrap;gap:4px 12px;max-height:55px;overflow:auto;padding:3px 6px;font-size:10px;color:var(--muted)}#rewardComponentLegend .reward-key i{height:8px;width:10px;border-radius:2px}
 .card{padding:14px;margin-bottom:12px;background:#0c1422;border:1px solid var(--line);border-radius:10px}.label{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
+.carried-vote-entry{margin-top:10px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.carried-vote-entry strong{font-size:12px}
 .value{font-size:24px;font-weight:750}.row{display:flex;justify-content:space-between;gap:12px;margin:7px 0;color:var(--muted)}.row b{color:var(--text)}
 #layout{grid-template-columns:clamp(360px,33vw,470px) minmax(0,1fr) 280px}
 #buildingPanel{display:grid;grid-template-columns:minmax(140px,.9fr) minmax(180px,1.1fr);align-content:start;align-items:start;gap:12px;padding:12px;min-width:0}
@@ -119,9 +122,9 @@ function sceneAxes(){let axis=title=>({title,gridcolor:'#22304a'});return {xaxis
 // Start without Plotly's turntable transition; configureUprightCamera installs
 // the upright controller without restarting that transition on replay redraws.
 function sceneLayout(revision){return {bgcolor:'#090e18',uirevision:revision+':'+cameraRevision,aspectmode:'data',dragmode:'orbit',...sceneAxes(),camera:structuredClone(camera||DEFAULT_CAMERA)}}
-function renderPlot(traces,revision,extra={}){renderQueue=renderQueue.catch(()=>{}).then(()=>{if(camera)rememberCamera();return Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',scene:sceneLayout(revision),...extra},{responsive:true,displaylogo:false}).then(captureCamera)});return renderQueue}
+function renderPlot(traces,revision,extra={}){const {sceneAnnotations=[],annotationOccluders={mins:[],maxs:[]},...layoutExtra}=extra;renderQueue=renderQueue.catch(()=>{}).then(()=>{if(camera)rememberCamera();$('scene').__droneAnnotationOccluders=annotationOccluders;return Plotly.react('scene',traces,{margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'#090e18',scene:{...sceneLayout(revision),annotations:sceneAnnotations},...layoutExtra},{responsive:true,displaylogo:false}).then(captureCamera)});return renderQueue}
 function setLoading(active,message){$('loading').classList.toggle('hidden',!active);$('replayDiscovery').classList.toggle('hidden',active);if(active)$('loadingText').textContent=message}
-function resizeMainView(){requestAnimationFrame(()=>{if($('scene')._fullLayout)Plotly.Plots.resize($('scene'));if(!$('rewardPlots').classList.contains('hidden'))for(const id of ['absoluteRewardPlot','relativeRewardPlot'])if($(id)._fullLayout)Plotly.Plots.resize($(id))})}
+function resizeMainView(){requestAnimationFrame(()=>{if(!$('scene').classList.contains('hidden')&&$('scene')._fullLayout)Plotly.Plots.resize($('scene'));for(const id of ['validationTrend','validationHistogram'])if($(id)?._fullLayout)Plotly.Plots.resize($(id));if(!$('rewardPlots').classList.contains('hidden'))for(const id of ['absoluteRewardPlot','relativeRewardPlot'])if($(id)._fullLayout)Plotly.Plots.resize($(id))})}
 function updateRewardPlotsVisibility(){const visible=mode==='replay'&&$('showRewardPlots').checked;$('rewardPlots').classList.toggle('hidden',!visible);$('mainView').classList.toggle('plots-hidden',!visible);resizeMainView()}
 function setMode(nextMode){mode=nextMode;$('buildingPanel').classList.toggle('no-episode',mode!=='replay');$('checkpointConfiguration').classList.toggle('hidden',mode==='roadmap');$('buildingPanel').style.visibility='visible';$('roadmapOrangeControl').classList.toggle('hidden',mode!=='roadmap');stopPlayback();$('frameNavigation').classList.toggle('hidden',mode!=='replay');$('inspectorHeader').classList.toggle('has-frame-navigation',mode==='replay');for(const id of ['playbackCard','episodeCard','replayPathCard'])$(id).classList.toggle('hidden',mode!=='replay');$('showCoverage').closest('.card').classList.toggle('hidden',mode!=='replay');$('replayLegend').classList.toggle('hidden',mode!=='replay');$('heatmapControls').classList.toggle('hidden',mode!=='heatmap');$('selectedTarget').classList.toggle('hidden',mode!=='heatmap');if($('roadmapControls'))$('roadmapControls').classList.toggle('hidden',mode!=='roadmap');if(mode!=='replay'&&keyboardTrack==='frames')setNavigationTrack('steps');updateRewardPlotsVisibility();if(mode==='heatmap'){$('selectedPoint').textContent='Click a point to create a replay command.';$('heatmapCommand').value='';renderHeatmapAgreementButtons();updateHeatmapStats()}}
 let replayPath=null,replayPathRequest=0;
@@ -157,8 +160,8 @@ async function loadArtifactData(id){
     const parts=[];for(const name of data.chunks){const chunk=await fetch('./'+name);if(!chunk.ok)throw Error('Export data chunk failed to load');parts.push(await chunk.arrayBuffer())}
     return new Response(new Blob(parts).stream().pipeThrough(new DecompressionStream('gzip'))).json();
 }
-function loadReplay(id,keepCamera=false){resetReplayPath();setLoading(true,'Loading artifact...');return loadArtifactData(id).then(d=>{renderConfiguration(d);if(String(id)!==loadedArtifactId||!keepCamera){camera=null;cameraRevision++}loadedArtifactId=String(id);if(d.kind==='roadmap'){D=d;H=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);$('roadmapOrangeGeometry').checked=false;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;rewardPlotData=prepareRewardPlots(d);setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);renderRewardLegend();return draw(0)}).finally(()=>setLoading(false))}
-let artifactItems=[],artifactBusy=false,keyboardTrack='types',showingAllRuns=false,moreRunsAvailable=false;
+function loadReplay(id,keepCamera=false){resetReplayPath();setLoading(true,'Loading artifact...');return loadArtifactData(id).then(d=>{clearValidationView();renderConfiguration(d);if(d.kind==='validation'){loadedArtifactId=String(id);return drawValidation(d)}if(!keepCamera){camera=null;cameraRevision++}loadedArtifactId=String(id);if(d.kind==='roadmap'){D=d;H=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);$('roadmapOrangeGeometry').checked=false;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;rewardPlotData=prepareRewardPlots(d);setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);renderRewardLegend();return draw(0)}).finally(()=>setLoading(false))}
+let artifactItems=[],artifactBusy=false,keyboardTrack='types',artifactRunLimit=3,includeTests=false,moreRunsAvailable=false;
 let artifactStars=new Set();try{artifactStars=new Set(JSON.parse(localStorage.getItem('swarmecho.inspector.stars')||'[]'))}catch{}
 function artifactParts(label){const start=label.indexOf('_[');return {run:start<0?label:label.slice(0,start),detail:start<0?'Open artifact':label.slice(start+2).replace(/\]_\[/g,' · ').replace(/\]$/,'')}}
 function suiteMapId(item){return item?.map_suite_map_id||item?.random_eval_map_id}
@@ -167,6 +170,36 @@ function manualEvalName(item){return typeof item?.eval_name==='string'&&item.eva
 function canStarArtifact(item){return ['heatmap','replay'].includes(artifactKind(item))}
 function suiteMapLabel(item){return item?.source_map_name||suiteMapId(item)}
 function artifactDetail(item){if(suiteMapId(item))return artifactParts(item.label).detail+' · '+suiteMapLabel(item);const duplicates=artifactItems.filter(other=>artifactRun(other)===artifactRun(item)&&other.label===item.label);let detail=artifactParts(item.label).detail;if(artifactKind(item)==='roadmap'&&item.label.startsWith('random_buildings_'))detail=detail.replace(/ · Roadmap$/,'');return detail+(duplicates.length>1?' · '+(duplicates.indexOf(item)+1):'')}
+function clearValidationView(){
+    for(const id of ['validationTrend','validationHistogram'])if($(id))Plotly.purge(id);
+    $('validationStats')?.remove();$('scene').classList.remove('hidden');$('buildingVisibilityCard').classList.remove('hidden');
+}
+function drawValidation(data){
+    D=null;H=null;rewardPlotData=null;setMode('validation');$('scene').classList.add('hidden');$('buildingVisibilityCard').classList.add('hidden');
+    const metrics=data.metrics,rows=data.maps||[],panel=document.createElement('section');panel.id='validationStats';panel.style.cssText='height:100%;overflow:auto;padding:24px;box-sizing:border-box';
+    const title=document.createElement('h2');title.textContent='Validation · '+metrics.episodes.toLocaleString()+' episodes';panel.appendChild(title);
+    const summary=document.createElement('p');summary.textContent='Success '+(100*metrics.success_rate).toFixed(2)+'% · 95% interval '+(100*metrics.success_ci_low).toFixed(2)+'–'+(100*metrics.success_ci_high).toFixed(2)+'% · Maps '+metrics.maps_evaluated+'/'+metrics.maps_total+' · Stage budget '+data.stage;panel.appendChild(summary);
+    const details=document.createElement('p');details.className='meta';details.textContent='Mean episode length '+metrics.mean_length.toFixed(1)+' · Mean terminal population '+metrics.mean_population.toFixed(2)+' · Map p10 '+(100*metrics.p10_map_success_rate).toFixed(1)+'%. Per-map estimates use the sample counts shown below.';panel.appendChild(details);
+    const trend=document.createElement('div');trend.id='validationTrend';panel.appendChild(trend);
+    const histogram=document.createElement('div');histogram.id='validationHistogram';panel.appendChild(histogram);
+    const search=document.createElement('input');search.placeholder='Search validation map ID';search.setAttribute('aria-label','Search validation maps');panel.appendChild(search);
+    const sort=document.createElement('select');sort.setAttribute('aria-label','Sort validation maps');
+    for(const [value,label] of [['worst','Lowest success first'],['best','Highest success first'],['samples','Fewest samples first'],['id','Map ID']]){const option=document.createElement('option');option.value=value;option.textContent=label;sort.appendChild(option)}panel.appendChild(sort);
+    const table=document.createElement('table');table.style.cssText='width:100%;margin-top:18px;text-align:left;border-collapse:collapse';const head=document.createElement('thead'),header=document.createElement('tr');
+    for(const label of ['Map','Episodes','Successes','Success','Mean length','Mean population']){const cell=document.createElement('th');cell.textContent=label;cell.style.padding='8px';header.appendChild(cell)}head.appendChild(header);table.appendChild(head);const body=document.createElement('tbody');table.appendChild(body);panel.appendChild(table);
+    function renderRows(){
+        const filtered=rows.filter(row=>row.map_id.toLowerCase().includes(search.value.toLowerCase()));
+        filtered.sort((a,b)=>sort.value==='id'?a.map_id.localeCompare(b.map_id):sort.value==='samples'?a.episodes-b.episodes:((a.success_rate==null?Infinity:(sort.value==='best'?-a.success_rate:a.success_rate))-(b.success_rate==null?Infinity:(sort.value==='best'?-b.success_rate:b.success_rate))));
+        body.replaceChildren();for(const row of filtered){const line=document.createElement('tr');for(const value of [row.map_id,row.episodes,row.successes,row.success_rate==null?'—':(100*row.success_rate).toFixed(1)+'%',row.mean_length==null?'—':row.mean_length.toFixed(1),row.mean_population==null?'—':row.mean_population.toFixed(2)]){const cell=document.createElement('td');cell.textContent=value;cell.style.cssText='padding:8px;border-bottom:1px solid var(--line)';line.appendChild(cell)}body.appendChild(line)}
+    }
+    search.oninput=renderRows;sort.onchange=renderRows;renderRows();
+    if(!rows.length){const note=document.createElement('p');note.textContent='Per-map statistics were not saved for this pass.';panel.appendChild(note);search.disabled=true;sort.disabled=true}
+    $('mainView').appendChild(panel);$('replayName').textContent='Validation · '+data.global_step.toLocaleString()+' training steps';
+    const layout={height:240,paper_bgcolor:'transparent',plot_bgcolor:'transparent',font:{color:'#dce6f4'},margin:{t:35,b:45,l:55,r:15},yaxis:{tickformat:'.0%',range:[0,1]}};
+    const history=data.history||[];
+    Plotly.newPlot(trend,[{x:history.map(row=>row.global_step),y:history.map(row=>row.metrics.success_rate),mode:'lines+markers',name:'Validation success'}],{...layout,title:{text:'Validation success over training steps'},xaxis:{title:{text:'Training steps'}}},{responsive:true,displayModeBar:false});
+    Plotly.newPlot(histogram,[{x:rows.filter(row=>row.success_rate!=null).map(row=>row.success_rate),type:'histogram',xbins:{start:0,end:1,size:.05}}],{...layout,title:{text:'Observed map success distribution'},xaxis:{tickformat:'.0%',range:[0,1]},yaxis:{title:{text:'Maps'}}},{responsive:true,displayModeBar:false});
+}
 function artifactKind(item){return item.kind||(/Heatmap/i.test(item.label)?'heatmap':'replay')}
 function artifactRun(item){return item.run_id||artifactParts(item.label).run}
 function artifactSteps(item){const match=artifactParts(item.label).detail.match(/^(\d+(?:\.\d+)?)\s*([MkG])?(?:\s|$)/i);return match?Number(match[1])*({m:1e6,k:1e3,g:1e9}[(match[2]||'').toLowerCase()]||1):null}
@@ -257,22 +290,26 @@ function renderReplayList(items,preferredId,openRun){
     const choice=items.find(x=>String(x.id)===String(preferredId))||(first&&columnItems(runItems(first),artifactKind(first))[0])||first;
     if(choice)s.value=choice.id;
     groups.forEach((group,key)=>{const button=document.createElement('button');button.type='button';button.className='artifact-entry'+(group.length>1?' group':'');const label=document.createElement('span'),count=document.createElement('span');label.textContent=artifactParts(group[0].label).run;count.className='artifact-count';count.textContent=group.length;if(group.some(item=>manualEvalName(item))){const tag=document.createElement('span');tag.className='manual-eval-tag';tag.textContent='MANUAL';tag.title='Contains named manual evaluations';count.prepend(tag)}if(group.some(item=>canStarArtifact(item)&&artifactStars.has(item.id))){const star=document.createElement('span');star.className='run-star';star.textContent='★';star.title='Contains starred items';count.prepend(star)}button.append(label,count);button.onclick=()=>openArtifactSubmenu(group,button);menu.appendChild(button);if(openRun?key===openRun:choice&&group.includes(choice))openArtifactSubmenu(group,button)});
-    if(moreRunsAvailable){const button=document.createElement('button');button.type='button';button.className='artifact-load-more';button.textContent='Load more runs and tests';button.disabled=artifactBusy;button.onclick=()=>refreshArtifacts(false,true);menu.appendChild(button)}
+    if(moreRunsAvailable){const button=document.createElement('button');button.type='button';button.className='artifact-load-more';button.textContent='Load 10 more runs and tests';button.disabled=artifactBusy;button.onclick=()=>refreshArtifacts(false,true);menu.appendChild(button)}
     updateArtifactNavigation();return Promise.resolve();
 }
 document.addEventListener('click',event=>{if(!$('artifactPicker').contains(event.target))$('artifactPicker').open=false});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('artifactPicker').open){$('artifactPicker').open=false;$('artifactPickerButton').focus()}if(event.defaultPrevented||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey||event.target.closest('input,select,textarea,[contenteditable="true"]')||$('artifactPicker').open)return;if(event.key==='ArrowUp'||event.key==='ArrowDown'){const tracks=['types','steps'];if(!$('mapNavigation').classList.contains('hidden'))tracks.push('maps');if(!$('frameNavigation').classList.contains('hidden'))tracks.push('frames');const index=tracks.indexOf(keyboardTrack),next=tracks[Math.max(0,Math.min(tracks.length-1,index+(event.key==='ArrowUp'?-1:1)))];event.preventDefault();setNavigationTrack(next)}else if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();(keyboardTrack==='types'?moveCategory:keyboardTrack==='maps'?moveMap:keyboardTrack==='frames'?moveFrame:moveArtifact)(event.key==='ArrowLeft'?-1:1)}});
-async function refreshArtifacts(onlyRun=false,allRuns=false){
+async function refreshArtifacts(onlyRun=false,loadMore=false){
     if(PUBLIC_INSPECTOR)return;
     if(artifactBusy)return;
     const selected=currentArtifact();if(onlyRun&&!selected)return;
-    artifactBusy=true;updateArtifactNavigation();setLoading(true,onlyRun?'Finding run entries...':allRuns||showingAllRuns?'Finding all entries...':'Finding recent runs...');
+    artifactBusy=true;updateArtifactNavigation();setLoading(true,onlyRun?'Finding run entries...':loadMore?'Finding 10 more runs and tests...':'Finding recent runs...');
     try{
-        const url=onlyRun?'/api/replays?run='+encodeURIComponent(selected.run_id):allRuns||showingAllRuns?'/api/replays':'/api/replays?recent=3';
+        const excluded=loadMore?[...new Set(artifactItems.map(artifactRun))]:[];
+        const url=onlyRun?'/api/replays?run='+encodeURIComponent(selected.run_id):'/api/replays?recent='+(loadMore?10:artifactRunLimit)+((loadMore||includeTests)?'&tests=true':'')+(excluded.length?'&exclude='+excluded.join(','):'');
         const response=await fetch(url,{cache:'no-store'});
         if(!response.ok)throw Error('Artifact list failed to load');
         const items=await response.json();let merged=items;
-        if(!onlyRun){showingAllRuns=allRuns||showingAllRuns;moreRunsAvailable=!showingAllRuns&&response.headers.get('X-Inspector-Has-More')==='true'}
+        if(!onlyRun){
+            if(loadMore){const entries=new Map(artifactItems.map(item=>[item.id,item]));for(const item of items)entries.set(item.id,item);merged=[...entries.values()].sort((a,b)=>(b.modified||0)-(a.modified||0));includeTests=true}
+            artifactRunLimit=Math.max(3,new Set(merged.map(artifactRun)).size);moreRunsAvailable=response.headers.get('X-Inspector-Has-More')==='true';
+        }
         if(onlyRun){
             merged=[];let inserted=false;
             for(const item of artifactItems){
@@ -287,11 +324,11 @@ async function refreshArtifacts(onlyRun=false,allRuns=false){
         // Discovery preserves the current scene, camera and playback position.
         // Load only on initial discovery or when the previous item disappeared.
         if(choice&&(!(D||H)||choice.id!==selected?.id))await loadReplay(choice.id,!!selected);
-        $('replayDiscovery').textContent=items.length+' entries'+(onlyRun?' in current run':showingAllRuns?' across all runs':' in recent runs');
+        $('replayDiscovery').textContent=merged.length+' entries'+(onlyRun?' in current run':includeTests?' across loaded runs and tests':' in recent runs');
     }catch(error){$('replayDiscovery').textContent=error.message}
     finally{artifactBusy=false;setLoading(false);updateArtifactNavigation()}
 }
-function refreshReplays(){return refreshArtifacts(false,true)}
+function refreshReplays(){return refreshArtifacts()}
 function loadSelectedReplay(){const item=currentArtifact();if(item)return chooseArtifact(item)}
 let exportArtifactId=null,exportBaseArtifact=null,exportBusy=false,exportThumbnailData=null,exportThumbnailPromise=null,exportDialogGeneration=0;
 const EXPORT_FIELDS=['exportSubmit','exportClose','exportSlug','exportArtifactName','exportOverwrite','exportReferencePath','exportSection','exportNewSection','exportTags','exportIncludeThumbnail'];
@@ -398,7 +435,7 @@ function configureUprightCamera(){
     }
     live.updateFx(live.fullSceneLayout.dragmode,live.fullSceneLayout.hovermode);
 }
-function captureCamera(){configureUprightCamera();rememberCamera();updateElevation();let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){const changed=event=>{if(Object.keys(event).some(key=>key.startsWith('scene.camera'))){configureUprightCamera();rememberCamera();updateElevation()}};scene.on('plotly_relayout',changed);scene.on('plotly_relayouting',changed);scene.addEventListener('pointerdown',event=>{if(event.target.tagName==='CANVAS')cameraDragging=true});const released=()=>{cameraDragging=false};document.addEventListener('pointerup',released);document.addEventListener('pointercancel',released);window.addEventListener('blur',released);scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}updateAutoRotate()}
+function captureCamera(){installDroneAnnotationOcclusion($('scene')._fullLayout?.scene?._scene);configureUprightCamera();rememberCamera();updateElevation();let scene=$('scene');if(!scene.on)return;if(!scene.__cameraListener){const changed=event=>{if(Object.keys(event).some(key=>key.startsWith('scene.camera'))){configureUprightCamera();rememberCamera();updateElevation()}};scene.on('plotly_relayout',changed);scene.on('plotly_relayouting',changed);scene.addEventListener('pointerdown',event=>{if(event.target.tagName==='CANVAS')cameraDragging=true});const released=()=>{cameraDragging=false};document.addEventListener('pointerup',released);document.addEventListener('pointercancel',released);window.addEventListener('blur',released);scene.__cameraListener=true}if(!scene.__heatmapClickListener){scene.on('plotly_click',event=>{if(mode!=='heatmap')return;let point=event.points.find(item=>item.customdata);if(point)showHeatmapCommand(point.customdata[0],point.customdata[1])});scene.__heatmapClickListener=true}updateAutoRotate()}
 function rememberCamera(){const layout=$('scene')._fullLayout?.scene,live=layout?._scene;let current=live?.getCamera?live.getCamera():layout?.camera;if(current)camera=structuredClone(current)}
 function applyCameraPose(next){
     camera={...structuredClone(next),up:{x:0,y:0,z:1}};
@@ -560,21 +597,20 @@ function replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius)
         if(distance3(p[i],b)<=baseCommRadius&&!segmentBlocked(b,p[i],omin,omax))connect(i,base);
         if(D.directly_sees_target?D.directly_sees_target[f][i]:distance3(p[i],t)<=visualRadius&&!segmentBlocked(p[i],t,omin,omax))connect(i,target);
     }
-    const hopsFrom=start=>{const hops=Array(n+2).fill(Infinity),queue=[start];hops[start]=0;for(let k=0;k<queue.length;k++){const node=queue[k];adj[node].forEach((edge,next)=>{if(edge&&hops[next]===Infinity){hops[next]=hops[node]+1;queue.push(next)}})}return hops};
+    // Base and target are endpoints; only drones relay between components.
+    const hopsFrom=start=>{const hops=Array(n+2).fill(Infinity),queue=[start];hops[start]=0;for(let k=0;k<queue.length;k++){const node=queue[k];if(node>=n&&node!==start)continue;adj[node].forEach((edge,next)=>{if(edge&&hops[next]===Infinity){hops[next]=hops[node]+1;queue.push(next)}})}return hops};
     const baseHops=hopsFrom(base),targetHops=hopsFrom(target),cb=D.connected_to_base?.[f]||baseHops.slice(0,n).map(Number.isFinite),ct=D.connected_to_target?.[f]||targetHops.slice(0,n).map(Number.isFinite);
     const complete=D.fully_connected?Boolean(D.fully_connected[f]):Number.isFinite(baseHops[target]),green=new Set(),edgeKey=(i,j)=>Math.min(i,j)+':'+Math.max(i,j);
-    // Mirror the reward selector: minimum-hop paths to its two Euclidean tips,
-    // with the lowest node index breaking equal-hop ties.
-    const traceTip=(start,connected,goal)=>{
-        let tip=-1,best=Infinity;for(let i=0;i<n;i++)if(active[i]&&connected[i]){const distance=distance3(p[i],goal);if(distance<best){best=distance;tip=i}}
-        if(tip<0)return;const hops=hopsFrom(tip);let current=start;
-        for(let k=0;k<n+2&&current!==tip;k++){const next=adj[current].findIndex((edge,j)=>edge&&hops[j]===hops[current]-1);if(next<0)break;green.add(edgeKey(current,next));current=next}
-    };
+    // A held chain must highlight one complete minimum-hop base-target route.
+    // Euclidean frontier tips can select a redundant branch after connection.
     if(complete){
         if(D.manifest.allow_redundancy_reward){
             const visit=(node,path,seen)=>{if(node===target){for(let i=1;i<path.length;i++)green.add(edgeKey(path[i-1],path[i]));return}for(let next=0;next<n+2;next++)if(adj[node][next]&&!seen.has(next)){seen.add(next);path.push(next);visit(next,path,seen);path.pop();seen.delete(next)}};
             visit(base,[base],new Set([base]));
-        }else{traceTip(base,cb,t);traceTip(target,ct,b)}
+        }else if(Number.isFinite(targetHops[base])){
+            let current=base;
+            while(current!==target){const next=adj[current].findIndex((edge,j)=>edge&&targetHops[j]===targetHops[current]-1);if(next<0)break;green.add(edgeKey(current,next));current=next}
+        }
     }
     const blue='rgba(34,211,238,.35)',purple='rgba(167,139,250,.55)',pink='rgba(251,113,133,.65)',traces=[];
     for(let i=0;i<n+2;i++)for(let j=i+1;j<n+2;j++)if(adj[i][j]){
@@ -586,13 +622,215 @@ function replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius)
 }
 function baseKnowsTarget(f,base){if(D.base_target_known)return Boolean(D.base_target_known[f]);for(let q=0;q<=f;q++){if(D.fully_connected?.[q])return true;if(!D.fully_connected&&D.connected_to_base&&D.connected_to_target&&D.active[q].some((on,i)=>on&&D.connected_to_base[q][i]&&D.connected_to_target[q][i]))return true}return false}
 function renderKnownList(agentCount){let list=$('knownList');list.replaceChildren();['BASE',...Array.from({length:agentCount},(_,i)=>'D'+(i+1))].forEach(name=>{let item=document.createElement('button');item.type='button';item.className='known-item';item.textContent=name;list.appendChild(item)})}
-function updateKnownList(agentKnown,baseKnown){let statuses=[baseKnown,...agentKnown];$('knownList').querySelectorAll('.known-item').forEach((item,i)=>item.classList.toggle('known',Boolean(statuses[i])))}
+function adaptiveDroneStatus(f,i){const cfg=D.manifest.adapt_size;return 'D'+(i+1)+' · '+(D.adapt_vote[f][i]?'✓ YES':'○ NO')+' · Decommission '+D.adapt_dwell[f][i]+'/'+cfg.decommission_hold_steps}
+function latestDecisionProtocol(){return D.manifest.adapt_size?.vote_protocol==='latest_decision'}
+function carriedVoteLines(f,receiver){
+  const rounds=D.adapt_packet_round?.[f]?.[receiver];
+  if(latestDecisionProtocol()){
+    const timestamps=D.adapt_decision_step?.[f]?.[receiver],decisions=D.adapt_decision_yes?.[f]?.[receiver];
+    if(!rounds||!timestamps||!decisions)return null;
+    return timestamps.flatMap((stamp,source)=>stamp<0?[]:['D'+(source+1)+' · ID '+D.adapt_ids[f][source]+': '+(decisions[source]?'YES':'NO')+' · step '+stamp+' · age '+Math.max(0,(D.step?.[f]??f)-stamp)+' · round '+rounds[source]]);
+  }
+  const packets=D.adapt_packet_bits?.[f]?.[receiver];
+  if(!rounds||!packets)return null;
+  return packets.flatMap((words,source)=>{
+    const ids=[];words.forEach((word,w)=>{for(let bit=0;bit<32;bit++)if((word>>>bit)&1)ids.push(w*32+bit)});
+    if(!ids.length)return [];
+    const ranges=[];for(let k=0;k<ids.length;){let end=k;while(end+1<ids.length&&ids[end+1]===ids[end]+1)end++;ranges.push('#'+ids[k]+(end>k?'–#'+ids[end]:''));k=end+1}
+    return ['D'+(source+1)+' · ID '+D.adapt_ids[f][source]+': '+ids.length+' YES · packets '+ranges.join(', ')+' · round '+rounds[source]];
+  });
+}
+function droneHoverText(f,i){
+  const lines=['<b>D'+(i+1)+'</b>'];
+  if(D.adapt_vote&&D.manifest.adapt_size?.enabled){
+    lines.push('Vote round ID '+D.adapt_ids[f][i]);
+    const carried=carriedVoteLines(f,i);
+    if(carried?.length)lines.push('<b>Carried votes</b>',...carried);
+  }
+  return lines.join('<br>');
+}
+function setupVoteVisualizationControl(enabled){
+  let card=$('voteVisualizationCard');
+  if(!card){card=document.createElement('section');card.id='voteVisualizationCard';card.className='card';card.setAttribute('aria-label','Vote visualization');card.innerHTML='<div class="label">Vote visualization</div><label class="layer-control"><span><input id="showVoteIcons" type="checkbox" checked> Show vote icons</span></label><p class="meta" style="margin-bottom:0">➕ YES · crossed out ➕ NO</p>';$('buildingVisibilityCard').after(card);$('showVoteIcons').onchange=()=>draw(frame)}
+  card.hidden=!enabled;
+}
+function droneAnnotationOccluders(f){
+  const boxes=[],g=D.building,opacity=1-(+$('wallTransparency').value/100);
+  if(g&&+$('wallTransparency').value<100){
+    boxes.push(...g.walls.filter(w=>visibleStoreys[w.storey]&&(!w.outer||$('showOuterWalls').checked)));
+    boxes.push(...(g.floors||[]).filter(w=>visibleStoreys[w.storey]));
+    if($('showRoof').checked)boxes.push(...(g.roofs||[]).filter(w=>visibleStoreys[w.storey]));
+  }
+  (D.obstacle_min?.[f]||[]).forEach((lo,i)=>boxes.push({lo,hi:D.obstacle_max[f][i],opacity:.5}));
+  return {mins:boxes.map(b=>b.lo),maxs:boxes.map(b=>b.hi),opacities:boxes.map(b=>b.opacity??opacity)};
+}
+function installDroneAnnotationOcclusion(scene){
+  if(!scene?.drawAnnotations)return;
+  if(!scene.__droneOcclusionInstalled){
+    const drawAnnotations=scene.drawAnnotations;
+    scene.drawAnnotations=function(current){
+      const masks=layoutDroneAnnotations(current);
+      const result=drawAnnotations.call(this,current);
+      applyDroneAnnotationMasks(current,masks);
+      return result;
+    };
+    scene.__droneOcclusionInstalled=true;
+  }
+  scene.drawAnnotations(scene);
+}
+function droneLabelHull(points){
+  const sorted=points.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  if(sorted.length<3)return [];
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[],upper=[];
+  for(const p of sorted){while(lower.length>1&&cross(lower.at(-2),lower.at(-1),p)<=0)lower.pop();lower.push(p)}
+  for(const p of sorted.slice().reverse()){while(upper.length>1&&cross(upper.at(-2),upper.at(-1),p)<=0)upper.pop();upper.push(p)}
+  return lower.slice(0,-1).concat(upper.slice(0,-1));
+}
+function clipDroneLabelPolygon(polygon,axis,bound,keepGreater){
+  const output=[];
+  for(let i=0;i<polygon.length;i++){
+    const a=polygon[i],b=polygon[(i+1)%polygon.length],insideA=keepGreater?a[axis]>=bound:a[axis]<=bound,insideB=keepGreater?b[axis]>=bound:b[axis]<=bound;
+    if(insideA)output.push(a);
+    if(insideA!==insideB){const t=(bound-a[axis])/(b[axis]-a[axis]);output.push(a.map((n,k)=>n+t*(b[k]-n)))}
+  }
+  return output;
+}
+function layoutDroneAnnotations(scene){
+  const entries=[],masks=[];
+  for(const [index,ann] of (scene.fullSceneLayout.annotations||[]).entries()){
+    if(!/^drone-(?:name|vote|prohibition)-\d+$/.test(ann.name||''))continue;
+    ann.visible=true;entries.push({ann,index});
+  }
+  const params=scene.glplot.cameraParams,m=params?.model,v=params?.view,projection=params?.projection;
+  if(!entries.length||!m||!v||!projection)return masks;
+  const size=scene.fullLayout._size,domain=scene.fullSceneLayout.domain;
+  const left=size.l+domain.x[0]*size.w,top=size.t+(1-domain.y[1])*size.h,width=size.w*(domain.x[1]-domain.x[0]),height=size.h*(domain.y[1]-domain.y[0]);
+  if(!width||!height)return masks;
+  const toView=point=>{
+    const model=point.map((n,k)=>n*scene.dataScale[k]*m[k*5]+m[12+k]);
+    return [0,1,2].map(k=>v[k]*model[0]+v[4+k]*model[1]+v[8+k]*model[2]+v[12+k]);
+  };
+  const project=point=>{
+    const clip=[0,1,2,3].map(k=>projection[k]*point[0]+projection[4+k]*point[1]+projection[8+k]*point[2]+projection[12+k]);
+    return [left+(clip[0]/clip[3]+1)*width/2,top+(1-clip[1]/clip[3])*height/2];
+  };
+  const {mins=[],maxs=[],opacities=[]}=scene.graphDiv.__droneAnnotationOccluders||{};
+  const boxes=mins.map((lo,i)=>{const hi=maxs[i],vertices=[];for(let k=0;k<8;k++)vertices.push(toView([k&1?hi[0]:lo[0],k&2?hi[1]:lo[1],k&4?hi[2]:lo[2]]));return {vertices,opacity:opacities[i]??1}});
+  const edges=[];for(let i=0;i<8;i++)for(const bit of [1,2,4])if(!(i&bit))edges.push([i,i|bit]);
+  const near=-(scene.glplot.zNear||.01)*1.001,cache=new Map();
+  for(const {ann,index} of entries){
+    // World anchors are chosen when the drone moves, never by this camera pass.
+    const viewPoint=toView([ann.x,ann.y,ann.z]),key=viewPoint[2].toFixed(6);
+    let polygons=cache.get(key);
+    if(!polygons){
+      polygons=[];
+      // Clip the displayed solids to the space in front of this billboard.
+      // The resulting projected silhouettes partially cover its actual glyphs.
+      for(const {vertices,opacity} of boxes){
+        const far=viewPoint[2]+1e-5;
+        if(far>=near||opacity<=0)continue;
+        const clipped=vertices.filter(p=>p[2]>=far&&p[2]<=near);
+        for(const [a,b] of edges)for(const z of [far,near]){
+          const p=vertices[a],q=vertices[b],dz=q[2]-p[2];
+          if(Math.abs(dz)<1e-12)continue;
+          const t=(z-p[2])/dz;
+          if(t>=0&&t<=1)clipped.push(p.map((n,k)=>n+t*(q[k]-n)));
+        }
+        let hull=droneLabelHull(clipped.map(project).filter(p=>p.every(Number.isFinite)));
+        for(const [axis,bound,greater] of [[0,left,true],[0,left+width,false],[1,top,true],[1,top+height,false]])hull=clipDroneLabelPolygon(hull,axis,bound,greater);
+        if(hull.length>2)polygons.push({points:hull,opacity});
+      }
+      cache.set(key,polygons);
+    }
+    masks.push({id:index,indices:[index],polygons});
+  }
+  return masks;
+}
+function applyDroneAnnotationMasks(scene,masks){
+  const svgNS='http://www.w3.org/2000/svg',layer=scene.fullLayout._infolayer.node(),svg=layer.ownerSVGElement;
+  let defs=svg.querySelector('defs[data-drone-label-masks="'+scene.id+'"]');
+  if(!defs){defs=document.createElementNS(svgNS,'defs');defs.setAttribute('data-drone-label-masks',scene.id);svg.appendChild(defs)}
+  defs.replaceChildren();
+  for(const {id,indices,polygons} of masks){
+    if(!polygons.length)continue;
+    const maskID='drone-label-mask-'+scene.fullLayout._uid+'-'+scene.id+'-'+id,mask=document.createElementNS(svgNS,'mask');
+    mask.id=maskID;mask.setAttribute('maskUnits','userSpaceOnUse');mask.setAttribute('x','0');mask.setAttribute('y','0');mask.setAttribute('width',scene.fullLayout.width);mask.setAttribute('height',scene.fullLayout.height);mask.style.maskType='luminance';
+    const background=document.createElementNS(svgNS,'rect');background.setAttribute('width',scene.fullLayout.width);background.setAttribute('height',scene.fullLayout.height);background.setAttribute('fill','white');mask.appendChild(background);
+    const paths=new Map();
+    for(const polygon of polygons){const d='M'+polygon.points.map(p=>p.map(n=>n.toFixed(2)).join(',')).join('L')+'Z';paths.set(polygon.opacity,(paths.get(polygon.opacity)||'')+d)}
+    for(const [opacity,d] of paths){const path=document.createElementNS(svgNS,'path');path.setAttribute('d',d);path.setAttribute('fill','black');path.setAttribute('fill-opacity',opacity);mask.appendChild(path)}
+    defs.appendChild(mask);
+    for(const index of indices)layer.querySelector('.annotation-'+scene.id+'[data-index="'+index+'"]')?.setAttribute('mask','url(#'+maskID+')');
+  }
+}
+function droneAnnotationPlacement(f,i,point){
+  const g=D.building,size=D.manifest.world_size_m||[20,20,20],padding=.18;
+  const distance=Math.max(.65,Math.min(1.25,(g?.cell_size_m||D.manifest.cell_size_m||3)*.4));
+  const solids=[...(g?.walls||[]),...(g?.floors||[]),...(g?.roofs||[])];
+  (D.obstacle_min?.[f]||[]).forEach((lo,k)=>solids.push({lo,hi:D.obstacle_max[f][k]}));
+  const directions=[[2,1],[2,-1],[0,1],[0,-1],[1,1],[1,-1]];
+  const clearance=directions.map(([axis,sign])=>{
+    let free=(sign>0?size[axis]-point[axis]:point[axis])-padding;
+    for(const {lo,hi} of solids){
+      if([0,1,2].some(k=>k!==axis&&(point[k]<lo[k]-padding||point[k]>hi[k]+padding)))continue;
+      if(sign>0?hi[axis]<=point[axis]:lo[axis]>=point[axis])continue;
+      const near=sign>0?lo[axis]-padding-point[axis]:point[axis]-hi[axis]-padding;
+      const far=sign>0?hi[axis]+padding-point[axis]:point[axis]-lo[axis]+padding;
+      if(far>=0)free=Math.min(free,Math.max(0,near));
+    }
+    return Math.max(0,free);
+  });
+  const cache=droneAnnotationPlacement.cache||(droneAnnotationPlacement.cache=new WeakMap());
+  if(!cache.has(D))cache.set(D,new Map());
+  const choices=cache.get(D),previous=choices.get(i);
+  let chosen=clearance.findIndex(free=>free>=distance);
+  if(chosen<0)chosen=clearance.indexOf(Math.max(...clearance));
+  // Hysteresis depends only on physical clearance, not on the viewing angle.
+  if(previous!==undefined&&clearance[previous]>=distance&&(chosen!==0||clearance[0]<distance+.2))chosen=previous;
+  choices.set(i,chosen);
+  const [axis,sign]=directions[chosen],reach=Math.min(distance,clearance[chosen]);
+  const at=fraction=>point.map((n,k)=>n+(k===axis?sign*reach*fraction:0));
+  return {name:at(.4),icon:at(1)};
+}
+function droneSceneAnnotations(f,p,active){
+  const annotations=[],enabled=Boolean(D.adapt_vote&&D.manifest.adapt_size?.enabled)&&$('showVoteIcons')?.checked!==false;
+  const emojiFont='Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji,sans-serif';
+  active.forEach((isActive,i)=>{
+    if(!isActive)return;
+    const placement=droneAnnotationPlacement(f,i,p[i]);
+    const anchor=point=>({x:point[0],y:point[1],z:point[2],showarrow:false,xanchor:'center',yanchor:'middle',captureevents:false,borderpad:0,borderwidth:0});
+    annotations.push({...anchor(placement.name),name:'drone-name-'+i,text:'<b>D'+(i+1)+'</b>',font:{family:'Arial,sans-serif',size:16,color:'#f8fafc'}});
+    if(!enabled)return;
+    const badge={...anchor(placement.icon),width:40,height:40,bgcolor:'rgba(0,0,0,0)',font:{family:emojiFont,size:22}};
+    annotations.push({...badge,name:'drone-vote-'+i,text:'➕'});
+    if(!D.adapt_vote[f][i])annotations.push({...badge,name:'drone-prohibition-'+i,text:'⊘',font:{family:'Arial,sans-serif',size:30,color:'#ef4444'}});
+  });
+  return annotations;
+}
+function updateAdaptiveInspector(f){
+  const enabled=Boolean(D.adapt_vote&&D.manifest.adapt_size?.enabled);
+  setupVoteVisualizationControl(enabled);
+  let card=document.getElementById('adaptiveBaseCard');
+  if(!card&&enabled){card=document.createElement('div');card.id='adaptiveBaseCard';card.className='card';$('episodeColumn').insertBefore(card,$('episodeCard'))}
+  if(card){card.hidden=!enabled;if(enabled){card.replaceChildren();let title=document.createElement('h3');title.textContent='Base votes · Round '+D.adapt_round[f];card.appendChild(title);let cfg=D.manifest.adapt_size;D.active[f].forEach((active,i)=>{if(!active)return;let row=document.createElement('div');const name='D'+(i+1)+' · ';if(latestDecisionProtocol()){const base=D.active[f].length,stamp=D.adapt_decision_step?.[f]?.[base]?.[i]??-1,current=D.adapt_packet_round?.[f]?.[base]?.[i]===D.adapt_round[f]&&stamp>=0;row.textContent=name+(current?(D.adapt_decision_yes[f][base][i]?'YES':'NO')+' · step '+stamp:'UNKNOWN');row.title=current?'Source decision age: '+Math.max(0,(D.step?.[f]??f)-stamp)+' steps':'No decision received for this round'}else{row.textContent=name+D.adapt_available_votes[f][i]+'/'+cfg.vote_holding;row.title='YES credits received this round: '+D.adapt_base_votes[f][i]+'; consumed by rejected calls: '+D.adapt_spent[f][i]}card.appendChild(row)})}}
+  let carrying=document.getElementById('adaptiveCarryingCard');
+  if(!carrying&&enabled){carrying=document.createElement('div');carrying.id='adaptiveCarryingCard';carrying.className='card';$('episodeCard').after(carrying)}
+  if(carrying){carrying.hidden=!enabled;if(enabled){carrying.replaceChildren();const title=document.createElement('h3');title.textContent='Carried votes';carrying.appendChild(title);D.active[f].forEach((active,i)=>{if(!active)return;const entry=document.createElement('div');entry.className='carried-vote-entry';const heading=document.createElement('strong');heading.textContent='D'+(i+1)+' · Round '+(D.adapt_known_round?.[f]?.[i]??D.adapt_round[f]);entry.appendChild(heading);const lines=carriedVoteLines(f,i);for(const text of lines===null?['Not recorded in this replay']:lines.length?lines:['None']){const row=document.createElement('div');row.textContent=text;entry.appendChild(row)}carrying.appendChild(entry)})}}
+  $('knownList').querySelectorAll('.known-item').forEach((item,index)=>{if(!index)return;let i=index-1;item.hidden=enabled&&!D.active[f][i];item.textContent=enabled?adaptiveDroneStatus(f,i):'D'+(i+1);item.title=enabled?'Lifetime ID '+D.adapt_ids[f][i]:''});
+}
+function updateKnownList(agentKnown,baseKnown){let statuses=[baseKnown,...agentKnown];$('knownList').querySelectorAll('.known-item').forEach((item,i)=>item.classList.toggle('known',Boolean(statuses[i])));updateAdaptiveInspector(frame)}
+const rewardDebugPanel=document.createElement('div');rewardDebugPanel.className='reward-debug-panel';
+$('relativeRewardPlot').replaceWith(rewardDebugPanel);
+rewardDebugPanel.innerHTML='<div class="reward-debug-controls"><label>View <select id="rewardDebugMode"><option value="breakdown" selected>Reward breakdown</option><option value="relative">Relative advantage</option></select></label><label id="rewardDroneControl">Drone <select id="rewardDebugDrone" aria-label="Drone for reward breakdown"></select></label></div><div id="relativeRewardPlot" class="reward-chart"></div><div id="rewardComponentLegend" aria-label="Reward component legend"></div>';
+const REWARD_COMPONENT_STYLES={exploration_reward:['Exploration reward','#22d3ee'],collision_reward:['Collision reward','#f87171'],finder_reward:['Finder reward','#fbbf24'],target_found_reward:['Target found reward','#60a5fa'],time_presure_reward:['Time pressure reward','#94a3b8'],gap_reward:['Gap reward','#4ade80'],peer_informing_reward:['Peer informing reward','#a78bfa'],success_reward:['Success reward','#a3e635'],useless_agent_at_success_reward:['Useless agent at success reward','#fb7185'],useless_agent_at_success_all_agents_reward:['Useless agents · all agents reward','#f97316'],no_movement_termination_penalty:['No movement termination penalty','#d97706'],chain_efficiency_reward:['Chain efficiency reward','#2dd4bf'],reinforcement_reward:['Reinforcement reward','#f472b6'],withheld_reinforcement_vote_reward:['Withheld reinforcement vote reward','#fb923c'],unnecessary_reinforcement_call_reward:['Unnecessary reinforcement call reward','#e11d48'],decommission_reward:['Decommission reward','#c084fc'],rejected_call_reward:['Rejected call reward','#ef4444'],all_decommissioned_penalty:['All decommissioned penalty','#b91c1c'],reward_by_reference:['Reference reward','#e879f9']};
 const REWARD_COLORS=['#60a5fa','#fb7185','#4ade80','#fbbf24','#a78bfa','#22d3ee','#f472b6','#fb923c','#a3e635','#c084fc'];
 let rewardPlotData=null;
 function prepareRewardPlots(data){
     const terms=data.reward_terms,agents=data.manifest.agents||data.position?.[0]?.length;
     if(!Array.isArray(terms)||!terms.length||!agents||!Array.isArray(terms[0])||terms[0].length!==agents)return null;
     const steps=terms.map((_,i)=>Number.isFinite(Number(data.step?.[i]))?Number(data.step[i]):i);
+    const agentIndices=Array.from({length:agents},(_,i)=>i).filter(i=>!Array.isArray(data.active)||data.active.some(row=>Boolean(row?.[i])));
     const absolute=[],relative=[],perStep=[],relativeStep=[];let running=Array(agents).fill(0),relativeRunning=Array(agents).fill(0);
     for(const row of terms){
         const values=row.map(entry=>Array.isArray(entry)?entry.flat(Infinity).reduce((sum,value)=>sum+Number(value),0):Number(entry));
@@ -600,25 +838,68 @@ function prepareRewardPlots(data){
         running=running.map((value,i)=>value+values[i]);relativeRunning=relativeRunning.map((value,i)=>value+values[i]-minimum);
         absolute.push([...running]);relative.push([...relativeRunning]);perStep.push(values);relativeStep.push(stepRelative);
     }
-    return {steps,absolute,relative,perStep,relativeStep,agents};
+    const names=data.manifest.reward_component_names,components=data.reward_components;
+    const hasComponents=Array.isArray(names)&&names.length>0&&Array.isArray(components)&&components.length===terms.length&&components.every(row=>Array.isArray(row)&&row.length===agents&&row.every(values=>Array.isArray(values)&&values.length===names.length&&values.every(Number.isFinite)));
+    return {steps,absolute,relative,perStep,relativeStep,agents,agentIndices,componentNames:hasComponents?names:null,components:hasComponents?components:null,componentCache:new Map()};
 }
-function renderRewardLegend(){const legend=$('rewardPlotLegend');legend.replaceChildren();if(!rewardPlotData)return;for(let i=0;i<rewardPlotData.agents;i++){const item=document.createElement('span'),swatch=document.createElement('i');item.className='reward-key';swatch.style.background=REWARD_COLORS[i%REWARD_COLORS.length];item.append(swatch,'D'+(i+1));legend.appendChild(item)}}
-function rewardAxisRange(rows){let lo=0,hi=0;for(const row of rows)for(const value of row){lo=Math.min(lo,value);hi=Math.max(hi,value)}const padding=Math.max((hi-lo)*.08,.1);return [lo-padding,hi+padding]}
+function renderRewardLegend(){const legend=$('rewardPlotLegend');legend.replaceChildren();if(!rewardPlotData)return;for(const i of rewardPlotData.agentIndices){const item=document.createElement('span'),swatch=document.createElement('i');item.className='reward-key';swatch.style.background=REWARD_COLORS[i%REWARD_COLORS.length];item.append(swatch,'D'+(i+1));legend.appendChild(item)}}
+function rewardAxisRange(rows,agentIndices){let lo=0,hi=0;for(const row of rows)for(const i of agentIndices){const value=row[i];lo=Math.min(lo,value);hi=Math.max(hi,value)}const padding=Math.max((hi-lo)*.08,.1);return [lo-padding,hi+padding]}
+function rewardUnavailable(element,message){if(element._fullLayout)Plotly.purge(element);element.__rewardData=null;element.classList.add('reward-unavailable');element.textContent=message}
+function updateRewardDroneOptions(currentFrame){
+    const select=$('rewardDebugDrone'),active=D.active?.[currentFrame]||[];
+    const indices=rewardPlotData.agentIndices.filter(i=>Boolean(active[i]));
+    const key=indices.join(',');
+    if(select.dataset.activeDrones!==key||select.options.length!==indices.length){const previous=select.value;select.replaceChildren(...indices.map(i=>{const option=document.createElement('option');option.value=String(i);option.textContent='D'+(i+1);return option}));if(indices.some(i=>String(i)===previous))select.value=previous;select.dataset.activeDrones=key}
+    select.disabled=!indices.length;return indices.length?Number(select.value):null;
+}
+function rewardComponentSeries(data,drone){
+    if(data.componentCache.has(drone))return data.componentCache.get(drone);
+    const indices=data.componentNames.map((_,index)=>index).filter(index=>data.components.some(row=>row[drone][index]!==0));
+    const series=indices.map(index=>{const name=data.componentNames[index];let running=0;const cumulative=data.components.map(row=>running+=row[drone][index]);const [label,color]=REWARD_COMPONENT_STYLES[name]||[name.replaceAll('_',' '),REWARD_COLORS[index%REWARD_COLORS.length]];return {name,label,color,index,cumulative}});
+    data.componentCache.set(drone,series);return series;
+}
+function componentLegend(series){const legend=$('rewardComponentLegend');legend.replaceChildren();for(const {label,color} of series){const item=document.createElement('span'),swatch=document.createElement('i');item.className='reward-key';swatch.style.background=color;item.append(swatch,label);legend.appendChild(item)}}
+async function paintRewardBreakdown(currentFrame,data,common,options){
+    const element=$('relativeRewardPlot'),drone=updateRewardDroneOptions(currentFrame);
+    if(!data.components){$('rewardComponentLegend').replaceChildren();rewardUnavailable(element,'Data not available (legacy replay)');return}
+    if(drone===null){$('rewardComponentLegend').replaceChildren();rewardUnavailable(element,'No active drones at this step.');return}
+    element.classList.remove('reward-unavailable');if(!element._fullLayout)element.replaceChildren();
+    const series=rewardComponentSeries(data,drone),x=data.steps.slice(0,currentFrame+1),traces=[];
+    const positive=Array(x.length).fill(0),negative=Array(x.length).fill(0);
+    for(const item of series){
+        const values=item.cumulative.slice(0,currentFrame+1),customdata=values.map((value,f)=>[value,data.components[f][drone][item.index]]);
+        for(const sign of [1,-1]){
+            const y=values.map(value=>sign>0?Math.max(value,0):Math.min(value,0));
+            if(!y.some(value=>value!==0))continue;
+            const bounds=sign>0?positive:negative;y.forEach((value,i)=>bounds[i]+=value);
+            traces.push({type:'scatter',mode:'lines',name:item.label,x,y,customdata,stackgroup:sign>0?'rewards':'penalties',line:{color:item.color,width:.7},fillcolor:item.color,hoveron:'fills',text:item.label,hoverinfo:'text',hovertemplate:item.label+'<extra></extra>'});
+        }
+    }
+    componentLegend(series);
+    const bounds=positive.map((value,i)=>[negative[i],value]),range=rewardAxisRange(bounds,[0,1]);
+    await Plotly.react(element,traces,{...common,hovermode:'closest',title:{text:'Cumulative reward components · D'+(drone+1),font:{size:12,color:'#e5eefc'},x:0,xanchor:'left'},yaxis:{...common.yaxis,range}},options);element.__rewardData=null;
+}
 async function paintRewardPlots(currentFrame){
     if(mode!=='replay'||$('rewardPlots').classList.contains('hidden'))return Promise.resolve();
     const data=rewardPlotData;
-    if(!data){for(const id of ['absoluteRewardPlot','relativeRewardPlot']){if($(id)._fullLayout)Plotly.purge($(id));$(id).__rewardData=null;$(id).classList.add('reward-unavailable');$(id).textContent='Per-agent reward data is unavailable for this replay.'}return Promise.resolve()}
+    const breakdown=$('rewardDebugMode').value==='breakdown';$('rewardDroneControl').classList.toggle('hidden',!breakdown);$('rewardComponentLegend').classList.toggle('hidden',!breakdown);
+    const debugPlot=$('relativeRewardPlot');if(debugPlot.__rewardMode!==breakdown){if(debugPlot._fullLayout)Plotly.purge(debugPlot);debugPlot.__rewardData=null;debugPlot.__rewardMode=breakdown}
+    if(!data){$('rewardDebugDrone').replaceChildren();$('rewardDebugDrone').disabled=true;$('rewardComponentLegend').replaceChildren();for(const id of ['absoluteRewardPlot','relativeRewardPlot'])rewardUnavailable($(id),id==='relativeRewardPlot'&&breakdown?'Data not available (legacy replay)':'Per-agent reward data is unavailable for this replay.');return}
     const x=data.steps.slice(0,currentFrame+1),xEnd=data.steps[data.steps.length-1],xStart=data.steps[0],xRange=[xStart,Math.max(xStart+1,xEnd)];
     const common={paper_bgcolor:'#0c1422',plot_bgcolor:'#0c1422',font:{color:'#91a4c3',size:10},margin:{l:62,r:12,t:23,b:25},showlegend:false,hovermode:'x unified',xaxis:{title:{text:'Step',font:{size:10}},range:xRange,gridcolor:'#26344d',zeroline:false,tickfont:{size:10}},yaxis:{gridcolor:'#26344d',zerolinecolor:'#52627b',tickfont:{size:10}}};
     const options={responsive:true,displaylogo:false,displayModeBar:false};
-    const plots=[['absoluteRewardPlot',data.absolute,'Cumulative reward · drones',data.perStep],['relativeRewardPlot',data.relative,'Relative advantage · above step minimum',data.relativeStep]];
-    return Promise.all(plots.map(([id,rows,title,changes])=>{
+    const plots=[['absoluteRewardPlot',data.absolute,'Cumulative reward · drones',data.perStep]];
+    if(!breakdown)plots.push(['relativeRewardPlot',data.relative,'Relative advantage · above step minimum',data.relativeStep]);
+    const jobs=plots.map(([id,rows,title,changes])=>{
         const element=$(id);element.classList.remove('reward-unavailable');
-        const traces=Array.from({length:data.agents},(_,i)=>({type:'scatter',mode:'lines',name:'D'+(i+1),x,y:rows.slice(0,currentFrame+1).map(row=>row[i]),customdata:changes.slice(0,currentFrame+1).map(row=>row[i]),line:{color:REWARD_COLORS[i%REWARD_COLORS.length],width:1.2},hovertemplate:'D'+(i+1)+' · step %{x}<br>Cumulative %{y:.2f}<br>This step %{customdata:.2f}<extra></extra>'}));
-        const range=rewardAxisRange(rows.slice(0,currentFrame+1));
+        if(!element._fullLayout)element.replaceChildren();
+        const traces=data.agentIndices.map(i=>({type:'scatter',mode:'lines',name:'D'+(i+1),x,y:rows.slice(0,currentFrame+1).map(row=>row[i]),customdata:changes.slice(0,currentFrame+1).map(row=>row[i]),line:{color:REWARD_COLORS[i%REWARD_COLORS.length],width:1.2},hovertemplate:'D'+(i+1)+' · step %{x}<br>Cumulative %{y:.2f}<br>This step %{customdata:.2f}<extra></extra>'}));
+        const range=rewardAxisRange(rows.slice(0,currentFrame+1),data.agentIndices);
         if(element.__rewardData===data&&element._fullLayout&&element.data.length===traces.length)return Plotly.update(element,{x:traces.map(trace=>trace.x),y:traces.map(trace=>trace.y),customdata:traces.map(trace=>trace.customdata)},{'yaxis.range':range});
         return Plotly.react(element,traces,{...common,title:{text:title,font:{size:12,color:'#e5eefc'},x:0,xanchor:'left'},yaxis:{...common.yaxis,range}},options).then(()=>{element.__rewardData=data});
-    }));
+    });
+    if(breakdown)jobs.push(paintRewardBreakdown(currentFrame,data,common,options));
+    return Promise.all(jobs);
 }
 let rewardRenderPromise=null,rewardRequestedFrame=null;
 function renderRewardPlots(currentFrame){
@@ -626,14 +907,17 @@ function renderRewardPlots(currentFrame){
     if(!rewardRenderPromise)rewardRenderPromise=(async()=>{do{const requested=rewardRequestedFrame;rewardRequestedFrame=null;await paintRewardPlots(requested)}while(rewardRequestedFrame!==null)})().finally(()=>{rewardRenderPromise=null});
     return rewardRenderPromise;
 }
+$('rewardDebugMode').onchange=()=>renderRewardPlots(frame).then(resizeMainView);
+$('rewardDebugDrone').onchange=()=>renderRewardPlots(frame);
 function moveFrame(direction){if(mode==='replay'&&D){const result=draw(Math.max(0,Math.min(D.manifest.frames-1,frame+direction)));anchorPlayback(result)}}
 $('timeline').addEventListener('keydown',event=>{if(event.key==='ArrowUp'){event.preventDefault();event.target.blur();setNavigationTrack($('mapNavigation').classList.contains('hidden')?'steps':'maps')}else if(event.key==='ArrowDown'){event.preventDefault();setNavigationTrack('frames')}});
-function draw(f){frame=+f;let p=D.position[f],active=D.active[f],known=D.target_known[f],tr=[],agents=p.filter((_,i)=>active[i]),b=D.base_position[f],t=D.target_position[f],visualRadius=D.manifest.visual_radius_m||4,commRadius=D.manifest.comm_radius_m||5,baseCommRadius=D.manifest.comm_radius_base_m||6,baseKnown=baseKnowsTarget(f,b);if($('showShell').checked)tr.push(boxTrace(D.manifest.world_size_m||[20,20,20]));tr.push(...buildingTraces());if(D.obstacle_min)D.obstacle_min[f].forEach((lo,i)=>{tr.push(cuboidMesh(lo,D.obstacle_max[f][i]));tr.push(cuboidLines(lo,D.obstacle_max[f][i],'rgba(255,190,100,.8)'))});if($('showReplayPath').checked&&replayPath){const path=replayPath.path,color='hsl(70 85% 60%)';tr.push(lineTrace(path,color,7));if($('showReplayPathNodes').checked&&path.length>2){const nodes=path.slice(1,-1);tr.push({type:'scatter3d',mode:'markers',x:nodes.map(v=>v[0]),y:nodes.map(v=>v[1]),z:nodes.map(v=>v[2]),marker:{size:5,color:'#22d3ee',line:{color:'#e5eefc',width:1}},hovertemplate:'Path waypoint<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>'})}}if($('showVisualRange').checked&&agents.length)tr.push(sphereTrace(agents,visualRadius,'#fbbf24',+$('visualOpacity').value));if($('showCommRange').checked&&agents.length)tr.push(sphereTrace(agents,commRadius,'#a78bfa',+$('commOpacity').value));if($('showCommRange').checked)tr.push(sphereTrace([b],baseCommRadius,'#a78bfa',+$('commOpacity').value));updateKnownList(known,baseKnown);
-let colors=p.map((_,i)=>known[i]?'#fb7185':'#22d3ee');tr.push({type:'scatter3d',mode:'markers+text',x:p.map(v=>v[0]),y:p.map(v=>v[1]),z:p.map(v=>v[2]),text:p.map((_,i)=>'D'+(i+1)),textposition:'top center',marker:{size:7,color:colors,line:{color:'#e5eefc',width:1}},hovertemplate:'%{text}<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>'});
+function draw(f){if(!D)return;frame=+f;let p=D.position[f],active=D.active[f],known=D.target_known[f],tr=[],agents=p.filter((_,i)=>active[i]),b=D.base_position[f],t=D.target_position[f],visualRadius=D.manifest.visual_radius_m||4,commRadius=D.manifest.comm_radius_m||5,baseCommRadius=D.manifest.comm_radius_base_m||6,baseKnown=baseKnowsTarget(f,b);if($('showShell').checked)tr.push(boxTrace(D.manifest.world_size_m||[20,20,20]));tr.push(...buildingTraces());if(D.obstacle_min)D.obstacle_min[f].forEach((lo,i)=>{tr.push(cuboidMesh(lo,D.obstacle_max[f][i]));tr.push(cuboidLines(lo,D.obstacle_max[f][i],'rgba(255,190,100,.8)'))});if($('showReplayPath').checked&&replayPath){const path=replayPath.path,color='hsl(70 85% 60%)';tr.push(lineTrace(path,color,7));if($('showReplayPathNodes').checked&&path.length>2){const nodes=path.slice(1,-1);tr.push({type:'scatter3d',mode:'markers',x:nodes.map(v=>v[0]),y:nodes.map(v=>v[1]),z:nodes.map(v=>v[2]),marker:{size:5,color:'#22d3ee',line:{color:'#e5eefc',width:1}},hovertemplate:'Path waypoint<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>'})}}if($('showVisualRange').checked&&agents.length)tr.push(sphereTrace(agents,visualRadius,'#fbbf24',+$('visualOpacity').value));if($('showCommRange').checked&&agents.length)tr.push(sphereTrace(agents,commRadius,'#a78bfa',+$('commOpacity').value));if($('showCommRange').checked)tr.push(sphereTrace([b],baseCommRadius,'#a78bfa',+$('commOpacity').value));updateKnownList(known,baseKnown);
+if(D.adapt_zone_center&&D.adapt_zone_valid[f])tr.push(sphereTrace([D.adapt_zone_center[f]],D.manifest.adapt_size.decommission_radius_m,'#f97316',.18));
+let visible=p.map((_,i)=>i).filter(i=>active[i]),colors=visible.map(i=>known[i]?'#fb7185':'#22d3ee');tr.push({type:'scatter3d',mode:'markers',x:visible.map(i=>p[i][0]),y:visible.map(i=>p[i][1]),z:visible.map(i=>p[i][2]),marker:{size:7,color:colors,line:{color:'#e5eefc',width:1}},customdata:visible.map(i=>droneHoverText(f,i)),hovertemplate:'%{customdata}<extra></extra>'});
 let targetPresent=D.target_present?Boolean(D.target_present[f]):true,landmarks=targetPresent?[b,t]:[b];tr.push({type:'scatter3d',mode:'markers+text',x:landmarks.map(v=>v[0]),y:landmarks.map(v=>v[1]),z:landmarks.map(v=>v[2]),text:targetPresent?['BASE','TARGET']:['BASE'],textposition:'top center',marker:{size:targetPresent?[11,9]:[11],color:targetPresent?[baseKnown?'#fb7185':'#60a5fa','#fb7185']:[baseKnown?'#fb7185':'#60a5fa'],symbol:targetPresent?['diamond','circle']:['diamond']}});
 if($('showLinks').checked)tr.push(...replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius));
 if($('showCoverage').checked){let coverage=coverageTrace(D.coverage[f],D.manifest.coverage_voxel_size_m||D.manifest.cell_size_m||5,+$('coverageOpacity').value);if(coverage)tr.push(coverage)}
-const renderPromise=renderPlot(tr,'replay-camera',{uirevision:'replay-camera',showlegend:false});
+const renderPromise=renderPlot(tr,'replay-camera',{uirevision:'replay-camera',showlegend:false,sceneAnnotations:droneSceneAnnotations(f,p,active),annotationOccluders:droneAnnotationOccluders(f)});
 $('timeline').value=f;$('frame').textContent=f+'/'+(D.manifest.frames-1);$('frameSelection').textContent=f+'/'+(D.manifest.frames-1);$('previousFrame').disabled=f<=0;$('nextFrame').disabled=f>=D.manifest.frames-1;$('time').textContent=(f*D.manifest.dt).toFixed(1)+' s';let covered=D.coverage[f].flat(2),eligible=D.coverage_eligible?.flat(2),total=eligible?eligible.filter(Boolean).length:covered.length,cov=eligible?covered.filter((value,index)=>value&&eligible[index]).length:covered.filter(Boolean).length;$('coverage').textContent=(100*cov/Math.max(total,1)).toFixed(1)+'%';$('known').textContent=known.filter(Boolean).length;$('baseConn').textContent=D.connected_to_base[f].filter(Boolean).length;let successLabels={coverage:'SUCCESS: COVERAGE',discovery:'SUCCESS: VISUALLY FOUND',delivery:'SUCCESS: DELIVERED',chain_held:'SUCCESS: CHAIN HELD'};$('status').textContent=D.success[f]?(successLabels[D.manifest.success_condition]||'SUCCESS'):D.fully_connected[f]?'CHAIN HELD':known.some(Boolean)?'TARGET KNOWN':'EXPLORING';$('status').style.color=D.success[f]?'#a3e635':'#e5eefc';$('reward').textContent=D.reward_terms?D.reward_terms[f].flat().reduce((a,b)=>a+b,0).toFixed(2):'—';return Promise.all([renderPromise,renderRewardPlots(f)])}
 function updateOpacityValue(input,output){$(output).textContent=(Math.round(1000*+$(input).value)/10)+'%'}
 $('timeline').oninput=e=>{setNavigationTrack('frames');const result=draw(e.target.value);anchorPlayback(result)};
@@ -1106,6 +1390,8 @@ def make_handler(
         return hashlib.sha256(f"{kind}:{path}".encode()).hexdigest()
 
     def run_directory(path: Path) -> Path:
+        if path.parent.name == "validation":
+            return path.parent.parent
         for parent in path.parents:
             if parent.name == "artifacts":
                 return parent.parent
@@ -1136,10 +1422,11 @@ def make_handler(
             directory = run_directory(path)
             current = [("replay", item) for item in discover_replays(directory, single_run=True)]
             current += [("heatmap", item) for item in discover_heatmaps(directory, single_run=True)]
+            current += [("validation", item) for item in discover_validations(directory, single_run=True)]
             # Explicitly supplied artifacts may live outside the standard folders.
             current += [source for source in previous
                         if source[1].is_file() and source not in current
-                        and source[1].parent.name != "replays"
+                        and source[1].parent.name not in {"replays", "validation"}
                         and "artifacts" not in source[1].parts]
         current.sort(key=lambda source: source[1].stat().st_mtime_ns, reverse=True)
         with manifests_lock:
@@ -1154,6 +1441,8 @@ def make_handler(
         sources = [("replay", path) for path in replays] + [
             ("heatmap", path) for path in heatmaps
         ] + [("roadmap", path) for path in roadmaps]
+        if replay_root is not None:
+            sources += [("validation", path) for path in discover_validations(replay_root)]
         if initial is not None and initial not in replays:
             sources.append(("replay", initial))
 
@@ -1168,12 +1457,22 @@ def make_handler(
             cached_sources = current
             return list(cached_sources)
 
-    def refresh_recent_sources() -> tuple[list[tuple[str, Path]], bool]:
-        """Read recent run artifacts first; leave archived runs and tests for Load more."""
+    def refresh_recent_sources(
+        limit: int = 3, *, include_tests: bool = False, exclude_runs: set[str] | None = None
+    ) -> tuple[list[tuple[str, Path]], bool]:
+        """Read a bounded page of the newest unloaded run/test groups."""
         nonlocal cached_sources
+        exclude_runs = exclude_runs or set()
         if replay_root is None or not replay_root.is_dir():
-            return refresh_sources(), False
+            sources = refresh_sources()
+            groups: dict[str, list[tuple[str, Path]]] = {}
+            for source in sources:
+                identifier = run_id(*source)
+                if identifier not in exclude_runs:
+                    groups.setdefault(identifier, []).append(source)
+            return [source for group in list(groups.values())[:limit] for source in group], len(groups) > limit
         patterns = (
+            "validation/results_u*.json",
             "replays/*.json",
             "artifacts/train/replays/*.json",
             "artifacts/eval/replays/*.json",
@@ -1183,9 +1482,11 @@ def make_handler(
             "artifacts/eval/*/data/eval_info_*.csv",
             "artifacts/eval/*/eval_*/data/eval_info_*.csv",
         )
-        candidates: list[tuple[int, Path]] = []
+        candidates: list[tuple[int, Path | None, list[tuple[str, Path]]]] = []
         for directory in replay_root.iterdir():
             if not directory.is_dir() or directory.name == "testresults":
+                continue
+            if hashlib.sha256(str(directory).encode()).hexdigest() in exclude_runs:
                 continue
             newest = 0
             for pattern in patterns:
@@ -1195,28 +1496,43 @@ def make_handler(
                     except OSError:
                         continue
             if newest:
-                candidates.append((newest, directory))
+                candidates.append((newest, directory, []))
+        if include_tests:
+            test_groups: dict[str, list[tuple[str, Path]]] = {}
+            for path in discover_roadmap_tests(replay_root):
+                identifier = run_id("roadmap", path)
+                if identifier not in exclude_runs:
+                    test_groups.setdefault(identifier, []).append(("roadmap", path))
+            for sources in test_groups.values():
+                newest = max(path.stat().st_mtime_ns for _, path in sources)
+                candidates.append((newest, None, sources))
         candidates.sort(key=lambda entry: entry[0], reverse=True)
         current: list[tuple[str, Path]] = []
         loaded_runs = 0
-        for _, directory in candidates:
-            run_sources = [("replay", path) for path in discover_replays(directory, single_run=True)]
-            run_sources += [("heatmap", path) for path in discover_heatmaps(directory, single_run=True)]
+        has_more = False
+        for _, directory, run_sources in candidates:
+            if directory is not None:
+                run_sources = [("replay", path) for path in discover_replays(directory, single_run=True)]
+                run_sources += [("heatmap", path) for path in discover_heatmaps(directory, single_run=True)]
+                run_sources += [("validation", path) for path in discover_validations(directory, single_run=True)]
             if not run_sources:
                 continue
+            if loaded_runs == limit:
+                has_more = True
+                break
             current.extend(run_sources)
             loaded_runs += 1
-            if loaded_runs == 3:
-                break
-        if initial is not None and initial.is_file() and ("replay", initial) not in current:
+        if not exclude_runs and initial is not None and initial.is_file() and ("replay", initial) not in current:
             current.append(("replay", initial))
         current.sort(key=lambda source: source[1].stat().st_mtime_ns, reverse=True)
-        has_more = len(candidates) > loaded_runs or any(
-            replay_root.glob("testresults/**/*.roadmap.json")
-        )
+        if not include_tests:
+            has_more = has_more or any(replay_root.glob("testresults/**/*.roadmap.json"))
         with manifests_lock:
-            cached_sources = current
-            return list(cached_sources), has_more
+            if exclude_runs:
+                cached_sources = [source for source in cached_sources if source not in current] + current
+            else:
+                cached_sources = current
+            return list(current), has_more
 
     def available_sources() -> list[tuple[str, Path]]:
         with manifests_lock:
@@ -1340,8 +1656,14 @@ def make_handler(
                 try:
                     if "run" in query:
                         current = refresh_run_sources(query["run"][0])
-                    elif query.get("recent") == ["3"]:
-                        current, has_more = refresh_recent_sources()
+                    elif "recent" in query:
+                        limit = int(query["recent"][0])
+                        if limit < 1:
+                            raise ValueError("Recent run limit must be positive")
+                        current, has_more = refresh_recent_sources(
+                            limit, include_tests=query.get("tests") == ["true"],
+                            exclude_runs=set(query.get("exclude", [""])[0].split(",")) - {""},
+                        )
                     else:
                         current = refresh_sources()
                 except (ValueError, OSError):
@@ -1352,9 +1674,11 @@ def make_handler(
                         "id": source_id(kind, path),
                         "run_id": run_id(kind, path),
                         "kind": kind,
+                        "modified": path.stat().st_mtime,
                         **map_suite_metadata(kind, path),
                         "label": replay_label(path) if kind == "replay" else (
-                            heatmap_label(path) if kind == "heatmap" else roadmap_label(path)
+                            heatmap_label(path) if kind == "heatmap" else
+                            validation_label(path) if kind == "validation" else roadmap_label(path)
                         ),
                         "selected": path == initial if initial is not None else index == 0,
                     }
@@ -1404,6 +1728,9 @@ def make_handler(
                         payload = replay_payload(path)
                     elif kind == "heatmap":
                         payload = heatmap_payload(path)
+                    elif kind == "validation":
+                        payload = validation_payload(path)
+                        payload["configuration"] = artifact_configuration(path, payload)
                     else:
                         payload = roadmap_payload(path)
                     body = json.dumps(payload).encode()

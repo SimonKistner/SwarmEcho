@@ -1,0 +1,260 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Chain tightening: direct relay deletion and repeated existing rules ---
+Direct deletion checks the bypass link's visibility and applicable range; one finder is retained.
+Repeat horizontal -> doorway -> lifted -> deletion until an entire cycle removes no drones.
+ Agents | Corrected | Horizontal | Doorways | Lifted | Pruned | Stable | Final % | visual
+--------+-----------+------------+----------+--------+--------+--------+---------+----------------------------------------
+      0 |         0 |          0 |        0 |      0 |      0 |      0 |   0.00% | 
+      1 |         5 |          5 |      216 |    216 |    216 |    216 |   5.40% | IIIII
+      2 |       481 |        481 |    1,164 |  1,363 |  1,408 |  1,408 |  35.20% | IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+      3 |       992 |        992 |      443 |    571 |    560 |    560 |  14.00% | IIIIIIIIIIIIII
+      4 |       288 |        288 |      313 |    199 |    168 |    168 |   4.20% | IIII
+      5 |       175 |        175 |      337 |    135 |    143 |    143 |   3.58% | IIII
+      6 |       268 |        392 |      238 |    257 |    254 |    254 |   6.35% | IIIIII
+      7 |       264 |        378 |      254 |    553 |    567 |    567 |  14.18% | IIIIIIIIIIIIII
+      8 |       238 |         78 |      621 |    678 |    681 |    681 |  17.02% | IIIIIIIIIIIIIIIII
+      9 |        78 |        503 |      324 |     28 |      3 |      3 |   0.07% | .
+     10 |       503 |        618 |       90 |      0 |      0 |      0 |   0.00% | 
+     11 |       618 |         90 |        0 |      0 |      0 |      0 |   0.00% | 
+     12 |        90 |          0 |        0 |      0 |      0 |      0 |   0.00% | 
+
+Targets improved by initial direct deletion: 148/4,000
+Targets improved beyond lifted stage after all tightening: 148/4,000 (3.70%)
+Drones saved by initial deletion: 148; additional savings from repeated rules: 0
+Total additional drones saved: 148; maximum additional saving on one target: 1
+Stage order: corrected -> horizontal -> doorways -> lifted -> pruned -> stable
+Mean agents: 6.235 -> 5.822 -> 4.700 -> 4.304 -> 4.267 -> 4.267
+Targets requiring >7 agents: 1,527 (38.17%) -> 1,289 (32.23%) -> 1,035 (25.88%) -> 706 (17.65%) -> 684 (17.10%) -> 684 (17.10%)
+Additional targets moved to <=7 agents: 22
+No roadmap route: 0/4,000
+Previous horizontal/doorway/lifted replacements reproduced: 1,651 / 4,489 / 1,585
+
+Accepted initial direct deletions: 148
+Accepted additional horizontal/doorway/lifted/deletion operations: 0 / 0 / 0 / 0
+Direct deletions by endpoint role: base-adjacent=2, internal=100, finder=46
+Initial deletion windows: 17,145; range rejections: 3,544; obstructed-link rejections: 13,453
+Repeated deletion windows: 16,851; range rejections: 3,544; obstructed-link rejections: 13,307
+Repeated cycles including terminal zero-change cycles: 3,784; maximum on one target: 1
+Attempts include revisits; stable means no reduction by this rule order, not a global minimum.
+
+--- Improved chain examples: up to 5 ---
+Sample 18 (zero-based); target=(4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 12/11/10/9/8/8
+  Before tightening (9 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    drone 9: (4.525000095367432, 3.1500000953674316, 13.149999618530273); incoming=0.950000/15m; visible=True
+    target tip=1.212629/5m; visible=True
+  Stable chain (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    target tip=1.670857/5m; visible=True
+Sample 147 (zero-based); target=(11.545977073221055, 6.923650835805466, 12.874771154409013)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 11/10/9/8/7/7
+  Before tightening (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.475000381469727, 11.850000381469727, 11.8125); incoming=7.325000/15m; visible=True
+    drone 8: (10.506621749018464, 11.704546319904424, 11.843864330212508); incoming=0.152120/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (7 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.506621749018464, 11.704546319904424, 11.843864330212508); incoming=7.358126/15m; visible=True
+    target tip=4.999999/5m; visible=True
+Sample 1179 (zero-based); target=(6.661557095408039, 14.116469117127096, 10.921859371878147)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 9/8/7/7/6/6
+  Before tightening (7 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 10.475000381469727, 11.8125); incoming=6.197896/15m; visible=True
+    drone 7: (3.243379311555869, 10.571834206552575, 11.788816111696711); incoming=0.136592/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (6 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.243379311555869, 10.571834206552575, 11.788816111696711); incoming=6.263180/15m; visible=True
+    target tip=4.999999/5m; visible=True
+Sample 457 (zero-based); target=(2.9449349876039026, 9.301051291967026, 11.682407665608554)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 8/7/6/6/5/5
+  Before tightening (6 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.141681833414212, 5.63019987030897, 8.293288234432408); incoming=0.211395/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (5 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.141681833414212, 5.63019987030897, 8.293288234432408); incoming=2.484349/15m; visible=True
+    target tip=4.999999/5m; visible=True
+Sample 2601 (zero-based); target=(2.2446418668910058, 6.291271901760735, 8.681123064530626)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 7/6/5/5/4/4
+  Before tightening (5 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    target tip=1.329686/5m; visible=True
+  Stable chain (4 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    target tip=3.312002/5m; visible=True
+
+--- Remaining >7-agent chain examples: up to 5 ---
+Sample 2646 (zero-based); target=(4.14161545836032, 2.0143225306905364, 14.373478983788626)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 12/11/10/9/9/9
+  Before tightening (9 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    drone 9: (4.525000095367432, 3.1500000953674316, 13.149999618530273); incoming=0.950000/15m; visible=True
+    target tip=1.712790/5m; visible=True
+  Stable chain (9 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    drone 9: (4.525000095367432, 3.1500000953674316, 13.149999618530273); incoming=0.950000/15m; visible=True
+    target tip=1.712790/5m; visible=True
+Sample 18 (zero-based); target=(4.3045817105497495, 2.0681456808733145, 13.651473678966688)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 12/11/10/9/8/8
+  Before tightening (9 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    drone 9: (4.525000095367432, 3.1500000953674316, 13.149999618530273); incoming=0.950000/15m; visible=True
+    target tip=1.212629/5m; visible=True
+  Stable chain (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (5.474999904632568, 11.850000381469727, 11.8125); incoming=2.325000/15m; visible=True
+    drone 8: (5.474999904632568, 3.1500000953674316, 13.149999618530273); incoming=8.802211/15m; visible=True
+    target tip=1.670857/5m; visible=True
+Sample 3 (zero-based); target=(6.873506075822548, 1.3401168547077265, 11.546063869618456)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 11/10/8/8/8/8
+  Before tightening (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 10.475000381469727, 11.8125); incoming=6.197896/15m; visible=True
+    drone 7: (5.0, 12.097359530240915, 11.8125); incoming=2.460599/15m; visible=True
+    drone 8: (6.214198536917773, 6.29486470276995, 11.67167171677418); incoming=5.929845/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 10.475000381469727, 11.8125); incoming=6.197896/15m; visible=True
+    drone 7: (5.0, 12.097359530240915, 11.8125); incoming=2.460599/15m; visible=True
+    drone 8: (6.214198536917773, 6.29486470276995, 11.67167171677418); incoming=5.929845/15m; visible=True
+    target tip=4.999999/5m; visible=True
+Sample 10 (zero-based); target=(12.133007260757557, 1.4183302137146145, 13.497827360038546)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 11/10/9/8/8/8
+  Before tightening (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.475000381469727, 11.850000381469727, 11.8125); incoming=7.325000/15m; visible=True
+    drone 8: (11.357963826565165, 6.294665512547653, 12.71001283334386); incoming=5.696218/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.475000381469727, 11.850000381469727, 11.8125); incoming=7.325000/15m; visible=True
+    drone 8: (11.357963826565165, 6.294665512547653, 12.71001283334386); incoming=5.696218/15m; visible=True
+    target tip=4.999999/5m; visible=True
+Sample 28 (zero-based); target=(11.033698136423114, 5.630910069236728, 13.178270207426705)
+  Agents corrected/horizontal/doorways/lifted/pruned/stable: 11/10/9/8/8/8
+  Before tightening (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.475000381469727, 11.850000381469727, 11.8125); incoming=7.325000/15m; visible=True
+    drone 8: (10.596652692202008, 10.495839387572387, 12.10988637785761); incoming=1.391758/15m; visible=True
+    target tip=4.999999/5m; visible=True
+  Stable chain (8 drones); base=(2.5, 12.5, 0.125)
+    drone 1: (11.973685263157895, 10.0, 3.1499989999999998); incoming=10.254332/15m; visible=True
+    drone 2: (10.475000381469727, 4.650000095367432, 6.824999809265137); incoming=6.661395/15m; visible=True
+    drone 3: (5.474999904632568, 3.1500000953674316, 8.149999618530273); incoming=5.385687/15m; visible=True
+    drone 4: (3.1500000953674316, 3.1500000953674316, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 5: (3.1500000953674316, 5.474999904632568, 8.149999618530273); incoming=2.325000/15m; visible=True
+    drone 6: (3.1500000953674316, 11.850000381469727, 11.8125); incoming=7.352179/15m; visible=True
+    drone 7: (10.475000381469727, 11.850000381469727, 11.8125); incoming=7.325000/15m; visible=True
+    drone 8: (10.596652692202008, 10.495839387572387, 12.10988637785761); incoming=1.391758/15m; visible=True
+    target tip=4.999999/5m; visible=True
+
+Retained positions and accepted replacement link checks preserve the constructed geometric chains.
+No alternative route or placement search is performed; counts do not prove global minima or policy success.
+Previous stages are preprocessing only; earlier inspection reports are not printed.
+
+Preparation: 0.19s; target inspection: 8.63s

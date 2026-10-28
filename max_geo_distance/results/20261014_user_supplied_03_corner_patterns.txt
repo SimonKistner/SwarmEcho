@@ -1,0 +1,60 @@
+(swarmecho) mags@M4GI3R-PC:/mnt/q/_0_Projects/000_SwarmEcho/SwarmEcho$ uv run python max_geo_distance/inspect_paths.py --corrected-baseline --corner-patterns
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Original-path turn angles (0 degrees = straight; 180 = reverse) ---
+ Angle | Occurrences |     in % | visual
+    0d |           8 |    0.03% | .
+    5d |          60 |    0.26% | .
+   10d |         134 |    0.58% | I
+   15d |         399 |    1.72% | II
+   20d |       2,116 |    9.14% | IIIIIIIII
+   25d |         351 |    1.52% | II
+   30d |         193 |    0.83% | I
+   35d |       1,755 |    7.58% | IIIIIIII
+   40d |       3,236 |   13.98% | IIIIIIIIIIIIII
+   45d |       4,730 |   20.43% | IIIIIIIIIIIIIIIIIIII
+   50d |         320 |    1.38% | I
+   55d |       3,280 |   14.17% | IIIIIIIIIIIIII
+   60d |         253 |    1.09% | I
+   65d |         960 |    4.15% | IIII
+   70d |         286 |    1.24% | I
+   75d |       1,183 |    5.11% | IIIII
+   80d |       3,370 |   14.56% | IIIIIIIIIIIIIII
+   85d |         219 |    0.95% | I
+   90d |         281 |    1.21% | I
+   95d |           4 |    0.02% | .
+  100d |           2 |    0.01% | .
+  105d |           4 |    0.02% | .
+  110d |           2 |    0.01% | .
+  140d |           1 |    0.00% | .
+Angles are rounded to the nearest 5 degrees; counts include endpoint-adjacent turns.
+
+--- Consecutive turn patterns: top 20 of 414 groups ---
+ Turn pair | Plane    | Direction | B-C gap | Occurrences |     in % | visual
+ 80/40 d | 3D       | skew      | 0.5-1m  |       2,772 |   14.48% | IIIIIIIIIIIIII
+ 40/55 d | 3D       | skew      | 5-15m   |       1,761 |    9.20% | IIIIIIIII
+ 55/20 d | 3D       | skew      | 5-15m   |       1,714 |    8.95% | IIIIIIIII
+ 20/45 d | 3D       | skew      | 0.5-1m  |       1,658 |    8.66% | IIIIIIIII
+ 45/45 d | XY       | same      | 1-2m    |       1,651 |    8.62% | IIIIIIIII
+ 45/35 d | 3D       | skew      | 0.5-1m  |       1,394 |    7.28% | IIIIIII
+ 35/55 d | 3D       | skew      | 5-15m   |       1,235 |    6.45% | IIIIII
+ 55/45 d | 3D       | skew      | 1-2m    |       1,072 |    5.60% | IIIIII
+ 40/75 d | 3D       | skew      | 5-15m   |         654 |    3.42% | III
+ 75/75 d | 3D       | skew      | 0.5-1m  |         300 |    1.57% | II
+ 75/65 d | 3D       | skew      | 0.5-1m  |         164 |    0.86% | I
+ 75/15 d | 3D       | same      | 5-15m   |         155 |    0.81% | I
+ 75/20 d | 3D       | skew      | 5-15m   |         112 |    0.58% | I
+ 40/25 d | 3D       | skew      | 5-15m   |         109 |    0.57% | I
+ 45/90 d | 3D       | skew      | 0.5-1m  |          90 |    0.47% | .
+ 80/50 d | 3D       | skew      | 0.5-1m  |          81 |    0.42% | .
+ 45/70 d | 3D       | skew      | 0.5-1m  |          81 |    0.42% | .
+ 40/65 d | 3D       | skew      | 5-15m   |          79 |    0.41% | .
+ 55/35 d | 3D       | skew      | 1-2m    |          77 |    0.40% | .
+ 45/40 d | 3D       | skew      | 0.5-1m  |          75 |    0.39% | .
+Total: 19,147 pattern occurrences; remaining groups: 3,913 occurrences.
+Each pattern is A -> B -> C -> D; gap is B-C length. Counts repeat across target paths.
+
+Preparation: 0.19s; target inspection: 6.24s

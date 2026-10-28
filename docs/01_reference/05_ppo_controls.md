@@ -47,14 +47,16 @@ retains its existing meaning; step zero is a communication opportunity.
 
 Inactive agents have zero observations, recurrent state, messages, actions,
 and value outputs. They are excluded from critic attention, actor/critic losses,
-advantage/value statistics, entropy, and PPO diagnostics. Shared reward terms
-are divided among currently active agents, preserving team reward magnitude;
-inactive reward entries are zero. A newly spawned agent first acts using its
+advantage/value statistics, entropy, and PPO diagnostics. Reward coefficients
+are signed individual amounts with no active-population divisor. Inactive
+entries are zero except for removal-transition rewards and time pressure paid
+to the lifetime that acted. A newly spawned agent first acts using its
 next observation, rather than executing an action chosen while inactive.
 
 The reward defaults live in `RewardConfig`, including
-`no_movement_termination_penalty=-1000`. Level overrides still win.
-The no-movement penalty is included in `rewards/no_movement_termination`.
+`no_movement_termination_penalty=0` and `time_presure_reward=-0.75`.
+The signed no-movement amount is included in `rewards/no_movement_termination_penalty`.
+G02 is the migrated level; see [signed individual rewards](11_individual_rewards.md).
 
 The task's `max_steps` deadline remains terminal (zero bootstrap), as requested.
 Adding timestep observation changes observation width and checkpoint compatibility.

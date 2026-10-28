@@ -1,0 +1,32 @@
+(swarmecho) mags@M4GI3R-PC:/mnt/q/_0_Projects/000_SwarmEcho/SwarmEcho$ uv run python max_geo_distance/inspect_paths.py --corrected-baseline --corner-patterns
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+Results (roadmap nodes exclude base and target):
+ Nr Nodes | Amount of targets |     in % | visual
+----------+-------------------+----------+----------------------------------------
+        0 |                 0 |    0.00% |
+        1 |               189 |    4.72% | IIIII
+        2 |               925 |   23.12% | IIIIIIIIIIIIIIIIIIIIIII
+        3 |               446 |   11.15% | IIIIIIIIIII
+        4 |               262 |    6.55% | IIIIIII
+        5 |               121 |    3.02% | III
+        6 |               343 |    8.57% | IIIIIIIII
+        7 |               314 |    7.85% | IIIIIIII
+        8 |               113 |    2.83% | III
+        9 |               142 |    3.55% | IIII
+       10 |             1,005 |   25.12% | IIIIIIIIIIIIIIIIIIIIIIIII
+       11 |                51 |    1.27% | I
+       12 |                89 |    2.23% | II
+No roadmap route: 0/4,000 (0.00%)
+Visual: each I is approximately 1% of all sampled targets; . is a smaller nonzero bin.
+
+--- Range checks on paths with at least one roadmap node ---
+0/19,147 internal node-node lines > 15m --> 0.00%
+0/4,000 base-first-node tips > 15m --> 0.00%
+1,793/4,000 last-node-target tips (visual range) > 5m --> 44.83%
+Internal lines count occurrences across target paths, including repeated map edges.
+
+Preparation: 0.19s; target inspection: 6.24s

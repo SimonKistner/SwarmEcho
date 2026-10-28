@@ -20,6 +20,7 @@ PUBLIC_MANIFEST_FIELDS = {
     "success_condition", "allow_redundancy_reward", "robustness_runs",
     "obstacle_layout_mode", "map_suite_map_id", "random_eval_map_id",
     "source_map_name", "eval_name", "training_steps", "training_update",
+    "reward_component_names",
 }
 
 

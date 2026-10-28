@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,7 @@ class ResumeState:
     start_update: int
     step_offset: int
     prior_history: list[dict[str, Any]]
+    completed_run_steps: int = 0
 
 
 def resolve_resume_state(training: Any, run_name: str, num_envs: int, num_steps: int) -> ResumeState:
@@ -99,7 +101,10 @@ def resolve_resume_state(training: Any, run_name: str, num_envs: int, num_steps:
         prior_history = history
     inferred_offset = max(0, total_steps - start_update * num_envs * num_steps)
     manual = cfg_value(training, "checkpoint_step_offset")
-    return ResumeState(start_update, int(manual) if manual is not None else inferred_offset, prior_history)
+    completed_run_steps = (max(0, total_steps - sum(int(row["steps"]) for row in prior_history))
+                           if mode == "resume" else 0)
+    return ResumeState(start_update, int(manual) if manual is not None else inferred_offset,
+                       prior_history, completed_run_steps)
 
 
 def schedule_due(update: int, frequency: int, offset: int = 0) -> bool:
@@ -124,6 +129,43 @@ class EvaluationHold:
                       and success_length_reduction >= self.min_success_length_reduction)
         self.consecutive = self.consecutive + 1 if passed else 0
         return self.consecutive >= max(1, self.required)
+
+
+class TrainingSuccessHold:
+    """Require fresh, complete episode windows to pass on every authored map.
+
+    Fast/easy maps cannot crowd slower maps out of a pooled history. Each
+    observed window consumes at least one new sample per lane on each map;
+    overlapping rollout updates never count the same evidence twice.
+    """
+
+    def __init__(self, lane_map_ids, max_steps, threshold, required=1,
+                 min_success_length_reduction=None):
+        self.lane_map_ids = list(map(int, lane_map_ids))
+        counts = {map_id: self.lane_map_ids.count(map_id) for map_id in set(self.lane_map_ids)}
+        self.windows = {map_id: deque(maxlen=count) for map_id, count in counts.items()}
+        self.fresh = dict.fromkeys(counts, 0)
+        self.max_steps = max_steps
+        self.hold = EvaluationHold(threshold, required, min_success_length_reduction)
+
+    def append(self, lane, success, length):
+        map_id = self.lane_map_ids[lane]
+        self.windows[map_id].append((bool(success), int(length)))
+        self.fresh[map_id] += 1
+
+    def observe(self):
+        if any(self.fresh[key] < window.maxlen for key, window in self.windows.items()):
+            return False, None
+        rates, reductions = [], []
+        for window in self.windows.values():
+            rates.append(sum(success for success, _ in window) / len(window))
+            lengths = [length for success, length in window if success]
+            reductions.append(1 - (sum(lengths) / len(lengths) if lengths else self.max_steps) / self.max_steps)
+        self.fresh = dict.fromkeys(self.fresh, 0)
+        stop = self.hold.observe(min(rates), min(reductions))
+        return stop, {"train_early_exit_min_map_success": min(rates),
+                      "train_early_exit_min_map_length_reduction": min(reductions),
+                      "train_early_exit_hold": self.hold.consecutive}
 
 
 def init_wandb(
@@ -157,7 +199,7 @@ def init_wandb(
     group = cfg_value(logging, "wandb_group")
     if group:
         kwargs["group"] = str(group)
-    if cfg_value(training, "checkpoint_path"):
+    if cfg_value(training, "checkpoint_path") or cfg_value(cfg_value(training, "oom_recovery"), "enabled", False):
         wandb_dir = run_dir / "wandb"
         candidates = (
             sorted(

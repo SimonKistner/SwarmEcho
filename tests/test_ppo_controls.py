@@ -120,14 +120,15 @@ def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
     np.testing.assert_array_equal(values, 0.0)
 
 
-def test_defaults_and_find_only_overrides():
+def test_defaults_and_g02_overrides():
     defaults = TrainingConfig()
-    assert defaults.entropy_mode == "legacy" and defaults.value_normalization == "none"
-    assert RewardConfig().no_movement_termination_penalty == -1000.0
+    assert defaults.entropy_mode == "squashed" and defaults.value_normalization == "running"
+    assert RewardConfig().no_movement_termination_penalty == 0.0
     cfg = EnvConfig()
     assert not cfg.observe_current_timestep
     assert observation_dim(replace(cfg, observe_current_timestep=True)) == observation_dim(cfg) + 1
-    level = load_level("B01a_office_find_only", [
+    level = load_level("G02_static", [
+        "env.observe_current_timestep=true",
         "training.value_clip_eps=null",
         "reward.no_movement_termination_penalty=-100000.0",
     ])

@@ -1,0 +1,311 @@
+Maps: B02c_static_map_02344, B02c_static_map_02557, B02c_static_map_02713; targets per map: 4,000; seed per map: 456789; level: G01_static
+Geometry source: 20261014_224038_869771Z_11_maps_geometry.txt
+Phase 2: GPU checks use the exact targets and chains retained from phase 1; no resampling or rule changes.
+
+========== GPU map 1/3: B02c_static_map_02344 ==========
+Fixed base (m): [12.5, 2.5, 0.125]; roadmap nodes: 176
+
+--- Actual-runtime static chain-hold certification ---
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 128; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 679 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 677/679; chain-hold success 677/679; strictly certified 607/679; 11.44s
+
+Checking k=2: 1,213 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 1,204/1,213; chain-hold success 1,204/1,213; strictly certified 1,204/1,213; 9.00s
+
+Checking k=3: 787 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 784/787; chain-hold success 784/787; strictly certified 784/787; 9.11s
+
+Checking k=4: 607 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 605/607; chain-hold success 605/607; strictly certified 605/607; 9.26s
+
+Checking k=5: 632 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 632/632; chain-hold success 632/632; strictly certified 632/632; 8.99s
+
+Checking k=6: 21 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 21/21; chain-hold success 21/21; strictly certified 21/21; 9.03s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |     679 |             677 |                  677 |               607
+      2 |   1,213 |           1,204 |                1,204 |             1,204
+      3 |     787 |             784 |                  784 |               784
+      4 |     607 |             605 |                  605 |               605
+      5 |     632 |             632 |                  632 |               632
+      6 |      21 |              21 |                   21 |                21
+
+Certified assignments: 3,853/4,000 (96.33%)
+Runtime hold successes: 3,923/3,939 tested assignments
+Targets with no proposed assignment: 61
+Maximum coordinate rounding (poses and targets): 0.476727 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25
+Runtime checking time, including first compilation: 56.83s
+
+Failure reasons (may overlap):
+  invalid float32 physical placement: 70
+  runtime collision: 70
+  runtime changed injected positions: 70
+  no proposed assignment: 61
+  first runtime tick not fully connected: 16
+  first runtime hold counter not one: 16
+  connectivity failed during hold window: 16
+  runtime chain-hold success not reached: 16
+Failed zero-based sample indices: 23, 62, 76, 78, 105, 116, 122, 124, 149, 193, 196, 207, 224, 270, 292, 298, 303, 313, 420, 435, 461, 513, 523, 555, 609, 618, 687, 703-704, 712, 717, 730, 732, 745, 778, 831, 835, 838, 844, 870, 894, 896, 951, 972, 1054, 1060, 1135, 1150, 1154, 1161, 1184-1185, 1228, 1318, 1356, 1384, 1462-1463, 1474-1475, 1537, 1546, 1586, 1616, 1634, 1665, 1727, 1739, 1749, 1773, 1794, 1826, 1849, 1890, 1904, 1924, 1975-1976, 1992, 2000, 2074, 2082, 2109, 2170, 2187, 2212, 2375, 2434, 2505, 2521, 2562, 2572, 2590, 2647, 2704, 2736-2737, 2739, 2751, 2764, 2828, 2899, 2909, 2937, 2940-2941, 2946, 2954, 3038, 3068, 3072, 3080-3081, 3084-3085, 3111, 3135, 3218, 3227, 3237, 3275, 3286, 3304, 3324, 3375, 3415, 3451, 3468, 3471, 3492, 3541, 3560, 3602, 3625, 3633, 3666, 3764, 3769, 3772, 3798-3799, 3848-3849, 3859, 3889, 3907, 3992
+
+--- Failed assignment examples: up to 5 ---
+Sample 105; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(12.115201901483658, 6.562902277586217, 2.0005693588147118); runtime float32=(12.115201950073242, 6.562902450561523, 2.0005693435668945)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.5, 2.5, 0.125)
+    injected32=(12.5, 2.5, 0.125); final32=(12.5, 2.5, 0.375)
+Sample 122; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(8.508923030626818, 2.284576658825576, 1.7175438434273458); runtime float32=(8.508922576904297, 2.284576654434204, 1.7175438404083252)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.5, 2.5, 0.125)
+    injected32=(12.5, 2.5, 0.125); final32=(12.5, 2.5, 0.375)
+Sample 124; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(13.569857737304831, 8.573746904137014, 0.9762880298855457); runtime float32=(13.569857597351074, 8.573746681213379, 0.9762880206108093)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.0823973715m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.710634900884013, 3.695806725079531, 0.29260262934622217)
+    injected32=(12.7106351852417, 3.6958067417144775, 0.29260262846946716); final32=(12.7106351852417, 3.6958067417144775, 0.375)
+Sample 149; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(12.048200615897006, 6.767253081498685, 1.663241352571002); runtime float32=(12.048200607299805, 6.7672529220581055, 1.6632413864135742)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.5, 2.5, 0.125)
+    injected32=(12.5, 2.5, 0.125); final32=(12.5, 2.5, 0.375)
+Sample 224; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(8.639172930628789, 1.6738683129601122, 0.9200221149791321); runtime float32=(8.639172554016113, 1.6738682985305786, 0.9200221300125122)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.5, 2.5, 0.125)
+    injected32=(12.5, 2.5, 0.125); final32=(12.5, 2.5, 0.375)
+
+Status: runtime_assignment_failures
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+========== GPU map 2/3: B02c_static_map_02557 ==========
+Fixed base (m): [12.5, 12.5, 0.125]; roadmap nodes: 170
+
+--- Actual-runtime static chain-hold certification ---
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 128; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 756 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 749/756; chain-hold success 749/756; strictly certified 694/756; 9.92s
+
+Checking k=2: 1,173 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 1,173/1,173; chain-hold success 1,173/1,173; strictly certified 1,173/1,173; 8.40s
+
+Checking k=3: 836 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 830/836; chain-hold success 830/836; strictly certified 830/836; 7.99s
+
+Checking k=4: 534 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 533/534; chain-hold success 533/534; strictly certified 533/534; 7.79s
+
+Checking k=5: 690 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 690/690; chain-hold success 690/690; strictly certified 690/690; 8.44s
+
+Checking k=6: 11 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 11/11; chain-hold success 11/11; strictly certified 11/11; 7.57s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |     756 |             749 |                  749 |               694
+      2 |   1,173 |           1,173 |                1,173 |             1,173
+      3 |     836 |             830 |                  830 |               830
+      4 |     534 |             533 |                  533 |               533
+      5 |     690 |             690 |                  690 |               690
+      6 |      11 |              11 |                   11 |                11
+
+Certified assignments: 3,931/4,000 (98.28%)
+Runtime hold successes: 3,986/4,000 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.476823 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25
+Runtime checking time, including first compilation: 50.11s
+
+Failure reasons (may overlap):
+  invalid float32 physical placement: 55
+  runtime collision: 55
+  runtime changed injected positions: 55
+  first runtime tick not fully connected: 14
+  first runtime hold counter not one: 14
+  connectivity failed during hold window: 14
+  runtime chain-hold success not reached: 14
+Failed zero-based sample indices: 6, 62, 116, 160, 181, 198, 239, 247, 281, 391, 400, 440, 504, 523, 581, 667, 705, 777, 804, 814, 890, 974, 1105, 1198, 1309, 1346, 1444, 1469, 1523, 1576-1577, 1742, 1745, 1756, 1766, 1839, 1913, 1933, 1953, 1983, 2200, 2229, 2268, 2273, 2350, 2391, 2525, 2631, 2763, 2817, 2892, 2942, 2945, 3005, 3039, 3182, 3207, 3321, 3411, 3450, 3487, 3514, 3673, 3684, 3709, 3826, 3936, 3943, 3959
+
+--- Failed assignment examples: up to 5 ---
+Sample 6; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(8.92284156028385, 11.905426988375647, 3.3988743335252414); runtime float32=(8.922842025756836, 11.905426979064941, 3.398874282836914)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.5, 12.5, 0.125)
+    injected32=(12.5, 12.5, 0.125); final32=(12.5, 12.5, 0.375)
+Sample 62; k=1; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(14.118659779483473, 8.295616963588337, 8.906678856198589); runtime float32=(14.118659973144531, 8.29561710357666, 8.906679153442383)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False]; conn_base=[True]; conn_target=[False]
+  Drone 1: proposed64=(12.5, 9.374999999999998, 4.300718295482719)
+    injected32=(12.5, 9.375, 4.300718307495117); final32=(12.5, 9.375, 4.300718307495117)
+Sample 160; k=1; reasons=first runtime tick not fully connected; first runtime hold counter not one; connectivity failed during hold window; runtime chain-hold success not reached
+  Target float64=(12.847155762783437, 8.384391129919917, 7.781822032623176); runtime float32=(12.847155570983887, 8.384390830993652, 7.781822204589844)
+  First hold=0; final hold=0; success=False; done=True; idle=True; executed ticks=50; max drift=0m
+  Runtime sees=[False]; conn_base=[True]; conn_target=[False]
+  Drone 1: proposed64=(12.5, 9.374999999999996, 2.8932458753854275)
+    injected32=(12.5, 9.375, 2.8932459354400635); final32=(12.5, 9.375, 2.8932459354400635)
+Sample 198; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(7.740193368172161, 12.306526956176661, 2.524635938993274); runtime float32=(7.7401933670043945, 12.306527137756348, 2.5246360301971436)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.0997455716m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.201962283904535, 12.487885586838429, 0.2752544262903195)
+    injected32=(12.2019624710083, 12.487885475158691, 0.27525442838668823); final32=(12.2019624710083, 12.487885475158691, 0.375)
+Sample 239; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(7.5072188962353055, 12.458188943556788, 0.6265377198197175); runtime float32=(7.507218837738037, 12.458189010620117, 0.6265377402305603)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.248192623m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(12.482007734895578, 12.499849327339575, 0.1268073693653542)
+    injected32=(12.48200798034668, 12.499849319458008, 0.12680737674236298); final32=(12.48200798034668, 12.499849319458008, 0.375)
+
+Status: runtime_assignment_failures
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+========== GPU map 3/3: B02c_static_map_02713 ==========
+Fixed base (m): [2.5, 12.5, 0.125]; roadmap nodes: 166
+
+--- Actual-runtime static chain-hold certification ---
+Inject proposed positions once; zero velocity/actions; hold counters begin at zero.
+JAX 0.9.2; device: gpu / NVIDIA GeForce RTX 4090
+Precision: float32; hold requirement: 50 ticks; idle limit: 50; episode limit: 700
+Batch size: 128; exact k drone slots per group; no padded drones.
+Coverage is fixed to full solely to omit unrelated coverage work; chain-held success is unchanged.
+
+Checking k=1: 724 targets; preparing/compiling runtime kernel...
+k=1: connected on first tick 724/724; chain-hold success 724/724; strictly certified 635/724; 10.15s
+
+Checking k=2: 1,216 targets; preparing/compiling runtime kernel...
+k=2: connected on first tick 1,216/1,216; chain-hold success 1,216/1,216; strictly certified 1,216/1,216; 7.92s
+
+Checking k=3: 548 targets; preparing/compiling runtime kernel...
+k=3: connected on first tick 547/548; chain-hold success 547/548; strictly certified 547/548; 7.91s
+
+Checking k=4: 388 targets; preparing/compiling runtime kernel...
+k=4: connected on first tick 381/388; chain-hold success 381/388; strictly certified 381/388; 7.72s
+
+Checking k=5: 597 targets; preparing/compiling runtime kernel...
+k=5: connected on first tick 597/597; chain-hold success 597/597; strictly certified 597/597; 8.21s
+
+Checking k=6: 522 targets; preparing/compiling runtime kernel...
+k=6: connected on first tick 522/522; chain-hold success 522/522; strictly certified 522/522; 7.76s
+
+Checking k=7: 5 targets; preparing/compiling runtime kernel...
+k=7: connected on first tick 5/5; chain-hold success 5/5; strictly certified 5/5; 9.37s
+
+ Agents | Targets | First connected | Runtime hold success | Strictly certified
+--------+---------+-----------------+----------------------+-------------------
+      1 |     724 |             724 |                  724 |               635
+      2 |   1,216 |           1,216 |                1,216 |             1,216
+      3 |     548 |             547 |                  547 |               547
+      4 |     388 |             381 |                  381 |               381
+      5 |     597 |             597 |                  597 |               597
+      6 |     522 |             522 |                  522 |               522
+      7 |       5 |               5 |                    5 |                 5
+
+Certified assignments: 3,903/4,000 (97.58%)
+Runtime hold successes: 3,992/4,000 tested assignments
+Targets with no proposed assignment: 0
+Maximum coordinate rounding (poses and targets): 0.476801 micrometres
+Activation clocks by k: 1:0, 2:5, 3:10, 4:15, 5:20, 6:25, 7:30
+Runtime checking time, including first compilation: 59.03s
+
+Failure reasons (may overlap):
+  invalid float32 physical placement: 89
+  runtime collision: 89
+  runtime changed injected positions: 89
+  first runtime tick not fully connected: 8
+  first runtime hold counter not one: 8
+  connectivity failed during hold window: 8
+  runtime chain-hold success not reached: 8
+Failed zero-based sample indices: 94, 105, 112, 116, 124, 149, 192, 197, 246, 250, 258, 284, 292, 333, 350, 386-387, 405, 461-462, 481, 717, 732, 894, 956, 1076, 1185, 1226, 1229, 1259, 1261, 1282, 1308, 1337, 1386, 1409, 1434, 1449, 1463, 1480, 1618, 1645, 1672, 1700, 1730, 1738, 1853, 1860, 1975, 1994, 2044, 2061, 2167, 2187, 2236, 2287, 2301, 2316, 2335, 2355, 2410, 2462, 2506, 2524, 2529, 2562, 2638, 2781, 2787, 2819, 2878, 2909, 2937, 2954, 3031, 3041, 3073, 3134, 3288, 3304, 3339, 3410, 3440, 3482, 3556, 3629, 3647, 3738, 3764, 3805, 3849, 3862, 3883, 3899, 3942, 3986, 3988
+
+--- Failed assignment examples: up to 5 ---
+Sample 94; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(5.857210019368151, 11.926471654289893, 2.133342921542967); runtime float32=(5.857210159301758, 11.926471710205078, 2.133342981338501)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(2.5, 12.5, 0.125)
+    injected32=(2.5, 12.5, 0.125); final32=(2.5, 12.5, 0.375)
+Sample 105; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(6.986935868644878, 11.428916237931043, 2.0005693588147118); runtime float32=(6.986936092376709, 11.428915977478027, 2.0005693435668945)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(2.5, 12.5, 0.125)
+    injected32=(2.5, 12.5, 0.125); final32=(2.5, 12.5, 0.375)
+Sample 112; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(6.459645218668662, 13.920721787312221, 1.4405148313142173); runtime float32=(6.4596452713012695, 13.920722007751465, 1.4405148029327393)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(2.5, 12.5, 0.125)
+    injected32=(2.5, 12.5, 0.125); final32=(2.5, 12.5, 0.375)
+Sample 124; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(8.926476983073108, 13.152497346403155, 0.9762880298855457); runtime float32=(8.926477432250977, 13.152497291564941, 0.9762880206108093)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.0520039797m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(3.9946961523126627, 12.65176048644255, 0.32299603206098915)
+    injected32=(3.9946961402893066, 12.65176010131836, 0.32299602031707764); final32=(3.9946961402893066, 12.65176010131836, 0.375)
+Sample 149; k=1; reasons=invalid float32 physical placement; runtime collision; runtime changed injected positions
+  Target float64=(6.897600821196009, 11.604074069856017, 1.663241352571002); runtime float32=(6.8976006507873535, 11.604074478149414, 1.6632413864135742)
+  First hold=1; final hold=50; success=True; done=True; idle=False; executed ticks=50; max drift=0.25m
+  Runtime sees=[True]; conn_base=[True]; conn_target=[True]
+  Drone 1: proposed64=(2.5, 12.5, 0.125)
+    injected32=(2.5, 12.5, 0.125); final32=(2.5, 12.5, 0.375)
+
+Status: runtime_assignment_failures
+Certification uses the actual runtime step/success fields at exactly the proposed k, with no pose repinning.
+This confirms placed sampled assignments only; navigation, robustness and learned-policy success are untested.
+
+--- GPU aggregate: actual environment, exactly the proposed k ---
+ Map                         | Targets | Tested | First connected | Hold success | Certified | Failures |  Pass % | GPU seconds
+-----------------------------+---------+--------+-----------------+--------------+-----------+----------+---------+------------
+ B02c_static_map_02344       |   4,000 |  3,939 |           3,923 |        3,923 |     3,853 |      147 |  96.33% |      56.83
+ B02c_static_map_02557       |   4,000 |  4,000 |           3,986 |        3,986 |     3,931 |       69 |  98.28% |      50.11
+ B02c_static_map_02713       |   4,000 |  4,000 |           3,992 |        3,992 |     3,903 |       97 |  97.58% |      59.03
+ ALL MAPS                    |  12,000 | 11,939 |          11,901 |       11,901 |    11,687 |      313 |  97.39% |     165.97
+Pass percentages include targets without assignments as failures; GPU seconds include first compilation per map/k.
+
+ Agents | Tested | First connected | Hold success | Certified | Failures |  Pass %
+--------+--------+-----------------+--------------+-----------+----------+--------
+      1 |  2,159 |           2,150 |        2,150 |     1,936 |      223 |  89.67%
+      2 |  3,602 |           3,593 |        3,593 |     3,593 |        9 |  99.75%
+      3 |  2,171 |           2,161 |        2,161 |     2,161 |       10 |  99.54%
+      4 |  1,529 |           1,519 |        1,519 |     1,519 |       10 |  99.35%
+      5 |  1,919 |           1,919 |        1,919 |     1,919 |        0 | 100.00%
+      6 |    554 |             554 |          554 |       554 |        0 | 100.00%
+      7 |      5 |               5 |            5 |         5 |        0 | 100.00%
+
+Pooled failure reasons (may overlap):
+  invalid float32 physical placement: 214
+  runtime collision: 214
+  runtime changed injected positions: 214
+  no proposed assignment: 61
+  first runtime tick not fully connected: 38
+  first runtime hold counter not one: 38
+  connectivity failed during hold window: 38
+  runtime chain-hold success not reached: 38
+Checks confirm sampled placed assignments only; navigation and policy success remain untested.
+
+Status: runtime_assignment_failures
+Total two-phase time: 200.10s

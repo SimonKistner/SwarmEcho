@@ -1,0 +1,39 @@
+Map: B02c_static_map_noSpawn; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Corner simplification versus corrected baseline (same sampled targets) ---
+Rule: XY / same direction / 45-45 degrees (5-degree bins) / 1-2m middle gap
+One forward ray intersection; sequential replacements with neighbor revisits.
+ Agents | Baseline targets | Simplified targets |   Change | After % | visual
+--------+------------------+--------------------+----------+---------+----------------------------------------
+      0 |                0 |                  0 |       +0 |   0.00% | 
+      1 |                5 |                  5 |       +0 |   0.12% | .
+      2 |              481 |                481 |       +0 |  12.03% | IIIIIIIIIIII
+      3 |              992 |                992 |       +0 |  24.80% | IIIIIIIIIIIIIIIIIIIIIIIII
+      4 |              288 |                288 |       +0 |   7.20% | IIIIIII
+      5 |              175 |                175 |       +0 |   4.38% | IIII
+      6 |              268 |                392 |     +124 |   9.80% | IIIIIIIIII
+      7 |              264 |                378 |     +114 |   9.45% | IIIIIIIII
+      8 |              238 |                 78 |     -160 |   1.95% | II
+      9 |               78 |                503 |     +425 |  12.57% | IIIIIIIIIIIII
+     10 |              503 |                618 |     +115 |  15.45% | IIIIIIIIIIIIIII
+     11 |              618 |                 90 |     -528 |   2.25% | II
+     12 |               90 |                  0 |      -90 |   0.00% | 
+
+Targets improved: 1,651/4,000 (41.27%)
+Drones saved across target chains: 1,651; maximum saved on one target: 1
+Mean agents on reachable targets: 6.235 -> 5.822
+Targets requiring >7 agents: 1,527 (38.17%) -> 1,289 (32.23%)
+Targets moved to <=7 agents: 238
+No roadmap route: 0/4,000
+
+Windows inspected (including revisits): 24,242
+Eligible replacement attempts: 1,651
+Accepted replacements: 1,651; rejected: 0
+Acceptance checks point clearance, both link ranges/visibility, and local reachability.
+Counts are feasible geometric placements under this model, not global minima or policy success.
+Baseline construction is reused directly; earlier inspection reports are not needed.
+
+Preparation: 0.19s; target inspection: 6.29s

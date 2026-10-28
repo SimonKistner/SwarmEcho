@@ -41,7 +41,7 @@ from swarmecho.training.train import (
     evaluate_suite,
     replay_recorded_actions,
 )
-from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
+from swarmecho.visualize.replay import ReplayRewards, building_snapshot, planner_metadata, write_replay
 
 
 _EVAL_INFO_UPDATE = re.compile(r"eval_info_u(\d+)_")
@@ -138,7 +138,7 @@ def collect_robust_evaluation(
 ) -> tuple[dict[str, float], dict]:
     """Collect unanimous outcomes and ensemble means without writing artifacts."""
     level = resolve_evaluation_level(level)
-    episodes = level.evaluation.eval_parallel_envs
+    episodes = level.effective_eval_parallel_envs
     robustness_runs = level.evaluation.eval_robustness_runs
     if robustness_runs < 2:
         raise ValueError("Robust evaluation requires at least two runs.")
@@ -255,12 +255,26 @@ def run_parallel_evaluation(
     eval_name: str | None = None,
     result: tuple[dict[str, float], dict] | None = None,
 ) -> Path:
-    """Save a robust ensemble, optionally reusing the final training evaluation."""
+    """Save the configured final ensemble or a single noise-free evaluation."""
     level = resolve_evaluation_level(level)
-    metrics, info = result if result is not None else collect_robust_evaluation(model, level)
+    if result is not None:
+        metrics, info = result
+    elif level.evaluation.final_robustness:
+        metrics, info = collect_robust_evaluation(model, level)
+    else:
+        metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
+                                       return_episode_info=True, action_noise_max=0.)
+        successes = np.asarray(info["successes"], dtype=bool)
+        chain_success = successes & (level.env.success_condition == "chain_held")
+        delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
+        visually_found = np.asarray(info["visually_found"], dtype=bool) | delivered
+        info["stage_rates"] = {"chain_success": chain_success.astype(float),
+                               "found_and_delivered": delivered.astype(float),
+                               "visually_found": visually_found.astype(float)}
+        metrics = {**metrics, "eval_robustness_runs": 1}
     if result is None:
-        evaluation_row(metrics, label="[EVAL UNAN]", update=0, total=0,
-                       episodes=level.evaluation.eval_parallel_envs)
+        evaluation_row(metrics, label="[EVAL UNAN]" if metrics["eval_robustness_runs"] > 1 else "[EVAL 1/1]", update=0, total=0,
+                       episodes=level.effective_eval_parallel_envs)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
         run_dir, checkpoint, level, eval_name=eval_name
@@ -276,8 +290,8 @@ def run_parallel_evaluation(
         info_path,
         level,
         checkpoint=checkpoint,
-        robustness_runs=level.evaluation.eval_robustness_runs,
-        action_noise_max=level.evaluation.eval_action_noise_max,
+        robustness_runs=int(metrics["eval_robustness_runs"]),
+        action_noise_max=level.evaluation.eval_action_noise_max if metrics["eval_robustness_runs"] > 1 else 0.,
         obstacle_min=info["obstacle_min"],
         obstacle_max=info["obstacle_max"],
         eval_name=eval_name,
@@ -300,10 +314,10 @@ def run_action_capturing_evaluation(
     max_steps: int | None = None,
     eval_run_root: Path | None = None,
     eval_name: str | None = None,
-) -> tuple[Path, np.ndarray, str, int, list, np.ndarray]:
+) -> tuple[Path, np.ndarray, str, int, list, ReplayRewards]:
     """Evaluate, select, and replay actions originating in the same actor run."""
     level = resolve_evaluation_level(level)
-    episodes = level.evaluation.eval_parallel_envs
+    episodes = level.effective_eval_parallel_envs
     terminal_print(
         f"[EVAL] evaluating {episodes} deterministic episodes while capturing "
         "executed actions...",
@@ -575,7 +589,7 @@ def render_csv_replays(
             reward_terms=rewards,
             progress=False,
             metadata={
-                **planner_metadata(level.env),
+                **planner_metadata(level.env, reward_cfg=level.reward),
                 "world_size_m": level.building.world_size_m.tolist(),
                 "cell_size_m": level.building.cell_size_m,
                 "coverage_voxel_size_m": level.building.cell_size_m
@@ -747,7 +761,7 @@ def main() -> None:
         )
         terminal_print(
             f"[EVAL] successfully completed: {len(levels)} map(s), "
-            f"{level.evaluation.eval_parallel_envs:,} episodes/map, "
+            f"{level.effective_eval_parallel_envs:,} episodes/map, "
             f"overall success={metrics['eval_success']:.1%}.",
             flush=True,
         )
@@ -791,7 +805,7 @@ def main() -> None:
     replay_tag = "RANDOM"
     source_csv: Path | None = None
     captured_states: list | None = None
-    captured_rewards: np.ndarray | None = None
+    captured_rewards: ReplayRewards | None = None
     if mode == "selective_manual_pick" and explicit_target is None:
         raise ValueError(
             "mode=selective_manual_pick requires target_position=x,y,z."
@@ -855,7 +869,7 @@ def main() -> None:
         artifact_replay_tag = f"{artifact_replay_tag}_PARALLEL-CAPTURE"
     output = output.with_name(f"{output.name}_{artifact_replay_tag}")
     if replay_execution == "parallel_capture":
-        replay_batch_size = level.evaluation.eval_parallel_envs
+        replay_batch_size = level.effective_eval_parallel_envs
     else:
         replay_batch_size = None
     if replay_execution == "parallel_capture":
@@ -891,7 +905,7 @@ def main() -> None:
         reward_terms=rewards,
         progress=False,
         metadata={
-            **planner_metadata(level.env),
+            **planner_metadata(level.env, reward_cfg=level.reward),
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "coverage_voxel_size_m": (

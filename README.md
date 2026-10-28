@@ -2,6 +2,10 @@
 
 SwarmEcho is a **JAX-accelerated multi-agent reinforcement learning** project that trains a drone swarm to explore an environment and form a communication relay between a base and a discovered target. The current runtime supports **3D buildings and cuboid worlds**, using recurrent MAPPO (Multi-Agent PPO with a centralised critic) and optional TarMAC communication.
 
+G02 is the migrated reference for [signed individual rewards](docs/01_reference/11_individual_rewards.md).
+Other authored levels keep unsupported legacy reward blocks, with TODOs and
+commented default replacements beneath them for manual migration.
+
 The demos show the project's progression from 2D to 3D. The 2D implementation is available on the [`2d_core_features_only` branch](https://github.com/M4GI3R/SwarmEcho/tree/2d_core_features_only).
 
 <p align="center"><strong>Earlier 2D demo</strong></p>
@@ -23,6 +27,7 @@ The `src/swarmecho/` package separates configuration, the environment, models, t
 ```text
 SwarmEcho/
 ├── docs/                      Technical reference, guides, and project history
+├── geo_experiments/           Frozen-policy target probes, configs and static reports
 ├── src/swarmecho/
 │   ├── core/                  Level loading, configuration, and utilities
 │   ├── curriculum_config/     3D levels, maps, and building editor
@@ -33,6 +38,11 @@ SwarmEcho/
 │   └── visualize/             Replay data and interactive spatial inspector
 └── README.md
 ```
+
+The [Phase 0 target-probe suite](geo_experiments/README.md) evaluates target-cell
+and target-storey information in the finder GRU, outgoing message and base-stored
+message. It saves comparable static figures and source data in named,
+timestamped experiment folders.
 
 ---
 
@@ -59,6 +69,12 @@ uv run swarmecho-train level=M00_no_maze_open_cuboid
 ```
 
 Level files select the environment and training settings. Override individual values with `key=value`, for example `training.num_envs=512 logging.wandb_mode=online`.
+
+`B02c_random_buildings` experiments with majority-voted reinforcements and
+decommissioning, up to nine simultaneous drones. The two initial drones retain
+the usual spawn stagger; approved reinforcements arrive immediately. See the
+[adaptive swarm reference](docs/01_reference/06_adaptive_swarm_size.md) and
+[W&B diagnostics guide](docs/01_reference/07_adaptive_swarm_diagnostics.md).
 
 ### 2. Start curriculum training
 

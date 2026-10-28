@@ -30,9 +30,16 @@ from swarmecho.env.roadmap_cpu import building_roadmap
 
 
 # Change this constant to change the manual batch size and new-pool minimum.
-DEFAULT_POOL_SIZE = 5000
+DEFAULT_POOL_SIZE = 2000
 POOL_FORMAT = "swarmecho-random-building-bank/v1"
-POOL_ROOT = Path(__file__).resolve().parent / "pools"
+_pool_root_override = os.environ.get("SWARMECHO_POOL_ROOT")
+POOL_ROOT = (
+    Path(_pool_root_override).expanduser()
+    if _pool_root_override
+    else Path(__file__).resolve().parent / "pools"
+)
+if not POOL_ROOT.is_absolute():
+    raise ValueError("SWARMECHO_POOL_ROOT must be an absolute path.")
 _RECORD_KEYS = ("solid_min", "solid_max", "vertices", "distances", "base_position",
                 "target_lower", "target_upper", "target_volumes",
                 "base_lower", "base_upper", "base_volumes")
@@ -182,7 +189,8 @@ def find_compatible_pool(level, required_count=0, *, exclude=None, log=terminal_
     return max(compatible, key=lambda pair: (pair[1]["count"], pair[0].name)) if compatible else None
 
 
-def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_bonus_m, folder):
+def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_bonus_m, folder,
+                 relay_options=None, randomize_base=False):
     """Worker: write one YAML map and one unpadded numeric record."""
     name = f"map_{index:05d}"
     data, building = generate_building(settings, child_seed, name=name,
@@ -206,6 +214,10 @@ def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_b
         record["corner_distances"] = graph.corner_distances
     save_generated_map(data, folder / "maps" / f"{name}.yaml")
     np.savez(folder / "records" / f"{name}.npz", **record)
+    if relay_options is not None and relay_options.enabled and relay_options.mode == "global_candidates":
+        from swarmecho.env.relay_candidates import prepare_record
+        prepare_record(record, cfg, building, relay_options,
+                       randomize_base=randomize_base, cache_dir=folder / "relay_cache")
     return {"id": name, "seed": child_seed, "hash": expected_hash, "nodes": len(graph.vertices)}
 
 
@@ -287,7 +299,8 @@ def _append_batch(level, folder, metadata, count, seed, workers, *, new_pool, fi
         # Spawn avoids inheriting the training process's JAX runtime in workers.
         with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as executor:
             futures = {executor.submit(_compile_one, index, child_seed, digest,
-                                       level.random_buildings, level.env, plan, corner_bonus_m, folder): position
+                                       level.random_buildings, level.env, plan, corner_bonus_m, folder,
+                                       level.training.dynamic_max_geo_distance, level.training.randomize_base): position
                        for position, (index, child_seed, digest) in enumerate(planned)}
             for completed, future in enumerate(as_completed(futures), 1):
                 position = futures[future]

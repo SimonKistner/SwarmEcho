@@ -29,7 +29,7 @@ from swarmecho.visualize.replay import load_replay
 ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "outputs/solo_B02c_a4c4_15x15_rewardChange"
 SOURCE = RUN / "artifacts/train/replays/eval_u000451_s00180M_random_eval_0001.json"
-TARGET_CONFIG = ROOT / "src/swarmecho/curriculum_config/levels/B02c_random_buildings.yaml"
+TARGET_CONFIG = ROOT / "src/swarmecho/curriculum_config/levels/B/B02c_random_buildings.yaml"
 OUTPUT = (RUN / "artifacts/eval/replays"
           / "eval_u000451_s00180M_random_eval_0001_legacy_gap_fixed_trajectory")
 
@@ -81,8 +81,8 @@ def rescore() -> Path:
     env = EnvConfig(**run_config["env"])
     changed = {name for name in source_reward.__dataclass_fields__
                if getattr(source_reward, name) != getattr(target_reward, name)}
-    if changed - {"gap_reward_uses_change", "gap_change_meter_bonus",
-                   "gap_reduction_meter_bonus", "delivery_gap_vesting_enabled",
+    if changed - {"gap_reward_uses_change", "gap_change_reward_per_meter",
+                   "gap_progress_reward_per_meter", "delivery_gap_vesting_enabled",
                    "delivery_gap_vesting_steps"}:
         raise ValueError(f"Other reward settings changed; cannot swap only gap credit: {sorted(changed)}")
     if (not source_reward.gap_reward_uses_change
@@ -120,9 +120,9 @@ def rescore() -> Path:
     ), copy=True)
     vested[~known] = 0.0
     previous_vested = np.concatenate((np.zeros_like(vested[:1]), vested[:-1]))
-    source_gap = source_reward.gap_change_meter_bonus * (vested - previous_vested)
+    source_gap = source_reward.gap_change_reward_per_meter * (vested - previous_vested)
     source_gap[~known] = 0.0
-    target_gap = target_reward.gap_reduction_meter_bonus * credit
+    target_gap = target_reward.gap_progress_reward_per_meter * credit
     target_gap[~known] = 0.0
     source_gap *= active
     target_gap *= active
@@ -152,8 +152,8 @@ def rescore() -> Path:
             "source_replay": str(SOURCE),
             "source_gap_mode": "vested_change",
             "target_gap_mode": "legacy_recurring",
-            "source_gap_change_meter_bonus": source_reward.gap_change_meter_bonus,
-            "target_gap_reduction_meter_bonus": target_reward.gap_reduction_meter_bonus,
+            "source_gap_change_reward_per_meter": source_reward.gap_change_reward_per_meter,
+            "target_gap_progress_reward_per_meter": target_reward.gap_progress_reward_per_meter,
             "source_gap_total_by_agent": source_gap.sum(axis=0).tolist(),
             "target_gap_total_by_agent": target_gap.sum(axis=0).tolist(),
             "nearest_saved_checkpoint": str(RUN / "checkpoints/ckpt_000450"),

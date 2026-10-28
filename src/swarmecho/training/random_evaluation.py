@@ -12,6 +12,7 @@ from swarmecho.env.buildings import compile_building, target_spawn_boxes
 from swarmecho.env.random_buildings import generate_building, map_seed, save_generated_map
 from swarmecho.training.artifacts import artifact_suffix, save_eval_info_csv, write_manifest
 from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
+from swarmecho.training.orchestration import representative_map_indices
 
 
 def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=None, log=lambda message: None):
@@ -25,6 +26,18 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
         raise ValueError("An evaluation suite cannot use both static and random bank maps.")
     count = len(static_maps) if static_maps is not None else level.evaluation.random_eval_envs
     prefix = "static_eval" if static_maps is not None else "random_eval"
+    if bank_maps is None and static_maps is None and level.random_buildings.enabled:
+        from swarmecho.training.map_selection import load_selection
+        selection = load_selection(directory.parent, level.training.checkpoint_path)
+        if selection is not None and selection.get("kind") == "bank":
+            pool = Path(selection["pool"])
+            bank_maps = [pool / "maps" / f"{item['id']}.yaml"
+                         for item in selection["evaluation_maps"][:count]]
+        elif level.validation.enabled and selection is not None and selection.get("kind") == "generated":
+            from swarmecho.training.validation import prepare_generated_validation_maps
+            bank_maps = prepare_generated_validation_maps(level, directory.parent, log)[:count]
+        elif level.validation.enabled:
+            raise ValueError("Inspection requires this run's frozen validation selection; refusing a new split.")
     if (bank_maps is None and level.random_buildings.enabled
             and getattr(level.random_buildings, "load_maps_from_bank", False)
             and level.evaluation.random_eval_maps is None
@@ -33,14 +46,14 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
         from swarmecho.curriculum_config.maps.random_building_bank.generate_bank import (
             DEFAULT_POOL_SIZE, build_pool, ensure_pool, select_maps)
         count = level.evaluation.random_eval_envs
-        pool, metadata = ensure_pool(level, level.training.num_envs + count, log=log)
-        _, selection = select_maps(pool, metadata, level.training.seed, level.training.num_envs, count)
+        pool, metadata = ensure_pool(level, level.training_map_count + count, log=log)
+        _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
         bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
         if any(not source.is_file() for source in bank_maps):
             terminal_print(f"[BANK WARNING] Selected evaluation map is missing from {pool}; generating a new pool.")
-            pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, level.training.num_envs + count),
+            pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, level.training_map_count + count),
                                         avoid_pool=pool, log=log)
-            _, selection = select_maps(pool, metadata, level.training.seed, level.training.num_envs, count)
+            _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
             bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
     if bank_maps is not None and len(bank_maps) != level.evaluation.random_eval_envs:
         raise ValueError("bank_maps must contain exactly random_eval_envs maps.")
@@ -107,6 +120,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
     suffix = artifact_suffix(update, steps)
     results = []
     static = levels[0].building_name.startswith("static_eval_")
+    replay_indices = set(representative_map_indices(len(levels), levels[0].evaluation.map_suite_replay_limit))
     for index, level in enumerate(levels):
         level = resolve_evaluation_level(level)
         cfg, evaluation = level.env, level.evaluation
@@ -123,7 +137,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                   **({"checkpoint": str(checkpoint)} if checkpoint is not None else {}),
                   **({"eval_name": eval_name} if eval_name else {})}
         if eval_due:
-            metrics, info = evaluate_suite(model, level, episodes=evaluation.eval_parallel_envs,
+            metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
                                           return_episode_info=True, action_noise_max=0.)
             results.append(metrics)
             if on_run:
@@ -141,7 +155,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                 write_manifest(path.with_suffix(".heatmap.json"), {**common,
                     "format": "swarmecho-eval-heatmap/v1", "data_file": path.name, "robustness_runs": 1,
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
-        if replay_due:
+        if replay_due and index in replay_indices:
             replay_level = _replay_level_for_storey(level)
             states, rewards = evaluate_model(model, replay_level, max_steps=cfg.max_steps)
             write_replay(artifact_root / "replays" / f"eval_{suffix}_{name}",
@@ -164,10 +178,21 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                      eval_success_length_reduction=1.0 - successful_length / levels[0].env.max_steps)
     aggregate.update({"eval_static_maps" if static else "eval_random_maps": len(levels),
                       "eval_robustness_runs": 1})
+    rates = np.asarray([metrics["eval_success"] for metrics in results])
+    aggregate["eval_worst_map_success"] = float(rates.min())
+    individual_diagnostics = levels[0].logging.individual_map_diagnostics
+    if individual_diagnostics:
+        aggregate.update({f"eval_map/{level.map_source_name or level.building_name}/success_rate": metrics["eval_success"]
+                          for level, metrics in zip(levels, results)})
+    else:
+        aggregate.update(eval_best_map_success=float(rates.max()),
+                         eval_median_map_success=float(np.median(rates)),
+                         eval_p10_map_success=float(np.quantile(rates, .10)))
     write_manifest(artifact_root / "manifests" / f"{'static_eval' if static else 'random_eval'}_{suffix}.json",
                    {"type": "static_map_evaluation" if static else "random_map_evaluation",
                     "update": update, "steps": steps,
-                    "maps": [{"id": level.building_name, **metrics} for level, metrics in zip(levels, results)], **aggregate})
+                    "maps": [{"id": level.building_name, **(metrics if individual_diagnostics else {})}
+                             for level, metrics in zip(levels, results)], **aggregate})
     return aggregate
 
 

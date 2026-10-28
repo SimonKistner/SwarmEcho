@@ -1,0 +1,163 @@
+<!doctype html><meta charset="utf-8"><title>Vote icon preview</title><script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script><style>body{margin:0;background:#090e18;color:#f8fafc;font:16px Arial}header{padding:18px 24px;line-height:2.2}label{margin-left:14px;white-space:nowrap}input{accent-color:#22d3ee}button,select{background:#15253a;color:white;padding:6px;border:1px solid #406383;border-radius:6px;margin-left:10px}#scene{height:650px}small{color:#94a3b8}p{line-height:1.4}</style><header><b>Drone vote icons</b><label><input id="showVoteIcons" type="checkbox" checked> Show vote icons</label><label><input id="showWall" type="checkbox" checked> Show geometry</label><select id="sceneCase" aria-label="Preview scene"><option value="wall">Wall</option><option value="ceiling">Low ceiling / tight corner</option><option value="window">Partial view through opening</option></select><button id="reverseCamera">View opposite side</button><p><small>Label anchors depend on drone position and physical clearance. Orbit changes only the occlusion.</small></p></header><div id="scene"></div><script>
+const $=id=>document.getElementById(id),D={manifest:{adapt_size:{enabled:true},world_size_m:[8,6,5]},adapt_vote:[[true,false,true,false]]};let p=[],active=[],reverse=false;
+function droneHoverText(f,i){return 'D'+(i+1)+' · '+(D.adapt_vote[f][i]?'YES':'NO')}function installDroneAnnotationOcclusion(scene){
+  if(!scene?.drawAnnotations)return;
+  if(!scene.__droneOcclusionInstalled){
+    const drawAnnotations=scene.drawAnnotations;
+    scene.drawAnnotations=function(current){
+      const masks=layoutDroneAnnotations(current);
+      const result=drawAnnotations.call(this,current);
+      applyDroneAnnotationMasks(current,masks);
+      return result;
+    };
+    scene.__droneOcclusionInstalled=true;
+  }
+  scene.drawAnnotations(scene);
+}
+function droneLabelHull(points){
+  const sorted=points.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  if(sorted.length<3)return [];
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[],upper=[];
+  for(const p of sorted){while(lower.length>1&&cross(lower.at(-2),lower.at(-1),p)<=0)lower.pop();lower.push(p)}
+  for(const p of sorted.slice().reverse()){while(upper.length>1&&cross(upper.at(-2),upper.at(-1),p)<=0)upper.pop();upper.push(p)}
+  return lower.slice(0,-1).concat(upper.slice(0,-1));
+}
+function clipDroneLabelPolygon(polygon,axis,bound,keepGreater){
+  const output=[];
+  for(let i=0;i<polygon.length;i++){
+    const a=polygon[i],b=polygon[(i+1)%polygon.length],insideA=keepGreater?a[axis]>=bound:a[axis]<=bound,insideB=keepGreater?b[axis]>=bound:b[axis]<=bound;
+    if(insideA)output.push(a);
+    if(insideA!==insideB){const t=(bound-a[axis])/(b[axis]-a[axis]);output.push(a.map((n,k)=>n+t*(b[k]-n)))}
+  }
+  return output;
+}
+function layoutDroneAnnotations(scene){
+  const entries=[],masks=[];
+  for(const [index,ann] of (scene.fullSceneLayout.annotations||[]).entries()){
+    if(!/^drone-(?:name|vote|prohibition)-\d+$/.test(ann.name||''))continue;
+    ann.visible=true;entries.push({ann,index});
+  }
+  const params=scene.glplot.cameraParams,m=params?.model,v=params?.view,projection=params?.projection;
+  if(!entries.length||!m||!v||!projection)return masks;
+  const size=scene.fullLayout._size,domain=scene.fullSceneLayout.domain;
+  const left=size.l+domain.x[0]*size.w,top=size.t+(1-domain.y[1])*size.h,width=size.w*(domain.x[1]-domain.x[0]),height=size.h*(domain.y[1]-domain.y[0]);
+  if(!width||!height)return masks;
+  const toView=point=>{
+    const model=point.map((n,k)=>n*scene.dataScale[k]*m[k*5]+m[12+k]);
+    return [0,1,2].map(k=>v[k]*model[0]+v[4+k]*model[1]+v[8+k]*model[2]+v[12+k]);
+  };
+  const project=point=>{
+    const clip=[0,1,2,3].map(k=>projection[k]*point[0]+projection[4+k]*point[1]+projection[8+k]*point[2]+projection[12+k]);
+    return [left+(clip[0]/clip[3]+1)*width/2,top+(1-clip[1]/clip[3])*height/2];
+  };
+  const {mins=[],maxs=[],opacities=[]}=scene.graphDiv.__droneAnnotationOccluders||{};
+  const boxes=mins.map((lo,i)=>{const hi=maxs[i],vertices=[];for(let k=0;k<8;k++)vertices.push(toView([k&1?hi[0]:lo[0],k&2?hi[1]:lo[1],k&4?hi[2]:lo[2]]));return {vertices,opacity:opacities[i]??1}});
+  const edges=[];for(let i=0;i<8;i++)for(const bit of [1,2,4])if(!(i&bit))edges.push([i,i|bit]);
+  const near=-(scene.glplot.zNear||.01)*1.001,cache=new Map();
+  for(const {ann,index} of entries){
+    // World anchors are chosen when the drone moves, never by this camera pass.
+    const viewPoint=toView([ann.x,ann.y,ann.z]),key=viewPoint[2].toFixed(6);
+    let polygons=cache.get(key);
+    if(!polygons){
+      polygons=[];
+      // Clip the displayed solids to the space in front of this billboard.
+      // The resulting projected silhouettes partially cover its actual glyphs.
+      for(const {vertices,opacity} of boxes){
+        const far=viewPoint[2]+1e-5;
+        if(far>=near||opacity<=0)continue;
+        const clipped=vertices.filter(p=>p[2]>=far&&p[2]<=near);
+        for(const [a,b] of edges)for(const z of [far,near]){
+          const p=vertices[a],q=vertices[b],dz=q[2]-p[2];
+          if(Math.abs(dz)<1e-12)continue;
+          const t=(z-p[2])/dz;
+          if(t>=0&&t<=1)clipped.push(p.map((n,k)=>n+t*(q[k]-n)));
+        }
+        let hull=droneLabelHull(clipped.map(project).filter(p=>p.every(Number.isFinite)));
+        for(const [axis,bound,greater] of [[0,left,true],[0,left+width,false],[1,top,true],[1,top+height,false]])hull=clipDroneLabelPolygon(hull,axis,bound,greater);
+        if(hull.length>2)polygons.push({points:hull,opacity});
+      }
+      cache.set(key,polygons);
+    }
+    masks.push({id:index,indices:[index],polygons});
+  }
+  return masks;
+}
+function applyDroneAnnotationMasks(scene,masks){
+  const svgNS='http://www.w3.org/2000/svg',layer=scene.fullLayout._infolayer.node(),svg=layer.ownerSVGElement;
+  let defs=svg.querySelector('defs[data-drone-label-masks="'+scene.id+'"]');
+  if(!defs){defs=document.createElementNS(svgNS,'defs');defs.setAttribute('data-drone-label-masks',scene.id);svg.appendChild(defs)}
+  defs.replaceChildren();
+  for(const {id,indices,polygons} of masks){
+    if(!polygons.length)continue;
+    const maskID='drone-label-mask-'+scene.fullLayout._uid+'-'+scene.id+'-'+id,mask=document.createElementNS(svgNS,'mask');
+    mask.id=maskID;mask.setAttribute('maskUnits','userSpaceOnUse');mask.setAttribute('x','0');mask.setAttribute('y','0');mask.setAttribute('width',scene.fullLayout.width);mask.setAttribute('height',scene.fullLayout.height);mask.style.maskType='luminance';
+    const background=document.createElementNS(svgNS,'rect');background.setAttribute('width',scene.fullLayout.width);background.setAttribute('height',scene.fullLayout.height);background.setAttribute('fill','white');mask.appendChild(background);
+    const paths=new Map();
+    for(const polygon of polygons){const d='M'+polygon.points.map(p=>p.map(n=>n.toFixed(2)).join(',')).join('L')+'Z';paths.set(polygon.opacity,(paths.get(polygon.opacity)||'')+d)}
+    for(const [opacity,d] of paths){const path=document.createElementNS(svgNS,'path');path.setAttribute('d',d);path.setAttribute('fill','black');path.setAttribute('fill-opacity',opacity);mask.appendChild(path)}
+    defs.appendChild(mask);
+    for(const index of indices)layer.querySelector('.annotation-'+scene.id+'[data-index="'+index+'"]')?.setAttribute('mask','url(#'+maskID+')');
+  }
+}
+function droneAnnotationPlacement(f,i,point){
+  const g=D.building,size=D.manifest.world_size_m||[20,20,20],padding=.18;
+  const distance=Math.max(.65,Math.min(1.25,(g?.cell_size_m||D.manifest.cell_size_m||3)*.4));
+  const solids=[...(g?.walls||[]),...(g?.floors||[]),...(g?.roofs||[])];
+  (D.obstacle_min?.[f]||[]).forEach((lo,k)=>solids.push({lo,hi:D.obstacle_max[f][k]}));
+  const directions=[[2,1],[2,-1],[0,1],[0,-1],[1,1],[1,-1]];
+  const clearance=directions.map(([axis,sign])=>{
+    let free=(sign>0?size[axis]-point[axis]:point[axis])-padding;
+    for(const {lo,hi} of solids){
+      if([0,1,2].some(k=>k!==axis&&(point[k]<lo[k]-padding||point[k]>hi[k]+padding)))continue;
+      if(sign>0?hi[axis]<=point[axis]:lo[axis]>=point[axis])continue;
+      const near=sign>0?lo[axis]-padding-point[axis]:point[axis]-hi[axis]-padding;
+      const far=sign>0?hi[axis]+padding-point[axis]:point[axis]-lo[axis]+padding;
+      if(far>=0)free=Math.min(free,Math.max(0,near));
+    }
+    return Math.max(0,free);
+  });
+  const cache=droneAnnotationPlacement.cache||(droneAnnotationPlacement.cache=new WeakMap());
+  if(!cache.has(D))cache.set(D,new Map());
+  const choices=cache.get(D),previous=choices.get(i);
+  let chosen=clearance.findIndex(free=>free>=distance);
+  if(chosen<0)chosen=clearance.indexOf(Math.max(...clearance));
+  // Hysteresis depends only on physical clearance, not on the viewing angle.
+  if(previous!==undefined&&clearance[previous]>=distance&&(chosen!==0||clearance[0]<distance+.2))chosen=previous;
+  choices.set(i,chosen);
+  const [axis,sign]=directions[chosen],reach=Math.min(distance,clearance[chosen]);
+  const at=fraction=>point.map((n,k)=>n+(k===axis?sign*reach*fraction:0));
+  return {name:at(.4),icon:at(1)};
+}
+function droneSceneAnnotations(f,p,active){
+  const annotations=[],enabled=Boolean(D.adapt_vote&&D.manifest.adapt_size?.enabled)&&$('showVoteIcons')?.checked!==false;
+  const emojiFont='Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji,sans-serif';
+  active.forEach((isActive,i)=>{
+    if(!isActive)return;
+    const placement=droneAnnotationPlacement(f,i,p[i]);
+    const anchor=point=>({x:point[0],y:point[1],z:point[2],showarrow:false,xanchor:'center',yanchor:'middle',captureevents:false,borderpad:0,borderwidth:0});
+    annotations.push({...anchor(placement.name),name:'drone-name-'+i,text:'<b>D'+(i+1)+'</b>',font:{family:'Arial,sans-serif',size:16,color:'#f8fafc'}});
+    if(!enabled)return;
+    const badge={...anchor(placement.icon),width:40,height:40,bgcolor:'rgba(0,0,0,0)',font:{family:emojiFont,size:22}};
+    annotations.push({...badge,name:'drone-vote-'+i,text:'➕'});
+    if(!D.adapt_vote[f][i])annotations.push({...badge,name:'drone-prohibition-'+i,text:'⊘',font:{family:'Arial,sans-serif',size:30,color:'#ef4444'}});
+  });
+  return annotations;
+}
+function previewBox(lo,hi){return {type:'mesh3d',x:[lo[0],hi[0],hi[0],lo[0],lo[0],hi[0],hi[0],lo[0]],y:[lo[1],lo[1],hi[1],hi[1],lo[1],lo[1],hi[1],hi[1]],z:[lo[2],lo[2],lo[2],lo[2],hi[2],hi[2],hi[2],hi[2]],i:[0,0,4,4,0,0,1,1,2,2,3,3],j:[1,2,5,6,1,5,2,6,3,7,0,4],k:[2,3,6,7,5,4,6,5,7,6,4,7],color:'#959b9c',opacity:1,flatshading:true,hoverinfo:'skip'}}
+function draw(resetCamera=false){
+ const graph=$('scene'),kind=$('sceneCase').value,boxes=[];let eye={x:1,y:reverse?-1.8:1.8,z:.7},center={x:0,y:0,z:0};
+ p=[[2,2,1],[6,2,1],[2,4,1],[6,4,1]];active=[true,true,true,true];
+ if(kind==='wall')boxes.push({lo:[0,2.9,0],hi:[8,3.1,3]});
+ if(kind==='ceiling'){p=[[2,2,2.7],[6,2,1.2],[2,4,2.7],[6.15,4,.45]];boxes.push({lo:[0,0,2.9],hi:[8,6,3.1]},{lo:[5,3,1.05],hi:[7,5,1.25]},{lo:[6.45,3,0],hi:[6.65,5,2.9]});eye={x:-1.2,y:reverse?-1.6:1.6,z:-.05}}
+ if(kind==='window'){p[1]=[4,2,.6];active=[false,true,false,false];boxes.push({lo:[0,2.9,0],hi:[3.78,3.1,3]},{lo:[4.22,2.9,0],hi:[8,3.1,3]},{lo:[3.78,2.9,0],hi:[4.22,3.1,1.05]},{lo:[3.78,2.9,1.75],hi:[4.22,3.1,3]});eye={x:0,y:reverse?-1.8:1.8,z:-.3};center={x:0,y:0,z:-.15}}
+ D.building={cell_size_m:3,walls:boxes,floors:[],roofs:[]};
+ const visible=p.map((_,i)=>i).filter(i=>active[i]),traces=[{type:'scatter3d',mode:'markers',x:visible.map(i=>p[i][0]),y:visible.map(i=>p[i][1]),z:visible.map(i=>p[i][2]),marker:{size:7,color:'#22d3ee',line:{width:1,color:'#e5eefc'}}}];
+ if($('showWall').checked)traces.push(...boxes.map(({lo,hi})=>previewBox(lo,hi)));
+ graph.__droneAnnotationOccluders=$('showWall').checked?{mins:boxes.map(b=>b.lo),maxs:boxes.map(b=>b.hi)}:{mins:[],maxs:[]};
+ const scene={uirevision:'preview-'+kind,annotations:droneSceneAnnotations(0,p,active),bgcolor:'#090e18',aspectmode:'data',xaxis:{range:[0,8],color:'#94a3b8',gridcolor:'#22304a'},yaxis:{range:[0,6],color:'#94a3b8',gridcolor:'#22304a'},zaxis:{range:[0,5],color:'#94a3b8',gridcolor:'#22304a'}};
+ if(resetCamera||!graph._fullLayout)scene.camera={eye,center};
+ return Plotly.react(graph,traces,{paper_bgcolor:'#090e18',margin:{l:0,r:0,t:0,b:0},scene,showlegend:false},{responsive:true,displaylogo:false}).then(()=>installDroneAnnotationOcclusion(graph._fullLayout.scene._scene));
+}
+$('showVoteIcons').onchange=()=>draw();$('showWall').onchange=()=>draw();$('sceneCase').onchange=()=>draw(true);$('reverseCamera').onclick=()=>{reverse=!reverse;draw(true)};draw(true);
+</script>

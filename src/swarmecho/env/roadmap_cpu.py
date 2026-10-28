@@ -475,7 +475,10 @@ def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, p
     distances = np.empty((0, 0), dtype=np.float32)
     visible_edges = np.empty((0, 0), dtype=bool)
     corner_distances = distances
-    if plan and len(lo):
+    # Tight convex maps can have only boundary walls, which are represented
+    # by world bounds rather than internal solids. Still connect their saved
+    # or minimal-mode anchors so map-bank planning has a usable graph.
+    if plan and (len(lo) or candidate_bytes is not None):
         started = perf_counter()
         init_message(f"Building shared geodesic roadmap: {len(lo)} authored solids")
         expanded_lo, expanded_hi = lo - clearance + 1e-4, hi + clearance - 1e-4

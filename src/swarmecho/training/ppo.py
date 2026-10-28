@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from swarmecho.models.actions import vote_statistics
 
 class RunningValueNormalizer(nnx.Module):
     """Pooled running target moments (parallel variance merge), checkpointed by NNX."""
@@ -52,20 +53,22 @@ def replay(model, mb, key):
                 obs_t, *carry, reset=reset_t | ~active_t, comm_mask=comm_t,
                 active=active_t, base_signature=bs, base_value=bv, base_memory_mask=bm,
             )
-            return (h_t, sig_t, val_t), (mu, log_std)
+            logits = (model.actor.vote_logits(h_t) if getattr(model.actor, "vote_mode", None) is not None
+                      else jnp.zeros((*mu.shape[:-1], 0), dtype=mu.dtype))
+            return (h_t, sig_t, val_t), (mu, log_std, logits)
         _, distribution = jax.lax.scan(
             step, (h, sig, val), (obs, resets, active, comm, base_sig, base_val, base_mask)
         )
         return distribution
 
-    mu, log_std = jax.vmap(one_env, in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0))(
+    mu, log_std, logits = jax.vmap(one_env, in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0))(
         mb["obs"], mb["rnn_resets"], mb["active_masks"], mb["comm_masks"],
         mb["base_signatures"], mb["base_values"], mb["base_memory_masks"],
         mb["initial_actor_h"], mb["initial_actor_signature"], mb["initial_actor_value"],
     )
     mu, log_std = jnp.swapaxes(mu, 0, 1), jnp.swapaxes(log_std, 0, 1)
     std = jnp.exp(log_std)
-    actions = jnp.where(mb["active_masks"][..., None], mb["actions"], 0.0)
+    actions = jnp.where(mb["active_masks"][..., None], mb["actions"][..., :3], 0.0)
     log_probs = -0.5 * jnp.sum(
         ((actions - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1
     )
@@ -78,6 +81,12 @@ def replay(model, mb, key):
     # Fresh reparameterized samples: gradients include mean/std and tanh compression.
     sampled = mu + std * jax.random.normal(key, mu.shape)
     squashed = gaussian + correction(sampled)
+    if getattr(model.actor, "vote_mode", None) is not None:
+        logits = jnp.swapaxes(logits, 0, 1)
+        vote_lp, vote_entropy = vote_statistics(logits, mb["actions"][..., 3], model.actor.vote_mode)
+        log_probs += vote_lp
+        legacy += vote_entropy
+        squashed += vote_entropy
     active = mb["active_masks"]
     _, values = model.critic.values_sequence(
         mb["obs"], mb["initial_critic_h"], mb["rnn_resets"] | ~active,
@@ -143,7 +152,7 @@ def diagnostics(model, mb, key, target_mean):
         "gaussian": jnp.sum(jnp.where(active, gaussian, 0.0)),
         "squashed": jnp.sum(jnp.where(active, squashed, 0.0)),
         "saturation": jnp.sum(jnp.where(active[..., None],
-            (jnp.abs(jnp.tanh(mb["actions"])) > 0.99).astype(jnp.float32), 0.0), axis=(0, 1, 2)),
+            (jnp.abs(jnp.tanh(mb["actions"][..., :3])) > 0.99).astype(jnp.float32), 0.0), axis=(0, 1, 2)),
     }
 
 

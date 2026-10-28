@@ -104,13 +104,32 @@ add the panel.
 The private inspector displays the same configuration. For replays, the left
 sidebar places **Episode** at the top left, with **Checkpoint configuration**
 above **Building visibility** in the adjacent column. Reward debug plots start
-disabled in both versions; enable them under **Playback**. Public replay pages
+disabled in both versions; enable them under **Playback**. The reward lines,
+legend and axis scaling include only agent slots active in at least one
+recorded frame of the replay, including agents activated later or subsequently
+decommissioned. Drone labels and colors retain their original slot numbers.
+The cumulative plot sits on the left; the right-hand dropdown selects reward
+breakdown or relative advantage. The breakdown contains only component areas,
+with no net-reward overlay, and omits components that stay zero for the selected
+drone throughout the episode.
+When a chain is held, green links highlight a complete minimum-hop BASE-to-TARGET
+route (lowest drone slot breaks equal-hop ties). With redundancy rewards enabled,
+green links include every simple complete route. Other valid radio links stay
+blue. A pink drone means it remembers the target location; it can retain that
+knowledge without current target sight or a target connection. Hover a drone or
+its label to inspect recorded direct sight, target connectivity through drones,
+base connectivity, and remembered target knowledge separately. The base does not
+relay target connectivity between otherwise separate drone components.
+Public replay pages
 use a compact header with a full-width frame timeline and an **All results**
 link; the orbit/zoom hint sits inside the 3D view.
 New artifacts open at 10° camera elevation with two 15% zoom-in steps applied
 to the starting distance. This deterministic zoom avoids browser-dependent
-mouse-wheel timing. Switching artifacts resets to that pose; refreshing the
-same selected artifact retains its camera.
+mouse-wheel timing. Selecting an artifact from the run picker resets to that
+pose. The step buttons and arrow navigation retain the current camera angle,
+zoom and pan while loading the selected heatmap or replay; map and category
+navigation also retain the camera. Refreshing the same selected artifact
+retains its camera.
 
 ## Export from the command line
 

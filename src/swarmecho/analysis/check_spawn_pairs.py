@@ -37,9 +37,10 @@ from swarmecho.env.environment import make_autoreset_fns
 
 def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
     training = level.training
-    eval_count = (level.evaluation.random_eval_envs if level.evaluation.random_eval
+    eval_count = (level.validation.num_maps if level.validation.enabled else
+                  level.evaluation.random_eval_envs if level.evaluation.random_eval
                   and level.evaluation.random_eval_maps is None else 0)
-    required = training.num_envs + eval_count
+    required = level.training_map_count + eval_count
 
     if manifest_path is not None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -47,8 +48,8 @@ def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
             raise ValueError(f"{manifest_path} has no bank pool path; use a bank-backed training manifest.")
         pool = Path(manifest["pool"]).resolve()
         choices = manifest.get("maps")
-        if not isinstance(choices, list) or len(choices) != training.num_envs:
-            raise ValueError("Manifest map count differs from training.num_envs.")
+        if not isinstance(choices, list) or len(choices) != level.training_map_count:
+            raise ValueError("Manifest map count differs from the configured training map count.")
     elif pool_path is not None:
         pool = pool_path.resolve()
         choices = None
@@ -57,7 +58,7 @@ def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
         if found is None:
             raise ValueError("No compatible, sufficiently large pool exists. Build one first or pass --manifest.")
         pool, metadata = found
-        choices, _ = select_maps(pool, metadata, training.seed, training.num_envs, eval_count)
+        choices, _ = select_maps(pool, metadata, training.seed, level.training_map_count, eval_count)
 
     metadata = _read_metadata(pool)
     if metadata is None:
@@ -67,7 +68,7 @@ def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
     if choices is None:
         if metadata["count"] < required:
             raise ValueError(f"Pool has {metadata['count']} maps but training needs {required} including evaluation.")
-        choices, _ = select_maps(pool, metadata, training.seed, training.num_envs, eval_count)
+        choices, _ = select_maps(pool, metadata, training.seed, level.training_map_count, eval_count)
     known = {item["id"]: item for item in metadata["maps"]}
     for item in choices:
         if item.get("id") not in known or item.get("seed") != known[item["id"]]["seed"]:
@@ -104,10 +105,15 @@ def check(level, *, manifest_path=None, pool_path=None, rounds=1, max_report=20)
                    f"separation >= {threshold:g} m; corner bonus {cfg.roadmap_corner_bonus_m:g} m; "
                    f"randomized base={training.randomize_base}; skip exhausted target={skip_targets}")
     records = load_records(pool, choices, require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]))
-    bank = prepare_bank_from_records(records, level.building, cfg, log=terminal_print)
+    bank = prepare_bank_from_records(records, level.building, cfg,
+        dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+        relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
+        relay_cache_dir=pool / "relay_cache", log=terminal_print)
     reset, _, _, _ = make_autoreset_fns(
         level.building, cfg, level.reward,
         randomize_base=training.randomize_base,
+        dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+        relay_options=training.dynamic_max_geo_distance,
         minimum_geodesic_separation=training.minimum_geodesic_separation,
         minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
         skip_on_no_pair_found=training.skip_on_no_pair_found,
@@ -135,7 +141,7 @@ def check(level, *, manifest_path=None, pool_path=None, rounds=1, max_report=20)
             stop = min(start + 32, training.num_envs)
             indices = jnp.minimum(jnp.arange(start, start + 32), training.num_envs - 1)
             batch_keys = keys[indices]
-            attempts, target_retries, targets, bases = reset_batch(batch_keys, indices)
+            attempts, target_retries, targets, bases = reset_batch(batch_keys, indices % len(records))
             attempts, target_retries, targets, bases = (np.asarray(value)[:stop - start]
                                                         for value in (attempts, target_retries, targets, bases))
             attempts_all.extend(attempts.tolist())
@@ -144,7 +150,7 @@ def check(level, *, manifest_path=None, pool_path=None, rounds=1, max_report=20)
                 index = start + int(local)
                 round_failures += 1
                 if reported < max_report:
-                    item, record = choices[index], records[index]
+                    item, record = choices[index % len(records)], records[index % len(records)]
                     target = targets[local]
                     story = min(int(target[2] // level.building.cell_size_m) + 1,
                                 level.random_buildings.stories)

@@ -13,6 +13,9 @@
 <aside>
 <div class="section">Edit mode</div><div class="tools"><button data-mode="tiles" class="active">▦ Tiles</button><button data-mode="walls">▥ Walls</button><button data-mode="doors">Door wall</button><button data-mode="windows">Window wall</button><button data-mode="stairs">Staircase</button><button data-mode="exclude">▧ No target</button><button data-mode="base">● Base</button><button data-mode="orbit">↻ Orbit</button></div>
 <label class="hint">Stair ascent <select id="stairDirection"><option value="0">East +X</option><option value="1">South +Y</option><option value="2">West −X</option><option value="3">North −Y</option></select></label>
+<div class="grow"><button id="rotateStairBtn" disabled>Rotate 90° · R</button><button id="removeStairBtn" disabled>Remove stairs</button></div>
+<label class="hint"><input id="stairFullWidth" type="checkbox" checked> Full cell width stairs</label>
+<p id="stairSelection" class="hint">Click to place or select stairs. The upper storey and stair opening are added automatically. Select either end to rotate.</p>
 <div class="section">Inspect a template</div><select id="template"><option value="door">Door</option><option value="window">Window</option><option value="staircase">Staircase</option></select><button id="templateBtn">Open template</button>
 <label class="hint">Import map YAML <input id="importMap" type="file" accept=".yaml,.yml"></label>
 <label class="hint"><input id="showExclusions" type="checkbox" checked> Show no-target filling</label><div class="section">Batch tools</div><button id="outerBtn" class="wide">Add outer walls</button><button id="roofBtn" class="wide">Add roof</button>
@@ -26,7 +29,7 @@
 <dialog id="picker"><h3>Open existing v1 map</h3><select id="mapList"></select><p><button id="cancelOpen">Cancel</button> <button id="confirmOpen" class="primary">Open</button></p></dialog>
 <script>
 const $=id=>document.getElementById(id),canvas=$('scene'),ctx=canvas.getContext('2d'),coordKey=c=>c.join(',');
-let doc=null,mode='tiles',layer=0,yaw=-0.65,pitch=0.68,zoom=46,pointer=null,selection=null;
+let doc=null,mode='tiles',layer=0,yaw=-0.65,pitch=0.68,zoom=46,pointer=null,selection=null,selectedStair=null,stairPending=false;
 const setOf=list=>new Set(list.map(coordKey));
 async function api(path,body){const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||r.statusText);return j}
 function status(message,type=''){const box=$('status');box.textContent=message;box.className='status '+type}
@@ -98,12 +101,38 @@ function draw(){
     for(const w of doc.x_walls)if(w[2]<=layer&&w[2]<doc.layers)wallBlock('x',...w,roofView||w[2]===layer?'#8fd4df':'#416b78');
     for(const w of doc.y_walls)if(w[2]<=layer&&w[2]<doc.layers)wallBlock('y',...w,roofView||w[2]===layer?'#72bfcc':'#355d6b');
     for(const [x,y,z,d] of doc.stairs||[])if(z<=layer)for(let i=0;i<8;i++){
-        let lo=[i/8,.275,0],hi=[(i+1)/8,.725,(i+1)/8];
+        let lo=[i/8,doc.stair_full_width?0:.275,0],hi=[(i+1)/8,doc.stair_full_width?1:.725,(i+1)/8];
         if(d>=2)[lo[0],hi[0]]=[1-hi[0],1-lo[0]];
         if(d%2){[lo[0],lo[1]]=[lo[1],lo[0]];[hi[0],hi[1]]=[hi[1],hi[0]];}
         box(x+lo[0],y+lo[1],z+lo[2],x+hi[0],y+hi[1],z+hi[2],'#b69457','#e5c58c','#efd5a9');
     }
-    renderSolids();drawWallPreview();if(doc.base_cell&&doc.base_cell[2]===layer){const [x,y,z]=doc.base_cell,p=project(x+.5,y+.5,z+.05);ctx.beginPath();ctx.arc(...p,Math.max(5,zoom*.14),0,Math.PI*2);ctx.fillStyle='#58aaff';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='white';ctx.font='bold 10px sans-serif';ctx.textAlign='center';ctx.fillText('B',p[0],p[1]+3)}if(selection&&!roofView){const x0=Math.min(selection.start[0],selection.end[0]),x1=Math.max(selection.start[0],selection.end[0]),y0=Math.min(selection.start[1],selection.end[1]),y1=Math.max(selection.start[1],selection.end[1]),color=mode==='exclude'?(selection.add?'#e45770aa':'#381521bb'):(selection.add?'#45ddea88':'#0b1420cc');for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)polygon(cellPolygon(x,y,layer+.03),color,'#eafcff',2)}updateUi()}
+    renderSolids();drawWallPreview();drawStairMarkers();if(doc.base_cell&&doc.base_cell[2]===layer){const [x,y,z]=doc.base_cell,p=project(x+.5,y+.5,z+.05);ctx.beginPath();ctx.arc(...p,Math.max(5,zoom*.14),0,Math.PI*2);ctx.fillStyle='#58aaff';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='white';ctx.font='bold 10px sans-serif';ctx.textAlign='center';ctx.fillText('B',p[0],p[1]+3)}if(selection&&!roofView){const x0=Math.min(selection.start[0],selection.end[0]),x1=Math.max(selection.start[0],selection.end[0]),y0=Math.min(selection.start[1],selection.end[1]),y1=Math.max(selection.start[1],selection.end[1]),color=mode==='exclude'?(selection.add?'#e45770aa':'#381521bb'):(selection.add?'#45ddea88':'#0b1420cc');for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)polygon(cellPolygon(x,y,layer+.03),color,'#eafcff',2)}updateStairUi();updateUi()}
+function currentStair(){return (doc?.stairs||[]).find(stair=>coordKey(stair.slice(0,3))===selectedStair&&(stair[2]===layer||stair[2]+1===layer))}
+function updateStairUi(){
+    const stair=currentStair();$('rotateStairBtn').disabled=$('removeStairBtn').disabled=!stair||stairPending;
+    $('stairFullWidth').checked=Boolean(doc.stair_full_width);
+    $('stairFullWidth').disabled=$('stairDirection').disabled=stairPending;
+    if(stair)$('stairDirection').value=stair[3];
+    $('stairSelection').textContent=stair?`Selected ${stair[2]===layer?'lower':'upper'} stair section · Levels ${stair[2]+1}–${stair[2]+2}. Change ascent or rotate; Remove stairs deletes both sections.`:'Click to place or select stairs. The upper storey and stair opening are added automatically. Select either end to rotate.';
+}
+function drawStairMarkers(){
+    if(layer===doc.layers)return;
+    for(const stair of doc.stairs||[]){
+        const [x,y,z,d]=stair;if(z!==layer&&z+1!==layer)continue;
+        const selected=coordKey(stair.slice(0,3))===selectedStair,color=selected?'#8cffff':'#efd5a9',height=layer+.04;
+        if(selected)polygon(cellPolygon(x,y,height),'#38d5e522',color,2);
+        const [dx,dy]=[[1,0],[0,1],[-1,0],[0,-1]][z===layer?d:(d+2)%4],point=(along,across)=>project(x+.5+dx*along-dy*across,y+.5+dy*along+dx*across,height);
+        ctx.beginPath();ctx.moveTo(...point(-.28,0));ctx.lineTo(...point(.28,0));ctx.moveTo(...point(.12,-.12));ctx.lineTo(...point(.28,0));ctx.lineTo(...point(.12,.12));ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();
+        const label=project(x+.5,y+.5,height);ctx.fillStyle=color;ctx.font='bold 10px sans-serif';ctx.textAlign='center';ctx.fillText(z===layer?'UP':'DOWN',label[0],label[1]+15);
+    }
+}
+function rotateStair(){const stair=currentStair();if(!stair||stairPending)return;stair[3]=(stair[3]+1)%4;draw()}
+function removeStair(){const stair=currentStair();if(!stair||stairPending)return;doc.stairs.splice(doc.stairs.indexOf(stair),1);selectedStair=null;draw();status('Staircase removed from both storeys. The opening can now be filled with Tiles.')}
+async function placeEditorStair(cell){
+    const stair=[...cell,layer,+$('stairDirection').value],before=doc,oldLayers=doc.layers;stairPending=true;updateStairUi();
+    try{const result=await api('/api/buildings/stairs',{...doc,stair});if(doc!==before)return;doc=result.document;selectedStair=coordKey(stair.slice(0,3));status(doc.layers>oldLayers?'Stairs added with a new upper storey and connected upper section.':'Stairs added with a connected upper section and open floor.');}
+    catch(e){status(e.message,'err')}finally{stairPending=false;draw()}
+}
 function updateUi(){const sel=$('layer'),roofPresent=doc.tiles.some(t=>t[2]===doc.layers),optionsKey=doc.layers+':'+roofPresent;if(sel.dataset.optionsKey!==optionsKey){sel.dataset.optionsKey=optionsKey;sel.innerHTML='';for(let z=0;z<doc.layers;z++)sel.add(new Option(`Level ${z+1}`,z));if(roofPresent)sel.add(new Option('Roof · inspection',doc.layers))}if(layer>doc.layers||(layer===doc.layers&&!roofPresent))layer=doc.layers-1;sel.value=layer;$('name').value=doc.name;const roofView=layer===doc.layers;$('title').textContent=roofView?'Roof · inspection':`Level ${layer+1} · ${mode[0].toUpperCase()+mode.slice(1)}`;$('count').textContent=roofView?'Complete opaque building':`${doc.interior_cells.filter(c=>c[2]===layer).length} volume cells · ${doc.layers} levels`;$('structure').innerHTML='';for(let z=0;z<doc.layers;z++){const e=document.createElement('div'),count=doc.interior_cells.filter(c=>c[2]===z).length;e.className='storey'+(z===layer?' active':'');e.textContent=`LEVEL ${z+1}  ·  ${count} cells`;e.style.width=(55+Math.min(100,count*2))+'px';e.onclick=()=>{layer=z;draw()};$('structure').append(e)}if(roofPresent){const e=document.createElement('div'),count=doc.tiles.filter(t=>t[2]===doc.layers).length;e.className='storey roof'+(layer===doc.layers?' active':'');e.textContent=`ROOF · ${count} tiles`;e.style.width=(90+Math.min(80,count))+'px';e.onclick=()=>{layer=doc.layers;draw()};$('structure').append(e)}}
 function unproject(clientX,clientY){const r=canvas.getBoundingClientRect(),[cx,cy]=centre(),rx=(clientX-r.left-cx)/zoom,ry=(clientY-r.top-cy)/(zoom*Math.cos(pitch)),c=Math.cos(yaw),s=Math.sin(yaw),dx=rx*c+ry*s,dy=-rx*s+ry*c,x=Math.floor(dx+doc.cols/2),y=Math.floor(dy+doc.rows/2);return x>=0&&x<doc.cols&&y>=0&&y<doc.rows?[x,y]:null}
 function nearestWall(clientX,clientY){const cell=unproject(clientX,clientY);if(!cell)return null;const r=canvas.getBoundingClientRect(),[x,y]=cell,px=clientX-r.left,py=clientY-r.top,candidates=[['x',[x,y,layer],project(x,y+.5,layer+.5)],['x',[x+1,y,layer],project(x+1,y+.5,layer+.5)],['y',[x,y,layer],project(x+.5,y,layer+.5)],['y',[x,y+1,layer],project(x+.5,y+1,layer+.5)]];candidates.sort((a,b)=>Math.hypot(px-a[2][0],py-a[2][1])-Math.hypot(px-b[2][0],py-b[2][1]));return candidates[0]}
@@ -120,7 +149,7 @@ function drawWallPreview(){
         polygon(points.map(c=>project(...c)),fill,stroke,3);
     }
 }
-function beginEdit(ev){const cell=unproject(ev.clientX,ev.clientY);if(layer===doc.layers||mode==='orbit'||!cell){pointer={type:'orbit',x:ev.clientX,y:ev.clientY,yaw,pitch};canvas.setPointerCapture(ev.pointerId);return}
+function beginEdit(ev){if(stairPending)return;const cell=unproject(ev.clientX,ev.clientY);if(layer===doc.layers||mode==='orbit'||!cell){pointer={type:'orbit',x:ev.clientX,y:ev.clientY,yaw,pitch};canvas.setPointerCapture(ev.pointerId);return}
 if(mode==='doors'||mode==='windows'){
     const wall=nearestWall(ev.clientX,ev.clientY);if(!wall)return;const [axis,c]=wall,neighbor=[...c];neighbor[axis==='x'?0:1]--;
     const inside=setOf(doc.interior_cells);if(!inside.has(coordKey(c))||!inside.has(coordKey(neighbor)))return status('Doors/windows must connect two interior cells.','err');
@@ -128,10 +157,9 @@ if(mode==='doors'||mode==='windows'){
     const other=axis+'_'+(mode==='doors'?'windows':'doors');doc[other]??=[];toggle(doc[other],c,false);draw();return;
 }
 if(mode==='stairs'){
-    const [x,y]=cell;if(layer+1>=doc.layers)return status('Add an upper storey before placing stairs.','err');
-    doc.stairs??=[];const i=doc.stairs.findIndex(v=>v[0]===x&&v[1]===y&&v[2]===layer);
-    if(i>=0)doc.stairs.splice(i,1);else{doc.stairs.push([x,y,layer,+$('stairDirection').value]);toggle(doc.tiles,[x,y,layer+1],false);}
-    draw();return;
+    const [x,y]=cell,stairs=doc.stairs||[],stair=stairs.find(v=>v[0]===x&&v[1]===y&&v[2]===layer)||stairs.find(v=>v[0]===x&&v[1]===y&&v[2]+1===layer);
+    if(stair){selectedStair=coordKey(stair.slice(0,3));draw();return}
+    return placeEditorStair(cell);
 }
 if(mode==='base'){doc.base_cell=[...cell,layer];delete doc.base_position_m;draw();return}if(mode==='walls'){const wall=nearestWall(ev.clientX,ev.clientY);if(!wall)return;const list=wall[0]==='x'?doc.x_walls:doc.y_walls,add=!setOf(list).has(coordKey(wall[1]));const start=wall[1][wall[0]==='x'?1:0];pointer={type:'walls',add,wall,start,end:start,x:ev.clientX,y:ev.clientY};draw();canvas.setPointerCapture(ev.pointerId);return}const c=[...cell,layer],list=mode==='tiles'?doc.tiles:doc.target_exclusion_cells;if(mode==='exclude'&&!setOf(doc.interior_cells).has(coordKey(c)))return status('No-target selection must stay inside the interior volume.','err');selection={start:cell,end:cell,add:!setOf(list).has(coordKey(c))};pointer={type:'rectangle'};canvas.setPointerCapture(ev.pointerId);draw()}
 function touchWall(ev){
@@ -142,16 +170,19 @@ function touchWall(ev){
 }
 function cancelEdit(){pointer=null;selection=null;draw()}
 function moveEdit(ev){if(!pointer)return;if(pointer.type==='orbit'){yaw=pointer.yaw+(ev.clientX-pointer.x)/180;pitch=Math.max(.3,Math.min(1.25,pointer.pitch+(ev.clientY-pointer.y)/220));draw()}else if(pointer.type==='walls')touchWall(ev);else{const c=unproject(ev.clientX,ev.clientY);if(c){selection.end=c;draw()}}}
-function endEdit(ev){if(!pointer)return;if(pointer.type==='walls'){if(ev&&Number.isFinite(ev.clientX))touchWall(ev);const list=pointer.wall[0]==='x'?doc.x_walls:doc.y_walls;for(const c of selectedWalls())toggle(list,c,pointer.add);}if(pointer.type==='rectangle'&&selection){const [ax,ay]=selection.start,[bx,by]=selection.end,x0=Math.min(ax,bx),x1=Math.max(ax,bx),y0=Math.min(ay,by),y1=Math.max(ay,by);for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const c=[x,y,layer];if(mode==='tiles'){toggle(doc.tiles,c,selection.add);}else if(setOf(doc.interior_cells).has(coordKey(c)))toggle(doc.target_exclusion_cells,c,selection.add)}}pointer=null;selection=null;draw()}
+function endEdit(ev){if(!pointer)return;if(pointer.type==='walls'){if(ev&&Number.isFinite(ev.clientX))touchWall(ev);const list=pointer.wall[0]==='x'?doc.x_walls:doc.y_walls;for(const c of selectedWalls())toggle(list,c,pointer.add);}if(pointer.type==='rectangle'&&selection){const [ax,ay]=selection.start,[bx,by]=selection.end,x0=Math.min(ax,bx),x1=Math.max(ax,bx),y0=Math.min(ay,by),y1=Math.max(ay,by);for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const c=[x,y,layer];if(mode==='tiles'){const stairOpening=(doc.stairs||[]).some(s=>s[0]===x&&s[1]===y&&s[2]+1===layer);if(!selection.add||!stairOpening)toggle(doc.tiles,c,selection.add);}else if(setOf(doc.interior_cells).has(coordKey(c)))toggle(doc.target_exclusion_cells,c,selection.add)}}pointer=null;selection=null;draw()}
 $('showExclusions').onchange=draw;
+$('stairDirection').onchange=()=>{const stair=currentStair();if(stair)stair[3]=+$('stairDirection').value;draw()};$('rotateStairBtn').onclick=rotateStair;$('removeStairBtn').onclick=removeStair;
+$('stairFullWidth').onchange=()=>{doc.stair_full_width=$('stairFullWidth').checked;draw()};
+document.onkeydown=ev=>{if(ev.defaultPrevented||ev.ctrlKey||ev.altKey||ev.metaKey||ev.target.closest('input,select,textarea,button,[contenteditable="true"]'))return;if(mode==='stairs'&&ev.key.toLowerCase()==='r'){ev.preventDefault();rotateStair()}};
 canvas.addEventListener('pointerdown',beginEdit);canvas.addEventListener('pointermove',moveEdit);canvas.addEventListener('pointerup',endEdit);canvas.addEventListener('pointercancel',cancelEdit);canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(20,Math.min(100,zoom*(e.deltaY>0?.9:1.1)));draw()},{passive:false});
 document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('active',x===b));canvas.style.cursor=mode==='orbit'?'grab':'crosshair';draw()});$('layer').onchange=e=>{layer=+e.target.value;draw()};$('downBtn').onclick=()=>{layer=Math.max(0,layer-1);draw()};$('upBtn').onclick=()=>{const roof=doc.tiles.some(t=>t[2]===doc.layers);layer=Math.min(roof?doc.layers:doc.layers-1,layer+1);draw()};
 $('outerBtn').onclick=async()=>runDocument('/api/buildings/outer-walls',{...doc,selected_layer:layer},'Outer walls added.');$('roofBtn').onclick=()=>runDocument('/api/buildings/roof',doc,'Roof added. Select Roof in Current storey or Structure to inspect the building.');$('addLayerBtn').onclick=async()=>{await runDocument('/api/buildings/add-layer',doc,'Layer added; interior, walls, and no-target pattern copied; tile plane left empty.');layer=doc.layers-1;draw()};$('deleteLayerBtn').onclick=async()=>{const wasRoof=layer===doc.layers;await runDocument('/api/buildings/delete-layer',{...doc,selected_layer:layer},wasRoof?'Roof removed.':'Storey deleted and higher levels shifted down.');layer=Math.min(layer,doc.layers-1);draw()};document.querySelectorAll('[data-expand]').forEach(b=>b.onclick=()=>runDocument('/api/buildings/expand',{...doc,direction:b.dataset.expand,delta:Number(b.dataset.delta)},`${b.dataset.expand} edge ${Number(b.dataset.delta)>0?'expanded':'trimmed'}.`));
-async function runDocument(path,body,message){try{doc=(await api(path,body)).document;draw();status(message)}catch(e){status(e.message,'err')}}
+async function runDocument(path,body,message){try{doc=(await api(path,body)).document;selectedStair=null;draw();status(message)}catch(e){status(e.message,'err')}}
 async function validate(){doc.name=$('name').value;try{const r=(await api('/api/buildings/validate',doc)).report;status(`VALID BUILDING\n${r.interior_cells} interior cells\n${r.authored_solids} internal solids\n${r.target_candidate_cells} target cells\nWorld ${r.world_size_m.join(' × ')} m`,'ok');return true}catch(e){status(e.message,'err');return false}}
 $('copyBtn').onclick=async()=>{doc.name=$('name').value;try{const j=await api('/api/buildings/code',doc);await navigator.clipboard.writeText(j.code);status('Exact current map YAML copied to clipboard.','ok')}catch(e){status(e.message,'err')}};$('validateBtn').onclick=validate;$('saveBtn').onclick=async()=>{doc.name=$('name').value;if(!await validate())return;try{const j=await api('/api/buildings/save',{...doc,overwrite:$('overwrite').checked});status(`Saved ${j.path}\nRun: uv run swarmecho-validate-building ${j.path} --runtime-smoke`,'ok')}catch(e){status(e.message,'err')}};$('newBtn').onclick=()=>runDocument('/api/buildings/new',{},'New building. Place the base before validation.');$('openBtn').onclick=async()=>{try{const j=await api('/api/buildings');$('mapList').innerHTML='';j.maps.forEach(n=>$('mapList').add(new Option(n,n)));$('picker').showModal()}catch(e){status(e.message,'err')}};$('cancelOpen').onclick=()=>$('picker').close();$('confirmOpen').onclick=async()=>{try{doc=(await api('/api/buildings/'+encodeURIComponent($('mapList').value))).document;layer=0;$('picker').close();draw();status('Existing v1 map opened without conversion.')}catch(e){status(e.message,'err')}};
 new ResizeObserver(resizeCanvas).observe(canvas);api('/api/buildings/new').then(j=>{doc=j.document;resizeCanvas();status('New building. Base and no-target cells are intentionally unset.','ok')});
-$('templateBtn').onclick=async()=>{try{doc=(await api('/api/buildings/template/'+$('template').value)).document;layer=0;draw();status('Editable runtime template loaded. Save under a new name to keep it.')}catch(e){status(e.message,'err')}};
-$('importMap').onchange=async ev=>{const file=ev.target.files[0];if(!file)return;try{doc=(await api('/api/buildings/import',{yaml:await file.text()})).document;layer=0;draw();status('Map imported. Inspect each storey using the level selector.')}catch(e){status(e.message,'err')}ev.target.value=''};
+$('templateBtn').onclick=async()=>{try{doc=(await api('/api/buildings/template/'+$('template').value)).document;selectedStair=null;layer=0;draw();status('Editable runtime template loaded. Save under a new name to keep it.')}catch(e){status(e.message,'err')}};
+$('importMap').onchange=async ev=>{const file=ev.target.files[0];if(!file)return;try{doc=(await api('/api/buildings/import',{yaml:await file.text()})).document;selectedStair=null;layer=0;draw();status('Map imported. Inspect each storey using the level selector.')}catch(e){status(e.message,'err')}ev.target.value=''};
 </script>
 </body></html>

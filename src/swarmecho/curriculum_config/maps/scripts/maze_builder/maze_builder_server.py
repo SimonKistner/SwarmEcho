@@ -20,6 +20,7 @@ from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core
     add_outer_walls,
     add_roof,
     add_layer,
+    place_stair,
     available_maps,
     delete_layer,
     document_yaml,
@@ -129,6 +130,12 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     {"ok": True, "document": add_layer(payload)},
+                )
+                return
+            if path == "/api/buildings/stairs":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "document": place_stair(payload, payload.get("stair"))},
                 )
                 return
             if path == "/api/buildings/delete-layer":

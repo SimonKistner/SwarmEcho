@@ -1,0 +1,53 @@
+Maps: B02c_static_map_02344, B02c_static_map_02557, B02c_static_map_02713; targets per map: 4,000; seed per map: 456789; level: G01_static
+Phase 1: unchanged full simplifier on every map; GPU checking follows the aggregate table.
+
+Preparing map 1/3: B02c_static_map_02344
+Map: B02c_static_map_02344; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [12.5, 2.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 176 nodes; inspecting targets...
+Completed B02c_static_map_02344: 3,939 assignments; 17.34s
+
+Preparing map 2/3: B02c_static_map_02557
+Map: B02c_static_map_02557; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [12.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 170 nodes; inspecting targets...
+Completed B02c_static_map_02557: 4,000 assignments; 7.37s
+
+Preparing map 3/3: B02c_static_map_02713
+Map: B02c_static_map_02713; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Roadmap ready: 166 nodes; inspecting targets...
+Completed B02c_static_map_02713: 4,000 assignments; 8.67s
+
+--- Geometry aggregate: corrected baseline versus unchanged final rules ---
+ Map                         | Targets | No route | Baseline mean | Final mean | Max k | Final >7 | Drones saved
+-----------------------------+---------+----------+---------------+------------+-------+----------+-------------
+ B02c_static_map_02344       |   4,000 |       61 |         5.583 |      2.838 |     6 |        0 |       10,812
+ B02c_static_map_02557       |   4,000 |        0 |         3.932 |      2.816 |     6 |        0 |        4,465
+ B02c_static_map_02713       |   4,000 |        0 |         5.564 |      3.126 |     7 |        0 |        9,754
+ ALL MAPS                    |  12,000 |       61 |         5.024 |      2.927 |     7 |        0 |       25,031
+Means exclude targets without a roadmap route. >7 is descriptive; seven is not a limit on these maps.
+
+--- Final agent-count distribution by map and pooled ---
+ Agents | Corrected total |       B02c_static_map_02344 |       B02c_static_map_02557 |       B02c_static_map_02713 | Final total |   All % | visual
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+      0 |               0 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+      1 |           1,471 |                         679 |                         756 |                         724 |       2,159 |  17.99% | IIIIIIIIIIIIIIIIII
+      2 |           1,450 |                       1,213 |                       1,173 |                       1,216 |       3,602 |  30.02% | IIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+      3 |           2,129 |                         787 |                         836 |                         548 |       2,171 |  18.09% | IIIIIIIIIIIIIIIIII
+      4 |           1,335 |                         607 |                         534 |                         388 |       1,529 |  12.74% | IIIIIIIIIIIII
+      5 |             812 |                         632 |                         690 |                         597 |       1,919 |  15.99% | IIIIIIIIIIIIIIII
+      6 |             860 |                          21 |                          11 |                         522 |         554 |   4.62% | IIIII
+      7 |             753 |                           0 |                           0 |                           5 |           5 |   0.04% | .
+      8 |             979 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+      9 |             643 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     10 |             893 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     11 |             529 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     12 |              85 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+No roadmap route: 61/12,000; each I is approximately 1% of all sampled targets.
+Constructed counts are feasible under the CPU geometry model; they are not global minima or runtime results.
+
+All-map preparation and simplification: 33.39s

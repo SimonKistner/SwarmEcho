@@ -37,7 +37,7 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     metadata, arrays = load_replay(manifest_path)
     assert metadata["frames"] == 4
     assert arrays["position"].shape == (4, cfg.num_agents, 3)
-    assert arrays["coverage"].shape == (4, 4, 4, 4)
+    assert arrays["exploration_reward"].shape == (4, 4, 4, 4)
     assert arrays["reward_terms"].shape == (4, cfg.num_agents, 2)
     assert arrays["obstacle_min"].shape == (4, 0, 3)
     np.testing.assert_array_equal(arrays["base_target_known"], [s.base_target_known for s in states])

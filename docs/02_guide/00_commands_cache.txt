@@ -25,3 +25,5 @@ uv run python tests/generate_obstacle_roadmap_testresult.py --map office_mirrore
 uv run swarmecho-dashboard
 
 uv run swarmecho-inspect root=outputs
+
+uv run swarmecho-maze-builder

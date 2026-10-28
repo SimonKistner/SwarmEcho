@@ -1,0 +1,1049 @@
+{
+  "format": "swarmecho-c-curriculum/v1",
+  "seed": 35461354,
+  "radii_m": {
+    "base": 8.0,
+    "drone": 15.0,
+    "visual": 4.0
+  },
+  "C01": [
+    {
+      "path": "C01/C01_x_positive.yaml",
+      "first_direction": "x_positive",
+      "second_direction": null,
+      "target_cells": [
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    },
+    {
+      "path": "C01/C01_x_negative.yaml",
+      "first_direction": "x_negative",
+      "second_direction": null,
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    },
+    {
+      "path": "C01/C01_y_positive.yaml",
+      "first_direction": "y_positive",
+      "second_direction": null,
+      "target_cells": [
+        [
+          0,
+          3,
+          0
+        ],
+        [
+          0,
+          4,
+          0
+        ],
+        [
+          0,
+          5,
+          0
+        ],
+        [
+          0,
+          6,
+          0
+        ],
+        [
+          0,
+          7,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    },
+    {
+      "path": "C01/C01_y_negative.yaml",
+      "first_direction": "y_negative",
+      "second_direction": null,
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          2,
+          0
+        ],
+        [
+          0,
+          3,
+          0
+        ],
+        [
+          0,
+          4,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    },
+    {
+      "path": "C01/C01_z_positive.yaml",
+      "first_direction": "z_positive",
+      "second_direction": null,
+      "target_cells": [
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          0,
+          0,
+          4
+        ],
+        [
+          0,
+          0,
+          5
+        ],
+        [
+          0,
+          0,
+          6
+        ],
+        [
+          0,
+          0,
+          7
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    },
+    {
+      "path": "C01/C01_z_negative.yaml",
+      "first_direction": "z_negative",
+      "second_direction": null,
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ],
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          0,
+          0,
+          4
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.5,
+      "maximum_bend_target_distance_m": 37.66629793329841,
+      "available_bend_target_reach_m": 42.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": null,
+      "base_to_bend_distance_m": 0.0,
+      "proof": "full-cell Euclidean bounds; clear straight chain"
+    }
+  ],
+  "C02": [
+    {
+      "path": "C02/C02_x_positive_then_y_positive.yaml",
+      "first_direction": "x_positive",
+      "second_direction": "y_positive",
+      "target_cells": [
+        [
+          3,
+          1,
+          0
+        ],
+        [
+          3,
+          2,
+          0
+        ],
+        [
+          3,
+          3,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_positive_then_y_negative.yaml",
+      "first_direction": "x_positive",
+      "second_direction": "y_negative",
+      "target_cells": [
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          3,
+          1,
+          0
+        ],
+        [
+          3,
+          2,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_positive_then_z_positive.yaml",
+      "first_direction": "x_positive",
+      "second_direction": "z_positive",
+      "target_cells": [
+        [
+          3,
+          0,
+          1
+        ],
+        [
+          3,
+          0,
+          2
+        ],
+        [
+          3,
+          0,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_positive_then_z_negative.yaml",
+      "first_direction": "x_positive",
+      "second_direction": "z_negative",
+      "target_cells": [
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          1
+        ],
+        [
+          3,
+          0,
+          2
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_negative_then_y_positive.yaml",
+      "first_direction": "x_negative",
+      "second_direction": "y_positive",
+      "target_cells": [
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          2,
+          0
+        ],
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_negative_then_y_negative.yaml",
+      "first_direction": "x_negative",
+      "second_direction": "y_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          2,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_negative_then_z_positive.yaml",
+      "first_direction": "x_negative",
+      "second_direction": "z_positive",
+      "target_cells": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ],
+        [
+          0,
+          0,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_x_negative_then_z_negative.yaml",
+      "first_direction": "x_negative",
+      "second_direction": "z_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_positive_then_x_positive.yaml",
+      "first_direction": "y_positive",
+      "second_direction": "x_positive",
+      "target_cells": [
+        [
+          1,
+          3,
+          0
+        ],
+        [
+          2,
+          3,
+          0
+        ],
+        [
+          3,
+          3,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_positive_then_x_negative.yaml",
+      "first_direction": "y_positive",
+      "second_direction": "x_negative",
+      "target_cells": [
+        [
+          0,
+          3,
+          0
+        ],
+        [
+          1,
+          3,
+          0
+        ],
+        [
+          2,
+          3,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_positive_then_z_positive.yaml",
+      "first_direction": "y_positive",
+      "second_direction": "z_positive",
+      "target_cells": [
+        [
+          0,
+          3,
+          1
+        ],
+        [
+          0,
+          3,
+          2
+        ],
+        [
+          0,
+          3,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_positive_then_z_negative.yaml",
+      "first_direction": "y_positive",
+      "second_direction": "z_negative",
+      "target_cells": [
+        [
+          0,
+          3,
+          0
+        ],
+        [
+          0,
+          3,
+          1
+        ],
+        [
+          0,
+          3,
+          2
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_negative_then_x_positive.yaml",
+      "first_direction": "y_negative",
+      "second_direction": "x_positive",
+      "target_cells": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_negative_then_x_negative.yaml",
+      "first_direction": "y_negative",
+      "second_direction": "x_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_negative_then_z_positive.yaml",
+      "first_direction": "y_negative",
+      "second_direction": "z_positive",
+      "target_cells": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ],
+        [
+          0,
+          0,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_y_negative_then_z_negative.yaml",
+      "first_direction": "y_negative",
+      "second_direction": "z_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_positive_then_x_positive.yaml",
+      "first_direction": "z_positive",
+      "second_direction": "x_positive",
+      "target_cells": [
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          2,
+          0,
+          3
+        ],
+        [
+          3,
+          0,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_positive_then_x_negative.yaml",
+      "first_direction": "z_positive",
+      "second_direction": "x_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          2,
+          0,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_positive_then_y_positive.yaml",
+      "first_direction": "z_positive",
+      "second_direction": "y_positive",
+      "target_cells": [
+        [
+          0,
+          1,
+          3
+        ],
+        [
+          0,
+          2,
+          3
+        ],
+        [
+          0,
+          3,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_positive_then_y_negative.yaml",
+      "first_direction": "z_positive",
+      "second_direction": "y_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          0,
+          1,
+          3
+        ],
+        [
+          0,
+          2,
+          3
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_negative_then_x_positive.yaml",
+      "first_direction": "z_negative",
+      "second_direction": "x_positive",
+      "target_cells": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_negative_then_x_negative.yaml",
+      "first_direction": "z_negative",
+      "second_direction": "x_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_negative_then_y_positive.yaml",
+      "first_direction": "z_negative",
+      "second_direction": "y_positive",
+      "target_cells": [
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          2,
+          0
+        ],
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    },
+    {
+      "path": "C02/C02_z_negative_then_y_negative.yaml",
+      "first_direction": "z_negative",
+      "second_direction": "y_negative",
+      "target_cells": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          2,
+          0
+        ]
+      ],
+      "minimum_agents": 2,
+      "maximum_required_agents": 3,
+      "one_agent_reach_m": 12.0,
+      "minimum_base_target_distance_m": 12.747548783981962,
+      "maximum_bend_target_distance_m": 17.853571071357123,
+      "available_bend_target_reach_m": 19.0,
+      "certificate_buffer_m": 0.25,
+      "cells_per_leg_including_corner": 4,
+      "base_to_bend_distance_m": 15.0,
+      "proof": "full-cell Euclidean lower bound; relays at first-leg midpoint and bend centre"
+    }
+  ],
+  "C03": {
+    "path": "C03/C03_station.yaml",
+    "seed": 35461354,
+    "interior_cells": 189,
+    "passable_walls": {
+      "doors": 42,
+      "windows": 29
+    },
+    "target_minimum_geodesic_distance_m": 20.0,
+    "target_filter": "runtime geodesic rejection; every interior cell is eligible",
+    "vertical_connections": "open shafts; the map format supports doors/windows on x/y walls only"
+  },
+  "C05": {
+    "path": "C05/C05_cellar.yaml",
+    "source": "B02c_static_map_cellar.yaml"
+  }
+}

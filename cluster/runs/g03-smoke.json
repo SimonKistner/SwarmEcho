@@ -1,0 +1,19 @@
+{
+  "description": "One-slot G03 generated-map training smoke run",
+  "level": "G03_random_buildings",
+  "wandb_mode": "disabled",
+  "overrides": [
+    "random_buildings.load_maps_from_bank=false",
+    "training.num_envs=20",
+    "training.num_maps=18",
+    "training.num_steps=8",
+    "training.total_timesteps=320",
+    "validation.num_maps=2",
+    "validation.num_episodes=40",
+    "validation.parallel_envs=10",
+    "validation.val_freq=1",
+    "inspection_evaluation.inspection_maps=2",
+    "inspection_evaluation.eval_parallel_envs=20",
+    "inspection_evaluation.eval_video=false"
+  ]
+}

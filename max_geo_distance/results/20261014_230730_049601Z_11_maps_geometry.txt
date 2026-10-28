@@ -1,0 +1,112 @@
+Maps: B02c_static_map_02344, B02c_static_map_02557, B02c_static_map_02713; targets per map: 4,000; seed per map: 456789; level: G01_static
+Phase 1: corrected legal placements and guarded full simplifier; GPU checking follows the aggregate table.
+
+Preparing map 1/3: B02c_static_map_02344
+Map: B02c_static_map_02344; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [12.5, 2.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [12.5, 2.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 176 nodes; inspecting targets...
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 176/176
+Endpoint misses before finder recovery: 61; recovered by finder attachment: 56; unresolved: 5
+Missing endpoint routes are not classified as physically impossible.
+Recovered paths may include an extra edge-finder waypoint outside the original vertex set.
+  cell (0, 0, 2): 5; no planning-visible endpoint attachment; recovered=False
+  cell (0, 0, 2): 56; no planning-visible endpoint attachment; recovered=True
+Detailed endpoint-miss examples: up to 5
+  Sample 78; target=[0.7418868621552068, 2.3095646991067444, 11.651417810511782]; cell=(0, 0, 2); recovered=False; no planning-visible endpoint attachment
+    planning-visible nodes=0; reachable-visible=0; visible components=[]; legal finder attachments=0; nearest reachable node distance=4.930643m
+  Sample 730; target=[0.6666383722662471, 2.1404456676760906, 13.835454472489317]; cell=(0, 0, 2); recovered=False; no planning-visible endpoint attachment
+    planning-visible nodes=0; reachable-visible=0; visible components=[]; legal finder attachments=0; nearest reachable node distance=5.380286m
+  Sample 838; target=[0.7014374241332597, 2.8446521176035637, 12.44245394276961]; cell=(0, 0, 2); recovered=False; no planning-visible endpoint attachment
+    planning-visible nodes=0; reachable-visible=0; visible components=[]; legal finder attachments=0; nearest reachable node distance=5.060917m
+  Sample 1161; target=[0.6823110023575573, 2.260140634095154, 12.105698062756758]; cell=(0, 0, 2); recovered=False; no planning-visible endpoint attachment
+    planning-visible nodes=0; reachable-visible=0; visible components=[]; legal finder attachments=0; nearest reachable node distance=5.209385m
+  Sample 1586; target=[0.6989802419966233, 2.200932375076002, 11.67405409743888]; cell=(0, 0, 2); recovered=False; no planning-visible endpoint attachment
+    planning-visible nodes=0; reachable-visible=0; visible components=[]; legal finder attachments=0; nearest reachable node distance=5.025415m
+Unresolved zero-based indices: 78, 730, 838, 1161, 1586
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 3,995
+  final accepted: 3,995
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Completed B02c_static_map_02344: 3,995 assignments; 24.19s
+
+Preparing map 2/3: B02c_static_map_02557
+Map: B02c_static_map_02557; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [12.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [12.5, 12.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 170 nodes; inspecting targets...
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 170/170
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 5
+Unresolved zero-based indices: none
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 4,000
+  final accepted: 4,000
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Completed B02c_static_map_02557: 4,000 assignments; 11.39s
+
+Preparing map 3/3: B02c_static_map_02713
+Map: B02c_static_map_02713; settings: G01_static; seed: 456789
+Targets: 4,000; fixed base (m): [2.5, 12.5, 0.125]
+Roadmap: full; density: 0.5; merge wall-end nodes: True
+Assignment protocol: legal-drone-start / float32-links / finder-attachment-v2; safety margin: 0.001m
+Legal drone planning start (m): [2.5, 12.5, 0.37599998712539673] (radio station coordinate remains unchanged)
+Roadmap ready: 166 nodes; inspecting targets...
+
+--- Roadmap attachment diagnostics ---
+Protocol: legal-drone-start / float32-links / finder-attachment-v2; numerical margin: 0.001m
+Planning components: 1; base-reachable nodes: 166/166
+Endpoint misses before finder recovery: 0; recovered by finder attachment: 0; unresolved: 0
+Missing endpoint routes are not classified as physically impossible.
+Detailed endpoint-miss examples: up to 5
+Unresolved zero-based indices: none
+Invalid baseline assignments retained as unresolved: 0
+Complete rounded-chain guard outcomes:
+  baseline accepted: 4,000
+  final accepted: 4,000
+Rejected connector/bypass proposals retain their previous chain; guard failures are never labelled certified.
+Completed B02c_static_map_02713: 4,000 assignments; 13.58s
+
+--- Geometry aggregate: legal corrected baseline versus guarded final rules ---
+ Map                         | Targets | No route | Invalid chain | Baseline mean | Final mean | Max k | Final >7 | Drones saved
+-----------------------------+---------+----------+---------------+---------------+------------+-------+----------+-------------
+ B02c_static_map_02344       |   4,000 |        5 |             0 |         6.635 |      2.869 |     6 |        0 |       15,046
+ B02c_static_map_02557       |   4,000 |        0 |             0 |         4.923 |      2.813 |     6 |        0 |        8,437
+ B02c_static_map_02713       |   4,000 |        0 |             0 |         6.552 |      3.171 |     7 |        0 |       13,523
+ ALL MAPS                    |  12,000 |        5 |             0 |         6.036 |      2.951 |     7 |        0 |       37,006
+Means exclude unresolved routes and invalid baselines. >7 is descriptive; seven is not a limit on these maps.
+
+--- Final agent-count distribution by map and pooled ---
+ Agents | Corrected total |       B02c_static_map_02344 |       B02c_static_map_02557 |       B02c_static_map_02713 | Final total |   All % | visual
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+      0 |               0 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+      1 |             132 |                         679 |                         758 |                         631 |       2,068 |  17.23% | IIIIIIIIIIIIIIIII
+      2 |           1,338 |                       1,213 |                       1,167 |                       1,222 |       3,602 |  30.02% | IIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+      3 |           1,451 |                         786 |                         850 |                         635 |       2,271 |  18.93% | IIIIIIIIIIIIIIIIIII
+      4 |           2,128 |                         608 |                         524 |                         387 |       1,519 |  12.66% | IIIIIIIIIIIII
+      5 |           1,336 |                         688 |                         690 |                         598 |       1,976 |  16.47% | IIIIIIIIIIIIIIII
+      6 |             811 |                          21 |                          11 |                         522 |         554 |   4.62% | IIIII
+      7 |             861 |                           0 |                           0 |                           5 |           5 |   0.04% | .
+      8 |             752 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+      9 |             980 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     10 |             643 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     11 |             947 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     12 |             531 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+     13 |              85 |                           0 |                           0 |                           0 |           0 |   0.00% | 
+No roadmap/finder route: 5/12,000; invalid baseline: 0; each I is approximately 1% of all sampled targets.
+Constructed counts are feasible under the CPU geometry model; they are not global minima or runtime results.
+
+All-map preparation and simplification: 49.16s
