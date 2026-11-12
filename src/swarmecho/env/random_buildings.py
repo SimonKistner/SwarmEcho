@@ -10,8 +10,8 @@ import json
 
 import numpy as np
 
-from swarmecho.core.config import RandomBuildingConfig
-from swarmecho.env.buildings import BUILDING_FORMAT, compile_building
+from swarmecho.core.config import EnvConfig, RandomBuildingConfig
+from swarmecho.env.buildings import BUILDING_FORMAT, compile_building, target_spawn_boxes
 
 GENERATOR_VERSION = "partition_connect_v6"
 
@@ -106,7 +106,7 @@ def random_building_grid(settings: RandomBuildingConfig) -> tuple[int, int, int]
         raise ValueError("Building thickness must be smaller than a cell.")
     if settings.staircase_max >= int(np.prod(counts)):
         raise ValueError("staircase_max must leave at least one cell for the next storey's stairs and the base.")
-    for key in ("enabled", "save_training_maps", "load_maps_from_bank"):
+    for key in ("enabled", "save_training_maps", "load_maps_from_bank", "advanced_exclustion_base_LOS"):
         if type(getattr(settings, key)) is not bool:
             raise ValueError(f"random_buildings.{key} must be boolean.")
     return int(round(counts[0])), int(round(counts[1])), settings.stories
@@ -116,7 +116,75 @@ def map_seed(seed: int, index: int, *, evaluation: bool = False) -> int:
     return int(np.random.SeedSequence([int(seed), int(index), 1 if evaluation else 0]).generate_state(1)[0])
 
 
-def generate_building(settings: RandomBuildingConfig, seed: int, *, name: str = "random_building", drone_clearance: float = .35):
+def target_exclusion_parameters(settings: RandomBuildingConfig, cfg: EnvConfig) -> dict:
+    """Environment settings that affect advanced exclusions and bank identity."""
+    if not settings.advanced_exclustion_base_LOS:
+        return {}
+    return {"comm_radius_base": cfg.comm_radius_base, "visual_radius": cfg.visual_radius,
+            "target_wall_buffer_fraction": cfg.target_wall_buffer_fraction}
+
+
+def _visible(start, end, lower, upper):
+    """Unbuffered segment/solid LOS, including diagonal walls and stair treads."""
+    direction = end - start
+    parallel = np.abs(direction) <= 1e-5
+    safe = np.where(parallel, 1., direction)
+    first, last = (lower - start) / safe, (upper - start) / safe
+    near = np.max(np.where(parallel, -np.inf, np.minimum(first, last)), axis=-1)
+    far = np.min(np.where(parallel, np.inf, np.maximum(first, last)), axis=-1)
+    outside = np.any(parallel & ((start < lower) | (start > upper)), axis=-1)
+    return not np.any((far >= np.maximum(near, 1e-5)) & (near <= 1. - 1e-5) & ~outside)
+
+
+def advanced_target_exclusions(building, cfg: EnvConfig):
+    """All in-range base-visible cell representatives, plus one hidden neighbour.
+
+    This is a deterministic cell heuristic, not a one-agent feasibility test.
+    Each cell uses its largest legal spawn-box centre; no position sampling runs.
+    """
+    radius = cfg.comm_radius_base + cfg.visual_radius
+    if not np.isfinite(radius) or min(cfg.comm_radius_base, cfg.visual_radius) <= 0:
+        raise ValueError("Advanced target exclusions require positive finite communication/visual ranges.")
+    lower, upper, volumes = target_spawn_boxes(building, cfg, include_excluded=True)
+    centres = (lower + upper) * .5
+    cells = np.floor(centres / building.cell_size_m).astype(int)
+    points = {}
+    for index in np.argsort(-volumes, kind="stable"):
+        points.setdefault(tuple(map(int, cells[index])), centres[index])
+    base = building.base_position_m
+    base_cell = tuple(map(int, np.floor(base / building.cell_size_m)))
+    distances = {cell: float(np.linalg.norm(point - base)) for cell, point in points.items()}
+    visible = {cell for cell, point in points.items()
+               if distances[cell] <= radius
+               and _visible(base, point, building.solid_min_m, building.solid_max_m)}
+    direct = sorted(visible, key=lambda cell: (cell != base_cell, distances[cell], cell))
+    selected = list(dict.fromkeys([base_cell, *direct]))
+    corners = []
+    for cell, point in points.items():
+        if cell in selected or distances[cell] > radius:
+            continue
+        for entry in direct:
+            if (sum(abs(a-b) for a, b in zip(cell, entry)) == 1
+                    and _visible(points[entry], point, building.solid_min_m, building.solid_max_m)):
+                corners.append((distances[cell], cell, entry))
+    corner = min(corners) if corners else None
+    if corner is not None:
+        selected.append(corner[1])
+    excluded = set(selected)
+    if not any(cell not in excluded for cell in points):
+        raise ValueError("random_buildings.advanced_exclustion_base_LOS excludes all legal target volume; "
+                         "use a different layout/seed or disable the feature.")
+    return [list(cell) for cell in selected], {
+        "direct_los_cells": [list(cell) for cell in direct],
+        "around_corner_cell": list(corner[1]) if corner is not None else None,
+        "around_corner_via": list(corner[2]) if corner is not None else None,
+        "representative_points_m": {str(list(cell)): points[cell].tolist()
+                                    for cell in selected if cell in points},
+    }
+
+
+def generate_building(settings: RandomBuildingConfig, seed: int, *, name: str = "random_building",
+                      drone_clearance: float = .35, env_cfg: EnvConfig = EnvConfig()):
     """Return an editable map document and its compiled building.
 
     Doors form a spanning tree of adjacent rectangular rooms. Windows and
@@ -272,7 +340,13 @@ def generate_building(settings: RandomBuildingConfig, seed: int, *, name: str = 
             p[direction % 2] += (-.375 if layer == z else .375) * sign * c
             nodes.append(p)
     data["roadmap_nodes_m"] = np.asarray(nodes).tolist()
-    return data, compile_building(data)
+    building = compile_building(data)
+    if settings.advanced_exclustion_base_LOS:
+        data["target_exclusion_cells"], details = advanced_target_exclusions(building, env_cfg)
+        data["generation"]["target_exclusion_parameters"] = target_exclusion_parameters(settings, env_cfg)
+        data["generation"]["advanced_target_exclusions"] = details
+        building = compile_building(data)
+    return data, building
 
 
 def save_generated_map(data, path):
@@ -287,16 +361,21 @@ def save_generated_map(data, path):
     return path
 
 
-def generate_maps(settings, seed, count, *, evaluation=False, directory=None, log=lambda message: None, drone_clearance=.35):
+def generate_maps(settings, seed, count, *, evaluation=False, directory=None, log=lambda message: None,
+                  drone_clearance=.35, env_cfg: EnvConfig = EnvConfig()):
     buildings, records = [], []
     for index in range(count):
         name = f"{'eval' if evaluation else 'map'}_{index:04d}"
         child_seed = map_seed(seed, index, evaluation=evaluation)
-        data, building = generate_building(settings, child_seed, name=name, drone_clearance=drone_clearance)
+        data, building = generate_building(settings, child_seed, name=name,
+                                           drone_clearance=drone_clearance, env_cfg=env_cfg)
         if directory is not None:
             save_generated_map(data, Path(directory) / f"{name}.yaml")
         buildings.append(building)
         records.append({"id": name, "seed": child_seed})
         if index == 0 or (index + 1) % 100 == 0 or index + 1 == count:
             log(f"Generated {index + 1}/{count} buildings; latest {len(building.solid_min_m)} solids")
-    return buildings, {"version": GENERATOR_VERSION, "settings": asdict(settings), "maps": records}
+    manifest = {"version": GENERATOR_VERSION, "settings": asdict(settings), "maps": records}
+    if settings.advanced_exclustion_base_LOS:
+        manifest["target_exclusion_parameters"] = target_exclusion_parameters(settings, env_cfg)
+    return buildings, manifest

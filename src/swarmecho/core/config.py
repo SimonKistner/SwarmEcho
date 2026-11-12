@@ -15,6 +15,9 @@ LEVEL_DIR = _SRC_ROOT / "curriculum_config" / "levels"
 # Fixed across maps, population stages and available slots; not a deployment cap.
 DEPLOYED_AGENTS_OBS_REF = 10.0
 
+CHAIN_SUCCESS_CONDITIONS = frozenset({"chain_held", "chain_held_and_cleand_up"})
+SUCCESS_CONDITIONS = CHAIN_SUCCESS_CONDITIONS | {"coverage", "discovery", "delivery"}
+
 # Adaptive population control is opt-in; disabled levels retain their old shapes.
 @dataclass(frozen=True)
 class AdaptSizeConfig:
@@ -24,17 +27,22 @@ class AdaptSizeConfig:
     vote_protocol: str = "credits"  # credits | latest_decision
     vote_holding: int = 1  # Delivered YES credits; latest_decision always needs one YES.
     quorum_fraction: float = 0.49  # Strictly greater below 1; 1 means unanimity.
-    quorum_hold: int = 0  # Consecutive environment steps with sufficient votes.
+    quorum_hold: int = 0  # Consecutive online base steps with sufficient votes.
     decommission_radius_m: float = 1.0
     decommission_hold_steps: int = 15
     # Each qualified caller receives a decaying share of the recruit's normal reward.
     reward_by_reference_enabled: bool = False
     reward_by_reference_fraction: float = 0.10
     reward_by_reference_steps: int = 200
+    recruitment_enabled: bool = True  # False keeps initial launches and permanent decommissioning only.
 
     @property
     def approval_threshold(self) -> int:
         return 1 if self.vote_protocol == "latest_decision" else self.vote_holding
+
+    @property
+    def policy_vote_mode(self) -> str | None:
+        return self.vote_mode if self.enabled and self.recruitment_enabled else None
 
 
 # env
@@ -62,13 +70,13 @@ class EnvConfig:
     radar_count_cap: int = 3  # Saturation count in band_sep_counting mode.
 
     target_wall_buffer_fraction: float = 0.1
-    spawn_delay: int = 5
+    spawn_delay: int = 5  # Base cooldown after each deployment; incoming votes are ignored.
 
     max_steps: int = 700
     hold_chain_for: int = 50
     no_movement_termination_steps: int = 1000
     movement_epsilon: float = 1e-3
-    success_condition: str = "chain_held"  # coverage | discovery | delivery | chain_held
+    success_condition: str = "chain_held"  # coverage | discovery | delivery | chain_held | chain_held_and_cleand_up
 
     # Debugging-only legacy observation; never treat as a design decision or candidate.
     observe_target_vector: bool = False
@@ -77,6 +85,7 @@ class EnvConfig:
     # Debugging-only legacy observation; never treat as a design decision or candidate.
     observe_base_vector: bool = False
     observe_chain_contributor: bool = False
+    observe_decommission_zone: bool = True  # Inside the valid decommission sphere; adaptive size only.
     observe_base_vote_ratio: bool = False  # Qualified base approvals / active population, while base-connected.
     observe_base_population: bool = False  # Active population / DEPLOYED_AGENTS_OBS_REF, while base-connected.
     observe_current_timestep: bool = False  # Episode step / max_steps, in [0, 1].
@@ -114,6 +123,11 @@ def validate_adapt_size(cfg: EnvConfig) -> None:
     a = cfg.adapt_size
     if type(a.enabled) is not bool:
         raise ValueError("adapt_size.enabled must be boolean.")
+    if type(a.recruitment_enabled) is not bool:
+        raise ValueError("adapt_size.recruitment_enabled must be boolean.")
+    if a.enabled and not a.recruitment_enabled:
+        if a.initial_agents != cfg.num_agents or cfg.observe_base_vote_ratio or a.reward_by_reference_enabled:
+            raise ValueError("Automatic deployment requires initial_agents=num_agents, no vote observation or caller rewards.")
     if type(a.reward_by_reference_enabled) is not bool:
         raise ValueError("adapt_size.reward_by_reference_enabled must be a boolean.")
     fraction = a.reward_by_reference_fraction
@@ -139,14 +153,15 @@ def validate_adapt_size(cfg: EnvConfig) -> None:
         raise ValueError("adapt_size.quorum_fraction must be in [0, 1].")
     if not math.isfinite(a.decommission_radius_m) or a.decommission_radius_m <= 0:
         raise ValueError("adapt_size.decommission_radius_m must be positive and finite.")
-    if a.enabled and cfg.success_condition != "chain_held":
-        raise ValueError("Adaptive size currently requires success_condition=chain_held.")
+    if a.enabled and cfg.success_condition not in CHAIN_SUCCESS_CONDITIONS:
+        raise ValueError("Adaptive size requires chain_held or chain_held_and_cleand_up success.")
 
 
 def validate_radar_config(cfg: EnvConfig) -> None:
     """Validate radar settings for both loaded levels and direct environments."""
     for name in ("observe_visually_gated_target_displacement",
-                 "observe_base_vote_ratio", "observe_base_population"):
+                 "observe_base_vote_ratio", "observe_base_population",
+                 "observe_decommission_zone"):
         if type(getattr(cfg, name)) is not bool:
             raise ValueError(f"env.{name} must be boolean.")
     for name in ("wall_sensing_rays", "drone_radar_bins"):
@@ -187,6 +202,8 @@ class RandomBuildingConfig:
     window_probability: float = 0.2
     staircase_max: int = 1
 
+    advanced_exclustion_base_LOS: bool = False
+
     save_training_maps: bool = False
     load_maps_from_bank: bool = False
 
@@ -197,6 +214,10 @@ class PrivelegedVoteRewardConfig:
     # Estimator/observed-chain supervision; never changes the voting protocol.
     enabled: bool = False
     withheld_reinforcement_vote_reward: float = -1.0
+    # Responsible qualified YES callers on unnecessary grants after the base knows
+    # the target; G03_CLU uses -500. Necessary calls and approvals sent while
+    # needed remain exempt. Newborns receive no caller penalty and retain their
+    # qualifying non_contributor_decommission_reward (G03_CLU: +3000).
     unnecessary_reinforcement_call_reward: float = -200.0
 
 
@@ -210,7 +231,8 @@ def validate_priveleged_vote_reward(cfg: PrivelegedVoteRewardConfig, env_cfg: En
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError(f"reward.priveleged_vote_reward.{name} must be finite (positive, zero or negative).")
     if cfg.enabled and env_cfg is not None and (
-        not env_cfg.adapt_size.enabled or env_cfg.adapt_size.vote_protocol != "latest_decision"
+        not env_cfg.adapt_size.enabled or not env_cfg.adapt_size.recruitment_enabled
+        or env_cfg.adapt_size.vote_protocol != "latest_decision"
     ):
         raise ValueError("Privileged vote rewards require adapt_size.enabled=true and vote_protocol=latest_decision.")
 
@@ -222,11 +244,15 @@ class RewardConfig:
     reinforcement_reward: float = 1.0  # Full amount to each qualified deployment voter.
     priveleged_vote_reward: PrivelegedVoteRewardConfig = PrivelegedVoteRewardConfig()
     decommission_reward: float = 0.0  # Full amount to each removed drone, on removal.
+    # Independent, opt-in surplus-agent rewards during an intact chain hold.
+    non_contributor_return_reward_per_meter: float = 0.0
+    non_contributor_departure_reward_per_meter: float = 0.0
+    non_contributor_decommission_reward: float = 0.0  # Standalone terminal amount; G03 uses half its success reward.
     rejected_call_reward: float = -200.0  # Each qualified YES voter on a rejected batch.
     all_decommissioned_penalty: float = -1000.0  # Full signed amount to each last acting drone.
     useless_agent_at_success_reward: float = -3000.0  # Each active drone outside the selected success chain.
     useless_agent_at_success_all_agents_reward: float = -750.0  # Each active drone per useless drone at terminal chain success; no population divisor.
-    useless_agent_at_success_all_agents_reward_cap: float = 2000.0  # Maximum absolute adjustment per active drone, after counting useless drones.
+    useless_agent_at_success_all_agents_reward_cap: float = -2000.0  # Signed bound per active drone; same sign as the coefficient, or zero to disable.
     target_found_requires_delivery: bool = True
     chain_reward_system: str = "euclidean"
     progress_based_cluster_tiebreaker_soft: bool = False
@@ -260,12 +286,28 @@ class RewardConfig:
     delivery_gap_vesting_steps: int = 10
     no_movement_termination_penalty: float = 0.0  # Full signed amount to each active drone at idle failure.
 
+    @property
+    def non_contributor_movement_enabled(self) -> bool:
+        return (self.non_contributor_return_reward_per_meter != 0
+                or self.non_contributor_departure_reward_per_meter != 0)
+
+    @property
+    def non_contributor_rewards_enabled(self) -> bool:
+        return self.non_contributor_movement_enabled or self.non_contributor_decommission_reward != 0
+
+    @property
+    def requires_geodesic(self) -> bool:
+        return (self.chain_reward_system == "obstacle_geodesic"
+                or self.enable_chain_efficiency_reward or self.non_contributor_movement_enabled)
+
 
 def validate_reward_config(cfg: RewardConfig) -> None:
     """All reward coefficients are signed, finite amounts; no implicit negation."""
     validate_priveleged_vote_reward(cfg.priveleged_vote_reward)
     for name in (
         "reinforcement_reward", "decommission_reward", "rejected_call_reward",
+        "non_contributor_return_reward_per_meter", "non_contributor_departure_reward_per_meter",
+        "non_contributor_decommission_reward",
         "all_decommissioned_penalty", "useless_agent_at_success_reward",
         "useless_agent_at_success_all_agents_reward",
         "chain_efficiency_reward", "exploration_reward", "finder_reward",
@@ -277,14 +319,48 @@ def validate_reward_config(cfg: RewardConfig) -> None:
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError(f"reward.{name} must be finite (positive, zero or negative).")
     cap = cfg.useless_agent_at_success_all_agents_reward_cap
-    if type(cap) not in (int, float) or not math.isfinite(cap) or cap < 0:
-        raise ValueError("reward.useless_agent_at_success_all_agents_reward_cap must be finite and nonnegative.")
+    if type(cap) not in (int, float) or not math.isfinite(cap):
+        raise ValueError("reward.useless_agent_at_success_all_agents_reward_cap must be finite (positive, zero or negative).")
+    coefficient = cfg.useless_agent_at_success_all_agents_reward
+    if cap != 0 and coefficient != 0 and (cap < 0) != (coefficient < 0):
+        raise ValueError("reward.useless_agent_at_success_all_agents_reward_cap must have the same sign as "
+                         "useless_agent_at_success_all_agents_reward, or be zero to disable it.")
 
 
 # training
 # Keep training action perturbations aligned with the default used by the
 # standalone robust checkpoint evaluator.
 DEFAULT_ACTION_NOISE_LEVEL = 0.011
+
+
+@dataclass(frozen=True)
+class TargetCurriculumConfig:
+    mode: str = "none"  # none | forward | reverse; uniform targets within the allowed groups.
+    success_threshold: float = 0.75
+
+
+@dataclass(frozen=True)
+class TargetSpawnEligibilityConfig:
+    enabled: bool = False
+    samples_per_map: int = 800
+    minimum_cell_fraction: float = 0.01
+
+
+def validate_target_spawn_eligibility(cfg):
+    if type(cfg.enabled) is not bool:
+        raise ValueError("training.target_spawn_eligibility.enabled must be boolean.")
+    if type(cfg.samples_per_map) is not int or cfg.samples_per_map < 1:
+        raise ValueError("training.target_spawn_eligibility.samples_per_map must be a positive integer.")
+    value = cfg.minimum_cell_fraction
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError("training.target_spawn_eligibility.minimum_cell_fraction must be in [0, 1].")
+
+
+def validate_target_curriculum(cfg):
+    if cfg.mode not in {"none", "forward", "reverse"}:
+        raise ValueError("training.target_curriculum.mode must be none, forward or reverse.")
+    if type(cfg.success_threshold) not in (int, float) or not math.isfinite(cfg.success_threshold) or not 0 <= cfg.success_threshold <= 1:
+        raise ValueError("training.target_curriculum.success_threshold must be in [0, 1].")
 
 @dataclass(frozen=True)
 class AdaptiveMapSamplingConfig:
@@ -315,6 +391,7 @@ def validate_adaptive_map_sampling(cfg: AdaptiveMapSamplingConfig) -> None:
 @dataclass(frozen=True)
 class AdaptiveTargetSpawnConfig:
     enabled: bool = False
+    curriculum_start_agents: int | None = None  # Optional reset-time target budget; population stays fixed.
     min_probability_fraction: float = 0.20
     success_window_episodes_per_cell: int = 500
     probability_smoothing_half_life_updates: float = 3.0
@@ -324,6 +401,10 @@ class AdaptiveTargetSpawnConfig:
 
 
 def validate_adaptive_target_spawn(cfg: AdaptiveTargetSpawnConfig) -> None:
+    if cfg.curriculum_start_agents is not None and (
+            type(cfg.curriculum_start_agents) is not int or cfg.curriculum_start_agents < 1 or not cfg.enabled):
+        raise ValueError("training.adaptive_target_spawn.curriculum_start_agents must be a positive integer "
+                         "with adaptive_target_spawn.enabled=true, or null.")
     for name in ("enabled", "plateau_warning_enabled"):
         if type(getattr(cfg, name)) is not bool:
             raise ValueError(f"training.adaptive_target_spawn.{name} must be boolean.")
@@ -369,17 +450,87 @@ class AgentCountCurriculumConfig:
 @dataclass(frozen=True)
 class OOMRecoveryConfig:
     enabled: bool = False
+    parameter: str = "num_envs"  # num_envs | num_steps | num_minibatches | optimizer_microbatches
+    decrement: int = 500  # Used when factor is null; preserves the original envs -500 policy.
+    factor: float | None = None  # <1 for envs/steps; >1 for smaller optimizer minibatches.
+    max_retries: int | None = None  # null preserves retries until the shape is exhausted.
+
+
+def validate_oom_recovery(cfg: OOMRecoveryConfig) -> None:
+    if type(cfg.enabled) is not bool:
+        raise ValueError("training.oom_recovery.enabled must be boolean.")
+    if cfg.parameter not in {"num_envs", "num_steps", "num_minibatches", "optimizer_microbatches"}:
+        raise ValueError("Unknown training.oom_recovery.parameter.")
+    if type(cfg.decrement) is not int or cfg.decrement < 1:
+        raise ValueError("training.oom_recovery.decrement must be a positive integer.")
+    if cfg.factor is not None:
+        if (type(cfg.factor) not in (int, float) or not math.isfinite(cfg.factor)
+                or (cfg.factor <= 1 if cfg.parameter in {"num_minibatches", "optimizer_microbatches"} else not 0 < cfg.factor < 1)):
+            raise ValueError("training.oom_recovery.factor must be finite and greater than 1 for "
+                             "num_minibatches/optimizer_microbatches, or between 0 and 1 for num_envs/num_steps.")
+    elif cfg.parameter in {"num_minibatches", "optimizer_microbatches"}:
+        raise ValueError("OOM recovery for num_minibatches/optimizer_microbatches requires a factor greater than 1.")
+    if cfg.max_retries is not None and (type(cfg.max_retries) is not int or cfg.max_retries < 0):
+        raise ValueError("training.oom_recovery.max_retries must be null or a nonnegative integer.")
+
+
+@dataclass(frozen=True)
+class GeoAuxHeadConfig:
+    hidden_sizes: tuple[int, ...] = (256, 128)
+    learning_rate: float = 0.0003
+
+
+@dataclass(frozen=True)
+class GeoAuxSamplingConfig:
+    every_updates: int = 1
+    snapshots_per_agent: int = 1
+    selection: str = "stratified_eligible_steps"
+
+
+@dataclass(frozen=True)
+class GeoAuxScheduleConfig:
+    warmup_updates: int = 10
+    ramp_updates: int = 100
+
+
+DEFAULT_PATH_GRID_SHAPE = (5, 5, 5)
+
+
+@dataclass(frozen=True)
+class GeoProbeAuxiliaryConfig:
+    enabled: bool = False
+    observe_prev_path_probe: bool = False
+    lambda_target: float = 0.03
+    metric_threshold: float = 0.8
+    gradient_diagnostics: bool = True
+    head: GeoAuxHeadConfig = GeoAuxHeadConfig()
+    sampling: GeoAuxSamplingConfig = GeoAuxSamplingConfig()
+    schedule: GeoAuxScheduleConfig = GeoAuxScheduleConfig()
+    grid_shape: tuple[int, int, int] = DEFAULT_PATH_GRID_SHAPE
+
+    @property
+    def grid_width(self) -> int:
+        return math.prod(self.grid_shape)
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     total_timesteps: int = 250_000_000
+    # Per invocation, including setup/JIT and periodic evaluation; final saving/media follow.
+    max_wall_seconds: float | None = None
+    # Per training attempt after setup, including first JIT/evaluation; final saving/media follow.
+    max_training_seconds: float | None = None
     num_envs: int = 4000
     num_maps: int | None = None  # Persistent random training maps; null retains the legacy lane-count fallback.
     num_steps: int = 100
     num_epochs: int = 4
     num_minibatches: int = 20
+    optimizer_microbatches: int = 1 # Execution chunks per PPO minibatch; gradients accumulate before one Adam step.
+    rollout_batch_size: int | None = None # Execution-only chunking; null uses every lane. OOM recovery may reduce it.
+    geo_probe_auxiliary: GeoProbeAuxiliaryConfig = GeoProbeAuxiliaryConfig()
     seed: int = 42
+    map_selection_seed: int | None = None  # None follows seed; explicit value fixes bank splits across training seeds.
+    map_pool_path: str | None = None  # Optional exact precompiled pool; incompatible/missing pools fail instead of regenerating.
 
     lr: float = 3e-4
     gamma: float = 0.99
@@ -408,6 +559,9 @@ class TrainingConfig:
     skip_on_no_pair_found: bool = False
     spawn_pair_max_attempts: int = 1024
     adaptive_target_spawn: AdaptiveTargetSpawnConfig = AdaptiveTargetSpawnConfig()
+    target_curriculum: TargetCurriculumConfig = TargetCurriculumConfig()
+    target_spawn_eligibility: TargetSpawnEligibilityConfig = TargetSpawnEligibilityConfig()
+    base_memory_replay: str = "stored"  # stored | differentiable
     adaptive_map_sampling: AdaptiveMapSamplingConfig = AdaptiveMapSamplingConfig()
     dynamic_max_geo_distance: DynamicMaxGeoDistanceConfig = DynamicMaxGeoDistanceConfig()
     agent_count_curriculum: AgentCountCurriculumConfig = AgentCountCurriculumConfig()
@@ -416,6 +570,10 @@ class TrainingConfig:
     checkpoint_path: str | None = None
     checkpoint_step_offset: int | None = None
     ckpt_loading_mode: str = "branch"  # "resume" continues counters; "branch" carries progress; "init" loads weights only
+
+    @property
+    def bank_selection_seed(self) -> int:
+        return self.seed if self.map_selection_seed is None else self.map_selection_seed
 
 
 # network
@@ -439,6 +597,7 @@ class NetworkConfig:
 # evaluation
 @dataclass(frozen=True)
 class EvaluationConfig:
+    seed: int | None = None  # None follows training.seed; explicit value fixes inspection cases across training seeds.
     inspection_maps: int | None = None  # Random inspection subset; authored suites use their configured maps.
     num_agents: int | None = None  # None (YAML: null) uses env.num_agents from training; otherwise deploy this many for all evals/replays.
     eval_parallel_envs: int | None = 4000  # null follows the effective training.num_envs.
@@ -454,6 +613,7 @@ class EvaluationConfig:
     apply_trainings_min_geo_separation: bool = False
     minimum_geodesic_separation: bool | None = None  # None follows apply_trainings_min_geo_separation.
     dynamic_max_geo_distance: bool | None = None  # None follows training's toggle.
+    target_sampling: str = "independent"  # independent | training (adaptive weights) | curriculum (uniform, current budget).
 
     # Periodic metrics may use the same ensemble as the optional robust final eval.
     training_robustness: bool = False
@@ -463,7 +623,7 @@ class EvaluationConfig:
 
     early_exit: bool = False
     early_exit_source: str = "evaluation"  # evaluation | training (fresh completed-episode windows per map).
-    success_condition: str | None = None  # null follows env; coverage | discovery | delivery | chain_held
+    success_condition: str | None = None  # null follows env; also accepts chain_held_and_cleand_up
     early_exit_success_rate: float = 0.99
     final_early_exit_success_rate: float | None = None  # Override only the final agent-count curriculum stage.
     early_exit_min_success_length_reduction: float | None = None  # 0.25 -> mean completion by step 450 of 600
@@ -476,9 +636,11 @@ class EvaluationConfig:
     checkpoint_dir: str | None = None
     eval_freq: int = 20
     eval_offset: int = 1
+    eval_every_env_steps: int | None = None  # Overrides update cadence; evaluate after crossing a step boundary.
     eval_min_train_success: float = 0.0
 
     training_heatmap_creation: bool = False
+    final_artifacts_only: bool = False # Keep intermediate metrics; create heatmaps/replays at final checkpoint only.
 
     eval_video: bool = True
     eval_video_freq: int = 20
@@ -490,21 +652,32 @@ class EvaluationConfig:
 @dataclass(frozen=True)
 class ValidationConfig:
     enabled: bool = False
+    mode: str = "held_out_maps"  # held_out_maps | uniform_full_task (same authored map, full agent budget).
+    success_condition: str | None = None  # null follows env, independently of inspection_evaluation.
     num_maps: int = 400
     num_episodes: int = 10000
     seed: int = 456789
     fixed_targets: bool = True
     parallel_envs: int = 500
     val_freq: int = 100
+    val_every_env_steps: int | None = None
     val_on_finalization: bool = True
     save_per_map_stats: bool = True
     save_best_checkpoint: bool = True
 
 
 def validate_validation(cfg: ValidationConfig) -> None:
+    if cfg.success_condition is not None and (
+            not isinstance(cfg.success_condition, str) or cfg.success_condition not in SUCCESS_CONDITIONS):
+        raise ValueError(f"validation.success_condition must be one of {sorted(SUCCESS_CONDITIONS)} or null.")
     for name in ("enabled", "fixed_targets", "val_on_finalization", "save_per_map_stats", "save_best_checkpoint"):
         if type(getattr(cfg, name)) is not bool:
             raise ValueError(f"validation.{name} must be boolean.")
+    if cfg.mode not in {"held_out_maps", "uniform_full_task"}:
+        raise ValueError("validation.mode must be held_out_maps or uniform_full_task.")
+    if cfg.val_every_env_steps is not None and (
+            type(cfg.val_every_env_steps) is not int or cfg.val_every_env_steps < 1):
+        raise ValueError("validation.val_every_env_steps must be a positive integer or null.")
     if not cfg.enabled:
         return
     for name in ("num_maps", "num_episodes", "parallel_envs", "val_freq"):
@@ -626,9 +799,19 @@ def maximum_chain_distance(cfg: EnvConfig) -> float:
     return cfg.comm_radius_base + max(0, cfg.num_agents - 1) * cfg.comm_radius + cfg.visual_radius
 
 
+def resolve_validation_level(level: Level) -> Level:
+    """Apply the validation goal without inheriting inspection-only overrides."""
+    if level.validation.success_condition is not None:
+        level = replace(level, env=replace(level.env, success_condition=level.validation.success_condition))
+    validate_adapt_size(level.env)
+    return level
+
+
 def resolve_evaluation_level(level: Level) -> Level:
     """Apply evaluation-only agent, goal, and map overrides without changing training."""
     evaluation = level.evaluation
+    if evaluation.seed is not None:
+        level = replace(level, training=replace(level.training, seed=evaluation.seed))
     num_agents = getattr(evaluation, "num_agents", None)
     if num_agents is not None:
         level = replace(level, env=replace(level.env, num_agents=num_agents))
@@ -678,6 +861,13 @@ def evaluation_minimum_geodesic_separation(level: Level) -> bool:
 def evaluation_dynamic_max_geo_distance(level: Level) -> bool:
     override = level.evaluation.dynamic_max_geo_distance
     return level.training.dynamic_max_geo_distance.enabled if override is None else override
+
+
+def evaluation_stop_source(evaluation: EvaluationConfig) -> str:
+    """Restricted inspection can progress the sampler; validation certifies full-task stopping."""
+    if evaluation.target_sampling in {"training", "curriculum"} and evaluation.early_exit_source == "evaluation":
+        return "validation"
+    return evaluation.early_exit_source
 
 
 def _strict_dataclass(cls, values: object, label: str):
@@ -735,11 +925,33 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     validate_adapt_size(env)
     validate_radar_config(env)
     training_data = dict(data.get("training", {}))
+    geo = dict(training_data.get("geo_probe_auxiliary", {}))
+    if "grid_shape" in geo:
+        shape = geo["grid_shape"]
+        if (not isinstance(shape, (list, tuple)) or len(shape) != 3
+                or any(type(size) is not int or size < 1 or size % 2 == 0 for size in shape)
+                or shape[0] != shape[1]):
+            raise ValueError("Geo path grid_shape requires three positive odd sizes with equal X and Y.")
+        geo["grid_shape"] = tuple(shape)
+    head = dict(geo.get("head", {}))
+    if "hidden_sizes" in head:
+        head["hidden_sizes"] = tuple(head["hidden_sizes"])
+    for key, cls in (("head", GeoAuxHeadConfig), ("sampling", GeoAuxSamplingConfig), ("schedule", GeoAuxScheduleConfig)):
+        geo[key] = _strict_dataclass(cls, head if key == "head" else geo.get(key, {}), "training.geo_probe_auxiliary." + key)
+    training_data["geo_probe_auxiliary"] = _strict_dataclass(GeoProbeAuxiliaryConfig, geo, "training.geo_probe_auxiliary")
     training_data["adaptive_target_spawn"] = _strict_dataclass(
         AdaptiveTargetSpawnConfig, training_data.get("adaptive_target_spawn", {}),
         "training.adaptive_target_spawn",
     )
     validate_adaptive_target_spawn(training_data["adaptive_target_spawn"])
+    training_data["target_curriculum"] = _strict_dataclass(
+        TargetCurriculumConfig, training_data.get("target_curriculum", {}), "training.target_curriculum")
+    validate_target_curriculum(training_data["target_curriculum"])
+    training_data["target_spawn_eligibility"] = _strict_dataclass(
+        TargetSpawnEligibilityConfig, training_data.get("target_spawn_eligibility", {}), "training.target_spawn_eligibility")
+    validate_target_spawn_eligibility(training_data["target_spawn_eligibility"])
+    if training_data.get("base_memory_replay", "stored") not in {"stored", "differentiable"}:
+        raise ValueError("training.base_memory_replay must be stored or differentiable.")
     map_sampling_data = training_data.get("adaptive_map_sampling", {})
     if isinstance(map_sampling_data, dict):
         map_sampling_data = dict(map_sampling_data)
@@ -760,13 +972,57 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         if type(training_data[name].enabled) is not bool:
             raise ValueError(f"training.{name}.enabled must be boolean.")
     training = _strict_dataclass(TrainingConfig, training_data, "training")
+    geo = training.geo_probe_auxiliary
+    if type(geo.enabled) is not bool or type(geo.gradient_diagnostics) is not bool:
+        raise ValueError("Geo auxiliary enabled/gradient_diagnostics must be boolean.")
+    if type(geo.observe_prev_path_probe) is not bool:
+        raise ValueError("training.geo_probe_auxiliary.observe_prev_path_probe must be boolean.")
+    if geo.observe_prev_path_probe and not geo.enabled:
+        raise ValueError("observe_prev_path_probe requires training.geo_probe_auxiliary.enabled.")
+    if not math.isfinite(geo.lambda_target) or geo.lambda_target < 0 or not 0 <= geo.metric_threshold <= 1:
+        raise ValueError("Invalid geo auxiliary lambda/metric threshold.")
+    if (not geo.head.hidden_sizes or any(type(n) is not int or n < 1 for n in geo.head.hidden_sizes)
+            or not math.isfinite(geo.head.learning_rate) or geo.head.learning_rate <= 0):
+        raise ValueError("Invalid geo auxiliary head configuration.")
+    for value in (geo.sampling.every_updates, geo.sampling.snapshots_per_agent, training.optimizer_microbatches):
+        if type(value) is not int or value < 1:
+            raise ValueError("Geo sampling counts and optimizer_microbatches must be positive integers.")
+    if geo.sampling.selection != "stratified_eligible_steps":
+        raise ValueError("Unsupported geo auxiliary sampling selection.")
+    if any(type(n) is not int or n < 0 for n in (geo.schedule.warmup_updates, geo.schedule.ramp_updates)):
+        raise ValueError("Geo auxiliary warm-up/ramp must be nonnegative integers.")
+    if training.optimizer_microbatches > 1 and (training.num_envs % training.num_minibatches or (training.num_envs // training.num_minibatches) % training.optimizer_microbatches):
+        raise ValueError("PPO minibatches must divide environments and optimizer_microbatches must divide each minibatch.")
+    if training.rollout_batch_size is not None and (type(training.rollout_batch_size) is not int or training.rollout_batch_size < 1):
+        raise ValueError("training.rollout_batch_size must be null or positive.")
+    if geo.enabled and env.success_condition == "coverage":
+        raise ValueError("Geo path auxiliary supervision requires a target task.")
+    validate_oom_recovery(training.oom_recovery)
+    if training.map_selection_seed is not None and (
+            type(training.map_selection_seed) is not int or not 0 <= training.map_selection_seed < 2**32):
+        raise ValueError("training.map_selection_seed must be null or an integer in [0, 2**32).")
+    if training.map_pool_path is not None and (
+            not isinstance(training.map_pool_path, str) or not training.map_pool_path.strip()
+            or not generation.enabled or not generation.load_maps_from_bank):
+        raise ValueError("training.map_pool_path requires a nonempty path and a persistent random-building bank.")
+    for budget_name in ("max_wall_seconds", "max_training_seconds"):
+        budget = getattr(training, budget_name)
+        if budget is not None and (
+            type(budget) not in (int, float) or not math.isfinite(budget) or budget <= 0
+        ):
+            raise ValueError(f"training.{budget_name} must be null or a positive finite number.")
     if training.num_maps is not None and (type(training.num_maps) is not int or training.num_maps < 1):
         raise ValueError("training.num_maps must be null or a positive integer.")
-    if validation.enabled and not generation.enabled:
+    if validation.enabled and validation.mode == "held_out_maps" and not generation.enabled:
         raise ValueError("Validation requires persistent random buildings.")
+    if validation.enabled and validation.mode == "uniform_full_task" and (
+            generation.enabled or len(map_names or []) != 1 or validation.num_maps != 1
+            or not validation.fixed_targets or not training.dynamic_max_geo_distance.enabled):
+        raise ValueError("Uniform full-task validation requires one authored map, num_maps=1, "
+                         "fixed_targets=true and dynamic_max_geo_distance.enabled=true (solvable targets only).")
     if validation.enabled and (training.randomize_base or training.minimum_geodesic_separation):
         raise ValueError("Validation currently requires fixed bases and minimum_geodesic_separation=false.")
-    if validation.enabled and env.success_condition == "coverage":
+    if validation.enabled and (env.success_condition == "coverage" or validation.success_condition == "coverage"):
         raise ValueError("The held-out validation pipeline currently requires a target task.")
     if training.num_maps is not None and not generation.enabled:
         if training.num_maps != len(map_names or []):
@@ -796,6 +1052,30 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
                 or ev_data.get("num_agents") is not None):
             raise ValueError("Inspection-based curriculum progression requires the filtered stage population "
                              "(inspection_evaluation.dynamic_max_geo_distance=null or true, num_agents=null).")
+    if training.target_spawn_eligibility.enabled:
+        if (not training.dynamic_max_geo_distance.enabled or training.randomize_base
+                or training.minimum_geodesic_separation or env.num_obstacles
+                or env.success_condition == "coverage" or (not generation.enabled and len(map_names or []) != 1)):
+            raise ValueError("Target spawn eligibility requires fixed-base, certified target tasks on random maps or one authored map.")
+    if training.target_curriculum.mode != "none":
+        if (training.adaptive_target_spawn.enabled or training.adaptive_map_sampling.enabled
+                or curriculum.enabled or not training.dynamic_max_geo_distance.enabled
+                or env.num_agents < 2 or env.relay_agent_budget not in (None, env.num_agents)
+                or not data.get("validation", {}).get("enabled", False)
+                or data.get("evaluation", {}).get("early_exit_source") != "validation"):
+            raise ValueError("Target curriculum requires uniform sampling, full population, dynamic feasibility and validation progression.")
+    if training.adaptive_target_spawn.curriculum_start_agents is not None:
+        ev_data = data.get("evaluation", {})
+        exit_source = ev_data.get("early_exit_source", EvaluationConfig.early_exit_source)
+        if ((not generation.enabled and not map_names) or curriculum.enabled
+                or env.relay_agent_budget not in (None, env.num_agents)
+                or not training.dynamic_max_geo_distance.enabled
+                or training.adaptive_target_spawn.curriculum_start_agents > env.num_agents
+                or not ev_data.get("early_exit", EvaluationConfig.early_exit)
+                or exit_source not in {"evaluation", "validation"}
+                or exit_source == "evaluation" and ev_data.get("training_robustness", False)):
+            raise ValueError("Spawn curriculum requires authored or persistent random maps, fixed full population, dynamic feasibility "
+                             "and deterministic inspection- or validation-based early-exit settings.")
     if training.adaptive_target_spawn.enabled and (
         env.num_obstacles or training.randomize_base or training.minimum_geodesic_separation
         or env.success_condition == "coverage"
@@ -829,7 +1109,8 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
             raise ValueError("Random buildings and random obstacles are mutually exclusive.")
         from swarmecho.env.random_buildings import generate_building, map_seed
         _, building = generate_building(generation, map_seed(training.seed, 0), name="map_0000",
-                                        drone_clearance=env.drone_radius + env.obstacle_planning_clearance_m)
+                                        drone_clearance=env.drone_radius + env.obstacle_planning_clearance_m,
+                                        env_cfg=env)
         map_names = ["random_buildings"]
     else:
         if not isinstance(map_names, list) or not map_names or any(
@@ -887,12 +1168,14 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("Validation early exit requires validation.enabled=true.")
     validate_reward_config(level.reward)
     validate_priveleged_vote_reward(level.reward.priveleged_vote_reward, level.env)
-    success_conditions = {"coverage", "discovery", "delivery", "chain_held"}
+    success_conditions = SUCCESS_CONDITIONS
     if level.env.success_condition not in success_conditions:
         raise ValueError(f"env.success_condition must be one of {sorted(success_conditions)}.")
     if (level.evaluation.success_condition is not None
             and level.evaluation.success_condition not in success_conditions):
         raise ValueError(f"evaluation.success_condition must be one of {sorted(success_conditions)} or null.")
+    if validation.enabled:
+        resolve_validation_level(level)
     if level.network.critic_type != "observation":
         raise ValueError("network.critic_type currently supports only observation.")
     if level.env.success_condition == "coverage" and level.training.minimum_geodesic_separation:
@@ -925,8 +1208,10 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     parallel_envs = level.evaluation.eval_parallel_envs
     if parallel_envs is not None and (type(parallel_envs) is not int or parallel_envs < 1):
         raise ValueError("evaluation.eval_parallel_envs must be null or a positive integer.")
-    if level.training.oom_recovery.enabled and 500 % level.training.num_minibatches:
-        raise ValueError("OOM recovery requires num_minibatches to divide the 500-environment decrement.")
+    recovery = level.training.oom_recovery
+    if (recovery.enabled and recovery.parameter == "num_envs" and recovery.factor is None
+            and recovery.decrement % level.training.num_minibatches):
+        raise ValueError("OOM recovery requires num_minibatches to divide the configured environment decrement.")
     ev = level.evaluation
     if ev.num_agents is not None and (type(ev.num_agents) is not int or ev.num_agents < 1):
         raise ValueError("evaluation.num_agents must be null or a positive integer.")
@@ -943,8 +1228,33 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         raise ValueError("evaluation.minimum_geodesic_separation must be boolean or null.")
     if ev.dynamic_max_geo_distance is not None and type(ev.dynamic_max_geo_distance) is not bool:
         raise ValueError("evaluation.dynamic_max_geo_distance must be boolean or null.")
+    if ev.target_sampling not in {"independent", "training", "curriculum"}:
+        raise ValueError("inspection_evaluation.target_sampling must be independent, training or curriculum.")
+    if ev.target_sampling == "curriculum":
+        if (not training.adaptive_target_spawn.enabled
+                or training.adaptive_target_spawn.curriculum_start_agents is None
+                or ev.num_agents is not None or ev.eval_differes_from_training_map or ev.eval_map
+                or not evaluation_dynamic_max_geo_distance(level) or ev.training_robustness
+                or not validation.enabled):
+            raise ValueError("Curriculum inspection requires a virtual target curriculum, the full training "
+                             "population, dynamic feasibility, deterministic inspection and full-task validation.")
+    if ev.target_sampling == "training":
+        if (generation.enabled or len(map_names or []) != 1 or not training.adaptive_target_spawn.enabled
+                or ev.random_eval or ev.eval_differes_from_training_map or ev.eval_map
+                or ev.num_agents is not None or ev.success_condition not in (None, env.success_condition)
+                or evaluation_dynamic_max_geo_distance(level) != training.dynamic_max_geo_distance.enabled
+                or ev.minimum_geodesic_separation is True):
+            raise ValueError("Training target sampling requires one authored training map with adaptive target "
+                             "spawning and the training population, task and feasibility filter. "
+                             "Inspection maps cannot reuse another map's adaptive cell weights.")
+        if (ev.early_exit and ev.early_exit_source == "evaluation"
+                and (not validation.enabled or validation.mode != "uniform_full_task")):
+            raise ValueError("Training-distribution inspection requires uniform_full_task validation for "
+                             "full-level early stopping; inspection still controls spawn-curriculum progression.")
     if ev.dynamic_max_geo_distance and (env.success_condition == "coverage" or env.num_obstacles):
         raise ValueError("Dynamic max distance evaluation requires a static-geometry target task.")
+    if ev.seed is not None and (type(ev.seed) is not int or not 0 <= ev.seed < 2**32):
+        raise ValueError("inspection_evaluation.seed must be null or an integer in [0, 2**32).")
     if type(ev.random_eval) is not bool or type(ev.random_eval_envs) is not int or ev.random_eval_envs < 1:
         raise ValueError("random_eval must be boolean and random_eval_envs a positive integer.")
     if ev.replay_targets_from_storey is not None and (
@@ -977,6 +1287,11 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         value = getattr(level.evaluation, name)
         if type(value) is not int or value < 1:
             raise ValueError(f"evaluation.{name} must be a positive integer.")
+    interval = level.evaluation.eval_every_env_steps
+    if interval is not None and (type(interval) is not int or interval < 1):
+        raise ValueError("inspection_evaluation.eval_every_env_steps must be null or a positive integer.")
+    if type(level.evaluation.final_artifacts_only) is not bool:
+        raise ValueError("inspection_evaluation.final_artifacts_only must be boolean.")
     for name in ("eval_offset", "eval_video_offset", "checkpoint_offset"):
         value = getattr(level.evaluation, name)
         if type(value) is not int or value < 0:
@@ -1045,11 +1360,16 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
         level.reward.gap_reward_uses_change and level.reward.target_found_requires_delivery
     ):
         raise ValueError("Delivery gap vesting requires gap-change reward and target delivery.")
-    if level.reward.success_reward_as_hold_record and level.env.success_condition != "chain_held":
-        raise ValueError("reward.success_reward_as_hold_record requires env.success_condition=chain_held.")
+    if level.reward.success_reward_as_hold_record and level.env.success_condition not in CHAIN_SUCCESS_CONDITIONS:
+        raise ValueError("reward.success_reward_as_hold_record requires a chain-hold success condition.")
     if (level.reward.success_reward_as_hold_record
-            and level.evaluation.success_condition not in (None, "chain_held")):
-        raise ValueError("Hold-record success reward requires chain_held evaluation success.")
+            and level.evaluation.success_condition is not None
+            and level.evaluation.success_condition not in CHAIN_SUCCESS_CONDITIONS):
+        raise ValueError("Hold-record success reward requires a chain-hold evaluation success condition.")
+    if (validation.enabled and level.reward.success_reward_as_hold_record
+            and validation.success_condition is not None
+            and validation.success_condition not in CHAIN_SUCCESS_CONDITIONS):
+        raise ValueError("Hold-record success reward requires a chain-hold validation success condition.")
     if level.env.success_condition == "coverage" and (
         level.reward.gap_reward_uses_change or level.reward.peer_informing_reward_enabled
     ):

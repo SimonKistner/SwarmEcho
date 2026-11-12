@@ -1,0 +1,22 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "geo_aux_v1",
+  "seeds": [
+    456789
+  ],
+  "wandb_mode": "online",
+  "description": "G03 CLU from-scratch path auxiliary lambda/snapshot comparison",
+  "overrides": [
+    "training.geo_probe_auxiliary.enabled=true",
+    "training.oom_recovery.enabled=true",
+    "training.oom_recovery.parameter=optimizer_microbatches",
+    "training.oom_recovery.factor=2.0",
+    "training.oom_recovery.max_retries=null"
+  ],
+  "variations": {
+    "aux_l0p1_k5": [
+      "training.geo_probe_auxiliary.lambda_target=0.1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ]
+  }
+}

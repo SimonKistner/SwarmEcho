@@ -21,7 +21,7 @@ def test_authored_geometry_classifies_recessed_outer_walls_and_roofs(tmp_path, m
     assert [wall["outer"] for wall in geometry["walls"]] == [True, False, True, True]
     assert geometry["walls"][1]["lo"] == [4.875, 0, 0]
     assert geometry["walls"][1]["hi"] == [5.125, 5, 5]
-    assert geometry["roofs"] == [{"lo": [0, 0, 9.75], "hi": [5, 5, 10.25]}]
+    assert geometry["roofs"] == [{"lo": [0, 0, 9.75], "hi": [5, 5, 10.25], "storey": 1}]
     assert geometry["floors"] == [
         {"lo": [0, 0, -.25], "hi": [5, 5, .25], "storey": 0},
         {"lo": [0, 0, 4.75], "hi": [5, 5, 5.25], "storey": 1},

@@ -1,0 +1,83 @@
+schema: 1
+id: path-predictor
+status: active
+target:
+  kind: optimal_roadmap_path
+  endpoints: base_to_target
+  reference: reward_geodesic_distance # Unpenalized planning_distances, not spawn corner_distances.
+  route_selection: single_shortest # Log and replace sampled pairs without a finite reward-reference route; never fabricate a label.
+  artifact: reuse_compatible_route_or_reconstruct_and_cache_once_per_pair
+  multiple_route_supervision: deferred
+inputs:
+  finder_gru: {kind: gru, agents: finder, event: first_communication_after_discovery}
+  finder_message: {kind: message, agents: finder, event: first_communication_after_discovery}
+  all_knowing_after_info:
+    kind: gru
+    agents: active_target_knowing # Includes the finder when eligible.
+    event: first_actor_update_processing_target_information
+    capture: once_per_agent_episode
+  all_knowing_till_end:
+    kind: gru
+    agents: active_target_knowing
+    event: actor_update_after_target_information
+    every_steps: 10 # Candidate stride in ENVIRONMENT steps from each agent's first informed snapshot; selection below may retain fewer.
+    include_first: true
+    stop: episode_end_or_agent_inactive
+  base: {kind: stored_message, agents: base, event: first_receipt}
+model: {kind: mlp, hidden_sizes: [256, 128], normalization: train_standardize}
+output:
+  encoding: binary_cell_mask
+  size: 125
+  shape: [5, 5, 5]
+  relative_cell_range: [-2, 2]
+  origin: base_cell
+  origin_index: [2, 2, 2]
+  rotations: yaw_quarter_turns # Keep up/down distinct; no reflections.
+  frame: canonical_base_anchored_geometry
+  symmetry_tiebreaker: base_target_configuration_then_canonical_shortest_route
+  cardinality: multiple
+  cell_order: z_y_x_x_fastest
+  loss: sigmoid_binary_cross_entropy
+  readout: separate_per_input
+sampling:
+  unit: input_specific_event
+  split_unit: episode
+  backend: mixed_episode_and_agent_events
+  labels: one_per_episode_referenced_by_snapshot_rows
+  repeated_snapshot_cap_per_agent: 20 # Maximum RETAINED rows per agent/episode; retain all when fewer candidates exist, never duplicate.
+  repeated_snapshot_selection: uniform_over_candidate_indices # Include first/last when cap>=2; evenly spread the rest over the full eligible lifetime.
+  training_sampler: uniform_episode_then_agent_then_snapshot # Separate sampler per input: equal episode influence, then equal represented-agent influence.
+  evaluation_aggregation: mean_snapshot_then_agent_then_episode # Match the training population; do not let long trajectories dominate the reported score.
+settings:
+  policy: {level: null, from_run_config: true, map_source: compatible_pool}
+  protocol: {eligibility: informed} # Retain informed episodes even when delivery/success later fails.
+  dataset:
+    train_samples: 10000 # Independent episode budgets, not repeated GRU rows.
+    validation_samples: 1000
+    test_samples: 5000
+    eval_batch_size: 4096 # Initial parallel rollout lanes; on allocation failure halve and retry the same episode IDs, keeping the reduced size thereafter.
+    max_episodes: 100000
+    seed: 467789
+    split_seed: 20261013
+    path: null
+  probe:
+    seeds: [0, 1, 2] # Suite repeats overrides these decoder seeds.
+    epochs: 150
+    updates_per_epoch: 64 # Fixed optimizer updates; hierarchical sampling draws with replacement.
+    batch_size: 256
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    patience: 15
+    min_delta: 0.00001
+  audit: {enabled: false, mode: conditional, samples: 5000, every: 1, batch_size: 16, duplicate_threshold: 0.01}
+  distance: {clearance_m: null} # Use the checkpoint reward's clearance exactly.
+  report:
+    renderer: path_mask
+    dpi: 160
+    threshold: 0.8 # Default cell selection; report offers 50/75/80/90/95% from saved probabilities, independently of each example's local slider.
+    overview: per_input_with_nested_details
+    metrics: [exact_path_accuracy, path_similarity] # Complete matches; shared path cells penalized by missing/extra cells.
+    histogram: {metric: path_similarity, incorrect_only: true, bin_width_percent: 10} # Similarity of imperfect masks; higher means more shared path and fewer missed/extra cells.
+    examples:
+      default_open: false # Inside Details -> group -> Representative prediction.
+      threshold_slider: true # Updates this example only; the held-out threshold selector controls aggregate scores.

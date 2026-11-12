@@ -1,5 +1,40 @@
 # Future Features
 
+## Geo path-predictor directions (backlog, 2026-11-01)
+
+- [ ] **Inspector agent-belief playback.** Select a replay agent and a probe from
+  the same policy checkpoint; show per-timestep path probabilities in a second
+  rotatable building synchronized with replay. This extends beyond the prototype's
+  retained snapshot examples.
+- [ ] **Recurrent probe and representation comparisons.** Explore additional
+  belief memory, sequence outputs and multiple reference routes as separate
+  experiments. These are outside the first path-predictor prototype.
+
+Details and optional research diagnostics are recorded in the
+[path-predictor backlog](../../geo_experiments/probes/path-predictor/BACKLOG.md).
+
+## Random-building pool preparation (backlog, 2026-10-29)
+
+- [ ] **Automatically size CPU preparation workers to the allocation.** Replace
+  the fixed four-worker ceiling with detection of usable CPU capacity from CPU
+  affinity and cgroup quotas, with a configurable override. Log the detected
+  capacity and selected worker count. Account for nested numerical-library
+  threads and memory pressure; compare preparation time before assuming the
+  largest worker count is fastest.
+
+- [ ] **Make map-pool identity reproducible from the experiment seed.** For
+  unchanged generation settings and geometry code, the same seed should resolve
+  to the same buildings and training/held-out split regardless of which run
+  creates the pool first or which compatible pools already exist. Define and
+  persist the relationship between experiment seed, generation seed and pool
+  identity while preserving frozen selections on resume.
+
+These features remain deferred. G03 refinement now supports an explicit pinned
+PFSS pool and a map-selection seed independent of the training seed; this keeps
+the existing dataset fixed across paired training seeds. It does not yet define
+deterministic pool creation from the experiment seed. See the
+[combined-wave submission guide](../../cluster/README.md#g03-refinement-one-combined-wave-two-training-seeds).
+
 ## Chain contribution visibility
 
 - [x] Add `env.observe_chain_contributor` (default off; enabled in B01 office).

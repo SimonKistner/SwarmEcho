@@ -1,0 +1,12 @@
+{
+  "description": "G03 cluster 2B-step run: G01 uniform final validation 43.8%; PPO 16000/25/1/10; shared task and cluster settings in G03_CLU_random_buildings",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=16000",
+    "training.num_steps=25",
+    "training.num_epochs=1",
+    "training.num_minibatches=10"
+  ]
+}

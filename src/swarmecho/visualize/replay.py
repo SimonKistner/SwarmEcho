@@ -44,7 +44,8 @@ def planner_metadata(cfg, *, reward_cfg=None) -> dict:
              "relay_agent_budget",
              "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m",
              "wall_sensing_layout", "wall_sensing_rays", "wall_sensing_ray_max_distance")
-    metadata = {**{name: getattr(cfg, name) for name in names}, "adapt_size": asdict(cfg.adapt_size)}
+    metadata = {**{name: getattr(cfg, name) for name in names},
+                "adapt_size": asdict(cfg.adapt_size), "spawn_delay": cfg.spawn_delay}
     if reward_cfg is not None and reward_cfg.priveleged_vote_reward.enabled:
         metadata["reward"] = {"priveleged_vote_reward": asdict(reward_cfg.priveleged_vote_reward)}
     return metadata
@@ -111,7 +112,8 @@ def write_replay(
                      "dwell", "zone_center", "zone_valid", "spawned", "decommissioned",
                      "rejected_voters", "calls", "decommissions", "rejected_calls",
                      "reference_callers", "reference_age", "packet_round", "packet_count",
-                     "packet_bits", "decision_step", "decision_yes", "vote_step"):
+                     "packet_bits", "decision_step", "decision_yes", "vote_step",
+                     "quorum_steps", "last_spawn_step"):
             arrays[f"adapt_{name}"] = np.stack([
                 np.asarray(getattr(state.adaptive, name)) for state in state_list
             ])
@@ -218,6 +220,9 @@ def load_replay(manifest: str | Path) -> tuple[dict, dict[str, np.ndarray]]:
     """Read and validate the format marker of one completed replay."""
     manifest_path = Path(manifest)
     metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if metadata.get("checkpoint"):
+        from swarmecho.core.paths import resolve_project_path
+        metadata["checkpoint"] = str(resolve_project_path(metadata["checkpoint"]))
     if metadata.get("format") != REPLAY_FORMAT:
         raise ValueError(f"Unsupported replay format: {metadata.get('format')!r}")
     data_path = manifest_path.parent / metadata["data_file"]

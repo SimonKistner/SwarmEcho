@@ -6,27 +6,118 @@ probabilities applied during a rollout and the success estimate at its end.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import os
 from pathlib import Path
+import tempfile
 
 import numpy as np
 
 
 def atomic_json(path: Path, payload: dict) -> None:
-    """Readers see the complete old or new file, never a partial replacement."""
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(payload, allow_nan=False) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    """Publish complete JSON with a private temporary file for every writer.
+
+    Shared-filesystem advisory locks need not serialize writers on different
+    nodes. Unique names keep one writer from renaming another writer's file.
+    """
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(payload, allow_nan=False) + "\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
-class AdaptiveTargetSpawnController:
-    def __init__(self, building, env, config, *, feasibility_budget=None, relay_options=None):
+def sampling_config_dict(config):
+    """Keep disabled optional settings out of existing sampler/journal identities."""
+    values = asdict(config)
+    if values.get("curriculum_start_agents") is None:
+        values.pop("curriculum_start_agents", None)
+    return values
+
+
+class TargetBudgetCurriculum:
+    """One target-budget gate, independent of adaptive map and cell probabilities."""
+
+    def _init_curriculum(self, env, config, progression_config):
+        self.config = config
+        self.curriculum_budget = config.curriculum_start_agents
+        self.curriculum_hold = None
+        self.curriculum_maximum = env.num_agents
+        self.curriculum_source = None
+        self.curriculum_target_sampling = "independent"
+        if self.curriculum_budget is not None:
+            if progression_config is None:
+                raise ValueError("Spawn curriculum requires the configured early-exit source and threshold.")
+            from swarmecho.training.run_lifecycle import EvaluationHold
+            self.curriculum_source = progression_config.early_exit_source
+            if self.curriculum_source == "evaluation":
+                self.curriculum_target_sampling = progression_config.target_sampling
+            self.curriculum_hold = EvaluationHold(progression_config.early_exit_success_rate,
+                progression_config.early_exit_hold_evals, progression_config.early_exit_min_success_length_reduction)
+
+    def observe_curriculum(self, source, required_agents, successes, lengths, max_steps):
+        """Score current-budget cases and change only the target reset filter."""
+        if self.curriculum_hold is None or source != self.curriculum_source:
+            return {}
+        required, successes, lengths = (np.asarray(x).reshape(-1) for x in (required_agents, successes, lengths))
+        if (not (len(required) == len(successes) == len(lengths))
+                or np.any((required < 1) | (required > self.curriculum_maximum))):
+            raise ValueError("Spawn curriculum requires matching certified per-case requirements/outcomes.")
+        budget = self.curriculum_budget
+        selected = required == budget
+        count = int(selected.sum())
+        success = float(np.mean(successes[selected])) if count else 0.
+        successful = selected & successes.astype(bool)
+        reduction = 1 - float(np.mean(lengths[successful])) / max_steps if np.any(successful) else 0.
+        if count:
+            ready = self.curriculum_hold.observe(success, reduction)
+        else:
+            self.curriculum_hold.consecutive = 0
+            ready = False
+        hold = self.curriculum_hold.consecutive
+        if ready and count and budget < self.curriculum_maximum:
+            self.curriculum_budget += 1
+            self.curriculum_hold.consecutive = 0
+            from swarmecho.core.terminal import terminal_print
+            terminal_print(f"[TARGET SPAWN] budget {budget} -> {self.curriculum_budget}; "
+                           f"{self.curriculum_maximum} recruitment slots remain available.")
+        return {"target_budget": budget, "next_target_budget": self.curriculum_budget,
+                "success_rate": success, "eligible_episodes": count, "hold_evals": hold}
+
+    def _curriculum_state(self):
+        return {"budget": self.curriculum_budget, "source": self.curriculum_source,
+                "hold": asdict(self.curriculum_hold), "target_sampling": self.curriculum_target_sampling}
+
+    def _restore_curriculum(self, state):
+        if self.curriculum_hold is not None:
+            saved = state.get("spawn_curriculum", {})
+            gate = saved.get("hold", {})
+            expected_gate = asdict(self.curriculum_hold)
+            if (saved.get("source") != self.curriculum_source
+                    or any(gate.get(key) != value for key, value in expected_gate.items() if key != "consecutive")
+                    or type(saved.get("budget")) is not int
+                    or not self.config.curriculum_start_agents <= saved["budget"] <= self.curriculum_maximum
+                    or type(gate.get("consecutive")) is not int or gate["consecutive"] < 0):
+                raise ValueError("Spawn curriculum resume requires matching source, gate and budget settings.")
+            self.curriculum_budget = saved["budget"]
+            # Keep the learned budget on resume, but never combine qualifying
+            # measurements from different inspection distributions in one hold.
+            self.curriculum_hold.consecutive = (gate["consecutive"]
+                if saved.get("target_sampling", "independent") == self.curriculum_target_sampling else 0)
+
+
+class AdaptiveTargetSpawnController(TargetBudgetCurriculum):
+    def __init__(self, building, env, config, *, feasibility_budget=None, relay_options=None, progression_config=None):
         from swarmecho.env.buildings import target_spawn_boxes
 
-        self.config = config
+        self._init_curriculum(env, config, progression_config)
         self.feasibility_budget = feasibility_budget
         self.eligibility = None
         self.cell_size = float(building.cell_size_m)
@@ -148,7 +239,7 @@ class AdaptiveTargetSpawnController:
         return {"format": "swarmecho-adaptive-spawn/v1", "run_name": run_name,
                 "cells": self.cells.tolist(), "base_cell": self.base_cell.tolist(),
                 "cell_size_m": self.cell_size, "baseline": self.baseline.tolist(),
-                "cell_volumes_m3": self.cell_volumes.tolist(), "config": asdict(self.config),
+                "cell_volumes_m3": self.cell_volumes.tolist(), "config": sampling_config_dict(self.config),
                 "sampler_identity": self.sampler_identity,
                 **({"eligibility": self.eligibility} if self.feasibility_budget is not None else {}),
                 "probability_timing": "applied during rollout; success measured at rollout end"}
@@ -237,7 +328,7 @@ class AdaptiveTargetSpawnController:
                     f"over {horizon} PPO updates."]
         for index in indices:
             messages.append(f"  Cell {self.cells[index].tolist()}: success {initial[index]:.1%} "
-                            f"→ {self.rates[index]:.1%}, peak {peaks[index]:.1%}; "
+                            f"â†’ {self.rates[index]:.1%}, peak {peaks[index]:.1%}; "
                             f"mean spawn probability {mean_probability[index]:.2%}; "
                             f"completed episodes {self.total_episodes[index] - start['completed_counts'][index]}.")
         return messages
@@ -246,7 +337,7 @@ class AdaptiveTargetSpawnController:
         if not self.eligibility_ready:
             raise ValueError("Cannot checkpoint adaptive spawn before startup eligibility is ready.")
         payload = {"format": 2 if self.feasibility_budget is not None else 1,
-                   "config": asdict(self.config), "cells": self.cells.tolist(),
+                   "config": sampling_config_dict(self.config), "cells": self.cells.tolist(),
                    "sampler_identity": self.sampler_identity,
                    **({"eligibility": self.eligibility} if self.feasibility_budget is not None else {}),
                    "cell_volumes": self.cell_volumes.tolist(),
@@ -257,6 +348,10 @@ class AdaptiveTargetSpawnController:
                    "previously_improved": self.previously_improved,
                    "warning_history": list(self.warning_history), "warned_at": self.warned_at.tolist(),
                    "update": self.update, "steps": self.steps}
+        if self.curriculum_hold is not None:
+            payload["spawn_curriculum"] = {"budget": self.curriculum_budget,
+                "source": self.curriculum_source, "hold": asdict(self.curriculum_hold),
+                "target_sampling": self.curriculum_target_sampling}
         return payload
 
     def save(self, checkpoint_path):
@@ -271,12 +366,16 @@ class AdaptiveTargetSpawnController:
 
     def load_state_dict(self, state):
         expected_format = 2 if self.feasibility_budget is not None else 1
-        if (state.get("format") != expected_format or state["config"] != asdict(self.config)
+        saved_config = dict(state["config"])
+        if saved_config.get("curriculum_start_agents") is None:
+            saved_config.pop("curriculum_start_agents", None)
+        if (state.get("format") != expected_format or saved_config != sampling_config_dict(self.config)
                 or state.get("sampler_identity") != self.sampler_identity
                 or state["cells"] != self.cells.tolist()
                 or not np.allclose(state["cell_volumes"], self.cell_volumes, rtol=1e-7, atol=0.)):
             raise ValueError("Adaptive spawn resume requires matching controller configuration and spawn geometry; "
                              "use ckpt_loading_mode=branch to start a new controller.")
+        self._restore_curriculum(state)
         if self.feasibility_budget is not None:
             self._apply_eligibility(state["eligibility"])
         count = len(self.cells)
@@ -306,20 +405,23 @@ class AdaptiveTargetSpawnController:
         return True
 
 
-class MapAdaptiveTargetSpawnController:
+class MapAdaptiveTargetSpawnController(TargetBudgetCurriculum):
     """Independent existing controllers, with one padded device weight table.
 
-    Intended for small persistent static suites. The map dimension is indexed
-    inside JAX reset; success windows and probability updates stay on the host.
+    Supports authored suites and compact random-map banks. The map dimension is
+    indexed inside JAX reset; per-map windows stay independent on the host, with
+    one optional shared curriculum controlling only target difficulty.
     """
-    def __init__(self, buildings, map_names, env, config, *, feasibility_budget=None, compact=False, relay_options=None):
+    def __init__(self, buildings, map_names, env, config, *, feasibility_budget=None, compact=False, relay_options=None, progression_config=None):
         if len(buildings) != len(map_names) or len(buildings) < (1 if compact else 2):
             raise ValueError("A map spawn controller requires matching names for at least two maps.")
         if len(set(map_names)) != len(map_names):
             raise ValueError("Adaptive spawn map names must be unique.")
+        self._init_curriculum(env, config, progression_config)
         self.map_names = tuple(map_names)
+        child_config = replace(config, curriculum_start_agents=None)
         self.controllers = tuple(AdaptiveTargetSpawnController(
-            building, env, config, feasibility_budget=feasibility_budget, relay_options=relay_options) for building in buildings)
+            building, env, child_config, feasibility_budget=feasibility_budget, relay_options=relay_options) for building in buildings)
         self.feasibility_budget = feasibility_budget
         self.update = self.steps = 0
         self.compact = compact
@@ -420,6 +522,8 @@ class MapAdaptiveTargetSpawnController:
             atomic_npz(Path(checkpoint_path) / "adaptive_cell_windows.npz", **self.packed_windows.arrays())
         atomic_json(Path(checkpoint_path) / "adaptive_spawn_state.json", {
             "format": "swarmecho-adaptive-map-spawn/v1", "map_names": list(self.map_names),
+            **({"spawn_curriculum": self._curriculum_state(),
+                "curriculum_config": sampling_config_dict(self.config)} if self.curriculum_hold is not None else {}),
             "controllers": [controller.state_dict(include_windows=not self.compact) for controller in self.controllers],
             **({"packed_windows": True} if self.compact else {}),
             "update": self.update, "steps": self.steps})
@@ -433,6 +537,10 @@ class MapAdaptiveTargetSpawnController:
                 or payload.get("map_names") != list(self.map_names)
                 or len(payload.get("controllers", [])) != len(self.controllers)):
             raise ValueError("Adaptive spawn checkpoint map order changed; branch into a new run.")
+        if self.curriculum_hold is not None:
+            if payload.get("curriculum_config") != sampling_config_dict(self.config):
+                raise ValueError("Adaptive map spawn curriculum settings changed; branch into a new run.")
+            self._restore_curriculum(payload)
         packed = None
         if payload.get("packed_windows"):
             from swarmecho.training.adaptive_maps import OutcomeWindows

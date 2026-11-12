@@ -7,7 +7,7 @@ env:
     - G02_static_map_05
 
   num_agents: 7 # Hard population cap and final geometric stage budget, including any spare slots.
-  spawn_delay: 5 # Initial agents retain the normal stagger; voted reinforcements arrive immediately.
+  spawn_delay: 5 # Minimum environment steps between all base deployments, including reinforcements.
 
   max_force: 50.0
   max_speed: 10.0
@@ -70,8 +70,8 @@ reward:
   rejected_call_reward: -200 # Each qualified YES voter on a rejected batch.
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
   useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; -min(750 * useless_count, 2000). min caps the loss
-  useless_agent_at_success_all_agents_reward_cap: 2000
+  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; max(-750 * useless_count, -2000). max limits the loss
+  useless_agent_at_success_all_agents_reward_cap: -2000
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
   progress_based_cluster_tiebreaker_soft: true

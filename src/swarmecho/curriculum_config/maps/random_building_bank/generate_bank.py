@@ -25,7 +25,9 @@ import yaml
 from swarmecho.core.config import load_level
 from swarmecho.core.terminal import terminal_print
 from swarmecho.env.buildings import target_spawn_boxes
-from swarmecho.env.random_buildings import GENERATOR_VERSION, generate_building, map_seed, save_generated_map
+from swarmecho.env.random_buildings import (
+    GENERATOR_VERSION, generate_building, map_seed, save_generated_map, target_exclusion_parameters,
+)
 from swarmecho.env.roadmap_cpu import building_roadmap
 
 
@@ -81,7 +83,8 @@ def required_settings(level):
             "drone_radius": cfg.drone_radius,
             "obstacle_planning_clearance_m": cfg.obstacle_planning_clearance_m,
         },
-        "spawn": {"target_wall_buffer_fraction": cfg.target_wall_buffer_fraction},
+        "spawn": {"target_wall_buffer_fraction": cfg.target_wall_buffer_fraction,
+                  **target_exclusion_parameters(level.random_buildings, cfg)},
     }
 
 
@@ -194,7 +197,7 @@ def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_b
     """Worker: write one YAML map and one unpadded numeric record."""
     name = f"map_{index:05d}"
     data, building = generate_building(settings, child_seed, name=name,
-        drone_clearance=cfg.drone_radius + cfg.obstacle_planning_clearance_m)
+        drone_clearance=cfg.drone_radius + cfg.obstacle_planning_clearance_m, env_cfg=cfg)
     if _map_digest(data) != expected_hash:
         raise ValueError(f"Generated map {index} changed between deduplication and roadmap compilation.")
     graph = building_roadmap(building, cfg, plan=plan, corner_bonus_m=corner_bonus_m)
@@ -279,7 +282,8 @@ def _append_batch(level, folder, metadata, count, seed, workers, *, new_pool, fi
             continue
         name = f"map_{start + len(planned):05d}"
         data, _ = generate_building(level.random_buildings, child_seed, name=name,
-            drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m)
+            drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m,
+            env_cfg=level.env)
         digest = _map_digest(data)
         if digest in seen_hashes:
             skipped += 1
@@ -378,6 +382,21 @@ def ensure_pool(level, required_count, *, log=terminal_print):
     """Reuse a sufficient pool; otherwise extend a matching pool to capacity."""
     if type(required_count) is not int or required_count < 1:
         raise ValueError("required_count must be positive.")
+    pinned = getattr(level.training, "map_pool_path", None)
+    if pinned is not None:
+        folder = Path(pinned).expanduser()
+        if not folder.is_absolute() or folder.name.endswith(".incomplete"):
+            raise ValueError("training.map_pool_path must name an absolute, completed map pool.")
+        metadata = _read_metadata(folder)
+        if metadata is None:
+            raise ValueError(f"Pinned map pool is missing or invalid: {folder}")
+        differences = _differences(required_settings(level), metadata["settings"])
+        if metadata["count"] < required_count:
+            differences.append(f"count: bank={metadata['count']}, required={required_count}")
+        if differences:
+            raise ValueError(f"Pinned map pool {folder} is incompatible: " + "; ".join(differences))
+        log(f"Using pinned map pool: {folder} ({metadata['count']} maps)")
+        return folder, metadata
     with _generation_lock():
         found = find_compatible_pool(level, log=log)
         if found is not None and found[1]["count"] >= required_count:

@@ -11,6 +11,55 @@ Random-building runs automatically prepare a persistent inspection suite;
 `inspection_maps` controls its size. Authored levels use their configured maps.
 G02 still evaluates its five authored maps, with validation disabled.
 
+## Inspection target distribution
+
+```yaml
+inspection_evaluation:
+  target_sampling: training # independent (default) | training
+  success_condition: null # Follow env.success_condition, or select an inspection-only goal.
+  dynamic_max_geo_distance: null
+  num_agents: null
+```
+
+`target_sampling: training` makes inspection resets use a snapshot of the live
+adaptive target sampler's cell probabilities and current virtual target budget.
+It samples new target positions with the same proposal weights and feasibility
+rejection rules as training; it does not replay training's already sampled
+targets. Only target eligibility changes with the virtual budget. All configured
+recruitment slots remain available throughout evaluation, as in training.
+`eval/success_rate` therefore measures the current training distribution, and
+`eval/target_budget` identifies the budget used by that pass. The existing
+`eval/spawn_curriculum_*` metrics still drive progression when inspection is the
+configured curriculum source; every inspection episode is eligible in this mode.
+
+This mode currently supports a single authored training map with adaptive target
+spawning, including the G01 virtual curriculum. Population, task, map and
+feasibility overrides that change that training distribution are rejected.
+G03's held-out inspection maps cannot reuse training maps' cell weights and keep
+independent sampling. `dynamic_max_geo_distance` only controls feasibility;
+setting it to `true` alone does not select the live sampler or virtual budget.
+
+Periodic metrics, final metrics, heatmaps and newly sampled replays use the
+selected distribution. Robustness passes share a frozen sampler snapshot.
+Standalone checkpoint inspection restores the saved adaptive sampler and virtual
+budget; a missing sampler checkpoint is an error, with no uniform fallback.
+Explicit replay targets and CSV-selected targets keep their original positions.
+
+Validation never receives inspection's adaptive weights or virtual budget.
+G01 uses `validation.mode: uniform_full_task` for independent uniform solvable
+targets under the full seven-agent budget. With training-distribution inspection
+and `early_exit_source: inspection_evaluation`, inspection continues to control
+virtual-curriculum advancement, while **validation controls full-level early
+stopping** using the existing success, length and hold thresholds. This requires
+enabled `uniform_full_task` validation. With `early_exit_source: validation`,
+validation retains control of both progression and stopping.
+
+`target_sampling: independent` restores the previous inspection distribution and
+stopping source. Existing level files default to this mode; both G01 level files
+explicitly select `training`. When resuming across this option change, the saved
+virtual budget is retained and its progression hold resets so measurements from
+different distributions are not combined.
+
 ## Independent map counts and the split
 
 `training.num_envs` counts parallel simulation lanes. `training.num_maps`
@@ -41,6 +90,7 @@ when no adaptive map sampler exists. Missing/corrupt frozen banks are not replac
 ```yaml
 validation:
   enabled: true
+  success_condition: null # Follow env.success_condition independently of inspection.
   num_maps: 400
   num_episodes: 10000
   seed: 456789
@@ -54,8 +104,17 @@ validation:
 
 Validation currently supports target tasks on persistent random buildings with
 fixed bases and no minimum-geodesic-separation constraint. Adaptive map sampling
-may be enabled or disabled. It uses the training task and stage population; inspection-only overrides
-do not change validation.
+may be enabled or disabled. It uses the training stage population and defaults to
+the training success condition; inspection-only overrides do not change validation.
+
+Set `validation.success_condition` and `inspection_evaluation.success_condition`
+independently to select each runner's goal. For example, G03 CLU trains with
+`env.success_condition: chain_held_and_cleand_up`, while both overrides are
+`chain_held`. Validation and inspection episodes then succeed and finish when
+the chain hold completes, even with active surplus agents. Their success rates,
+episode lengths, progression/stopping gates and best-validation checkpoint use
+that selected goal. A `null` override follows training. Changing the effective
+validation goal changes its frozen task identity and requires a new run.
 
 When validation controls curriculum progression, inspection may set
 `dynamic_max_geo_distance: false` to sample the permitted spawn volume without
@@ -92,6 +151,13 @@ map rates equally. Summaries include a Wilson 95% episode-success interval,
 observed-map coverage, worst/best/median/p10 map success, lengths, returns and
 terminal active population. These estimates do not prove mastery of every map.
 
+With adaptive swarm size enabled, `validation/useless_agents_at_success` and
+`eval/useless_agents_at_success` report the mean number of active agents outside
+the success-contributing chain, over successful episodes only, matching training's
+`adapt_size/useless_agents_at_success`. The metric is omitted when no episode
+succeeds. Inspection map suites and robustness runs pool successful episodes
+instead of averaging their per-map or per-run means equally.
+
 A strict success-rate improvement replaces `checkpoints/best_val_checkpoint/`.
 The existing checkpoint publisher saves actor, critic, value normalizer and
 adaptive state together, plus validation cases, identity, best score and hold
@@ -111,6 +177,14 @@ by `validation.save_per_map_stats`, independently of training diagnostic switche
 The inspector lists validation passes in the run's artifact menu. Its statistics
 view shows a success trend, map-rate distribution and searchable/sortable table,
 without loading geometry or replay data.
+
+`validation/peer-informed-pct` and `validation/base-informed-pct` show how newly
+informed agents learned the target, pooled over this validation pass's episodes
+(excluding padding lanes). Direct discoveries are included in the denominator;
+the remaining percentage represents them. No training-window smoothing applies.
+An agent counts once per lifetime, with simultaneous sources attributed to direct
+sight, then base, then peer. A pass without informed agents omits both metrics.
+Raw `[all, peer, base]` recipient counts are retained in local result files.
 
 CPU checks cover real config loading, aliases, count independence, disjoint map
 selection and host statistics. JAX/GPU execution, throughput and OOM continuation

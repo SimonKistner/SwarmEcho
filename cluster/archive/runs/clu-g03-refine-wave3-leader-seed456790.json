@@ -1,0 +1,15 @@
+{
+  "description": "G03 Wave 3; PPO 8000/50/3/5; seed 456790; 4h learning budget from level YAML; OOM recovery off; pairs with existing seed A run qmcncz8f",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03-refine-wave3_{ppo}_seed456790",
+  "wandb_group": "G03_CLU_refinement_wave2_N8000_T50_E3_M5",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=8000",
+    "training.num_steps=50",
+    "training.num_epochs=3",
+    "training.num_minibatches=5",
+    "training.seed=456790",
+    "training.oom_recovery.enabled=false"
+  ]
+}

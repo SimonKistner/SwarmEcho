@@ -37,7 +37,7 @@ without auxiliary supervision?
 
 Detailed settings, snapshot semantics and archive keys remain in the
 [code README](../../geo_experiments/README.md),
-[configuration](../../geo_experiments/legacy/configs/g01_target.yaml) and linked run manifests/data.
+[configuration](../../geo_experiments/archive/legacy/configs/g01_target.yaml) and linked run manifests/data.
 
 ## Completed runs
 

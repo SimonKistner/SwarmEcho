@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from swarmecho.core.config import load_level
+from swarmecho.core.paths import resolve_project_path
 from swarmecho.core.terminal import terminal_print
 from swarmecho.curriculum_config.maps.random_building_bank.generate_bank import (
     _read_metadata,
@@ -46,7 +47,7 @@ def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if "pool" not in manifest:
             raise ValueError(f"{manifest_path} has no bank pool path; use a bank-backed training manifest.")
-        pool = Path(manifest["pool"]).resolve()
+        pool = resolve_project_path(manifest["pool"]).resolve()
         choices = manifest.get("maps")
         if not isinstance(choices, list) or len(choices) != level.training_map_count:
             raise ValueError("Manifest map count differs from the configured training map count.")

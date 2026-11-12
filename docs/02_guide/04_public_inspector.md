@@ -108,6 +108,12 @@ disabled in both versions; enable them under **Playback**. The reward lines,
 legend and axis scaling include only agent slots active in at least one
 recorded frame of the replay, including agents activated later or subsequently
 decommissioned. Drone labels and colors retain their original slot numbers.
+Adaptive replays also show a **Base** card with WAITING FOR VOTES, DEPLOYING
+while quorum is held, or COOLDOWN with remaining steps. When `quorum_hold` is
+positive, **All YES HELD: X/Y** reports consecutive online quorum steps above
+the per-drone votes. Cooldown holds the base's active records at NO and the
+counter at zero. Regenerate older replays to record the status timing and hold
+counter; missing values are shown as unavailable.
 The cumulative plot sits on the left; the right-hand dropdown selects reward
 breakdown or relative advantage. The breakdown contains only component areas,
 with no net-reward overlay, and omits components that stay zero for the selected
@@ -257,3 +263,16 @@ deployment, reload with its cache disabled.
 GitHub documentation: [publishing sources](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site),
 [custom Pages workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages),
 and [Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits).
+## Local display aliases
+
+To shorten a run's name in the local inspector, create
+`outputs/<run>/.cluster/inspector.json` containing, for example:
+
+```json
+{"display_name": "G03 Forward - aux 0.3 - efficiency 25"}
+```
+
+The alias applies to replay, heatmap and validation picker labels. The full run
+folder, checkpoint provenance and run identity remain available and separate;
+two runs with identical display labels retain distinct picker identities.
+

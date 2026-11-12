@@ -1,0 +1,2 @@
+protocol:
+  decoder: map_specific

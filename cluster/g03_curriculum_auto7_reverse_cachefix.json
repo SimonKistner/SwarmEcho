@@ -1,0 +1,32 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "name": "G03_auto7",
+  "run_postfix": "curriculum_v3_cachefix",
+  "seeds": [
+    456789,
+    456790
+  ],
+  "wandb_mode": "online",
+  "description": "Replace only failed reverse v3 runs; unique temporary cache filenames remove concurrent-writer collisions; reuse measured cell support",
+  "overrides": [],
+  "variations": {
+    "reverse_aux_l0p03": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.03"
+    ],
+    "reverse_aux_l0p3": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "reverse_aux_l1": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=1.0"
+    ]
+  },
+  "exclude_trials": [
+    {
+      "variation": "reverse_aux_l1",
+      "seed": 456790
+    }
+  ]
+}

@@ -29,10 +29,15 @@ class RunLayout:
     train_manifest_dir: Path
 
 
-def resolve_run_layout(logging: Any, evaluation: Any, *, media_dir: str) -> RunLayout:
+def resolve_run_layout(logging: Any, evaluation: Any, *, media_dir: str, training: Any = None) -> RunLayout:
     """Resolve the proven run/checkpoint/artifact hierarchy for any dimension."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     configured_name = cfg_value(logging, "run_name")
+    if configured_name and "{ppo}" in str(configured_name):
+        if training is None:
+            raise ValueError("A {ppo} run-name template requires the resolved training configuration.")
+        from swarmecho.core.run_names import ppo_name
+        configured_name = str(configured_name).replace("{ppo}", ppo_name(training))
     use_timestamp = bool(cfg_value(logging, "use_timestamp_postfix", False))
     run_name = (
         f"run_{timestamp}"
@@ -180,6 +185,7 @@ def init_wandb(
     if mode == "disabled":
         return None
     import os
+    from swarmecho.core.run_names import wandb_display_name
 
     env_path = Path.cwd() / ".env"
     if env_path.exists():
@@ -191,7 +197,7 @@ def init_wandb(
     kwargs: dict[str, Any] = {
         "project": cfg_value(logging, "wandb_project", "SwarmEcho"),
         "entity": cfg_value(logging, "wandb_entity"),
-        "name": run_name,
+        "name": wandb_display_name(run_name),
         "mode": mode,
         "dir": str(run_dir),
         "config": config,

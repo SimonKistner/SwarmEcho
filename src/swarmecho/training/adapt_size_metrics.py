@@ -10,6 +10,10 @@ REWARD_NAMES = (
 VOTE_SHAPING_REWARD_NAMES = (
     "withheld_reinforcement_vote_reward", "unnecessary_reinforcement_call_reward",
 )
+NON_CONTRIBUTOR_REWARD_NAMES = (
+    "non_contributor_return_reward", "non_contributor_departure_reward",
+    "non_contributor_decommission_reward",
+)
 # Breakdowns of an existing reward, excluded from the additive reward terms.
 REFERENCE_DIAGNOSTIC_NAMES = (
     "reward_by_reference_positive", "reward_by_reference_negative",

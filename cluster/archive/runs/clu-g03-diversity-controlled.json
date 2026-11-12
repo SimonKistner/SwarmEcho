@@ -1,0 +1,12 @@
+{
+  "description": "G03 cluster 2B-step run: More map diversity per rollout with the winner's recurrent minibatch shape and four passes; PPO 8000/50/4/10; shared task and cluster settings in G03_CLU_random_buildings",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=8000",
+    "training.num_steps=50",
+    "training.num_epochs=4",
+    "training.num_minibatches=10"
+  ]
+}

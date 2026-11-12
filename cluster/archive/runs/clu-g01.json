@@ -1,0 +1,7 @@
+{
+  "description": "G01 cluster reference: local PPO 4000/100/4/20; shared task, budget and reporting settings from G01_CLU_static",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01_{ppo}",
+  "wandb_mode": "online",
+  "overrides": []
+}

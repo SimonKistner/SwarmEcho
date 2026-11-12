@@ -7,24 +7,26 @@ from pathlib import Path
 os.environ.setdefault("MPLBACKEND", "Agg")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from geo_experiments.artifacts import load_run
-from geo_experiments.common import resolve_path
+from geo_experiments.shared.artifacts import load_run
+from geo_experiments.shared.common import resolve_path
 # Preserve existing imports of shared presentation helpers.
-from geo_experiments.report_components import (
-    BACKGROUND, PANEL, TEXT, MUTED, GRID, COLORS, TASK_LABELS, _legend, _histogram, _table,
-)
+from geo_experiments.shared.report_components import BACKGROUND, PANEL, TEXT, MUTED, GRID, _legend, _histogram
+from geo_experiments.shared.reports.presentation import COLORS, TASK_LABELS, _table
 
 
 def generate_report(run_dir, dpi=None, audit_console=None):
     run_dir = Path(run_dir).resolve()
     manifest, arrays, legacy = load_run(run_dir)
     if audit_console is not None:
-        from geo_experiments.legacy.audit_console import attach_console_audit
+        from geo_experiments.archive.legacy.audit_console import attach_console_audit
         attach_console_audit(run_dir, audit_console, manifest)
+    if "definition" in manifest["config"]:
+        from geo_experiments.shared.reports.dispatch import render
+        return render(run_dir, manifest, arrays, dpi=dpi)
     if "geometry/map_offsets" in arrays:
-        from geo_experiments.target_report import generate_target_report
+        from geo_experiments.shared.reports.location import generate_target_report
         return generate_target_report(run_dir, manifest, arrays, dpi=dpi)
-    from geo_experiments.legacy.report import generate_legacy_report
+    from geo_experiments.archive.legacy.report import generate_legacy_report
     return generate_legacy_report(run_dir, manifest, arrays, legacy=legacy, dpi=dpi)
 
 

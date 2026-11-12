@@ -1,0 +1,34 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "decom3000_v1",
+  "seeds": [456789, 456790],
+  "wandb_mode": "online",
+  "description": "Fresh 24h G03 forward/reverse curriculum comparison: auxiliary lambda 0.3, chain efficiency 25/50/100, qualified decommission reward 3000, paired seeds",
+  "overrides": [
+    "training.geo_probe_auxiliary.lambda_target=0.3"
+  ],
+  "variations": {
+    "forward_aux_l0p3_eff25": [
+      "training.target_curriculum.mode=forward",
+      "reward.chain_efficiency_reward=25.0"
+    ],
+    "forward_aux_l0p3_eff50": [
+      "training.target_curriculum.mode=forward"
+    ],
+    "forward_aux_l0p3_eff100": [
+      "training.target_curriculum.mode=forward",
+      "reward.chain_efficiency_reward=100.0"
+    ],
+    "reverse_aux_l0p3_eff25": [
+      "training.target_curriculum.mode=reverse",
+      "reward.chain_efficiency_reward=25.0"
+    ],
+    "reverse_aux_l0p3_eff50": [
+      "training.target_curriculum.mode=reverse"
+    ],
+    "reverse_aux_l0p3_eff100": [
+      "training.target_curriculum.mode=reverse",
+      "reward.chain_efficiency_reward=100.0"
+    ]
+  }
+}

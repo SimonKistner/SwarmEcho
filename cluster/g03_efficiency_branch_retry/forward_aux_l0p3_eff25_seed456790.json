@@ -1,0 +1,20 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "name": "G03_forward_aux_l0p3_eff25",
+  "run_postfix": "decom3000_branch_v3",
+  "seeds": [
+    456790
+  ],
+  "wandb_mode": "online",
+  "wandb_group": "CLU_G03_decom3000_branch_v3_forward_aux_l0p3_eff25",
+  "description": "Independent v3 branch retry with a fresh output directory and W&B group; retain the saved parent checkpoint, curriculum and remaining allowance to 24 cumulative training hours",
+  "overrides": [
+    "training.geo_probe_auxiliary.lambda_target=0.3",
+    "training.target_curriculum.mode=forward",
+    "reward.chain_efficiency_reward=25.0",
+    "training.ckpt_loading_mode=branch",
+    "training.checkpoint_path=/pfss/mlde/workspaces/mlde_wsp_RAI_WS/ar44ruca/swarm_echo/outputs/CLU_G03_forward_aux_l0p3_seed456790_resume12h/checkpoints/ckpt_002520",
+    "training.map_pool_path=/pfss/mlde/workspaces/mlde_wsp_RAI_WS/ar44ruca/swarm_echo/map_pools/pool_20261030T151931Z_234b1780b0bc_seed3169383684_d4992a",
+    "training.max_training_seconds=34585.4660826833"
+  ]
+}

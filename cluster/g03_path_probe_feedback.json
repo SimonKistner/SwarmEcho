@@ -1,0 +1,36 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "name": "G03_aux",
+  "run_postfix": "v2",
+  "seeds": [456789, 456790],
+  "wandb_mode": "online",
+  "description": "Eight fresh G03 runs crossing forward and no target curriculum with previous-step path probe feedback off or on, with the 24-hour allocation recovery allowance pinned.",
+  "overrides": [
+    "training.geo_probe_auxiliary.enabled=true",
+    "training.geo_probe_auxiliary.lambda_target=0.3",
+    "reward.chain_efficiency_reward=25.0",
+    "reward.non_contributor_decommission_reward=3000",
+    "training.checkpoint_path=null",
+    "training.ckpt_loading_mode=init",
+    "training.max_training_seconds=86400",
+    "training.map_pool_path=/pfss/mlde/workspaces/mlde_wsp_RAI_WS/ar44ruca/swarm_echo/map_pools/pool_20261030T151931Z_234b1780b0bc_seed3169383684_d4992a"
+  ],
+  "variations": {
+    "forward": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=false"
+    ],
+    "forward_obsPathProb": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=true"
+    ],
+    "none": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=false"
+    ],
+    "none_obsPathProb": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=true"
+    ]
+  }
+}

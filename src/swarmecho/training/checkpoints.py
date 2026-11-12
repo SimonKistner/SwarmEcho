@@ -11,6 +11,10 @@ from swarmecho.core.terminal import terminal_print, display_path
 from typing import Any
 
 from flax import nnx
+from swarmecho.core.config import DEFAULT_PATH_GRID_SHAPE
+
+
+_DEFAULT_GEO_PATH_GRID = "x".join(map(str, DEFAULT_PATH_GRID_SHAPE))
 
 
 def validate_checkpoint_contract(model: Any, path: Path) -> None:
@@ -20,6 +24,10 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     expected = dict(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
+        if expected.get("observe_prev_path_probe", False):
+            raise ValueError("Previous path probe feedback requires matching checkpoint observation metadata.")
+        if expected.get("geo_path_grid", _DEFAULT_GEO_PATH_GRID) != _DEFAULT_GEO_PATH_GRID:
+            raise ValueError("A custom path grid requires matching checkpoint observation metadata.")
         if expected.get("observe_visually_gated_target_displacement", False):
             raise ValueError("Visually gated target displacement requires matching checkpoint observation metadata.")
         if expected.get("adaptive_size", False):
@@ -58,6 +66,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     for contract in (actual, expected):
         contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
         contract.setdefault("adaptive_size", False)
+        contract.setdefault("recruitment_enabled", contract["adaptive_size"])
         contract.setdefault("vote_mode", None)
         # Contracts predating timestamped decisions used accumulating credits.
         contract.setdefault("vote_protocol", "credits" if contract["adaptive_size"] else None)
@@ -68,11 +77,16 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         contract.setdefault("observe_visually_gated_target_displacement", False)
         contract.setdefault("observe_base_vote_ratio", False)
         contract.setdefault("observe_base_population", False)
+        contract.setdefault("observe_prev_path_probe", False)
+        contract.setdefault("geo_path_grid", _DEFAULT_GEO_PATH_GRID)
+        # Adaptive actors always observed zone membership before this toggle existed.
+        contract.setdefault("observe_decommission_zone", contract["adaptive_size"])
         contract.setdefault("base_population_observation_reference", None)
         if not contract["adaptive_size"]:
             contract["vote_protocol"] = None
             contract["observe_base_vote_ratio"] = False
             contract["observe_base_population"] = False
+            contract["observe_decommission_zone"] = False
             contract["base_population_observation_reference"] = None
         # Normalize both generations of renamed counts without changing rays.
         old_wall_rays = contract.pop("wall_radar_bins", None)
@@ -101,7 +115,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         else:
             contract["distance_bands"] = max(1, contract["distance_bands"])
     critical = {
-        "adaptive_size", "vote_mode", "vote_protocol",
+        "adaptive_size", "recruitment_enabled", "vote_mode", "vote_protocol",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
@@ -109,6 +123,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         "distance_bands", "radar_count_cap",
         "visually_gated_target_displacement_scale_m",
         "base_population_observation_reference",
+        "geo_path_grid",
         *[name for name in expected if name.startswith("observe_")],
     }
     critical.intersection_update(expected)
@@ -215,14 +230,21 @@ def save_model_checkpoint(
     return path
 
 
-def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=None, validation=None, final=False,
-                             metrics=None, run_dir=None, **kwargs):
+def save_training_checkpoint(model, path, *, adaptive_spawn=None, adaptive_maps=None, validation=None, target_curriculum=None, final=False,
+                             metrics=None, run_dir=None, trainer=None, target_eligibility=None, **kwargs):
     """Publish model, history and adaptive state together before marking ready."""
     path = Path(path).absolute()
     pending = path.with_name("." + path.name + "_pending")
     save_model_checkpoint(model, pending, **kwargs)
+    if trainer is not None:
+        from swarmecho.training.ppo_execution import save_optimizer
+        save_optimizer(trainer,pending)
     if adaptive_spawn is not None:
         adaptive_spawn.save(pending)
+    if target_curriculum is not None:
+        target_curriculum.save(pending)
+    if target_eligibility is not None:
+        target_eligibility.save(pending)
     if adaptive_maps is not None:
         adaptive_maps.save(pending)
     # Dataset assignment belongs to every random-map checkpoint, including

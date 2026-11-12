@@ -6,8 +6,9 @@ on:
     paths:
       - 'cluster/Dockerfile'
       - 'cluster/settings.json'
-      - 'cluster/submit.py'
-      - 'cluster/prepare_context.py'
+      - 'cluster/tools/submit.py'
+      - 'cluster/tools/prepare_context.py'
+      - 'cluster/tools/plan.py'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/cluster-image.yml'
@@ -29,7 +30,7 @@ jobs:
       - name: Resolve image and prepare inputs
         shell: bash
         run: |
-          python3 cluster/submit.py --image-info > image-info.json
+          python3 cluster/tools/submit.py --image-info > image-info.json
           IMAGE=$(jq -r .image image-info.json)
           case "$IMAGE" in *REPLACE_*) echo 'Configure image_repository first'; exit 1;; esac
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"

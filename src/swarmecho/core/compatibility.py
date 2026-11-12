@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 LEVEL_ALIASES = {
+    "CLU_G01_static": "G01_CLU_static",
     "M00_no_maze_open_cuboid_3D": "M00_no_maze_open_cuboid",
     "M01_no_maze_open_cuboid_tall_3D": "M01_no_maze_open_cuboid_tall",
     "M02_random_cuboid_obstacles_3D": "M02_random_cuboid_obstacles",

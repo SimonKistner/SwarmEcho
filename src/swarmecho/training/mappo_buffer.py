@@ -32,6 +32,7 @@ class MAPPOTransition(NamedTuple):
     base_signatures: Optional[np.ndarray] = None  # (E, S), saved base TarMAC signature
     base_values: Optional[np.ndarray] = None  # (E, V), saved base TarMAC value
     base_memory_masks: Optional[np.ndarray] = None  # (E, N), receivers that may hear base replay
+    base_write_indices: Optional[np.ndarray] = None  # (E,), sender slot, or -1 when no cache write
     agent_terminated: Optional[np.ndarray] = None  # (E, N), lifetime ends on this transition
 
 
@@ -67,6 +68,7 @@ class MAPPORolloutBuffer:
         actor_memory:  bool = False,
         critic_memory: bool = False,
         mask_inactive: bool = False,
+        host_minibatches: bool = False,
     ) -> None:
         self.T          = num_steps
         self.E          = num_envs
@@ -82,6 +84,7 @@ class MAPPORolloutBuffer:
         self.actor_memory = actor_memory
         self.critic_memory = critic_memory
         self.mask_inactive = mask_inactive
+        self.host_minibatches = host_minibatches
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
         self._actions   = np.zeros((self.T, self.E, self.N, self.A), dtype=np.float32)
@@ -98,6 +101,7 @@ class MAPPORolloutBuffer:
         self._base_signatures = np.zeros((self.T, self.E, self.tarmac_sig_dim), dtype=np.float32)
         self._base_values = np.zeros((self.T, self.E, self.tarmac_val_dim), dtype=np.float32)
         self._base_memory_masks = np.zeros((self.T, self.E, self.N), dtype=bool)
+        self._base_write_indices = np.full((self.T, self.E), -1, dtype=np.int32)
         self._initial_actor_h = None
         self._initial_actor_signature = None
         self._initial_actor_value = None
@@ -146,6 +150,7 @@ class MAPPORolloutBuffer:
             self._base_values[self._ptr] = np.asarray(tr.base_values, dtype=np.float32)
         if self.recurrent and tr.base_memory_masks is not None:
             self._base_memory_masks[self._ptr] = np.asarray(tr.base_memory_masks).astype(bool)
+        self._base_write_indices[self._ptr] = (-1 if tr.base_write_indices is None else np.asarray(tr.base_write_indices))
         self._ptr += 1
 
     # ── GAE ─────────────────────────────────────────────────────────────────
@@ -293,24 +298,28 @@ class MAPPORolloutBuffer:
             critic_h = np.zeros((self.E, self.N, self.hidden_dim), dtype=np.float32)
 
         minibatches = []
+        array = np.asarray if self.host_minibatches else jnp.array
         for i in range(n_minibatches):
             idx = perm[i * mb_envs : (i + 1) * mb_envs]
             minibatches.append({
-                "obs":             jnp.array(self._obs[:, idx]),
-                "actions":         jnp.array(self._actions[:, idx]),
-                "old_log_probs":   jnp.array(self._log_probs[:, idx]),
-                "old_values":      jnp.array(self._values[:, idx]),
-                "advantages":      jnp.array(adv[:, idx]),
-                "returns":         jnp.array(returns[:, idx]),
-                "rnn_resets":      jnp.array(self._rnn_resets[:, idx]),
-                "initial_actor_h":  jnp.array(actor_h[idx]),
-                "initial_actor_signature": jnp.array(actor_signature[idx]),
-                "initial_actor_value": jnp.array(actor_value[idx]),
-                "initial_critic_h": jnp.array(critic_h[idx]),
-                "comm_masks":       jnp.array(self._comm_masks[:, idx]),
-                "active_masks":     jnp.array(self._active_masks[:, idx]),
-                "base_signatures":  jnp.array(self._base_signatures[:, idx]),
-                "base_values":      jnp.array(self._base_values[:, idx]),
-                "base_memory_masks": jnp.array(self._base_memory_masks[:, idx]),
+                "env_indices": array(idx),
+                "obs":             array(self._obs[:, idx]),
+                "actions":         array(self._actions[:, idx]),
+                "old_log_probs":   array(self._log_probs[:, idx]),
+                "old_values":      array(self._values[:, idx]),
+                "advantages":      array(adv[:, idx]),
+                "returns":         array(returns[:, idx]),
+                "rnn_resets":      array(self._rnn_resets[:, idx]),
+                "initial_actor_h":  array(actor_h[idx]),
+                "initial_actor_signature": array(actor_signature[idx]),
+                "initial_actor_value": array(actor_value[idx]),
+                "initial_critic_h": array(critic_h[idx]),
+                "comm_masks":       array(self._comm_masks[:, idx]),
+                "active_masks":     array(self._active_masks[:, idx]),
+                "base_signatures":  array(self._base_signatures[:, idx]),
+                "base_values":      array(self._base_values[:, idx]),
+                "base_memory_masks": array(self._base_memory_masks[:, idx]),
+                "base_write_indices": array(self._base_write_indices[:, idx]),
+                "episode_dones": array(self._dones[:, idx].astype(bool)),
             })
         return minibatches

@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 from swarmecho.core.compatibility import canonical_marker
+from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS
 
 
 EVAL_STAGES = (
@@ -129,7 +130,7 @@ def eval_checkpoint_replay_root(
     return eval_checkpoint_artifact_root(run_dir, checkpoint_path, cfg) / "replays"
 
 
-_EVAL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_EVAL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_&-]*")
 
 
 def create_eval_run_root(
@@ -149,7 +150,7 @@ def create_eval_run_root(
     """
     if eval_name is not None and not _EVAL_NAME_PATTERN.fullmatch(eval_name):
         raise ValueError(
-            "eval_name must contain only letters, numbers, underscores, and hyphens."
+            "eval_name must contain only letters, numbers, underscores, hyphens, and ampersands."
         )
 
     value_ns = time.time_ns() if timestamp_ns is None else int(timestamp_ns)
@@ -290,7 +291,7 @@ def save_eval_info_csv(
                 "Evaluation CSV arrays must contain one target, base, and outcome "
                 "for every evaluated episode."
             )
-        chain_successes = successes & (success_condition == "chain_held")
+        chain_successes = successes & (success_condition in CHAIN_SUCCESS_CONDITIONS)
         delivered = delivered | chain_successes
         visually_found = visually_found | delivered
         stages = np.asarray(

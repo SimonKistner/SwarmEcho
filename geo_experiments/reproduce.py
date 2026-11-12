@@ -11,8 +11,9 @@ from zoneinfo import ZoneInfo
 os.environ.setdefault("MPLBACKEND", "Agg")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from geo_experiments.artifacts import add_group, group, load_run, save_data, update_run
-from geo_experiments.common import experiment_axes, resolve_path, validate_config
+from geo_experiments.shared.artifacts import add_group, group, load_run, save_data, update_run
+from geo_experiments.shared.common import resolve_path
+from geo_experiments.archive.target_location.config import experiment_axes, validate_config
 
 
 def main():
@@ -31,7 +32,11 @@ def main():
     source = resolve_path(options["run"])
     manifest, arrays, _ = load_run(source)
     config = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(manifest["config"]), OmegaConf.from_dotlist(overrides)), resolve=True)
-    validate_config(config)
+    if "definition" in config:
+        from geo_experiments.shared.definitions import validate_runtime
+        validate_runtime(config)
+    else:
+        validate_config(config)
     stamp = datetime.now(ZoneInfo(config["run"].get("timezone", "Europe/Berlin"))).strftime("%Y%m%d_%H%M%S_%f")
     target = source.parent / f"{config['run']['name']}_refit_{stamp}"
     target.mkdir(parents=True, exist_ok=False)
@@ -44,12 +49,16 @@ def main():
     data = {k: v for k, v in arrays.items() if not k.startswith("probes/")}
     save_data(target, data)
     try:
-        if "geometry/map_offsets" in data:
-            from geo_experiments.experiments import fit_experiment
+        if "definition" in config:
+            from geo_experiments.shared.fitting import fit_experiment
+            fitted, jobs = fit_experiment(config, data, target, shared_reference=False)
+            data.update(fitted)
+        elif "geometry/map_offsets" in data:
+            from geo_experiments.archive.target_location.fitting import fit_experiment
             fitted, jobs = fit_experiment(config, data, target, shared_reference=False)
             data.update(fitted)
         else:
-            from geo_experiments.probes import train_probe
+            from geo_experiments.archive.target_location.training import train_probe
             dataset, labels, splits, graph = (group(data, k) for k in ("dataset", "labels", "splits", "geometry"))
             tasks, sources = experiment_axes(config)
             jobs = []

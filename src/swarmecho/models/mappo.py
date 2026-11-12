@@ -69,9 +69,12 @@ class MAPPOModel(nnx.Module):
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
         vote_mode: str | None = None,
+        path_probe_width: int = 0,
     ) -> None:
         self.num_agents  = num_agents
-        self.obs_dim     = obs_dim
+        self.obs_dim     = obs_dim + path_probe_width
+        self.critic_obs_dim = obs_dim
+        self.path_probe_width = path_probe_width
         self.act_dim     = act_dim + int(vote_mode is not None)
         self.hidden_dim  = hidden_dim
         self.actor_memory = actor_memory
@@ -84,7 +87,7 @@ class MAPPOModel(nnx.Module):
 
         if actor_memory:
             self.actor = RecurrentDecentralizedActor(
-                obs_dim          = obs_dim,
+                obs_dim          = self.obs_dim,
                 act_dim          = act_dim,
                 hidden_dim       = hidden_dim,
                 actor_num_layers = actor_num_layers,
@@ -98,7 +101,7 @@ class MAPPOModel(nnx.Module):
             )
         else:
             self.actor = DecentralizedActor(
-                obs_dim          = obs_dim,
+                obs_dim          = self.obs_dim,
                 act_dim          = act_dim,
                 hidden_dim       = hidden_dim,
                 actor_num_layers = actor_num_layers,
@@ -122,6 +125,26 @@ class MAPPOModel(nnx.Module):
 
     # ── Convenience wrappers ────────────────────────────────────────────────
 
+    def initial_path_probe(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
+        n = self.num_agents if num_agents is None else num_agents
+        return jnp.zeros((*tuple(batch_shape), n, self.path_probe_width), dtype=jnp.float32)
+
+    def actor_observations(self, obs, prev_path_probe, active, target_known, resets):
+        if not self.path_probe_width:
+            return obs
+        available = active & target_known & ~resets
+        feedback = jnp.where(available[..., None], prev_path_probe, 0.0)
+        return jnp.concatenate((obs, feedback), axis=-1)
+
+    def next_path_probe(self, actor_hidden, active, target_known):
+        if not self.path_probe_width:
+            return actor_hidden[..., :0]
+        probabilities = jax.lax.stop_gradient(jax.nn.sigmoid(self.geo_probe_head(actor_hidden)))
+        return jnp.where((active & target_known)[..., None], probabilities, 0.0)
+
+    def critic_observations(self, obs):
+        return obs[..., :self.critic_obs_dim] if self.path_probe_width else obs
+
     def get_value(self, all_obs: jax.Array, deterministic: bool = True,
                   active: jax.Array | None = None) -> jax.Array:
         """
@@ -141,9 +164,9 @@ class MAPPOModel(nnx.Module):
                 return self.get_value_recurrent(
                     all_obs, hidden, None, deterministic=deterministic, active=active
                 )[1]
-            _, values = self.critic(all_obs, hidden, deterministic=deterministic)
+            _, values = self.critic(self.critic_observations(all_obs), hidden, deterministic=deterministic)
             return values
-        return self.critic(all_obs, deterministic=deterministic)
+        return self.critic(self.critic_observations(all_obs), deterministic=deterministic)
 
     def initial_actor_hidden(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
         """Return zero actor memory; N defaults to training, or the deployment count."""
@@ -173,6 +196,7 @@ class MAPPOModel(nnx.Module):
         active:          jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array]:
         """Centralised value call that carries critic memory when enabled."""
+        all_obs = self.critic_observations(all_obs)
         if self.critic_memory:
             if critic_hidden is None:
                 critic_hidden = self.initial_critic_hidden(all_obs.shape[:-2])

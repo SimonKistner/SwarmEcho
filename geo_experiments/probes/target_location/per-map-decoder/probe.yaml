@@ -1,0 +1,12 @@
+schema: 1
+id: target-location/per-map-decoder
+status: archived
+target: {kind: target_position}
+inputs:
+  finder_gru: {kind: gru, agents: finder, event: first_communication_after_discovery}
+  finder_message: {kind: message, agents: finder, event: first_communication_after_discovery}
+  base_message: {kind: stored_message, agents: base, event: first_receipt}
+model: {kind: mlp, routing: expert_per_map}
+output: {encoding: categorical_map_local_cell, loss: softmax_cross_entropy}
+sampling: {unit: episode, split_unit: episode, backend: episode_events}
+settings: {} # Historical config/implementation: archive/target_location/.

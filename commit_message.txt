@@ -1,13 +1,75 @@
-feat: tbd
+feat: add tracked cluster execution and adaptive G01 tuning
 
-- Add in-repository Determined zero-GPU shell configuration and PFSS access-check guide for RAI_WS
-- Prepare a minimal Determined model context and allow G03 map pools to use a persistent cluster path without changing local defaults
-- Add a one-slot G03 smoke/full experiment wrapper and dependency-image recipe while retaining W&B as the detailed logger
-- Centralize cluster settings and named run configs, and add single-command PowerShell submission with fresh source snapshots, offline dry runs and dependency-derived image tags
-- Publish dependency-tagged cluster images to GHCR through a default-branch GitHub Actions workflow using the built-in package token
-- Run frozen shared-coordinate probes on verified G03 validation-map banks with mixed-map collection, exact pooled budgets and compact distance scoring; retain historical one-map and five-map protocols
-- Simplify large random-bank report details and organize probe navigation by creation time, decoder title and shared training-run colors
-- Add slim colored title/run comparison choices and allow comparisons across runs and map counts while retaining metric matching
-- Consolidate geo probes around one suite configuration and shared execution, isolate historical workflows behind compatibility entry points, and archive superseded outputs while preserving completed results
+- Prepare the six-group G03 curriculum replay comparison using one best-validation checkpoint per group (seed 456789), frozen run settings, a verified shared map and sequential local evaluation with required-agent replays
+- Fetch four selected G03 best checkpoints across strict-resume lineage and prepare one user-run replay command selecting the two forward checkpoints on a shared inspection map with explicit chain-hold-and-cleanup success and a readable chain&cleanUp evaluation label; support concise local inspector display aliases without changing run identities
+
+- Add a first-time Mac cluster SSH quickstart covering VPN, isolated Determined CLI installation, login, zero-GPU PFSS shells, reconnect and cleanup
+
+- Track CLU_ cluster submissions and curriculum stages in local outputs, with matching W&B names and incremental one-command retrieval that preserves local diagnostics
+- Modernize local G01_static and colocated G01_CLU_static with identical current G03 rewards/task settings and fixed gamma/lambda, retaining seven recruitment slots throughout
+- Add an optional target-budget filter to the existing adaptive spawn sampler, driven by current-budget success from the configured evaluation or validation source and persisted in ordinary sampler checkpoints
+- Add inspection_evaluation.target_sampling=training for the single-map adaptive sampler, using live cell probabilities and the virtual target budget while retaining the full recruitment cap; enable it for local/cluster G01
+- Keep validation's independent uniform full-task sampling and stop gate, with inspection success driving virtual-curriculum advancement; preserve independent inspection as the default for other levels
+- Use frozen sampler snapshots for inspection metrics, robustness and replays, restore saved sampling for checkpoint inspection, and retain the virtual budget while resetting its hold when inspection distributions change on resume
+- Add matched cluster hardware-control and larger-minibatch ablation manifests with final-only artifacts and G03's update-based inspection/validation cadence (100/50 updates)
+- Derive G01 experiment names from effective PPO differences against current G03 (baseline or combined parameter labels), with optional local {ppo} templates and clean W&B display names while preserving unique submission/output identities
+- Add an optional cooperative training wall-time budget; matched local/cluster G01 runs use one hour including setup/evaluation with a 1B-step ceiling, preserving final checkpoint/media and recording the stop reason
+- Use <family>_CLU_<variant>.yaml beside the local level for cluster ablations; preserve the former CLU_G01_static name as a read alias and date/name the experiment 54837 report explicitly
+- Implement one-command G01 capacity probing and joint PPO search using measured memory headroom, fresh isolated GPU workers, hard deadlines, sequential KDE-guided suggestions and conservative wall-clock pruning
+- Add environment-step evaluation scheduling and final-only heatmaps/videos while keeping independent grouped W&B curves and JSON/CSV summaries for every search configuration
+- Keep normal W&B metric axes on environment steps, with wall time available separately for timing comparisons
+- Extend cluster retrieval to include live probe/search receipts and document the two-submission tuning workflow without a dependency-image rebuild
+- Add a single six-hour exploration job spanning large environment counts, short and multi-episode rollouts, wide epoch/minibatch choices and adaptive capacity brackets before learning search
+- Preserve per-attempt results through OOMs, timeouts, numerical failures and worker errors; add bounded fresh-process retries, W&B fallback, durable controller restart state and an unchanged study deadline
+- Add one-command secure PFSS W&B key setup from an existing local credential, using SSH stdin and owner-only permissions without including credentials in submission snapshots
 
 (old commit features were removed)
+
+- Enforce one shared spawn-delay cooldown for initial deployments and voted reinforcements in every adaptive level, holding base votes at NO and restarting quorum accumulation only when online
+- Show discrete base status, remaining cooldown steps and recorded quorum-hold X/Y progress in the inspector while preserving per-drone vote rows
+- Register each actual newborn's initial NO at the base before its first policy decision, including reset, scheduled arrivals and replacement lifetimes; retain the inspector's current-state display
+- Require three consecutive quorum steps in both local and cluster G03 levels
+
+- Add a dedicated G03 cluster level and eleven PPO comparison manifests: local baseline, five final uniform G01 finalists and five random-map ablations, with one continuous 2B-step cap and no wall-time cutoff
+- Extend virtual target budgets to persistent random-map banks while retaining seven recruitment slots, independent per-map cell adaptation and adaptive training-map sampling
+- Add uniform current-budget inspection without adaptive weights, full-task held-out validation and checkpointed multi-map curriculum progression
+- Support final-only heatmaps/replays for random inspection suites and retain frozen map assignments when initializing the virtual target budget
+- Record deferred allocation-aware CPU preparation and seed-reproducible map-pool features in the existing future-features backlog
+- Prepare one G03 refinement wave of 32 fresh runs across 16 configurations and two seeds, split into one initial pool-building run and 31 consumers, with wave1_v2 W&B groups and explicit OOM failures preserving exact PPO cells
+- Pin the original G03 cluster dataset and separate map-selection/inspection seeds from training randomness for matched seed comparisons without changing evaluation cadence or budgets
+- Speed up inspector discovery with header-only heatmap listing, timestamp-aware metadata caching, cached run/test pagination and one-artifact lookahead; keep full data validation on open and existing run folders unchanged
+- Add targeted cluster retrieval for one evaluation checkpoint and a chosen inspection-map count, filtering remote inventories before hashing while retaining incremental imports and separate completion tracking
+- Document the confirmed shared 24-GPU-slot workspace allocation ceiling and require capacity-aware staged submission, accounting for other users and separating rejected jobs from OOM and learning outcomes
+- Visualize the current PPO incumbent and its one-parameter neighbors in the refinement report, with measured outcomes and six explicitly marked TBD Wave 2 screening configurations
+- Add a focused six-run, single-seed G03 Wave 2 submission for the missing axial neighbors, with fresh per-configuration W&B groups and explicit OOM boundaries
+- Finalize the two-wave G03 PPO report from cluster and W&B evidence, adding matched wall-clock comparisons, the new 8k-environment record, measured neighborhood outcomes and a focused confirmation plan
+- Refocus the G03 report on three maintained search visuals, add the full OOM/search landscape and finer Wave 3 rollout bracket, and compare fixed-time seed averages with explicit missing-run counts
+- Replace the static G03 landscape with an offline interactive column view, restore yellow lower-score boxes and running-average time curves, and retain the original grid for Wave 3 boundary counts
+- Analyze current-policy ranking stability over matched training time, add rank trajectories and rolling pair-order turnover, and expose cutoff/current-versus-best controls in the interactive landscape
+- Prepare 17 G03 Wave 3 experiments with paired seeds, the additional 75-step rollout check and explicit OOM failures; add a transparent four-hour post-setup training budget in the cluster level
+- Default the interactive landscape to best success by four hours and add independent PPO axis selection for all six parameter pairs, with explicit fixed parameters and a synchronized legacy view
+- Finalize all 17 G03 Wave 3 outcomes with matched four-hour seed averages, completed boundary coverage and eight exact OOM configurations; refresh the three search views and ranking analysis, distinguish checkpoint quality from policy retention, and expose terminal-evaluation timing sensitivity in the final recommendation
+- Fix the PPO landscape to environments versus rollout steps with one fixed/epoch/minibatch detail selector and four-quarter cells; distinguish inferred memory walls from observed OOMs and add a focused 16-run Wave 4 proposal to fill the grid and probe the remaining long-rollout and optimization choices
+
+- Prepare the exact 16-run G03 Wave 4 submission loop and manifests, retaining the four-hour level budget, explicit OOM failures and the existing W&B group for the missing M6 confirmation seed
+
+- Add a separate five-run Wave 4 seed-B submission loop for the main E3/M5 grid cells, preserving existing W&B groups and the original 16-run loop; update the report to the 21-run plan
+- Finalize G03 Wave 4 from all 23 attempts, resolving slot-limit retries and retaining early OOM telemetry without fabricated validation scores; refresh the completed split-cell landscape, matched-time comparisons and ranking visuals, and identify the paired M6 leader with explicit seed and cutoff sensitivity
+- Keep targeted checkpoint imports lightweight and let geometry suites select frozen probe maps from compatible local pools, creating a matching pool when needed; preserve original-validation mode and distinguish local probe provenance in collection, cache identity and reports
+- Add a centralized cluster workflow command register covering setup, images, submissions and retries, capacity/monitoring, recovery, retrieval, local evaluation/probes, report rebuilding and shell cleanup; link it from the cluster documentation indexes
+- Register the current checkpoint evaluation with one replay map and identify required-agent replays by class plus map ID throughout the inspector and public exports
+- Replace per-experiment submission files with one editable cluster config and one-command level-default, multi-seed and named-variation submission; group seeds in W&B, freeze shared source, retain batch receipts and enforce the 24-slot batch ceiling
+- Organize cluster entry points, Python tools, documentation and archived experiment waves; retain historical manifests, receipts and report-rebuilding workflows
+- Make the all-agents useless-agent cap a signed bound (-2000 for penalties), preserving the 2000 maximum loss with max(-750 * count, -2000); migrate authored level settings and default examples, validate matching signs, and document positive-cap bonus behavior
+- Prepare one-command 12-hour continuations for the nine completed G03 curriculum screenshot runs, preserving final checkpoint state, existing W&B curves, frozen source/images and datasets while using clean job names and separate tracked outputs
+- Enable G03 CLU chain-efficiency shaping at 50, qualified retirement payout at 3000 and a 24-hour level training budget; prepare a 12-run forward/reverse curriculum sweep with auxiliary lambda 0.3, efficiency 25/50/100 and two matched seeds per variation
+- Support matching uniform target-curriculum stage inheritance on checkpoint branches; replace the fresh G03 efficiency sweep with paired branches from live resumed parents, retaining cumulative step provenance and allocating only the remaining time to a 24-hour cumulative training limit; prepare static user-submitted retry batches of all 12, the first one, or the remaining 11 plus an isolated fresh-weight comparison for startup network failures
+- Prepare an unchanged historical G03 control from successful experiment 55384's frozen submission, changing only experiment/run name and W&B group while retaining its original source, image, overrides and budget
+- Give the static efficiency retry split fresh v3 output names and paired W&B groups after a retry collided with validation history left by its failed predecessor; preflight all selected identities before submission, offer Enter-to-override/Ctrl+C-to-abort confirmation, and archive replaced local tracking while retaining remote histories
+- Add user-executed recovery of canceled G03 reverse auxiliary seed 456790 from its latest complete checkpoint, preserving frozen source, optimizer, curriculum and existing W&B curve while calculating only the remaining allowance to 24 cumulative training hours
+- Prepare six shared-parent G03 efficiency replacements after canceling the original seed-456790 branches: copy retained seed-456789 submissions' exact frozen source, checkpoint, training allowance and W&B group, vary continuation seed, and preserve fresh output identities with explicit pairing provenance
+- Handle Determined scheduler preemption with cooperative complete checkpoints, explicit acknowledgement and automatic allocation restart from the run's own optimizer/controller state and remaining portable training clock; package the lifecycle fix with nine further 12-hour G03 continuations (including the separately completed reverse-seed recovery) and five checkpoint recoveries preserving existing W&B identities/groups
+- Submit all seventeen G03 continuations (55550–55566), with nine main runs before eight efficiency-25/50 branches; preserve live manually corrected W&B groups, strict checkpoint recovery and unused prior allowance while adding twelve training hours, and record explicit scheduler queue authorization alongside live capacity
+- Add optional previous-step path probe feedback to the actor, reuse the saved online head in evaluation and replay, and prepare eight matched G03 curriculum and feedback runs with a local observation proof of concept
+- Recover preempted cluster runs with training allowances inherited from the frozen level config and pin the 24-hour allowance in the G03 path probe ablation manifest
+- Add G04 CLU with 4×4×4 buildings and nine drones, configurable online path-mask dimensions, and three matched forward-curriculum runs for probe feedback, auxiliary supervision alone, and no probe

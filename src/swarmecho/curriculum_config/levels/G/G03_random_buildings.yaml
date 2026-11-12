@@ -4,7 +4,7 @@ env:
   map_names: [] # Persistent random buildings replace the authored G02 suite.
 
   num_agents: 7 # Hard population cap and final geometric stage budget, including any spare slots.
-  spawn_delay: 5 # Initial agents retain the normal stagger; voted reinforcements arrive immediately.
+  spawn_delay: 5 # Minimum environment steps between all base deployments, including reinforcements.
 
   max_force: 50.0
   max_speed: 10.0
@@ -28,6 +28,7 @@ env:
   success_condition: chain_held # coverage | discovery | delivery | chain_held
 
   observe_chain_contributor: true
+  observe_decommission_zone: true # Own membership in the valid decommission sphere (1 inside, 0 outside).
   observe_base_vote_ratio: true # Qualified base voters / active population; zero off the base network.
   observe_base_population: true # Active population / global DEPLOYED_AGENTS_OBS_REF (10); zero off-network.
   observe_seeing_target: false
@@ -43,6 +44,7 @@ env:
 
 random_buildings:
   enabled: true
+  advanced_exclustion_base_LOS: true # All in-range base-visible cells plus one around-corner cell when enabled.
 
   # Match the generation settings of the existing 5000-map, 15 m pool.
   # Source-fingerprint compatibility is checked separately by the bank loader.
@@ -68,7 +70,7 @@ adapt_size:
   vote_protocol: latest_decision # credits | latest_decision; newest timestamped YES/NO per drone.
   vote_holding: 1 # Used only by credits; latest_decision always uses the latest YES/NO.
   quorum_fraction: 1.0 # Unanimity: every active drone must have qualified approval at the base.
-  quorum_hold: 0 # Minimum consecutive environment steps with quorum; 0 acts immediately.
+  quorum_hold: 3 # Require three consecutive environment steps with quorum before an attempt.
   decommission_radius_m: 0.75 # Fits above a centred base inside a sealed 5 m shaft.
   decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
   reward_by_reference_enabled: false # Extra signed reward for qualified reinforcement callers.
@@ -83,11 +85,14 @@ reward:
     withheld_reinforcement_vote_reward: -1.0 # Per informed, connected NO on an eligible communication tick.
     unnecessary_reinforcement_call_reward: -200 # Responsible YES sources on an unnecessary grant; replaces +10.
   decommission_reward: 0 # Full amount to each removed drone, on removal.
+  non_contributor_return_reward_per_meter: 3.0 # Positive geodesic progress toward the decommission-zone centre while a chain is intact; no radius cutoff.
+  non_contributor_departure_reward_per_meter: -3.0 # Cost per metre away from that centre, including inside the zone.
+  non_contributor_decommission_reward: 1500 # One-shot surplus-agent exit reward if the chain survives; half this level's success_reward.
   rejected_call_reward: -200 # Each qualified YES voter on a rejected batch.
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
   useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: 0 # Each active drone per useless drone at terminal chain success; -min(750 * useless_count, 2000). min caps the loss
-  useless_agent_at_success_all_agents_reward_cap: 2000
+  useless_agent_at_success_all_agents_reward: 0 # Each active drone per useless drone at terminal chain success; max(-750 * useless_count, -2000). max limits the loss
+  useless_agent_at_success_all_agents_reward_cap: -2000
   target_found_requires_delivery: true
   chain_reward_system: obstacle_geodesic
   progress_based_cluster_tiebreaker_soft: true

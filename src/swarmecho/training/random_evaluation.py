@@ -5,7 +5,7 @@ import json
 import numpy as np
 import yaml
 
-from swarmecho.core.config import MAP_DIR, resolve_evaluation_level
+from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS, MAP_DIR, resolve_evaluation_level
 from swarmecho.core.compatibility import resolve_map_file
 from swarmecho.core.terminal import terminal_print
 from swarmecho.env.buildings import compile_building, target_spawn_boxes
@@ -13,6 +13,9 @@ from swarmecho.env.random_buildings import generate_building, map_seed, save_gen
 from swarmecho.training.artifacts import artifact_suffix, save_eval_info_csv, write_manifest
 from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
 from swarmecho.training.orchestration import representative_map_indices
+from swarmecho.training.information_metrics import (
+    EVALUATION_INFORMATION_KEYS, pool_evaluation_information,
+)
 
 
 def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=None, log=lambda message: None):
@@ -47,13 +50,15 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
             DEFAULT_POOL_SIZE, build_pool, ensure_pool, select_maps)
         count = level.evaluation.random_eval_envs
         pool, metadata = ensure_pool(level, level.training_map_count + count, log=log)
-        _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
+        _, selection = select_maps(pool, metadata, level.training.bank_selection_seed, level.training_map_count, count)
         bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
         if any(not source.is_file() for source in bank_maps):
+            if level.training.map_pool_path is not None:
+                raise ValueError("Pinned inspection map is missing; refusing to replace the dataset.")
             terminal_print(f"[BANK WARNING] Selected evaluation map is missing from {pool}; generating a new pool.")
             pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, level.training_map_count + count),
                                         avoid_pool=pool, log=log)
-            _, selection = select_maps(pool, metadata, level.training.seed, level.training_map_count, count)
+            _, selection = select_maps(pool, metadata, level.training.bank_selection_seed, level.training_map_count, count)
             bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
     if bank_maps is not None and len(bank_maps) != level.evaluation.random_eval_envs:
         raise ValueError("bank_maps must contain exactly random_eval_envs maps.")
@@ -74,7 +79,8 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
             data["name"] = name
         else:
             data, _ = generate_building(level.random_buildings, map_seed(level.training.seed, index, evaluation=True),
-                name=name, drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m)
+                name=name, drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m,
+                env_cfg=level.env)
         building = compile_building(data)
         if not target.exists():
             save_generated_map(data, target)
@@ -113,12 +119,18 @@ def _replay_level_for_storey(level):
 
 
 def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=True, replay_due=False, on_run=None,
-                       artifact_root=None, scope="train", checkpoint=None, eval_name=None):
+                       artifact_root=None, scope="train", checkpoint=None, eval_name=None,
+                       sampling_kwargs=None, spawn_sampler=None, replay_by_required_agents=False):
     from swarmecho.training.train import evaluate_suite, evaluate_model
     destination = Path(destination)
     artifact_root = Path(artifact_root) if artifact_root is not None else destination / "artifacts" / "train"
     suffix = artifact_suffix(update, steps)
     results = []
+    sampling_kwargs = {} if sampling_kwargs is None else dict(sampling_kwargs)
+    if replay_by_required_agents and not eval_due:
+        raise ValueError("Required-agent replays need a fresh evaluation batch.")
+    score_spawn = getattr(spawn_sampler, "curriculum_source", None) == "evaluation"
+    curriculum_outcomes = []
     static = levels[0].building_name.startswith("static_eval_")
     replay_indices = set(representative_map_indices(len(levels), levels[0].evaluation.map_suite_replay_limit))
     for index, level in enumerate(levels):
@@ -130,6 +142,9 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                           {"random_eval_map_id": name, "random_eval_group": f"{artifact_root}:{suffix}",
                            "random_eval_maps": len(levels)})
         common = {"map_name": name, "num_agents": cfg.num_agents, **suite_metadata,
+                  "target_sampling": evaluation.target_sampling,
+                  **({"target_budget": int(sampling_kwargs["target_agent_budget"])}
+                     if "target_agent_budget" in sampling_kwargs else {}),
                   **({"source_map_name": level.map_source_name} if level.map_source_name else {}),
                   "world_size_m": level.building.world_size_m.tolist(),
                   "training_update": update, "environment_steps": steps, "artifact_scope": scope,
@@ -138,13 +153,17 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                   **({"eval_name": eval_name} if eval_name else {})}
         if eval_due:
             metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
-                                          return_episode_info=True, action_noise_max=0.)
+                                          return_episode_info=True,
+                                          return_required_agents=score_spawn or replay_by_required_agents,
+                                          action_noise_max=0., **sampling_kwargs)
             results.append(metrics)
+            if score_spawn:
+                curriculum_outcomes.append(info)
             if on_run:
                 on_run(metrics, index + 1, len(levels))
             if evaluation.training_heatmap_creation:
                 success = np.asarray(info["successes"], dtype=bool)
-                chain_success = success & (resolve_evaluation_level(level).env.success_condition == "chain_held")
+                chain_success = success & (resolve_evaluation_level(level).env.success_condition in CHAIN_SUCCESS_CONDITIONS)
                 delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
                 visual = np.asarray(info["visually_found"], dtype=bool) | delivered
                 path = save_eval_info_csv(artifact_root / "data" / f"eval_info_{suffix}_{name}.csv",
@@ -156,8 +175,11 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                     "format": "swarmecho-eval-heatmap/v1", "data_file": path.name, "robustness_runs": 1,
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
         if replay_due and index in replay_indices:
+            if replay_by_required_agents:
+                _write_required_agent_replays(model, level, info, artifact_root, suffix, common)
+                continue
             replay_level = _replay_level_for_storey(level)
-            states, rewards = evaluate_model(model, replay_level, max_steps=cfg.max_steps)
+            states, rewards = evaluate_model(model, replay_level, max_steps=cfg.max_steps, **sampling_kwargs)
             write_replay(artifact_root / "replays" / f"eval_{suffix}_{name}",
                 states, map_name=name, building=level.building, dt=cfg.dt, reward_terms=rewards, progress=False,
                 metadata={**common, **planner_metadata(level.env), "cell_size_m": level.building.cell_size_m,
@@ -168,7 +190,9 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
     if not results:
         return None
-    aggregate = {key: float(np.mean([m[key] for m in results])) for key in results[0]}
+    aggregate = {key: float(np.mean([m[key] for m in results])) for key in results[0]
+                 if key != "eval_useless_agents_at_success" and key not in EVALUATION_INFORMATION_KEYS}
+    aggregate.update(pool_evaluation_information(results))
     successful_count = sum(m["eval_success_episode_count"] for m in results)
     successful_length = (sum(m["eval_success_episode_length"] * m["eval_success_episode_count"]
                              for m in results) / successful_count if successful_count
@@ -176,8 +200,18 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
     aggregate.update(eval_success_episode_count=successful_count,
                      eval_success_episode_length=successful_length,
                      eval_success_length_reduction=1.0 - successful_length / levels[0].env.max_steps)
+    if successful_count and any("eval_useless_agents_at_success" in m for m in results):
+        aggregate["eval_useless_agents_at_success"] = sum(
+            m.get("eval_useless_agents_at_success", 0.0) * m["eval_success_episode_count"]
+            for m in results) / successful_count
     aggregate.update({"eval_static_maps" if static else "eval_random_maps": len(levels),
                       "eval_robustness_runs": 1})
+    if curriculum_outcomes:
+        scores = spawn_sampler.observe_curriculum("evaluation",
+            np.concatenate([info["required_agents"] for info in curriculum_outcomes]),
+            np.concatenate([info["successes"] for info in curriculum_outcomes]),
+            np.concatenate([info["lengths"] for info in curriculum_outcomes]), levels[0].env.max_steps)
+        aggregate.update({"eval_spawn_curriculum_" + key: value for key, value in scores.items()})
     rates = np.asarray([metrics["eval_success"] for metrics in results])
     aggregate["eval_worst_map_success"] = float(rates.min())
     individual_diagnostics = levels[0].logging.individual_map_diagnostics
@@ -194,6 +228,40 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                     "maps": [{"id": level.building_name, **(metrics if individual_diagnostics else {})}
                              for level, metrics in zip(levels, results)], **aggregate})
     return aggregate
+
+
+def _write_required_agent_replays(model, level, info, artifact_root, suffix, common):
+    """Replay one evaluated target per observed estimator class on this map."""
+    from swarmecho.training.train import evaluate_model
+
+    required = np.asarray(info["required_agents"])
+    cfg = level.env
+    expected = int(common.get("target_budget", cfg.geometric_agent_budget))
+    if np.any((required < 1) | (required > expected)):
+        raise ValueError("Required-agent replays need classified targets; enable inspection_evaluation.dynamic_max_geo_distance.")
+    for count in range(1, expected + 1):
+        lanes = np.flatnonzero(required == count)
+        if not len(lanes):
+            terminal_print(f"[REPLAY] {level.building_name}: no sampled target requiring {count} agent(s).", flush=True)
+            continue
+        lane = int(lanes[0])
+        target = np.asarray(info["target_positions"][lane])
+        states, rewards = evaluate_model(model, level, max_steps=cfg.max_steps, target_position=target)
+        actual = int(np.asarray(states[0].target_required_agents))
+        if actual != count:
+            raise ValueError(f"Replay target required-agent class changed from {count} to {actual}.")
+        terminal_print(f"[REPLAY] {level.building_name}: target requiring {count} agent(s).", flush=True)
+        write_replay(artifact_root / "replays" / f"eval_{suffix}_{level.building_name}_required_agents_{count}",
+            states, map_name=level.building_name, building=level.building, dt=cfg.dt,
+            reward_terms=rewards, progress=False,
+            metadata={**common, **planner_metadata(cfg), "cell_size_m": level.building.cell_size_m,
+                "coverage_voxel_size_m": cfg.coverage_voxel_size or level.building.cell_size_m,
+                "comm_radius_m": cfg.comm_radius, "comm_radius_base_m": cfg.comm_radius_base,
+                "visual_radius_m": cfg.visual_radius,
+                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                "success_condition": cfg.success_condition, "required_agents": count,
+                "replay_source_lane": lane, "selected_target_position": target.tolist(),
+                "target_selection": f"required_agents_{count}", "replay_execution": "single"})
 
 
 evaluate_random_maps = evaluate_map_suite

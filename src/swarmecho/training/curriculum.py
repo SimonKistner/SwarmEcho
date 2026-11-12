@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
+from swarmecho.core.paths import resolve_project_path
 import sys
 import time
 
@@ -37,7 +38,7 @@ def train_agent_counts(level, *, output_dir=None, checkpoint_path=None):
         checkpoint_dir = Path(str(checkpoint).replace("\\", "/"))
         marker = checkpoint_dir / "recovery_ready.json"
         metadata = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
-        source = (Path(metadata["run_dir"]) if metadata.get("run_dir") else checkpoint_dir.parents[1]) / "config.yaml"
+        source = (resolve_project_path(metadata["run_dir"]) if metadata.get("run_dir") else checkpoint_dir.parents[1]) / "config.yaml"
         if not source.is_file():
             raise ValueError("Resuming an agent stage requires its saved config.yaml.")
         saved = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -119,7 +120,6 @@ def train_agent_counts(level, *, output_dir=None, checkpoint_path=None):
             raise RuntimeError("Mastered agent stage produced no checkpoint.")
     return checkpoint, final_metrics
 
-
 def main() -> None:
     """Train the requested levels in order, handing off final weights."""
     levels, shared_args = split_levels(
@@ -173,7 +173,8 @@ def main() -> None:
     for index, level_name in enumerate(levels, start=1):
         level = load_level_cli([f"level={level_name}", *shared_args])
         level_short = level.name.split("_", 1)[0]
-        stage_name = f"curr_{curriculum_id}_{level_short}"
+        stage_name = (f"{curriculum_id}_{level_short}" if curriculum_id.startswith("CLU_")
+                      else f"curr_{curriculum_id}_{level_short}")
         training = level.training
         if training.oom_recovery.enabled and effective_num_envs is not None:
             training = replace(training, num_envs=min(training.num_envs, effective_num_envs))

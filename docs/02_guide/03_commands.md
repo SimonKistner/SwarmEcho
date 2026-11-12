@@ -34,6 +34,24 @@ Parallel evaluation followed by selected successful replays:
 uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel replay_after=true result=success replays=3 offset=0 eval_name=review
 ```
 
+For a frozen map suite, create heatmaps and one replay per observed required-agent
+count on each map:
+
+```bash
+uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel replay_after=true replay_by_required_agents=true inspection_evaluation.training_heatmap_creation=true inspection_evaluation.dynamic_max_geo_distance=true inspection_evaluation.target_sampling=independent inspection_evaluation.eval_video=true inspection_evaluation.map_suite_replay_limit=null eval_name=required_agents
+```
+
+This selects the first evaluated target in each estimator class, regardless of
+success. Missing classes are reported; `replays` and `result` do not control this
+selection. Independent sampling covers the full deployed agent budget rather than
+the checkpoint's virtual curriculum budget. These are single-environment policy
+replays of selected targets, so their outcomes can differ from the parallel pass.
+The inspector labels these replays by required-agent class and map ID, such as
+`required_agents_3_random_eval_0000`. Set
+`inspection_evaluation.map_suite_replay_limit=1` to replay only one map while
+retaining metrics for the full suite. The current cluster checkpoint command is
+registered in [Cluster commands](../../cluster/docs/COMMANDS.md#12-evaluate-a-fetched-checkpoint-in-wsl).
+
 Select from an existing evaluation, or request an XYZ position:
 
 ```bash
@@ -56,6 +74,19 @@ uv run swarmecho-dashboard
 
 `swarmecho-eval-dashboard` and `swarmecho-artefacts` are aliases for
 `swarmecho-inspect` with identical options.
+
+The inspector initially lists the three newest runs. **Load 10 more runs and
+tests** reuses an in-memory snapshot of the run ordering instead of rescanning
+all outputs on every page. **Refresh all** rebuilds that ordering to pick up new
+runs and updated artifact timestamps; **Refresh run** checks only the selected
+run for new entries. Roadmap test groups are indexed when first requested and
+reused on subsequent pages until **Refresh all**.
+
+Discovery reads replay/heatmap metadata and heatmap CSV headers, without parsing
+evaluation rows or loading replay arrays. Full data loading and row validation
+happen when an artifact is opened. Metadata is cached in memory and reread when
+its file timestamp or size changes. These optimizations require no changes to
+existing run folders and create no discovery index files.
 
 Export a selected replay or evaluation heatmap as a static public page:
 

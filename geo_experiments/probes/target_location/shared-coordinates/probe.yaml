@@ -1,0 +1,44 @@
+schema: 1
+id: target-location/shared-coordinates
+status: active
+target: {kind: target_position, field: target_position, task: target_cell}
+inputs:
+  finder_gru: {kind: gru, agents: finder, event: first_communication_after_discovery}
+  finder_message: {kind: message, agents: finder, event: first_communication_after_discovery}
+  base_message: {kind: stored_message, agents: base, event: first_receipt}
+model: {kind: mlp, hidden_sizes: [256, 128], normalization: train_standardize}
+output:
+  encoding: categorical_coordinates
+  vocabulary: pooled_absolute_xyz_cells
+  loss: softmax_cross_entropy
+  readout: separate_per_input
+sampling: {unit: episode, split_unit: episode, backend: episode_events}
+settings:
+  policy: {level: null, from_run_config: true, map_source: compatible_pool}
+  protocol: {eligibility: delivered}
+  dataset:
+    train_samples: 10000
+    validation_samples: 1000
+    test_samples: 5000
+    eval_batch_size: 256
+    max_episodes: 100000
+    seed: 467789
+    split_seed: 20261013
+    path: null
+  probe:
+    seeds: [0, 1, 2] # Standalone defaults; suite repeats supplies scheduled seeds.
+    epochs: 150
+    batch_size: 256
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    patience: 15
+    min_delta: 0.00001
+  audit:
+    enabled: true
+    mode: conditional
+    samples: 5000
+    every: 1
+    batch_size: 16
+    duplicate_threshold: 0.01
+  distance: {clearance_m: null}
+  report: {dpi: 160, renderer: location}

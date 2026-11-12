@@ -1,0 +1,38 @@
+# Submit leader seed 456789 separately first; this script submits the other 31 runs.
+# Wait until the initial run has loaded its completed map pool before running this.
+$ErrorActionPreference = 'Stop'
+foreach ($runName in @(
+    'clu-g03-refine-wave1-leader-seed456790'
+    'clu-g03-refine-wave1-runner-up-seed456789'
+    'clu-g03-refine-wave1-runner-up-seed456790'
+    'clu-g03-refine-wave1-envs4k-seed456789'
+    'clu-g03-refine-wave1-envs4k-seed456790'
+    'clu-g03-refine-wave1-envs8k-seed456789'
+    'clu-g03-refine-wave1-envs8k-seed456790'
+    'clu-g03-refine-wave1-epochs2-seed456789'
+    'clu-g03-refine-wave1-epochs2-seed456790'
+    'clu-g03-refine-wave1-epochs4-seed456789'
+    'clu-g03-refine-wave1-epochs4-seed456790'
+    'clu-g03-refine-wave1-horizon25-seed456789'
+    'clu-g03-refine-wave1-horizon25-seed456790'
+    'clu-g03-refine-wave1-horizon100-seed456789'
+    'clu-g03-refine-wave1-horizon100-seed456790'
+    'clu-g03-refine-wave1-minibatches2-seed456789'
+    'clu-g03-refine-wave1-minibatches2-seed456790'
+    'clu-g03-refine-wave1-minibatches10-seed456789'
+    'clu-g03-refine-wave1-minibatches10-seed456790'
+    'clu-g03-refine-wave1-bridge4k100-seed456789'
+    'clu-g03-refine-wave1-bridge4k100-seed456790'
+    'clu-g03-refine-wave1-bridge6k100-seed456789'
+    'clu-g03-refine-wave1-bridge6k100-seed456790'
+    'clu-g03-refine-wave1-wide-low-reuse-seed456789'
+    'clu-g03-refine-wave1-wide-low-reuse-seed456790'
+    'clu-g03-refine-wave1-runner-minibatches2-seed456789'
+    'clu-g03-refine-wave1-runner-minibatches2-seed456790'
+    'clu-g03-refine-wave1-long-low-reuse-seed456789'
+    'clu-g03-refine-wave1-long-low-reuse-seed456790'
+    'clu-g03-refine-wave1-wide-long-low-reuse-seed456789'
+    'clu-g03-refine-wave1-wide-long-low-reuse-seed456790'
+)) {
+    & (Join-Path $PSScriptRoot '../submit.ps1') -Run $runName
+}

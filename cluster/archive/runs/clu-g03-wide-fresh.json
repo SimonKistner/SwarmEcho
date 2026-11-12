@@ -1,0 +1,12 @@
+{
+  "description": "G03 cluster 2B-step run: Wide recurrent minibatches and two passes favor fresh random-map experience; PPO 8000/50/2/5; shared task and cluster settings in G03_CLU_random_buildings",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=8000",
+    "training.num_steps=50",
+    "training.num_epochs=2",
+    "training.num_minibatches=5"
+  ]
+}

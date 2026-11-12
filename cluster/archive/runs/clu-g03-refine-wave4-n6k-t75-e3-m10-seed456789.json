@@ -1,0 +1,15 @@
+{
+  "description": "G03 Wave 4; PPO 6000/75/3/10; seed 456789; Minibatch probe; 4h learning budget from level YAML; OOM recovery off",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03-refine-wave4_{ppo}_seed456789",
+  "wandb_group": "G03_CLU_refinement_wave4_N6000_T75_E3_M10",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=6000",
+    "training.num_steps=75",
+    "training.num_epochs=3",
+    "training.num_minibatches=10",
+    "training.seed=456789",
+    "training.oom_recovery.enabled=false"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "name": "G03_auto7",
+  "run_postfix": "curriculum_v3",
+  "seeds": [
+    456789,
+    456790
+  ],
+  "wandb_mode": "online",
+  "description": "Reverse-only replacement of curriculum_v2 runs with cached cell eligibility and required-agent histograms",
+  "overrides": [],
+  "variations": {
+    "reverse_policy_only": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "reverse_aux_l0p03": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.03"
+    ],
+    "reverse_aux_l0p3": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "reverse_aux_l1": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=1.0"
+    ]
+  },
+  "exclude_trials": [
+    {
+      "variation": "reverse_policy_only",
+      "seed": 456790
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+schema: 1
+id: own-cell/cell-mask
+status: planned
+target: {kind: agent_position, field: sampled_agent_position}
+inputs:
+  agent_gru: {kind: gru, agents: all_active, event: null}
+model: {kind: mlp, hidden_sizes: [256, 128], normalization: train_standardize}
+output:
+  encoding: binary_cell_mask
+  size: map_cell_count
+  cardinality: exactly_one
+  cell_order: null
+  loss: sigmoid_binary_cross_entropy
+  readout: separate_per_input
+sampling: {unit: agent_event, split_unit: episode, backend: agent_events}
+settings: {} # Sampling cadence, balancing and optimizer settings remain to be chosen.

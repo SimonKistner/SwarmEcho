@@ -42,6 +42,8 @@ The actor receives local information, with width given by
   + observe_current_timestep
   + observe_seeing_target
   + 3 * observe_visually_gated_target_displacement
+  + adapt_size.enabled * (1 + observe_decommission_zone
+                         + observe_base_vote_ratio + observe_base_population)
 ```
 
 The six mandatory self values are normalized XYZ velocity, connection to the
@@ -243,6 +245,17 @@ remaining current credited progress.
 
 ### Success and time pressure
 
+`chain_held` succeeds after `env.hold_chain_for` consecutive connected steps.
+The optional `chain_held_and_cleand_up` condition additionally requires zero
+active non-contributors, using the same membership as chain-contributor
+observations and terminal surplus rewards. The hold counter and cleanup check
+are independent: the counter continues while surplus drones return, and a
+chain break always resets it to zero. Success is checked after movement,
+removal and recruitment, so a new surplus recruit prevents completion and a
+final surplus removal can complete it on that transition. Timeout, idle and
+all-decommissioned failures remain enabled. G03_CLU selects the cleanup mode;
+normal G03 retains `chain_held`.
+
 The legacy idle shortcut is separate from successful chain holding.
 `env.no_movement_termination_steps` must currently be a positive integer: zero
 does not disable it and is rejected. To prevent idle termination within an
@@ -256,11 +269,12 @@ Every active drone receives the full `success_reward` at first success. At
 terminal chain success, each active drone outside the selected success chain
 also receives `useless_agent_at_success_reward`. In addition, every active
 drone receives `useless_agent_at_success_all_agents_reward` per useless active
-drone, without a population divisor, capped in absolute amount per recipient by
+drone, without a population divisor, limited per recipient by the signed bound
 `useless_agent_at_success_all_agents_reward_cap`. Defaults are success +3000,
-the individual adjustment -3000, and the all-agents adjustment `-min(750 * U, 2000)`
-for `U` useless drones. Contributors receive `3000 - min(750 * U, 2000)` and
-useless drones receive `-min(750 * U, 2000)` from these terminal components.
+the individual adjustment -3000, and the all-agents adjustment `max(-750 * U, -2000)`
+for `U` useless drones with the default -2000 cap. Contributors receive
+`3000 + max(-750 * U, -2000)` and useless drones receive `max(-750 * U, -2000)`
+from these terminal components.
 The cap leaves useful drones at least +1000 from success and this adjustment,
 preserving an incentive to finish even with many unused drones. Inactive drones receive zero.
 Both adjustments trigger only once at terminal chain success; zero disables
@@ -269,7 +283,9 @@ either independently. There is no contributors-only success switch.
 `success_reward_as_hold_record` instead pays each qualifying holder
 `success_reward / hold_chain_for` on each new episode hold record. Repeated
 records do not pay, and no extra terminal success payout is added. Holders do
-not divide a shared budget. This requires `success_condition: chain_held`.
+not divide a shared budget. This requires either chain-hold success condition.
+In cleanup mode, hold-record payments can finish before episode success;
+cleanup still gates successful termination.
 
 Each acting drone receives `time_presure_reward` every transition, including
 its removal transition. The default is -0.75 regardless of population. The

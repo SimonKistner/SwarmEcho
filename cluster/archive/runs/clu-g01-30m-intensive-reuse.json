@@ -1,0 +1,12 @@
+{
+  "description": "G01 30-minute comparison 5/5: intensive small rollouts, PPO 2000/50/8/5, shared settings inherited from G01_CLU_static",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01-30m_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=2000",
+    "training.num_steps=50",
+    "training.num_epochs=8",
+    "training.num_minibatches=5"
+  ]
+}

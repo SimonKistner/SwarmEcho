@@ -1,0 +1,12 @@
+{
+  "description": "G01 30-minute comparison 2/5: more fresh experience, PPO 8000/100/2/10, shared settings inherited from G01_CLU_static",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01-30m_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=8000",
+    "training.num_steps=100",
+    "training.num_epochs=2",
+    "training.num_minibatches=10"
+  ]
+}

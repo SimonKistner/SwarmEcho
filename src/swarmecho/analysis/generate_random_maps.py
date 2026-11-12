@@ -34,7 +34,8 @@ def main():
     root = Path(args.output_dir) / f"random_buildings_{datetime.now():%Y%m%d_%H%M%S_%f}_seed{level.training.seed}"
     maps_dir = root / "maps"
     _, manifest = generate_maps(level.random_buildings, level.training.seed, args.count,
-        directory=maps_dir, log=print, drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m)
+        directory=maps_dir, log=print, drone_clearance=level.env.drone_radius + level.env.obstacle_planning_clearance_m,
+        env_cfg=level.env)
     write_manifest(root / "generation.json", manifest)
     # Persist effective level settings so scans use precisely the training cfg.
     from dataclasses import asdict

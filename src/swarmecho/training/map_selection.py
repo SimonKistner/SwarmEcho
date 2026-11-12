@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from swarmecho.training.adaptive_spawn import atomic_json
+from swarmecho.core.paths import resolve_project_path, resolve_saved_paths
 
 
 def load_selection(destination, checkpoint):
@@ -22,11 +23,11 @@ def load_selection(destination, checkpoint):
         if marker.is_file():
             source_run = json.loads(marker.read_text()).get('run_dir')
             if source_run:
-                candidates.append(Path(source_run) / 'adaptive_maps' / 'selection.json')
+                candidates.append(resolve_project_path(source_run) / 'adaptive_maps' / 'selection.json')
         candidates.append(Path(checkpoint).parents[1] / 'adaptive_maps' / 'selection.json')
     for path in candidates:
         if path.is_file():
-            return json.loads(path.read_text(encoding='utf-8'))
+            return resolve_saved_paths(json.loads(path.read_text(encoding='utf-8')))
     return None
 
 

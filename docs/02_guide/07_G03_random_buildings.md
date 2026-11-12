@@ -5,6 +5,14 @@ parallel training lanes over 3600 persistent training maps, reserving 400 maps
 for independent statistical validation. Three of those held-out maps also form
 the existing inspection suite. See the [validation reference](../01_reference/12_validation.md).
 
+The cluster variant `G03_CLU_random_buildings` selects
+`env.success_condition: chain_held_and_cleand_up`: its 100-step uninterrupted
+chain hold must be complete and every remaining active drone must contribute
+before successful termination. A chain break during cleanup resets the hold
+counter normally. It also uses an unnecessary-call penalty of -500 per
+responsible qualified caller, gated by the base already knowing the target.
+Normal G03 retains `chain_held` and its -200 unnecessary-call penalty.
+
 ## Counts, scheduling and diagnostics
 
 | Setting | G03 |
@@ -54,10 +62,48 @@ drone radius 0.25 m, planning clearance 0.1 m and target wall buffer 0.1.
 Layout matching does not bypass source fingerprints. The old 5000-map pool has
 an older compiler fingerprint; current startup will build a compatible pool of
 at least 4000 maps. Reusing the exact old pool requires a validated migration.
-Ordinary random maps exclude only the base cell from target spawning; they do
-not inherit G02's authored four-cell exclusions or sampled starter screening.
+The random-building feature defaults to base-cell-only target exclusions.
+Both `G03_random_buildings` and `G03_CLU_random_buildings` explicitly enable
+an expanded version of G02's exclusion heuristic:
+
+```yaml
+random_buildings:
+  advanced_exclustion_base_LOS: true # Enabled for local and cluster G03; global default false.
+```
+
+This excludes the base cell and every cell whose representative point is visible
+from the base within `env.comm_radius_base + env.visual_radius`. Each representative
+is the centre of that cell's largest legal target spawn box, using the configured
+target wall buffer. Segment tests against compiled solids handle diagonal walls,
+door/window openings and stairs. The nearest hidden cell sharing a face with,
+and visible from, one of those directly visible cells is also excluded if it lies
+within the same range. If no such corner exists, only the direct exclusions apply.
+The rule runs once per map generation, with no random position sampling or
+agent simulation. It may leave some single-agent-solvable targets; it does not
+inherit G02's sampled two-agent starter screening. A layout with no remaining
+legal target volume fails explicitly rather than falling back to base-only.
+
+The flag and its range/buffer settings participate in map-bank compatibility,
+so enabling it uses a compatible bank instead of old base-only spawn boxes.
+Local and cluster G03 use `training.map_pool_path: null`, allowing startup to
+reuse a sufficient compatible pool or create a new one when none matches. Cluster
+pools persist under the shared PFSS `map_pools` directory. An explicit pool path
+pins the dataset and fails on incompatibility instead of replacing it. Existing
+runs retain their frozen selections; changing these settings requires a fresh run.
+Training, generated validation and inspection share the same rule. Existing
+authored G02 maps are unchanged. A launch override is:
+
+```bash
+uv run swarmecho-train level=G03_random_buildings random_buildings.advanced_exclustion_base_LOS=true
+```
 
 ## Differences from current G02
+
+Both local `G03_random_buildings` and cluster `G03_CLU_random_buildings` require
+`adapt_size.quorum_hold: 3`: three consecutive environment steps of base quorum.
+Their `env.spawn_delay: 5` now gates every base deployment, as in all levels,
+including reinforcements. Every actual newborn is registered at the base as NO
+before its first GRU policy decision; the inspector displays these true records.
 
 G03 now follows current G02's latest-decision voting, vote holding 1 (inactive
 with this protocol), unanimity, base-vote/population observations and enabled
@@ -98,4 +144,26 @@ The intended full launch is:
 
 ```bash
 uv run swarmecho-train level=G03_random_buildings logging.run_name=G03_random_4k_v1
+```
+
+## G04 CLU 4×4×4 comparison
+
+`G04_CLU_random_buildings` uses 20 × 20 × 20 m buildings with 5 m cells,
+four floors, four to seven rooms per floor and one or two staircases per
+floor transition. Nine drones deploy automatically. The forward curriculum
+opens target difficulty groups from two through nine required agents.
+
+The three runs share a seed, the same map-bank selection and validation
+cases, efficiency reward 25, decommission reward 3000, the 24-hour training
+budget and OOM recovery. The two probe arms use auxiliary weight 0.3.
+G04 uses a base-relative `7 × 7 × 7` path grid to cover offsets −3 through
++3 along every axis. Probe feedback increases the actor input from 141 to
+484 values. The critic uses 141 in all three arms.
+
+The first run to acquire the shared pool lock builds a compatible G04 pool
+if needed. The other runs reuse it. Submit the three runs from the
+repository root in PowerShell.
+
+```powershell
+.\cluster\submit.ps1 -Config .\cluster\g04_path_probe_feedback.json
 ```

@@ -4,6 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from swarmecho.core.paths import resolve_project_path
+
+
+def inspector_run_name(directory: Path) -> str:
+    """Use an optional local display alias while keeping storage/run IDs intact."""
+    directory = Path(directory)
+    try:
+        metadata = json.loads((directory / ".cluster/inspector.json").read_text(encoding="utf-8"))
+        label = metadata.get("display_name")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    except (OSError, ValueError, AttributeError):
+        pass
+    return directory.name
 
 
 def artifact_configuration(source: Path, payload: dict) -> dict:
@@ -33,7 +47,7 @@ def artifact_configuration(source: Path, payload: dict) -> dict:
     candidates = []
     checkpoint = manifest.get("checkpoint")
     if isinstance(checkpoint, str):
-        checkpoint_path = Path(checkpoint)
+        checkpoint_path = resolve_project_path(checkpoint)
         for path in (checkpoint_path, source.parent / checkpoint_path):
             if path.parent.name == "checkpoints" and path.is_dir():
                 candidates.append(path.parent.parent)

@@ -1,5 +1,28 @@
 # Adaptive swarm diagnostics
 
+Target-information sources are also reported, independently of adaptive size:
+`train/peer-informed-pct` and `train/base-informed-pct` are percentages (0–100) of
+all agent lives that learned the target, pooled across the same last
+`training.num_envs` completed episodes as the main training statistics. This is
+4,000 episodes with the default configuration and 6,000 in G03's current config;
+there is no separate window or logging cadence. Both series wait for a full
+window, and are omitted if nobody in that window learned the target.
+
+Count each drone once on first acquisition; a reused deployment slot is a new
+life. Direct sightings (including at reset) belong in the denominator but neither
+numerator. Consequently the two percentages need not sum to 100; the remainder
+is direct discovery. For simultaneous sources, direct sight takes precedence,
+then base, then peer. Multiple informing peers count as one recipient. Attribution
+uses the environment's actual information event, including communication cadence
+and line of sight, even if the sender decommissions during the same step. It
+measures who informed the agent, not whether its neural message encoded a useful
+path or which messages it subsequently attended to.
+
+Inspection evaluation and validation emit the same suffixes under `eval/` and
+`validation/`, using only their own evaluated episodes. Map suites and robustness
+passes sum recipient counts before computing percentages. These two series are
+automatic for future runs; no diagnostic setting is needed.
+
 Reward components use the signed individual system described in [signed individual rewards](11_individual_rewards.md). Historical run series retain their original names and values.
 
 These metrics are emitted to **Weights & Biases only** when adaptive size is enabled. `adapt_size/` metrics use the last `training.num_envs` **completed episodes** and first appear once that window is full. Ratios and success/failure subgroup means are omitted when their denominator or subgroup is absent; an absent series is not zero. `total_` values sum this sliding window, not the entire run. Compare them with `train/success_rate` and `train/ep_length`, which use the same completed-episode window.
@@ -120,7 +143,7 @@ per-caller payments or policy-gradient importance. In G02, gross terminal succes
 | `rewards/rejected_call_reward` | Penalties paid by qualified YES voters on rejected majority batches. A more negative value with higher `rejected_calls_mean` diagnoses overcalling at capacity. |
 | `rewards/all_decommissioned_penalty` | Full signed amount to every last acting drone when all are removed. Should tend to zero alongside `decommission_termination_rate`. |
 | `rewards/useless_agent_at_success_reward` | Individual terminal chain-success adjustment, summed across recipients. G02 pays -3000 to each useless active drone; contributors and inactive drones receive zero from this term. |
-| `rewards/useless_agent_at_success_all_agents_reward` | All-agents terminal chain-success adjustment, summed across recipients. Each active drone gets `-min(750 * useless_count, 2000)` in G02, so the episode total is active count times that capped individual amount. Inactive drones receive zero. Included in normal reward and recorded replay components; the cap is not a separate reward component. |
+| `rewards/useless_agent_at_success_all_agents_reward` | All-agents terminal chain-success adjustment, summed across recipients. Each active drone gets `max(-750 * useless_count, -2000)` in G02, so the episode total is active count times that bounded individual amount. Inactive drones receive zero. Included in normal reward and recorded replay components; the signed cap is not a separate reward component. |
 | `rewards/reward_by_reference` | Sum of the signed, linearly decaying reference shares paid independently to qualified callers. Includes the recruits' normal signed rewards, including terminal adjustments, but excludes their reference bonuses. Zero when disabled; negative values mean recruited drones accumulated net penalties while their references were active. |
 | `rewards/reward_by_reference_positive` | Mean episode total of positive caller-recruit payments only. Negative payments contribute zero. Same units and completed-episode window as other reward charts; a diagnostic breakdown of the net reference reward. |
 | `rewards/reward_by_reference_negative` | Mean episode total of negative caller-recruit payments only. Positive payments contribute zero; the value stays negative. Same units and window as the positive chart; a diagnostic breakdown, not another penalty. |

@@ -104,7 +104,11 @@ surfaces as ordinary walls. Spawn boxes are split around buffered treads and
 sampled by their remaining volume, shared by training and evaluation. Generated
 cuboid obstacles still use `env.obstacle_target_buffer_m`.
 
-Generator version `partition_connect_v6` saves only the base-cell exclusion.
+Generator version `partition_connect_v6` saves only the base-cell exclusion by
+default. Optional `random_buildings.advanced_exclustion_base_LOS` excludes all
+in-range base-visible cell representatives plus one qualifying around-corner
+cell; see the [G03 guide](../02_guide/07_G03_random_buildings.md). The flag defaults
+to false and does not use random position sampling or starter-agent simulation.
 When compiling older generated maps (including B02c static maps and saved
 evaluation suites), an exclusion list matching the old base-plus-stairs default
 is upgraded in memory to the base cell alone. Custom exclusion lists are

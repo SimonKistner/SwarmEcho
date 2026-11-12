@@ -70,15 +70,16 @@ class AdaptiveState(NamedTuple):
     vote_step: jax.Array  # Episode transition clock; independent of call rounds.
     decision_step: jax.Array  # [receiver (agents + base), source]; -1 means unknown.
     decision_yes: jax.Array  # Latest source decision, meaningful only with a timestamp.
+    last_spawn_step: jax.Array  # Shared base cooldown, including the reset deployment.
     vote_shaping: VoteShapingState | None = None  # No extra array leaves when disabled.
 
 
 def initial_state(n, initial_agents, zone_center, zone_valid=True, max_steps=1024,
-                  vote_protocol="credits", vote_shaping_enabled=False):
+                  vote_protocol="credits", vote_shaping_enabled=False, spawn_delay=0):
     z = jnp.zeros(n, dtype=jnp.int32)
     b = jnp.zeros(n, dtype=jnp.bool_)
     packet_words = max(1, (max_steps + 31) // 32) if vote_protocol == "credits" else 1
-    return AdaptiveState(
+    state = AdaptiveState(
         b, jnp.where(jnp.arange(n) < initial_agents, jnp.arange(n), -1),
         jnp.int32(initial_agents), jnp.int32(0), z, z,
         jnp.full((n + 1, n), -1, dtype=jnp.int32),
@@ -90,10 +91,53 @@ def initial_state(n, initial_agents, zone_center, zone_valid=True, max_steps=102
         jnp.zeros((n, n), dtype=jnp.bool_), z,
         jnp.int32(0), jnp.full((n + 1, n), -1, dtype=jnp.int32),
         jnp.zeros((n + 1, n), dtype=jnp.bool_),
+        jnp.int32(0),
         (VoteShapingState(
             jnp.int32(n + 1), jnp.zeros((n + 1, n), dtype=jnp.bool_),
             b, b, jnp.bool_(False),
         ) if vote_shaping_enabled else None),
+    )
+    deployed = (jnp.arange(n) < initial_agents) & (jnp.arange(n) * spawn_delay <= 0)
+    return _record_spawn_no(state, deployed)
+
+
+def _record_spawn_no(a, spawned):
+    """The station knows a newborn's NO before its first policy decision.
+
+    Stamp only actual births, never a round announcement. Subsequent source
+    decisions have newer timestamps and replace this record through normal radio
+    transport. Credit mode records NO too, without creating any YES credit.
+    """
+    return a._replace(
+        vote=a.vote & ~spawned,
+        known_round=jnp.where(spawned, a.round, a.known_round),
+        packet_round=a.packet_round.at[-1].set(jnp.where(spawned, a.round, a.packet_round[-1])),
+        decision_step=a.decision_step.at[-1].set(jnp.where(spawned, a.vote_step, a.decision_step[-1])),
+        decision_yes=a.decision_yes.at[-1].set(a.decision_yes[-1] & ~spawned),
+        last_spawn_step=jnp.where(jnp.any(spawned), a.vote_step, a.last_spawn_step),
+    )
+
+
+def _freeze_base_no(a, active):
+    """Discard cooldown receipts and pin every active source to NO at the base.
+
+    Refresh timestamps even between radio ticks, so a delayed latest decision
+    from the offline interval cannot replace the station's NO after reopening.
+    Peer transport and the drones' own choices continue normally.
+    """
+    shaping = a.vote_shaping
+    if shaping is not None:
+        shaping = shaping._replace(
+            decision_unnecessary=shaping.decision_unnecessary.at[-1].set(False),
+        )
+    return a._replace(
+        packet_round=a.packet_round.at[-1].set(jnp.where(active, a.round, -1)),
+        packet_count=a.packet_count.at[-1].set(0),
+        packet_bits=a.packet_bits.at[-1].set(jnp.uint32(0)),
+        spent=jnp.zeros_like(a.spent), quorum_steps=jnp.int32(0),
+        decision_step=a.decision_step.at[-1].set(jnp.where(active, a.vote_step, -1)),
+        decision_yes=a.decision_yes.at[-1].set(False),
+        vote_shaping=shaping,
     )
 
 
@@ -206,7 +250,7 @@ def _communicate_latest(values, alive, peer_links, base_links, current_round, st
 
 
 def transition(a, active, pos, commands, peer_links, base_links, share_now,
-               cfg: AdaptSizeConfig, *, shaping_context=None):
+               cfg: AdaptSizeConfig, *, shaping_context=None, spawn_delay=0):
     """Return next protocol state and active mask; every array retains its shape."""
     n = active.shape[0]
     inside = (jnp.linalg.norm(pos - a.zone_center, axis=-1)
@@ -214,6 +258,27 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
     dwell = jnp.where(inside, a.dwell + 1, 0)
     removed = active & (dwell >= cfg.decommission_hold_steps)
     alive = active & ~removed
+    if not cfg.recruitment_enabled:
+        # Initial lifetime IDs are reserved until launch. Removed lifetimes
+        # lose their IDs permanently and can never re-enter the launch queue.
+        tick = a.vote_step + 1
+        reserved = ~active & (a.ids >= 0)
+        due = reserved & (tick >= jnp.arange(n) * spawn_delay)
+        spawned = due & ((tick - a.last_spawn_step) >= spawn_delay)
+        if spawn_delay > 0:
+            spawned &= jnp.arange(n) == jnp.argmax(due)
+        live = alive | spawned
+        pending = reserved & ~spawned
+        return a._replace(
+            ids=jnp.where(removed, -1, a.ids), vote=jnp.zeros_like(a.vote),
+            vote_step=tick, spawned=spawned, decommissioned=removed,
+            dwell=jnp.where(live & ~spawned, dwell, 0),
+            last_spawn_step=jnp.where(jnp.any(spawned), tick, a.last_spawn_step),
+            decommissions=a.decommissions + jnp.sum(removed, dtype=jnp.int32),
+            all_decommissioned=~jnp.any(live | pending),
+            rejected_voters=jnp.zeros_like(a.rejected_voters),
+            reference_callers=jnp.zeros_like(a.reference_callers),
+        ), live
     vote = apply_vote(a.vote, commands, cfg.vote_mode) & alive
     # Physical removal invalidates that lifetime's queued traffic everywhere.
     # Slot reuse therefore cannot make an old identity's receipts count again.
@@ -230,6 +295,7 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
     decision_step = decision_step.at[:n].set(jnp.where(alive[:, None], decision_step[:n], -1))
     decision_yes = decision_yes.at[:n].set(decision_yes[:n] & alive[:, None])
     vote_step = a.vote_step + 1
+    deployment_ready = (vote_step - a.last_spawn_step) >= spawn_delay
     shaping = a.vote_shaping
     vote_shaping_enabled = shaping_context is not None
     if vote_shaping_enabled:
@@ -354,13 +420,23 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
     # spawn-delay tick. A reinforcement cannot overwrite those reserved slots.
     reserved = (~active) & (a.ids >= 0)
     occupied = count + jnp.sum(reserved)
+    initial_due = reserved & (vote_step >= jnp.arange(n) * spawn_delay)
+    # Initial arrivals share the base gate and take priority over voted calls.
+    # With a positive delay, at most one drone can leave on this transition.
+    initial_spawned = initial_due & deployment_ready
+    if spawn_delay > 0:
+        initial_spawned &= jnp.arange(n) == jnp.argmax(initial_due)
+    # Offline base receipts cannot qualify or advance the hold. They are
+    # discarded below, while peers can still exchange decisions and rounds.
+    ready &= deployment_ready
     approvals = jnp.sum(ready)
     # Full approval is attainable at 100%; lower fractions retain strict >.
     enough_votes = (approvals == count if cfg.quorum_fraction == 1.0
                     else approvals > cfg.quorum_fraction * count)
-    quorum = (count > 0) & enough_votes
+    quorum = deployment_ready & (count > 0) & enough_votes
     held = jnp.where(quorum, a.quorum_steps + 1, 0)
-    attempt = share_now & quorum & (held >= cfg.quorum_hold)
+    attempt = (share_now & quorum & (held >= cfg.quorum_hold)
+               & deployment_ready & ~jnp.any(initial_spawned))
     grant = attempt & (occupied < n)
     reject = attempt & (occupied == n)
     rejected_voters = ready & reject
@@ -375,7 +451,7 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
             reachable,
         )
         current_round = (a.known_round == a.round) & (known == a.known_round)
-        withheld = (share_now & alive & informed & reachable & current_round
+        withheld = (deployment_ready & share_now & alive & informed & reachable & current_round
                     & needs_recruit & ~vote & ~attempt)
         shaping = shaping._replace(
             withheld_voters=withheld,
@@ -389,21 +465,22 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
     if cfg.vote_protocol == "credits":
         spent = jnp.where(rejected_voters, received, spent)
     slot = jnp.argmax((~alive) & ~reserved)
-    spawned = (jnp.arange(n) == slot) & grant
+    recruit_spawned = (jnp.arange(n) == slot) & grant
+    spawned = recruit_spawned | initial_spawned
     result_active = alive | spawned
     # Capture the qualified sources before the grant clears base receipts.
     # Remove both incoming and outgoing references on any lifetime boundary,
     # including decommission and replacement of the same slot on this step.
     continuing = alive & ~spawned
     reference_callers = a.reference_callers & continuing[:, None] & continuing[None, :]
-    reference_callers |= ready[:, None] & spawned[None, :]
+    reference_callers |= ready[:, None] & recruit_spawned[None, :]
     reference_age = jnp.where(spawned, 0, a.reference_age + 1)
     # Latest decisions authorize one attempt. Rejecting also closes that round,
     # preventing repeated penalties from the same cached agreement.
     completed = grant | (reject & (cfg.vote_protocol == "latest_decision"))
     new_round = a.round + completed.astype(jnp.int32)
     ids = jnp.where(removed, -1, a.ids)
-    ids = jnp.where(spawned, a.next_id, ids)
+    ids = jnp.where(recruit_spawned, a.next_id, ids)
     # Newborn learns protocol round at the station, but no task knowledge/memory.
     known = jnp.where(spawned, new_round, known)
     vote &= ~spawned
@@ -429,11 +506,11 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
         context_records = context_records.at[n].set(context_records[n] & ~completed)
         shaping = shaping._replace(decision_unnecessary=context_records)
     spent = jnp.where(completed, 0, spent)
-    return a._replace(
+    result = a._replace(
         vote=vote, ids=ids, next_id=a.next_id + grant.astype(jnp.int32),
         round=new_round, known_round=known, source_yes=source,
         packet_round=pr, packet_count=pc, packet_bits=bits, spent=spent,
-        quorum_steps=jnp.where(attempt, 0, held),
+        quorum_steps=jnp.where(attempt | jnp.any(spawned), 0, held),
         dwell=jnp.where(result_active & ~spawned, dwell, 0),
         calls=a.calls + grant.astype(jnp.int32),
         decommissions=a.decommissions + jnp.sum(removed, dtype=jnp.int32),
@@ -443,7 +520,14 @@ def transition(a, active, pos, commands, peer_links, base_links, share_now,
         reference_callers=reference_callers, reference_age=reference_age,
         vote_step=vote_step, decision_step=decision_step, decision_yes=decision_yes,
         vote_shaping=shaping,
-    ), result_active
+    )
+    result = _record_spawn_no(result, spawned)
+    if spawn_delay > 0:
+        result = jax.lax.cond(
+            (vote_step - result.last_spawn_step) < spawn_delay,
+            lambda state: _freeze_base_no(state, result_active), lambda state: state, result,
+        )
+    return result, result_active
 
 
 def lifetime_ended(previous, current):

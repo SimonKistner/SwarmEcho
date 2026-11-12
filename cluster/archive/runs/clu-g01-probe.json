@@ -1,0 +1,12 @@
+{
+  "description": "G01 capacity probe: one GPU, all seven drones active, at most 15 controller minutes, no W&B",
+  "level": "G01_CLU_static",
+  "wandb_mode": "disabled",
+  "overrides": [],
+  "tuning": {
+    "phase": "probe",
+    "probe_seconds": 900,
+    "candidate_seconds": 180,
+    "probe_updates": 3
+  }
+}

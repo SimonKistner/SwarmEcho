@@ -19,7 +19,7 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 import numpy as np
 import yaml
 
-from swarmecho.core.config import load_level_cli, resolve_evaluation_level
+from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS, load_level_cli, resolve_evaluation_level
 from swarmecho.core.paths import normalize_wsl_path
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
@@ -41,6 +41,10 @@ from swarmecho.training.train import (
     evaluate_suite,
     replay_recorded_actions,
 )
+from swarmecho.training.inspection_sampling import inspection_sampling_kwargs
+from swarmecho.training.information_metrics import (
+    EVALUATION_INFORMATION_KEYS, pool_evaluation_information,
+)
 from swarmecho.visualize.replay import ReplayRewards, building_snapshot, planner_metadata, write_replay
 
 
@@ -60,12 +64,15 @@ def _as_bool(value: str) -> bool:
 def _replay_stage_label(stage: str, success_condition: str) -> str:
     """Render the achieved stage and whether it meets this evaluation goal."""
     goal_stage = {"discovery": "visually_found", "delivery": "found_and_delivered",
-                  "chain_held": "chain_success", "coverage": "coverage"}[success_condition]
+                  "chain_held": "chain_success", "chain_held_and_cleand_up": "chain_success",
+                  "coverage": "coverage"}[success_condition]
     rank = {"not_found": 0, "visually_found": 1, "found_and_delivered": 2,
             "chain_success": 3, "coverage": 1}
     if rank[stage] >= rank[goal_stage]:
         return {"discovery": "SUCCESS: VISUALLY FOUND", "delivery": "SUCCESS: DELIVERED",
-                "chain_held": "SUCCESS: CHAIN HELD", "coverage": "SUCCESS: COVERAGE"}[success_condition]
+                "chain_held": "SUCCESS: CHAIN HELD",
+                "chain_held_and_cleand_up": "SUCCESS: CHAIN HELD AND CLEANED UP",
+                "coverage": "SUCCESS: COVERAGE"}[success_condition]
     return {"chain_success": "CHAIN HELD", "found_and_delivered": "DELIVERED",
             "visually_found": "VISUALLY FOUND", "not_found": "NOT FOUND"}[stage]
 
@@ -103,6 +110,7 @@ def _heatmap_manifest(
     obstacle_min: np.ndarray | None = None,
     obstacle_max: np.ndarray | None = None,
     eval_name: str | None = None,
+    target_budget: int | None = None,
 ) -> None:
     """Write the small inspector metadata sidecar for one eval CSV."""
     manifest = {
@@ -114,9 +122,12 @@ def _heatmap_manifest(
         "artifact_scope": "eval",
         "success_condition": resolve_evaluation_level(level).env.success_condition,
         "num_agents": getattr(resolve_evaluation_level(level).env, "num_agents", None),
+        "target_sampling": getattr(level.evaluation, "target_sampling", "independent"),
     }
     if robustness_runs is not None:
         manifest["robustness_runs"] = int(robustness_runs)
+    if target_budget is not None:
+        manifest["target_budget"] = int(target_budget)
     if action_noise_max is not None:
         manifest["action_noise_max"] = float(action_noise_max)
     if eval_name is not None:
@@ -135,6 +146,8 @@ def collect_robust_evaluation(
     level,
     *,
     on_run=None,
+    target_spawn_weights=None,
+    target_agent_budget=None,
 ) -> tuple[dict[str, float], dict]:
     """Collect unanimous outcomes and ensemble means without writing artifacts."""
     level = resolve_evaluation_level(level)
@@ -155,6 +168,9 @@ def collect_robust_evaluation(
     reference_chain_lengths: np.ndarray | None = None
     reference_obstacle_min: np.ndarray | None = None
     reference_obstacle_max: np.ndarray | None = None
+    sampling_kwargs = {name: value for name, value in (
+        ("target_spawn_weights", target_spawn_weights), ("target_agent_budget", target_agent_budget),
+    ) if value is not None}
     for run_index in range(robustness_runs):
         metrics, episode_info = evaluate_suite(
             model,
@@ -164,6 +180,7 @@ def collect_robust_evaluation(
             action_noise_max=action_noise_max,
             action_noise_seed=level.training.seed + 20_000 + run_index,
             layout_mode=layout_mode,
+            **sampling_kwargs,
         )
         if on_run is not None:
             on_run(metrics, run_index + 1, robustness_runs)
@@ -195,7 +212,7 @@ def collect_robust_evaluation(
             )
 
         successes = np.asarray(episode_info["successes"], dtype=bool)
-        chain_successes = successes & (level.env.success_condition == "chain_held")
+        chain_successes = successes & (level.env.success_condition in CHAIN_SUCCESS_CONDITIONS)
         delivered = np.asarray(episode_info["delivered"], dtype=bool) | chain_successes
         visually_found = (
             np.asarray(episode_info["visually_found"], dtype=bool) | delivered
@@ -216,7 +233,14 @@ def collect_robust_evaluation(
     metrics = {
         key: float(np.mean([run[key] for run in metric_runs]))
         for key in metric_runs[0]
+        if key != "eval_useless_agents_at_success" and key not in EVALUATION_INFORMATION_KEYS
     }
+    metrics.update(pool_evaluation_information(metric_runs))
+    successful_count = sum(run.get("eval_success_episode_count", 0) for run in metric_runs)
+    if successful_count and any("eval_useless_agents_at_success" in run for run in metric_runs):
+        metrics["eval_useless_agents_at_success"] = sum(
+            run.get("eval_useless_agents_at_success", 0.0) * run.get("eval_success_episode_count", 0)
+            for run in metric_runs) / successful_count
     all_successes = np.stack(success_runs)
     all_lengths = np.stack(length_runs)
     successful_length = (float(np.mean(all_lengths[all_successes])) if np.any(all_successes)
@@ -259,13 +283,16 @@ def run_parallel_evaluation(
     level = resolve_evaluation_level(level)
     if result is not None:
         metrics, info = result
-    elif level.evaluation.final_robustness:
-        metrics, info = collect_robust_evaluation(model, level)
     else:
-        metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
-                                       return_episode_info=True, action_noise_max=0.)
+        sampling_kwargs = inspection_sampling_kwargs(level, checkpoint=checkpoint)
+        if level.evaluation.final_robustness:
+            metrics, info = collect_robust_evaluation(model, level, **sampling_kwargs)
+        else:
+            metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
+                                           return_episode_info=True, action_noise_max=0., **sampling_kwargs)
+    if result is None and not level.evaluation.final_robustness:
         successes = np.asarray(info["successes"], dtype=bool)
-        chain_success = successes & (level.env.success_condition == "chain_held")
+        chain_success = successes & (level.env.success_condition in CHAIN_SUCCESS_CONDITIONS)
         delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
         visually_found = np.asarray(info["visually_found"], dtype=bool) | delivered
         info["stage_rates"] = {"chain_success": chain_success.astype(float),
@@ -295,6 +322,7 @@ def run_parallel_evaluation(
         obstacle_min=info["obstacle_min"],
         obstacle_max=info["obstacle_max"],
         eval_name=eval_name,
+        target_budget=metrics.get("eval_target_budget"),
     )
     terminal_print(
         f"[EVAL ARTIFACTS] saved {display_path(info_path)}",
@@ -318,6 +346,7 @@ def run_action_capturing_evaluation(
     """Evaluate, select, and replay actions originating in the same actor run."""
     level = resolve_evaluation_level(level)
     episodes = level.effective_eval_parallel_envs
+    sampling_kwargs = inspection_sampling_kwargs(level, checkpoint=checkpoint)
     terminal_print(
         f"[EVAL] evaluating {episodes} deterministic episodes while capturing "
         "executed actions...",
@@ -330,6 +359,7 @@ def run_action_capturing_evaluation(
         result=result,
         offset=offset,
         max_steps=max_steps,
+        **sampling_kwargs,
     )
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
@@ -368,6 +398,7 @@ def run_action_capturing_evaluation(
         capture_lane=lane,
         batch_size=episodes,
         max_steps=max_steps,
+        **sampling_kwargs,
     )
     reconstructed_success = bool(np.asarray(states[-1].success))
     expected_success = result.lower() in {"success", "successful"}
@@ -422,7 +453,8 @@ def _successful_stage_mask(stages: np.ndarray, success_condition: str) -> np.nda
     """Match persisted physical stages against the configured target goal."""
     stage_rank = {"not_found": 0, "visually_found": 1,
                   "found_and_delivered": 2, "chain_success": 3}
-    required_rank = {"discovery": 1, "delivery": 2, "chain_held": 3}[success_condition]
+    required_rank = {"discovery": 1, "delivery": 2, "chain_held": 3,
+                     "chain_held_and_cleand_up": 3}[success_condition]
     return np.asarray([stage_rank[stage] >= required_rank for stage in stages])
 
 
@@ -571,7 +603,7 @@ def render_csv_replays(
         )
         final_state = states[-1]
         final_stage = _replay_stage_label(evaluation_stage(
-            success=bool(np.asarray(final_state.success)) and level.env.success_condition == "chain_held",
+            success=bool(np.asarray(final_state.success)) and level.env.success_condition in CHAIN_SUCCESS_CONDITIONS,
             delivered=bool(np.asarray(final_state.base_target_known)),
             visually_found=bool(np.any(np.asarray(final_state.target_known))),
         ), level.env.success_condition)
@@ -621,6 +653,7 @@ def main() -> None:
     result = "success"
     offset = 0
     replay_after = False
+    replay_by_required_agents = False
     replay_count = 1
     target_mode = "csv"
     replay_execution = "single"
@@ -635,7 +668,7 @@ def main() -> None:
             raise ValueError(
                 "Use checkpoint=<path>, mode=parallel|selective_auto_pick|"
                 "selective_manual_pick, result=success|fail, offset=<n>, "
-                "replay_after=true|false, replays=<positive count>, "
+                "replay_after=true|false, replay_by_required_agents=true|false, replays=<positive count>, "
                 "eval_name=<label>, "
                 "target_position=x,y,z, replay_execution=single|"
                 "parallel_capture, and "
@@ -659,6 +692,8 @@ def main() -> None:
             selection_argument_seen = True
         elif key == "replay_after":
             replay_after = _as_bool(value)
+        elif key == "replay_by_required_agents":
+            replay_by_required_agents = _as_bool(value)
         elif key == "replays":
             replay_count = int(value)
         elif key == "eval_name":
@@ -699,6 +734,9 @@ def main() -> None:
         elif selection_argument_seen or target_argument_seen:
             mode = "selective_auto_pick"
 
+    if replay_by_required_agents and (mode != "parallel" or not replay_after):
+        raise ValueError("replay_by_required_agents requires mode=parallel replay_after=true.")
+
     if target_mode not in {"csv", "random"}:
         raise ValueError("target must be csv or random.")
 
@@ -710,6 +748,12 @@ def main() -> None:
     if checkpoint_level is not None:
         config_arguments.insert(0, f"level={checkpoint_level}")
     level = load_level_cli(config_arguments)
+    if replay_by_required_agents and not (level.evaluation.random_eval or level.static_map_suite or suite_map_id):
+        raise ValueError("replay_by_required_agents requires a saved evaluation map suite.")
+    if replay_by_required_agents:
+        from swarmecho.core.config import evaluation_dynamic_max_geo_distance
+        if not level.evaluation.eval_video or not evaluation_dynamic_max_geo_distance(level):
+            raise ValueError("Required-agent replays need inspection_evaluation.eval_video=true and dynamic_max_geo_distance=true.")
     if suite_map_id is not None:
         import re
         from dataclasses import replace
@@ -752,12 +796,15 @@ def main() -> None:
         from swarmecho.training.artifacts import parse_checkpoint_update
         update = parse_checkpoint_update(checkpoint) or 0
         cumulative_steps = steps_for_checkpoint(checkpoint, level)
+        from swarmecho.training.inspection_sampling import inspection_sampling_kwargs
         metrics = evaluate_map_suite(
             model, levels, run_dir, update=update,
             steps=cumulative_steps,
             replay_due=replay_after and level.evaluation.eval_video,
             artifact_root=root, scope="eval", checkpoint=checkpoint,
             eval_name=eval_name,
+            sampling_kwargs=inspection_sampling_kwargs(level, checkpoint=checkpoint),
+            replay_by_required_agents=replay_by_required_agents,
         )
         terminal_print(
             f"[EVAL] successfully completed: {len(levels)} map(s), "
@@ -884,10 +931,11 @@ def main() -> None:
             target_position=selected_target,
             obstacle_min=selected_obstacle_min,
             obstacle_max=selected_obstacle_max,
+            **(inspection_sampling_kwargs(level, checkpoint=checkpoint) if selected_target is None else {}),
         )
     final_state = states[-1]
     final_stage = _replay_stage_label(evaluation_stage(
-        success=bool(np.asarray(final_state.success)) and level.env.success_condition == "chain_held",
+        success=bool(np.asarray(final_state.success)) and level.env.success_condition in CHAIN_SUCCESS_CONDITIONS,
         delivered=bool(np.asarray(final_state.base_target_known)),
         visually_found=bool(np.any(np.asarray(final_state.target_known))),
     ), level.env.success_condition)

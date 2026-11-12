@@ -4,9 +4,24 @@ Adaptive population control is enabled in G02 and disabled globally by default. 
 
 ## Deployment and voting
 
-`adapt_size.initial_agents` reserves the initial cohort. Drone 1 starts at reset; the others activate at their normal `slot_index × env.spawn_delay` episode step. A successful vote deploys one reinforcement immediately in a free, unreserved slot. Thus a call can arrive before a delayed initial drone without cancelling that drone's scheduled arrival. The episode terminates if every active drone is decommissioned, even while an initial drone is still scheduled.
+`adapt_size.initial_agents` reserves the initial cohort. Drone 1 starts at reset; the others become due at `slot_index × env.spawn_delay`. Every actual base deployment resets one shared cooldown, including the deployment at reset, scheduled initial arrivals and voted reinforcements. A positive delay permits at most one spawn per transition and requires at least `env.spawn_delay` environment steps between births; zero disables the cooldown. Due initial arrivals take priority over voted calls and retain their reserved slots. For example, delay 5 permits births at steps 0, 5, 10 and so on at the earliest. The episode terminates if every active drone is decommissioned, even while an initial drone is still scheduled.
+
+The base has three discrete states: **WAITING FOR VOTES**, **DEPLOYING** while the configured quorum is held, and **COOLDOWN** after an actual deployment. During cooldown it ignores incoming votes, clears YES credits, holds every active source at NO and keeps `quorum_steps` at zero. Drone choices, peer transport and round announcements continue normally. In latest-decision mode the base refreshes its cooldown NO timestamps each environment step, preventing delayed decisions from the offline interval from approving a later call. At `last_spawn_step + spawn_delay` the base comes online and begins receiving votes and counting the hold again. An attempt requires current agreement and the configured consecutive online hold; no request is locked in for later execution. Cooldown and scheduled initial arrivals incur no capacity-rejection penalty. Every spawn resets the hold and starts cooldown for the changed population. This applies to both vote protocols in every adaptive level, without an opt-in flag. Non-adaptive levels retain their initial stagger.
+
+The inspector's **Base** card reports `Status: WAITING FOR VOTES`, `Status: DEPLOYING`, or `Status: COOLDOWN: X STEPS`. With `adapt_size.quorum_hold > 0`, `All YES HELD: X/Y` shows the recorded consecutive quorum steps against the configured hold, above the existing per-drone vote and source-step rows. The quorum still follows `quorum_fraction`; the label does not impose unanimity. A deployment immediately enters cooldown when the delay is positive; with zero delay, its recorded frame shows DEPLOYING. New replays record the hold counter, last deployment step and spawn delay. Older replays without those fields show unavailable status/progress instead of estimated values; regenerate their replays to obtain the new reporting.
+
+At every actual spawn, including reset and slot reuse, the base records that newborn's initial NO with the birth step and current round. The newborn knows that round, starts locally at NO and has no carried decisions. A later GRU policy decision can supersede the birth NO through normal vote communication with a newer source timestamp. Reserved drones are not registered before they actually spawn. In credit mode the birth record creates no YES credits. The inspector continues displaying the actual current-round base state.
 
 The actor has the existing three Gaussian movement outputs plus one discrete vote output from its shared policy trunk. Only movement is passed through `tanh`. `hold` samples a Bernoulli YES/NO action which sets the bit each step. `keep_yes_no` samples a categorical KEEP, YES or NO action; KEEP retains the bit. The bit starts at zero. Each actor observes its own vote and whether it is inside the decommission sphere. Both modes use the existing PPO entropy coefficient.
+
+`env.observe_decommission_zone` controls the zone-membership scalar: 1 inside
+or on the valid decommission sphere, 0 outside or when no valid zone exists.
+It defaults to `true` to preserve existing adaptive observations and is explicitly
+enabled in both G03 levels. Setting it to `false` removes that channel without
+changing decommission behavior. It has no effect when adaptive size is disabled.
+Inactive agents still receive all-zero observations. Older adaptive checkpoints
+without this flag are interpreted as `true`; changing the toggle requires a
+checkpoint with the matching observation layout.
 
 Two additional adaptive observations default to false globally and are enabled
 only in G02: `env.observe_base_vote_ratio` and `env.observe_base_population`. A drone currently
@@ -39,7 +54,7 @@ With `vote_protocol: latest_decision`, every connected source sends its current 
 
 With `vote_protocol: credits`, a connected YES source emits one numbered credit. Each receiver accepts at most one new credit per source per tick, with packet receipts deduplicating routes. Relays retain all received packets for that round; NO stops new emissions without retracting stored or delivered credits. An isolated source cannot bank credits for later reconnection, and a source does not retain its own packets. Qualification needs `vote_holding` delivered, unspent credits, regardless of the source's current YES/NO bit.
 
-Successful approval deploys one drone immediately, advances the call round and clears base approval. In latest-decision mode a capacity rejection also advances the round and clears the base's records, so one cached agreement can fund only one attempt. Further attempts require fresh decisions in the new round; there is no extra cooldown. The base repeatedly announces its current round through the same one-hop network. Disconnected drones catch up when they reconnect, clearing their carried records and local vote; acknowledgement overrides a simultaneous policy YES. Old-round records cannot approve in the new round. A newborn knows the current round at the station but has no mission knowledge.
+An eligible successful attempt deploys one drone, advances the call round and clears the previous base approval, then records the newborn's initial NO in the new round. In latest-decision mode a capacity rejection also advances the round and clears the base's records, so one cached agreement can fund only one attempt. Further attempts require fresh decisions in the new round and respect any remaining spawn cooldown. A rejection does not reset the spawn cooldown because nobody spawned. The base repeatedly announces its current round through the same one-hop network. Disconnected drones catch up when they reconnect, clearing their carried records and local vote; acknowledgement overrides a simultaneous policy YES. Old-round records cannot approve in the new round. A newborn knows the current round at the station but has no mission knowledge.
 
 At capacity an attempted call deploys nobody and penalizes **each qualified YES voter**. In credits mode the round and raw receipts remain, but base spends all credits already received from qualified voters. Each needs a fresh `vote_holding` batch before another rejection. Voting time also incurs the existing episode time cost. G02 pays `reinforcement_reward=10` to each qualified source on successful deployment; carrying somebody else's approval does not make a relay a qualified source.
 
@@ -61,6 +76,13 @@ reward:
     unnecessary_reinforcement_call_reward: -200.0
 ```
 
+G03_CLU uses `unnecessary_reinforcement_call_reward: -500`. The existing
+delivery gate is unchanged: search calls before the base knows the target
+retain their ordinary reinforcement reward. After delivery, only responsible
+qualified YES sources on unnecessary grants receive the penalty; necessary
+reinforcements and delayed approvals sent while needed remain exempt. The
+newborn receives no caller penalty and retains its qualified surplus-exit reward.
+
 The effective population budget is the smaller of the accepted target's
 estimator count and the smallest **active population** that has formed a valid
 physical chain during this episode, including at reset. This records population,
@@ -76,7 +98,7 @@ arrivals count toward pending population so they do not justify extra calls.
 source choosing NO on an eligible communication tick while the population is
 below budget and no chain is connected. Every withholding source is charged,
 not only a single pivotal voter. It does not pay between communication ticks,
-when a call completes, while at capacity, for inactive/removed/newborn sources,
+when a call completes, during base cooldown, while at capacity, for inactive/removed/newborn sources,
 or while learning/catching up to a new round. The source must already know the
 target and the base must already know it before the action. Connectivity excludes
 agents removed on this transition. Current YES choices are never charged because
@@ -142,9 +164,9 @@ currently active drone outside the selected shortest-hop success chain.
 Contributors and inactive drones receive zero from this component. Separately,
 `useless_agent_at_success_all_agents_reward=-750` applies to every active drone
 per useless active drone, without a population divisor. Its per-recipient
-absolute amount is limited by `useless_agent_at_success_all_agents_reward_cap=2000`.
+signed amount is bounded below by `useless_agent_at_success_all_agents_reward_cap=-2000`.
 With `U` useless drones, default terminal success components are
-`3000 - min(750 * U, 2000)` for contributors and `-min(750 * U, 2000)` for
+`3000 + max(-750 * U, -2000)` for contributors and `max(-750 * U, -2000)` for
 useless drones. The cap preserves at least +1000 from these components for useful
 drones even when many drones are unused, keeping completion worthwhile. Inactive drones
 receive neither term. Both trigger only once at terminal chain success and
@@ -197,9 +219,10 @@ before loading. The reference controls belong to `adapt_size`.
 | `adapt_size.enabled` | `false` | `true` | Enable population control |
 | `adapt_size.initial_agents` | `1` | `1` | Reserved initial cohort |
 | `env.num_agents` | `5` | `7` | Hard maximum slot count |
-| `env.spawn_delay` | `5` | `5` | Stagger reserved initial drones only |
+| `env.spawn_delay` | `5` | `5` | Minimum environment steps between all base deployments |
 | `env.observe_base_vote_ratio` | `false` | `true` | Qualified base voters / live population, zero when disconnected |
 | `env.observe_base_population` | `false` | `true` | Live population / global reference 10, zero when disconnected |
+| `env.observe_decommission_zone` | `true` | `true` | Own membership in the valid decommission sphere; adaptive size only |
 | `adapt_size.vote_mode` | `hold` | `hold` | Vote action layout |
 | `adapt_size.vote_protocol` | `credits` | `latest_decision` | Accumulating credits or newest timestamped YES/NO |
 | `reward.priveleged_vote_reward.enabled` | `false` | `true` | Enable budget/chain-aware individual vote rewards |
@@ -217,7 +240,7 @@ before loading. The reference controls belong to `adapt_size`.
 | `reward.all_decommissioned_penalty` | `-1000` | `-1000` | Full signed amount per last acting drone |
 | `reward.useless_agent_at_success_reward` | `-3000` | `-3000` | Only each useless active drone at terminal chain success |
 | `reward.useless_agent_at_success_all_agents_reward` | `-750` | `-750` | Every active drone per useless active drone at terminal chain success; no divisor; capped per recipient |
-| `reward.useless_agent_at_success_all_agents_reward_cap` | `2000` | `2000` | Nonnegative maximum absolute adjustment per active drone after counting useless drones |
+| `reward.useless_agent_at_success_all_agents_reward_cap` | `-2000` | `-2000` | Signed bound per active drone; same sign as the coefficient, or zero to disable |
 | `adapt_size.reward_by_reference_enabled` | `false` | `false` | Enable caller rewards |
 | `adapt_size.reward_by_reference_fraction` | `0.10` | `0.20` | Full initial fraction per caller |
 | `adapt_size.reward_by_reference_steps` | `200` | `500` | Linear decay window in transitions |

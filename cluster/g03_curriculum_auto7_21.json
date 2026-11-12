@@ -1,0 +1,76 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "name": "G03_auto7",
+  "run_postfix": "curriculum_v3",
+  "seeds": [
+    456789,
+    456790
+  ],
+  "wandb_mode": "online",
+  "description": "Uniform target curriculum comparison with cached cell eligibility and required-agent histograms: auto-launch seven, permanent decommissioning, differentiable base replay; detached control probes",
+  "overrides": [],
+  "variations": {
+    "none_policy_only": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "none_aux_l0p03": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.lambda_target=0.03"
+    ],
+    "none_aux_l0p3": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "none_aux_l1": [
+      "training.target_curriculum.mode=none",
+      "training.geo_probe_auxiliary.lambda_target=1.0"
+    ],
+    "forward_policy_only": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "forward_aux_l0p03": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.03"
+    ],
+    "forward_aux_l0p3": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "forward_aux_l1": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=1.0"
+    ],
+    "reverse_policy_only": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "reverse_aux_l0p03": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.03"
+    ],
+    "reverse_aux_l0p3": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "reverse_aux_l1": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=1.0"
+    ]
+  },
+  "exclude_trials": [
+    {
+      "variation": "none_policy_only",
+      "seed": 456790
+    },
+    {
+      "variation": "forward_policy_only",
+      "seed": 456790
+    },
+    {
+      "variation": "reverse_policy_only",
+      "seed": 456790
+    }
+  ]
+}

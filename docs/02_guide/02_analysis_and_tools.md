@@ -262,14 +262,23 @@ historical audit import and compact source-data conventions.
 
 The sequential probe plan lives in `geo_experiments/probes.yaml`:
 
+The suite specifies checkpoint selections, probe IDs and repetition counts.
+Probe-specific inputs, target, model, output, sampling and report settings live in
+`geo_experiments/probes/target_location/shared-coordinates/probe.yaml`. One shared
+collector/runner, artifacts, report layout and navigation live in
+`geo_experiments/shared/`. The path-mask predictor is active and selected by the
+suite; the own-cell mask definition remains planned. Older per-map, joint map-and-cell and own-cell
+classification workflows are archived. See the [geo concept](../../geo_experiments/CONCEPT.md).
+
 ```bash
 uv run python geo_experiments/suite.py plan=true
 uv run python geo_experiments/suite.py
 ```
 
-The current default runs only shared-coordinate target decoding on the latest
-`G03_random_4k_v1_agents_4` checkpoint and all 400 verified frozen validation maps,
-with 10k/1k/5k total samples and nine fits. Historical G02 plans still share
+The current schedule runs the base-to-target path predictor with five input
+groups and three initialization seeds (15 fits), using the checkpoint
+selected in `probes.yaml`. Its probe config sets 10k/1k/5k independent episodes and the
+map source; inspect those files for the current selections. Historical G02 plans still share
 delivery-eligible collection across map-specific, map+cell and shared-coordinate
 readouts; their authored-map behaviour is unchanged. Each has
 its own report, required-agent target groups, chain-success distribution highlights

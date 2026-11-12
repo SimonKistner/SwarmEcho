@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from swarmecho.visualize.inspector_metadata import inspector_run_name
+
 
 def active_validation_history(directory):
     """Apply session rollback markers without deleting historical result files."""
@@ -38,7 +40,7 @@ def validation_label(path):
     result = json.loads(path.read_text(encoding="utf-8"))
     steps = int(result["global_step"])
     display = f"{steps/1e6:g}M" if steps >= 1000000 else f"{steps/1000:g}k" if steps >= 1000 else str(steps)
-    return f"{path.parent.parent.name}_[{display}]_[Validation]"
+    return f"{inspector_run_name(path.parent.parent)}_[{display}]_[Validation]"
 
 
 def validation_payload(path):

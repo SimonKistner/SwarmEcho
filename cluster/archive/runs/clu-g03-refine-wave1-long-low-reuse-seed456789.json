@@ -1,0 +1,15 @@
+{
+  "description": "G03 refinement wave 1 v2 clean start; PPO 6000/100/2/5; training seed 456789; fixed map-selection and evaluation seeds; exact PPO cell (OOM recovery disabled)",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03-refine-wave1-v2_{ppo}_seed456789",
+  "wandb_group": "G03_CLU_refinement_wave1_v2_N6000_T100_E2_M5",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=6000",
+    "training.num_steps=100",
+    "training.num_epochs=2",
+    "training.num_minibatches=5",
+    "training.seed=456789",
+    "training.oom_recovery.enabled=false"
+  ]
+}

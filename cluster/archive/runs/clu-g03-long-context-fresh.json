@@ -1,0 +1,12 @@
+{
+  "description": "G03 cluster 2B-step run: Longer recurrent context with two passes and the winner's total sample presentations per rollout; PPO 4000/100/2/10; shared task and cluster settings in G03_CLU_random_buildings",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=4000",
+    "training.num_steps=100",
+    "training.num_epochs=2",
+    "training.num_minibatches=10"
+  ]
+}

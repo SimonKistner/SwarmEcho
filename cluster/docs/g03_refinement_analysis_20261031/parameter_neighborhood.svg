@@ -1,0 +1,483 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="1044pt" height="756pt" viewBox="0 0 1044 756" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-11-01T02:08:43.522571</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.7.1, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 756 
+L 1044 756 
+L 1044 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 39.672 244.188 
+L 336.168 244.188 
+Q 342.432 244.188 342.432 239.652 
+L 342.432 130.032 
+Q 342.432 125.496 336.168 125.496 
+L 39.672 125.496 
+Q 33.408 125.496 33.408 130.032 
+L 33.408 239.652 
+Q 33.408 244.188 39.672 244.188 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 373.752 244.188 
+L 670.248 244.188 
+Q 676.512 244.188 676.512 239.652 
+L 676.512 130.032 
+Q 676.512 125.496 670.248 125.496 
+L 373.752 125.496 
+Q 367.488 125.496 367.488 130.032 
+L 367.488 239.652 
+Q 367.488 244.188 373.752 244.188 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 707.832 244.188 
+L 1004.328 244.188 
+Q 1010.592 244.188 1010.592 239.652 
+L 1010.592 130.032 
+Q 1010.592 125.496 1004.328 125.496 
+L 707.832 125.496 
+Q 701.568 125.496 701.568 130.032 
+L 701.568 239.652 
+Q 701.568 244.188 707.832 244.188 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 39.672 386.316 
+L 336.168 386.316 
+Q 342.432 386.316 342.432 381.78 
+L 342.432 272.16 
+Q 342.432 267.624 336.168 267.624 
+L 39.672 267.624 
+Q 33.408 267.624 33.408 272.16 
+L 33.408 381.78 
+Q 33.408 386.316 39.672 386.316 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 373.752 386.316 
+L 670.248 386.316 
+Q 676.512 386.316 676.512 381.78 
+L 676.512 272.16 
+Q 676.512 267.624 670.248 267.624 
+L 373.752 267.624 
+Q 367.488 267.624 367.488 272.16 
+L 367.488 381.78 
+Q 367.488 386.316 373.752 386.316 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 707.832 386.316 
+L 1004.328 386.316 
+Q 1010.592 386.316 1010.592 381.78 
+L 1010.592 272.16 
+Q 1010.592 267.624 1004.328 267.624 
+L 707.832 267.624 
+Q 701.568 267.624 701.568 272.16 
+L 701.568 381.78 
+Q 701.568 386.316 707.832 386.316 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #faecea; stroke: #a23936; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 39.672 528.444 
+L 336.168 528.444 
+Q 342.432 528.444 342.432 523.908 
+L 342.432 414.288 
+Q 342.432 409.752 336.168 409.752 
+L 39.672 409.752 
+Q 33.408 409.752 33.408 414.288 
+L 33.408 523.908 
+Q 33.408 528.444 39.672 528.444 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 373.752 528.444 
+L 670.248 528.444 
+Q 676.512 528.444 676.512 523.908 
+L 676.512 414.288 
+Q 676.512 409.752 670.248 409.752 
+L 373.752 409.752 
+Q 367.488 409.752 367.488 414.288 
+L 367.488 523.908 
+Q 367.488 528.444 373.752 528.444 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 707.832 528.444 
+L 1004.328 528.444 
+Q 1010.592 528.444 1010.592 523.908 
+L 1010.592 414.288 
+Q 1010.592 409.752 1004.328 409.752 
+L 707.832 409.752 
+Q 701.568 409.752 701.568 414.288 
+L 701.568 523.908 
+Q 701.568 528.444 707.832 528.444 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 39.672 670.572 
+L 336.168 670.572 
+Q 342.432 670.572 342.432 666.036 
+L 342.432 556.416 
+Q 342.432 551.88 336.168 551.88 
+L 39.672 551.88 
+Q 33.408 551.88 33.408 556.416 
+L 33.408 666.036 
+Q 33.408 670.572 39.672 670.572 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 373.752 670.572 
+L 670.248 670.572 
+Q 676.512 670.572 676.512 666.036 
+L 676.512 556.416 
+Q 676.512 551.88 670.248 551.88 
+L 373.752 551.88 
+Q 367.488 551.88 367.488 556.416 
+L 367.488 666.036 
+Q 367.488 670.572 373.752 670.572 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #e7f4ec; stroke: #247148; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 707.832 670.572 
+L 1004.328 670.572 
+Q 1010.592 670.572 1010.592 666.036 
+L 1010.592 556.416 
+Q 1010.592 551.88 1004.328 551.88 
+L 707.832 551.88 
+Q 701.568 551.88 701.568 556.416 
+L 701.568 666.036 
+Q 701.568 670.572 707.832 670.572 
+z
+" clip-path="url(#p15ef4de9f9)" style="fill: #fff6e8; stroke: #aa7e30; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font: 700 18px 'DejaVu Sans'; text-anchor: start" x="36.54" y="36.357188" transform="rotate(-0 36.54 36.357188)">Wave 4 complete: the tested grid and the new minibatch leader</text>
+   </g>
+   <g id="text_2">
+    <text style="fill: #52657b; font: 10.5px 'DejaVu Sans'; text-anchor: start" x="36.54" y="54.432" transform="rotate(-0 36.54 54.432)">Rows 1–3 keep M=5. The final row centers M=6, now the highest paired mean best validation within 4h.</text>
+   </g>
+   <g id="text_3">
+    <text style="fill: #52657b; font: 700 10px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="88.452" transform="rotate(-0 187.92 88.452)">LOWER</text>
+   </g>
+   <g id="text_4">
+    <text style="fill: #52657b; font: 700 10px 'DejaVu Sans'; text-anchor: middle" x="522" y="88.452" transform="rotate(-0 522 88.452)">ROW REFERENCE</text>
+   </g>
+   <g id="text_5">
+    <text style="fill: #52657b; font: 700 10px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="88.452" transform="rotate(-0 856.08 88.452)">HIGHER</text>
+   </g>
+   <g id="text_6">
+    <text style="font: 700 12px 'DejaVu Sans'; text-anchor: start" x="36.54" y="117.18" transform="rotate(-0 36.54 117.18)">Environments · T50 E3 M5</text>
+   </g>
+   <g id="text_7">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="148.512398" transform="rotate(-0 187.92 148.512398)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_8">
+    <!-- $\mathbf{4000}\,/\,50\,/\,3\,/\,5$ -->
+    <g transform="translate(144 174.45453)">
+     <text>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="0 8.349609 16.699219 25.048828" y="-0.09375">4000</tspan>
+      <tspan style="font: 12px 'DejaVu Sans'" x="35.346719 41.337969 48.972734 58.555781 64.547031 74.130078 80.121328" y="-0.09375">/50/3/5</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_9">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="197.599478" transform="rotate(-0 187.92 197.599478)">at 4h: 56.53% · at 6h: 58.10% · at 8h: 66.87%</text>
+   </g>
+   <g id="text_10">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="217.005998" transform="rotate(-0 187.92 217.005998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_11">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="234.700177" transform="rotate(-0 187.92 234.700177)">1 seed · A</text>
+   </g>
+   <g id="text_12">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="148.512398" transform="rotate(-0 522 148.512398)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_13">
+    <!-- $\mathbf{6000}\,/\,50\,/\,3\,/\,5$ -->
+    <g transform="translate(478.08 174.45453)">
+     <text>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="0 8.349609 16.699219 25.048828" y="-0.09375">6000</tspan>
+      <tspan style="font: 12px 'DejaVu Sans'" x="35.346719 41.337969 48.972734 58.555781 64.547031 74.130078 80.121328" y="-0.09375">/50/3/5</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_14">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="197.599478" transform="rotate(-0 522 197.599478)">at 4h: 70.15% · at 6h: 71.98% · at 8h: 74.48%</text>
+   </g>
+   <g id="text_15">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="217.005998" transform="rotate(-0 522 217.005998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_16">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="234.665021" transform="rotate(-0 522 234.665021)">2-seed average</text>
+   </g>
+   <g id="text_17">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="148.512398" transform="rotate(-0 856.08 148.512398)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_18">
+    <!-- $\mathbf{8000}\,/\,50\,/\,3\,/\,5$ -->
+    <g transform="translate(812.16 174.45453)">
+     <text>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="0 8.349609 16.699219 25.048828" y="-0.09375">8000</tspan>
+      <tspan style="font: 12px 'DejaVu Sans'" x="35.346719 41.337969 48.972734 58.555781 64.547031 74.130078 80.121328" y="-0.09375">/50/3/5</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_19">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="197.599478" transform="rotate(-0 856.08 197.599478)">at 4h: 69.21% · at 6h: 75.06% · at 8h: 75.55%</text>
+   </g>
+   <g id="text_20">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="217.005998" transform="rotate(-0 856.08 217.005998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_21">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="234.700177" transform="rotate(-0 856.08 234.700177)">2-seed average (4h); 6h/8h n=1/1</text>
+   </g>
+   <g id="text_22">
+    <text style="font: 700 12px 'DejaVu Sans'; text-anchor: start" x="36.54" y="259.308" transform="rotate(-0 36.54 259.308)">Rollout steps · N6k E3 M5</text>
+   </g>
+   <g id="text_23">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="290.640397" transform="rotate(-0 187.92 290.640397)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_24">
+    <!-- $6000\,/\,\mathbf{25}\,/\,3\,/\,5$ -->
+    <g transform="translate(144.72 316.58253)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 57.126093 63.117343 72.70039 78.69164" y="-0.09375">6000//3/5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="38.478594 46.828203" y="-0.09375">25</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_25">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="339.727477" transform="rotate(-0 187.92 339.727477)">at 4h: 63.94% · at 6h: 63.94% · at 8h: 63.94%</text>
+   </g>
+   <g id="text_26">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="359.133997" transform="rotate(-0 187.92 359.133997)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_27">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="376.793021" transform="rotate(-0 187.92 376.793021)">2-seed average</text>
+   </g>
+   <g id="text_28">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="290.640397" transform="rotate(-0 522 290.640397)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_29">
+    <!-- $6000\,/\,\mathbf{50}\,/\,3\,/\,5$ -->
+    <g transform="translate(478.8 316.58253)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 57.126093 63.117343 72.70039 78.69164" y="-0.09375">6000//3/5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="38.478594 46.828203" y="-0.09375">50</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_30">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="339.727477" transform="rotate(-0 522 339.727477)">at 4h: 70.15% · at 6h: 71.98% · at 8h: 74.48%</text>
+   </g>
+   <g id="text_31">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="359.133997" transform="rotate(-0 522 359.133997)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_32">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="376.793021" transform="rotate(-0 522 376.793021)">2-seed average</text>
+   </g>
+   <g id="text_33">
+    <text style="fill: #a23936; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="290.640397" transform="rotate(-0 856.08 290.640397)">CONFIRMED OOM</text>
+   </g>
+   <g id="text_34">
+    <!-- $6000\,/\,\mathbf{75}\,/\,3\,/\,5$ -->
+    <g transform="translate(812.88 316.58253)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 57.126093 63.117343 72.70039 78.69164" y="-0.09375">6000//3/5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="38.478594 46.828203" y="-0.09375">75</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_35">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="339.727477" transform="rotate(-0 856.08 339.727477)">51.03 GiB allocation</text>
+   </g>
+   <g id="text_36">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="359.133997" transform="rotate(-0 856.08 359.133997)">2 seeds · after 1 logged update(s)</text>
+   </g>
+   <g id="text_37">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="376.828177" transform="rotate(-0 856.08 376.828177)">No learning score</text>
+   </g>
+   <g id="text_38">
+    <text style="font: 700 12px 'DejaVu Sans'; text-anchor: start" x="36.54" y="401.436" transform="rotate(-0 36.54 401.436)">Epochs · N6k T50 M5</text>
+   </g>
+   <g id="text_39">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="432.768397" transform="rotate(-0 187.92 432.768397)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_40">
+    <!-- $6000\,/\,50\,/\,\mathbf{2}\,/\,5$ -->
+    <g transform="translate(145.08 458.71053)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 71.985546 77.976796" y="-0.09375">6000/50//5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="61.687656" y="-0.09375">2</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_41">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="481.855477" transform="rotate(-0 187.92 481.855477)">at 4h: 58.72% · at 6h: 60.88% · at 8h: 60.88%</text>
+   </g>
+   <g id="text_42">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="501.261998" transform="rotate(-0 187.92 501.261998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_43">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="518.956177" transform="rotate(-0 187.92 518.956177)">1 seed · A</text>
+   </g>
+   <g id="text_44">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="432.768397" transform="rotate(-0 522 432.768397)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_45">
+    <!-- $6000\,/\,50\,/\,\mathbf{3}\,/\,5$ -->
+    <g transform="translate(479.16 458.71053)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 71.985546 77.976796" y="-0.09375">6000/50//5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="61.687656" y="-0.09375">3</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_46">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="481.855477" transform="rotate(-0 522 481.855477)">at 4h: 70.15% · at 6h: 71.98% · at 8h: 74.48%</text>
+   </g>
+   <g id="text_47">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="501.261998" transform="rotate(-0 522 501.261998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_48">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="518.921021" transform="rotate(-0 522 518.921021)">2-seed average</text>
+   </g>
+   <g id="text_49">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="432.768397" transform="rotate(-0 856.08 432.768397)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_50">
+    <!-- $6000\,/\,50\,/\,\mathbf{4}\,/\,5$ -->
+    <g transform="translate(813.24 458.71053)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 71.985546 77.976796" y="-0.09375">6000/50//5</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="61.687656" y="-0.09375">4</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_51">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="481.855477" transform="rotate(-0 856.08 481.855477)">at 4h: 59.59% · at 6h: 59.59% · at 8h: 61.68%</text>
+   </g>
+   <g id="text_52">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="501.261998" transform="rotate(-0 856.08 501.261998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_53">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="518.921021" transform="rotate(-0 856.08 518.921021)">2-seed average</text>
+   </g>
+   <g id="text_54">
+    <text style="font: 700 12px 'DejaVu Sans'; text-anchor: start" x="36.54" y="543.564" transform="rotate(-0 36.54 543.564)">Minibatches · N6k T50 E3</text>
+   </g>
+   <g id="text_55">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="574.896398" transform="rotate(-0 187.92 574.896398)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_56">
+    <!-- $6000\,/\,50\,/\,3\,/\,\mathbf{5}$ -->
+    <g transform="translate(145.08 600.83853)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 61.687656 71.270703" y="-0.09375">6000/50/3/</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="77.261953" y="-0.09375">5</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_57">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="623.983478" transform="rotate(-0 187.92 623.983478)">at 4h: 70.15% · at 6h: 71.98% · at 8h: 74.48%</text>
+   </g>
+   <g id="text_58">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="643.389998" transform="rotate(-0 187.92 643.389998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_59">
+    <text style="fill: #34445a; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="187.92" y="661.049021" transform="rotate(-0 187.92 661.049021)">2-seed average</text>
+   </g>
+   <g id="text_60">
+    <text style="fill: #247148; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="574.896398" transform="rotate(-0 522 574.896398)">RECOMMENDED · TWO SEEDS</text>
+   </g>
+   <g id="text_61">
+    <!-- $6000\,/\,50\,/\,3\,/\,\mathbf{6}$ -->
+    <g transform="translate(479.16 600.83853)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 61.687656 71.270703" y="-0.09375">6000/50/3/</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="77.261953" y="-0.09375">6</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_62">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="623.983478" transform="rotate(-0 522 623.983478)">at 4h: 71.57% · at 6h: 73.30% · at 8h: 74.11%</text>
+   </g>
+   <g id="text_63">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="643.389998" transform="rotate(-0 522 643.389998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_64">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="522" y="661.084178" transform="rotate(-0 522 661.084178)">2-seed average (4h); 6h/8h n=1/1</text>
+   </g>
+   <g id="text_65">
+    <text style="fill: #aa7e30; font: 700 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="574.896398" transform="rotate(-0 856.08 574.896398)">WORSE THAN CANDIDATE¹</text>
+   </g>
+   <g id="text_66">
+    <!-- $6000\,/\,50\,/\,3\,/\,\mathbf{10}$ -->
+    <g transform="translate(809.04 600.83853)">
+     <text>
+      <tspan style="font: 12px 'DejaVu Sans'" x="0 7.634766 15.269531 22.904297 32.487344 38.478594 46.113359 55.696406 61.687656 71.270703" y="-0.09375">6000/50/3/</tspan>
+      <tspan style="font: 700 12px 'DejaVu Sans'" x="77.261953 85.611562" y="-0.09375">10</tspan>
+     </text>
+    </g>
+   </g>
+   <g id="text_67">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="623.983478" transform="rotate(-0 856.08 623.983478)">at 4h: 69.18% · at 6h: 69.18% · at 8h: 69.18%</text>
+   </g>
+   <g id="text_68">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="643.389998" transform="rotate(-0 856.08 643.389998)">time to reach 75%: — (not reached)</text>
+   </g>
+   <g id="text_69">
+    <text style="fill: #34445a; font: 9px 'DejaVu Sans'; text-anchor: middle" x="856.08" y="661.084178" transform="rotate(-0 856.08 661.084178)">1 seed · B</text>
+   </g>
+   <g id="text_70">
+    <text style="fill: #34445a; font: 10px 'DejaVu Sans'; text-anchor: start" x="36.54" y="709.884" transform="rotate(-0 36.54 709.884)">6000 / 50 / 3 / 6: 71.57% paired mean at 4h, versus 70.15% for M5 and 69.18% for M10 (one seed).</text>
+   </g>
+   <g id="text_71">
+    <text style="fill: #52657b; font: 10px 'DejaVu Sans'; text-anchor: start" x="36.54" y="728.784" transform="rotate(-0 36.54 728.784)">M6 is bracketed by tested M5 and M10, but its environment/rollout/epoch neighborhood is not fully measured.</text>
+   </g>
+   <g id="text_72">
+    <text style="fill: #52657b; font: 9.5px 'DejaVu Sans'; text-anchor: start" x="36.54" y="746.928" transform="rotate(-0 36.54 746.928)">¹ Yellow = lower observed 4h score than M6; seed counts differ. This is not a statistical significance claim.</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p15ef4de9f9">
+   <rect x="0" y="0" width="1044" height="756"/>
+  </clipPath>
+ </defs>
+</svg>

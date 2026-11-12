@@ -11,7 +11,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from swarmecho.env import adapt_size as adaptive_population
-from swarmecho.core.config import DEPLOYED_AGENTS_OBS_REF
+from swarmecho.env.knowledge import information_counts, new_information_counts
+from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS, DEPLOYED_AGENTS_OBS_REF, SUCCESS_CONDITIONS
 
 from swarmecho.env.buildings import BuildingArrays
 from swarmecho.env.obstacles import (
@@ -59,6 +60,8 @@ class EnvState(NamedTuple):
     delivery_gap_step: jax.Array = jnp.int32(-1)
     # Receiver-by-sender attribution for newly shared target knowledge.
     peer_informed_by: jax.Array = jnp.zeros((0, 0), dtype=jnp.bool_)
+    # This step's recipient counts [all, peer, base], independent of sender credit.
+    new_information_counts: jax.Array = jnp.zeros((3,), dtype=jnp.int32)
     # Persistent record of target delivery to the base by an informed drone
     # on a communication tick. A later chain break cannot revoke delivery.
     base_target_known: jax.Array = jnp.bool_(False)
@@ -224,7 +227,8 @@ def observation_dim(cfg: EnvConfig) -> int:
         + int(cfg.observe_chain_contributor)
         + int(cfg.observe_current_timestep)
         + int(cfg.adapt_size.enabled) * (
-            2 + int(cfg.observe_base_vote_ratio) + int(cfg.observe_base_population)
+            1 + int(cfg.observe_decommission_zone)
+            + int(cfg.observe_base_vote_ratio) + int(cfg.observe_base_population)
         )
     )
 
@@ -618,6 +622,66 @@ def success_contributors(state, cfg, *, chain_reward_system="euclidean", allow_r
                         lambda _: jnp.zeros_like(state.active), None) & state.active
 
 
+def _return_progress_metres(previous, current):
+    """Signed geodesic progress to the decommission-zone centre, with no cutoff."""
+    distances = free_space_distance(
+        current.adaptive.zone_center, jnp.concatenate((previous.pos, current.pos)),
+        current.planning_vertices, current.planning_distances,
+        current.planning_min, current.planning_max,
+    )[0]
+    before, after = jnp.split(distances, 2)
+    valid = jnp.isfinite(before) & jnp.isfinite(after) & (before < 1e6) & (after < 1e6)
+    return jnp.where(valid, before - after, 0.0)
+
+
+def non_contributor_rewards(previous, current, cfg, env_cfg):
+    """Movement guidance and a one-shot exit payment for surplus lifetimes.
+
+    Membership is measured before the action, as in the actor observation.
+    A surviving agent must remain surplus, and the chain must survive the
+    transition. Removed agents use their prior membership, never the trivially
+    false membership of an inactive/replaced slot.
+    """
+    zero = jnp.zeros_like(current.coverage_credit)
+    empty = (zero, zero, zero)
+    if not env_cfg.adapt_size.enabled or env_cfg.success_condition not in CHAIN_SUCCESS_CONDITIONS:
+        return empty
+
+    def pay(_):
+        # On complete chains, frontier leaders cannot change membership.
+        # Avoid redundant roadmap queries just to choose partial-chain tips.
+        previous_members = success_contributors(
+            previous, env_cfg,
+            allow_redundancy=cfg.allow_redundancy_reward,
+        )
+        surplus = previous.active & ~previous_members
+        returned = departed = zero
+        if cfg.non_contributor_movement_enabled:
+            current_members = success_contributors(
+                current, env_cfg,
+                allow_redundancy=cfg.allow_redundancy_reward,
+            )
+            continuing = (surplus & current.active & ~current_members
+                          & ~current.adaptive.spawned & ~current.adaptive.decommissioned)
+
+            def movement(_):
+                progress = _return_progress_metres(previous, current)
+                progress = jnp.where(continuing & current.adaptive.zone_valid, progress, 0.0)
+                return (cfg.non_contributor_return_reward_per_meter * jnp.maximum(progress, 0.0),
+                        cfg.non_contributor_departure_reward_per_meter * jnp.maximum(-progress, 0.0))
+
+            returned, departed = jax.lax.cond(jnp.any(continuing), movement, lambda _: (zero, zero), None)
+        removed = (surplus & current.adaptive.decommissioned
+                   & (current.adaptive.decommissions > previous.adaptive.decommissions))
+        decommissioned = cfg.non_contributor_decommission_reward * removed.astype(jnp.float32)
+        return returned, departed, decommissioned
+
+    return jax.lax.cond(
+        previous.fully_connected & current.fully_connected & ~previous.done,
+        pay, lambda _: empty, None,
+    )
+
+
 def compute_rewards(
     previous: EnvState,
     current: EnvState,
@@ -657,6 +721,9 @@ def compute_rewards(
             "newly_knows": zero,
         }
         terms = {name: jnp.where(current.active, value, 0.0) for name, value in terms.items()}
+        if cfg.non_contributor_rewards_enabled:
+            terms.update(dict.fromkeys(("non_contributor_return_reward", "non_contributor_departure_reward",
+                                        "non_contributor_decommission_reward"), zero))
         return sum(value for name, value in terms.items() if name != "newly_knows"), terms
     if cfg.target_found_requires_delivery:
         target_found_event = (
@@ -799,7 +866,7 @@ def compute_rewards(
 
     useless_reward = jnp.zeros(n, dtype=jnp.float32)
     all_agents_useless_reward = jnp.zeros(n, dtype=jnp.float32)
-    if env_cfg.success_condition == "chain_held" and (
+    if env_cfg.success_condition in CHAIN_SUCCESS_CONDITIONS and (
         cfg.useless_agent_at_success_reward != 0
         or cfg.useless_agent_at_success_all_agents_reward != 0
     ):
@@ -810,14 +877,14 @@ def compute_rewards(
             )
             useless = (current.active & ~contributors).astype(jnp.float32)
             all_agents_amount = cfg.useless_agent_at_success_all_agents_reward * jnp.sum(useless)
-            # For the negative G02 coefficient this is -min(750 * useless, 2000).
-            # min caps the loss per drone, not a shared team budget. With the
+            # Signed penalty bound: max(-750 * useless, -2000).
+            # This limits the loss per drone, not a shared team budget. With the
             # default +3000 success reward, useful drones retain at least +1000
             # from these components even when many drones are unused, preserving
-            # an incentive to finish. Preserve the sign for positive coefficients.
-            all_agents_amount = jnp.sign(all_agents_amount) * jnp.minimum(
-                jnp.abs(all_agents_amount), cfg.useless_agent_at_success_all_agents_reward_cap,
-            )
+            # an incentive to finish. Positive bonuses use a positive upper bound;
+            # a zero cap disables the term in either direction.
+            cap = cfg.useless_agent_at_success_all_agents_reward_cap
+            all_agents_amount = jnp.clip(all_agents_amount, min(cap, 0.0), max(cap, 0.0))
             return (
                 cfg.useless_agent_at_success_reward * useless,
                 all_agents_amount * reward_active,
@@ -898,6 +965,13 @@ def compute_rewards(
             terms["unnecessary_reinforcement_call_reward"] = (
                 cfg.priveleged_vote_reward.unnecessary_reinforcement_call_reward * shaping.unnecessary_voters.astype(jnp.float32)
             )
+    if cfg.non_contributor_rewards_enabled:
+        returned, departed, decommissioned = non_contributor_rewards(
+            previous, current, cfg, env_cfg,
+        )
+        # Removal payments belong to the old lifetime, including a reused slot.
+        terms.update(non_contributor_return_reward=returned, non_contributor_departure_reward=departed,
+                     non_contributor_decommission_reward=decommissioned)
     total = sum(value for name, value in terms.items() if name != "newly_knows")
     if env_cfg.adapt_size.enabled:
         reference_reward = jnp.zeros(n, dtype=jnp.float32)
@@ -964,7 +1038,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
     from swarmecho.core.config import validate_adapt_size
     validate_adapt_size(cfg)
     validate_priveleged_vote_reward(priveleged_vote_reward, cfg)
-    if cfg.success_condition not in {"coverage", "discovery", "delivery", "chain_held"}:
+    if cfg.success_condition not in SUCCESS_CONDITIONS:
         raise ValueError("Unknown env.success_condition.")
     has_target = cfg.success_condition != "coverage"
     if delivery_gap_vesting_enabled and (not has_target or not target_found_requires_delivery):
@@ -1283,6 +1357,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         stored_corner_distances: jax.Array | None = None,
         map_id=0,
         target_spawn_weights: jax.Array | None = None,
+        target_agent_budget: jax.Array | None = None,
+        target_min_agents: jax.Array | None = None,
     ):
         """Reset an episode, optionally at one validated external target point.
 
@@ -1417,13 +1493,15 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 if dynamic_max_geo_distance:
                     # Necessary straight-line bound, followed by a constructive
                     # witness. Curriculum spare slots never enlarge target eligibility.
-                    budget = cfg.geometric_agent_budget
+                    budget = cfg.geometric_agent_budget if target_agent_budget is None else target_agent_budget
                     bound = cfg.comm_radius_base + (budget - 1) * cfg.comm_radius + cfg.visual_radius
                     valid &= jnp.linalg.norm(base - target) <= bound
                     required, certified = jax.lax.cond(
                         valid, lambda _: relay_calculator(base, target, map_id),
                         lambda _: (jnp.int32(0), jnp.bool_(False)), operand=None)
                     valid &= certified & (required <= budget)
+                    if target_min_agents is not None:
+                        valid &= required >= target_min_agents
                 return base, target, valid, required
 
             def sample_pair_for_target(fixed_target, key):
@@ -1478,6 +1556,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 n, cfg.adapt_size.initial_agents, zone, valid_zone, max_steps=cfg.max_steps,
                 vote_protocol=cfg.adapt_size.vote_protocol,
                 vote_shaping_enabled=priveleged_vote_reward.enabled,
+                spawn_delay=cfg.spawn_delay,
             )
         coverage = jnp.zeros(coverage_shape, dtype=jnp.bool_)
         coverage, _ = update_coverage(coverage, pos, active, obstacle_min, obstacle_max, map_id)
@@ -1529,7 +1608,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         )
 
     def step(state: EnvState, action: jax.Array):
-        expected_actions = 4 if cfg.adapt_size.enabled else 3
+        expected_actions = 3 + int(cfg.adapt_size.policy_vote_mode is not None)
         if action.shape != (n, expected_actions):
             raise ValueError(f"Expected actions shaped {(n, expected_actions)}, got {action.shape}.")
         # The policy communicates from the pre-action state. Knowledge uses
@@ -1599,17 +1678,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                     acting=~state.done,
                 )
             adaptive, active = adaptive_population.transition(
-                adaptive, state.active, pos, action[:, 3], peer_links, base_links,
+                adaptive, state.active, pos,
+                action[:, 3] if cfg.adapt_size.recruitment_enabled else jnp.zeros(n), peer_links, base_links,
                 (state.step % memory_comm_every_k_steps) == 0, cfg.adapt_size,
                 shaping_context=shaping_context,
-            )
-            initial_due = (~state.active) & (state.adaptive.ids >= 0) & (
-                next_step >= jnp.arange(n) * cfg.spawn_delay
-            )
-            active |= initial_due
-            adaptive = adaptive._replace(
-                spawned=adaptive.spawned | initial_due,
-                all_decommissioned=~jnp.any(active),
+                spawn_delay=cfg.spawn_delay,
             )
             pos = jnp.where((active & ~adaptive.spawned)[:, None], pos, drone_spawn)
             velocity = jnp.where((active & ~adaptive.spawned)[:, None], velocity, 0.0)
@@ -1676,7 +1749,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             success = base_target_known
         else:
             success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
-        done = success | idle_terminated | (next_step >= jnp.int32(cfg.max_steps))
+        done = idle_terminated | (next_step >= jnp.int32(cfg.max_steps))
         if cfg.adapt_size.enabled:
             done |= adaptive.all_decommissioned
         next_state = EnvState(
@@ -1700,7 +1773,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             delivery_gap_credit=state.delivery_gap_credit,
             delivery_gap_step=state.delivery_gap_step,
             peer_informed_by=peer_informed_by,
-            done=done,
+            new_information_counts=new_information_counts(state.target_known, known, active, sees, from_base),
+            done=done | success,
             collided=jnp.any(collided, axis=-1) & active,
             coverage_credit=coverage_credit,
             stationary_steps=stationary_steps,
@@ -1719,6 +1793,18 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             building_bank=state.building_bank,
             target_required_agents=state.target_required_agents,
         )
+        if cfg.success_condition == "chain_held_and_cleand_up":
+            # Hold timing is independent of cleanup: it keeps advancing while
+            # surplus drones return, and any chain break resets it above.
+            def cleaned_up(_):
+                contributors = success_contributors(
+                    next_state, cfg, chain_reward_system=chain_reward_system,
+                    allow_redundancy=allow_redundancy_reward,
+                )
+                return ~jnp.any(next_state.active & ~contributors)
+
+            success = jax.lax.cond(success, cleaned_up, lambda _: jnp.bool_(False), None)
+            next_state = next_state._replace(success=success, done=done | success)
         if delivery_gap_vesting_enabled:
             def record_delivery_credit(next_state):
                 credit = credited_chain_progress(
@@ -1857,9 +1943,11 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             )
             optional = []
             if cfg.adapt_size.enabled:
-                in_zone = (jnp.linalg.norm(origin - state.adaptive.zone_center)
-                           <= cfg.adapt_size.decommission_radius_m) & state.adaptive.zone_valid
-                optional.append(jnp.asarray([state.adaptive.vote[i], in_zone], dtype=jnp.float32))
+                optional.append(jnp.asarray([state.adaptive.vote[i]], dtype=jnp.float32))
+                if cfg.observe_decommission_zone:
+                    in_zone = (jnp.linalg.norm(origin - state.adaptive.zone_center)
+                               <= cfg.adapt_size.decommission_radius_m) & state.adaptive.zone_valid
+                    optional.append(jnp.asarray([in_zone], dtype=jnp.float32))
                 # Instantaneous base-network feedback, never a latched receipt.
                 # is_conn_base includes physical relay paths, not only direct LOS.
                 if cfg.observe_base_vote_ratio:
@@ -1967,7 +2055,7 @@ def make_autoreset_fns(
     ):
         raise ValueError("Delivery gap vesting requires delivery, gap-change reward, and positive steps.")
     reset, step, observations, metrics = make_env_fns(
-        building, cfg, plan_geodesic=reward_cfg.chain_reward_system == "obstacle_geodesic" or reward_cfg.enable_chain_efficiency_reward,
+        building, cfg, plan_geodesic=reward_cfg.requires_geodesic,
         randomize_base=randomize_base, minimum_geodesic_separation=minimum_geodesic_separation,
         dynamic_max_geo_distance=dynamic_max_geo_distance,
         relay_options=relay_options,
@@ -2027,6 +2115,7 @@ def make_autoreset_fns(
             "gap_gain": jnp.maximum(reward_terms["gap_reward"], 0.0),
             "gap_loss": jnp.minimum(reward_terms["gap_reward"], 0.0),
             "peer_informed_count": jnp.sum(jnp.any(terminal_state.peer_informed_by, axis=1)),
+            "information_counts": information_counts(state, terminal_state),
             "best_chain_held_steps": terminal_state.best_chain_held_steps,
             "done": terminal_state.done,
             "idle_terminated": terminal_state.idle_terminated,
@@ -2070,38 +2159,54 @@ def make_autoreset_fns(
                 info["chain_efficiency"] = jnp.float32(0.0)
         return terminal_state, reward, terminal_state.done, info
 
-    def reset_persisted(state, target_spawn_weights=None, map_sampling_cdf=None):
+    def reset_persisted(state, target_spawn_weights=None, map_sampling_cdf=None, target_agent_budget=None, target_min_agents=None):
         if resample_maps:
             map_key, reset_key = jax.random.split(state.key)
             num_maps = building_bank.arrays["base_position"].shape[0]
-            if map_sampling_cdf is None:
-                index = jax.random.randint(map_key, (), 0, num_maps)
-            else:
+            def choose_map(key):
+                if map_sampling_cdf is None:
+                    return jax.random.randint(key, (), 0, num_maps)
                 if map_sampling_cdf.shape != (num_maps,):
                     raise ValueError("Map-selection CDF must cover the complete prepared training bank.")
-                index = jnp.minimum(jnp.searchsorted(map_sampling_cdf, jax.random.uniform(map_key, ()),
+                return jnp.minimum(jnp.searchsorted(map_sampling_cdf, jax.random.uniform(key, ()),
                                                     side="right"), num_maps - 1)
-            return reset(reset_key, map_id=index, target_spawn_weights=target_spawn_weights)
+            index = choose_map(map_key)
+            fresh = reset(reset_key, map_id=index, target_spawn_weights=target_spawn_weights,
+                         target_agent_budget=target_agent_budget, target_min_agents=target_min_agents)
+            if target_min_agents is not None:
+                # Some maps have no targets in a reverse curriculum's allowed
+                # group. Retry map selection; never fall back to easier targets.
+                def retry(carry):
+                    attempt, previous = carry
+                    mk, rk = jax.random.split(previous.key)
+                    index = choose_map(mk)
+                    return attempt + 1, reset(rk, map_id=index, target_spawn_weights=target_spawn_weights,
+                        target_agent_budget=target_agent_budget, target_min_agents=target_min_agents)
+                _, fresh = jax.lax.while_loop(
+                    lambda carry: (carry[0] < 128) & (carry[1].spawn_pair_attempts == 0),
+                    retry, (jnp.int32(0), fresh))
+            return fresh
         return reset(state.key, obstacle_min=state.obstacle_min, obstacle_max=state.obstacle_max,
                      stored_vertices=state.roadmap_vertices, stored_distances=state.roadmap_distances,
                      stored_corner_distances=state.roadmap_corner_distances, map_id=state.map_id,
-                     target_spawn_weights=target_spawn_weights)
+                     target_spawn_weights=target_spawn_weights, target_agent_budget=target_agent_budget,
+                     target_min_agents=target_min_agents)
 
-    def autoreset_step(state: EnvState, action: jax.Array, target_spawn_weights=None, map_sampling_cdf=None):
+    def autoreset_step(state: EnvState, action: jax.Array, target_spawn_weights=None, map_sampling_cdf=None, target_agent_budget=None, target_min_agents=None):
         """Original scalar API retained as the dense equivalence reference."""
         terminal, reward, done, info = transition(state, action)
-        fresh = reset_persisted(terminal, target_spawn_weights, map_sampling_cdf)
+        fresh = reset_persisted(terminal, target_spawn_weights, map_sampling_cdf, target_agent_budget, target_min_agents)
         result = jax.tree_util.tree_map(lambda a, b: jnp.where(done, a, b), fresh, terminal)
         return result, reward, done, info
 
-    def batched_step(states, actions, target_spawn_weights=None, map_sampling_cdf=None):
+    def batched_step(states, actions, target_spawn_weights=None, map_sampling_cdf=None, target_agent_budget=None, target_min_agents=None):
         terminal, rewards, done, info = jax.vmap(transition)(states, actions)
         size = done.shape[0]
         count = jnp.sum(done, dtype=jnp.int32)
 
         def dense(current):
-            if resample_maps:
-                fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf))(current)
+            if resample_maps or target_agent_budget is not None:
+                fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf, target_agent_budget, target_min_agents))(current)
             else:
                 fresh = (jax.vmap(reset_persisted)(current) if target_spawn_weights is None else
                          jax.vmap(lambda state: reset_persisted(state, target_spawn_weights))(current))
@@ -2118,8 +2223,8 @@ def make_autoreset_fns(
             def reset_chunk(index, result):
                 lanes = jax.lax.dynamic_slice_in_dim(indices, index * block, block)
                 selected = jax.tree_util.tree_map(lambda a: a[jnp.minimum(lanes, size - 1)], current)
-                if resample_maps:
-                    fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf))(selected)
+                if resample_maps or target_agent_budget is not None:
+                    fresh = jax.vmap(lambda state: reset_persisted(state, target_spawn_weights, map_sampling_cdf, target_agent_budget, target_min_agents))(selected)
                 else:
                     fresh = (jax.vmap(reset_persisted)(selected) if target_spawn_weights is None else
                              jax.vmap(lambda state: reset_persisted(state, target_spawn_weights))(selected))
@@ -2146,5 +2251,6 @@ def make_autoreset_fns(
         return result, rewards, done, info
 
     autoreset_step.batched = batched_step
+    reset.resample = reset_persisted
 
     return reset, autoreset_step, observations, metrics

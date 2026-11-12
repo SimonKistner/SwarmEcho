@@ -1,0 +1,38 @@
+# Defaults owned by target-location probes; inherited by each variant.
+experiment: target
+policy:
+  level: null # Unused: policies are restored from their saved run config.
+  from_run_config: true
+  map_source: compatible_pool
+protocol:
+  eligibility: delivered
+  target_storey: false
+dataset:
+  train_samples: 10000
+  validation_samples: 1000
+  test_samples: 5000
+  eval_batch_size: 256
+  max_episodes: 100000
+  seed: 467789
+  split_seed: 20261013
+  path: null
+probe:
+  hidden_sizes: [256, 128]
+  seeds: [0, 1, 2]
+  epochs: 150
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 15
+  min_delta: 0.00001
+audit:
+  enabled: true
+  mode: conditional
+  samples: 5000
+  every: 1
+  batch_size: 16
+  duplicate_threshold: 0.01 # Per-input trigger: packet profiles use saved data; only conflicting finder GRUs need histories.
+distance:
+  clearance_m: null
+report:
+  dpi: 160

@@ -1,0 +1,12 @@
+{
+  "description": "G01 30-minute comparison 1/5: larger minibatches, PPO 4000/100/4/5, shared settings inherited from G01_CLU_static",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01-30m_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=4000",
+    "training.num_steps=100",
+    "training.num_epochs=4",
+    "training.num_minibatches=5"
+  ]
+}

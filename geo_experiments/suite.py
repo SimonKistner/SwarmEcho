@@ -1,7 +1,6 @@
 """Plan and sequentially execute configured readouts, sharing collection by policy."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -16,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omegaconf import OmegaConf
 
-from geo_experiments.artifacts import update_run
-from geo_experiments.common import ROOT, resolve_path, validate_config
-from geo_experiments.labels import DECODERS
-from geo_experiments.console import terminal_print as print
-from geo_experiments.naming import display_name, run_slug
+from geo_experiments.shared.artifacts import update_run
+from geo_experiments.shared.common import ROOT, resolve_path
+from geo_experiments.registry import get_probe, job_probe, archived_probe
+from geo_experiments.shared.console import terminal_print as print
+from geo_experiments.shared.naming import display_name
 
 
 def latest_checkpoint(run):
@@ -33,64 +32,73 @@ def latest_checkpoint(run):
     return max(candidates, key=lambda p: int(p.name.split("_")[-1])).resolve()
 
 
+def load_settings(path, overrides):
+    settings = OmegaConf.load(path)
+    for argument in overrides:
+        key, _, raw = argument.partition("=")
+        value = OmegaConf.to_container(OmegaConf.from_dotlist(["value=" + raw]), resolve=False)["value"]
+        OmegaConf.update(settings, key, value, merge=True)
+    return OmegaConf.to_container(settings, resolve=True)
+
+
 def execution_plan(settings):
-    if set(settings) != {"run", "defaults", "policies", "experiments", "execute"}:
-        raise ValueError("Suite sections must be run, defaults, policies, experiments, execute.")
-    selected, resolved = [], {}
+    legacy = set(settings) == {"run", "defaults", "policies", "experiments", "execute"}
+    if not legacy and set(settings) != {"run", "policies", "execute"}:
+        raise ValueError("Suite sections must be run, policies, execute.")
+    selected, resolved, verified = [], {}, set()
     for entry in settings["execute"]:
-        if set(entry) != {"policy", "experiment"}:
-            raise ValueError("Each execute entry must name policy and experiment.")
-        name, experiment = entry["policy"], entry["experiment"]
+        if legacy:
+            if set(entry) != {"policy", "experiment"}:
+                raise ValueError("Historical execute entries must name policy and experiment.")
+            config = OmegaConf.to_container(OmegaConf.merge(settings["defaults"],
+                settings["experiments"][entry["experiment"]]), resolve=True)
+            probe_name = {"shared_cell": "target-location/shared-coordinates",
+                          "map_specific": "target-location/map-specific",
+                          "map_cell": "target-location/map-and-cell"}.get(config["protocol"].get("decoder"))
+        else:
+            if set(entry) != {"policy", "probe", "repeats"}:
+                raise ValueError("Each execute entry must name policy, probe and repeats.")
+            if type(entry["repeats"]) is not int or entry["repeats"] < 1:
+                raise ValueError("repeats must be a positive integer (decoder seeds 0 through repeats-1).")
+            probe_name = entry["probe"]
+            config = get_probe(probe_name).settings()
+            config["probe"]["seeds"] = list(range(entry["repeats"]))
+        probe = archived_probe() if legacy else get_probe(probe_name)
+        name = entry["policy"]
         if name not in resolved:
             policy = settings["policies"][name]
+            if not legacy and set(policy) != {"run", "checkpoint"}:
+                raise ValueError("Suite policies contain only run and checkpoint; sampling belongs to the probe config.")
             run = resolve_path(policy["run"])
             checkpoint = latest_checkpoint(run) if policy["checkpoint"] == "latest" else resolve_path(policy["checkpoint"])
             if not checkpoint.is_dir():
                 raise FileNotFoundError(checkpoint)
             resolved[name] = {"run": str(run), "checkpoint": str(checkpoint)}
-            if "map_source" in policy:
+            if legacy and "map_source" in policy:
                 resolved[name]["map_source"] = policy["map_source"]
-            if policy.get("map_source") == "validation":
-                from geo_experiments.validation_maps import frozen_validation_maps
-                paths, _ = frozen_validation_maps(checkpoint)
-                print(f"[suite] {run.name}: {len(paths)} verified frozen validation maps", flush=True)
-        config = OmegaConf.to_container(OmegaConf.merge(settings["defaults"],
-                   settings["experiments"][experiment], {"run": {**settings["run"], "name": f"{name}_{experiment}"},
-                   "policy": {k: v for k, v in resolved[name].items() if k != "run"}}), resolve=True)
-        # Historical saved suite configs omitted this unused field.
-        # Modern policies load the checkpoint config rather than a named level.
-        config["policy"].setdefault("level", None)
-        config["run"]["name"] = run_slug(config)
-        validate_config(config)
-        if config.get("experiment", "target") != "target" or config["protocol"]["decoder"] not in DECODERS:
-            raise ValueError("This suite schedules only the three target-cell alternatives; own-cell is not enabled.")
-        if not config["policy"]["from_run_config"] or config["dataset"]["path"] is not None:
-            raise ValueError("Suite policies use their saved training config; use resume=<suite folder> to reuse collection.")
-        # Decoder/task selection changes fits, never collection. Audit settings
-        # are included because conditional history collection is shared too.
-        collection_settings = {k: config[k] for k in ("policy", "dataset", "audit", "distance")}
-        collection_settings["eligibility"] = config["protocol"]["eligibility"]
-        if config["protocol"]["decoder"] == "shared_cell":
-            # Small per-map quotas may share coordinate support across maps.
-            # Preserve the historical collection key whenever coverage fits.
-            if config["policy"].get("map_source") == "validation":
-                collection_settings["training_class_coverage"] = "pooled_coordinates"
-        key = hashlib.sha256(json.dumps(collection_settings, sort_keys=True).encode()).hexdigest()[:16]
-        selected.append({**entry, "collection_key": key, "config": config})
+        config = OmegaConf.to_container(OmegaConf.merge(config,
+            {"run": {**settings["run"], "name": name},
+             "policy": {k: v for k, v in resolved[name].items() if k != "run"}}), resolve=True)
+        adapter = probe.adapter()
+        key = adapter.plan_config(config)
+        identity = (name, config["policy"].get("map_source", "training"))
+        if identity not in verified:
+            adapter.verify_policy(config)
+            verified.add(identity)
+        selected.append({**entry, "probe": probe_name, "collection_key": key, "config": config})
     if not selected:
         raise ValueError("The execute list is empty.")
-    names = [(e["policy"], e["experiment"]) for e in selected]
+    names = [(e["policy"], e["probe"]) for e in selected]
     if len(names) != len(set(names)):
-        raise ValueError("Duplicate policy/experiment in execute list.")
+        raise ValueError("Duplicate policy/probe in execute list; use repeats for decoder repetitions.")
     return selected, resolved
 
 
 def execute_suite(settings, root, plan):
-    from geo_experiments.execution import prepare_collection, fit_and_report
-
     prepared = set()
     for index, job in enumerate(plan):
         config, key = job["config"], job["collection_key"]
+        adapter = job_probe(job).adapter()
         run_dir = root / "runs" / config["run"]["name"]
         if (run_dir / "run.json").is_file():
             previous = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -99,10 +107,9 @@ def execute_suite(settings, root, plan):
                 continue
         collection_dir = root / "collections" / key
         if key not in prepared:
-            decoders = tuple(sorted({j["config"]["protocol"]["decoder"] for j in plan if j["collection_key"] == key}))
-            prepare_collection(config, collection_dir, decoders)
+            adapter.prepare(config, collection_dir, [j for j in plan if j["collection_key"] == key])
             prepared.add(key)
-        fit_and_report(config, run_dir, collection_dir)
+        adapter.fit_and_report(config, run_dir, collection_dir)
         update_run(root, progress={"stage": "experiments", "completed": index + 1, "total": len(plan)})
     update_run(root, progress={"stage": "complete", "completed": len(plan), "total": len(plan)})
 
@@ -112,7 +119,7 @@ def main():
     for argument in sys.argv[1:]:
         key, separator, value = argument.partition("=")
         if not separator:
-            raise ValueError("Use config=<yaml>, plan=true, resume=<suite folder>, or defaults.<key>=<value>.")
+            raise ValueError("Use config=<yaml>, plan=true, resume=<suite folder>, or execute.<index>.repeats=<count>.")
         if key in ("config", "plan", "resume"):
             options[key] = value
         else:
@@ -125,7 +132,7 @@ def main():
         settings, plan = manifest["suite_config"], manifest["execution_plan"]
     else:
         path = resolve_path(options["config"]) if "config" in options else Path(__file__).with_name("probes.yaml")
-        settings = OmegaConf.to_container(OmegaConf.merge(OmegaConf.load(path), OmegaConf.from_dotlist(overrides)), resolve=True)
+        settings = load_settings(path, overrides)
         plan, resolved = execution_plan(settings)
         output_root = resolve_path(settings["run"]["output_root"])
         if not output_root.is_relative_to(ROOT / "geo_experiments"):

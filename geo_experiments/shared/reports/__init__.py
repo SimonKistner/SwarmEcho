@@ -1,0 +1,1 @@
+"""Shared registered blocks."""

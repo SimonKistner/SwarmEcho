@@ -25,11 +25,14 @@ and selects obstacle-geodesic chain geometry.
 | `collision_reward` | `-0.5` | Each colliding active drone on that transition |
 | `useless_agent_at_success_reward` | `-3000` | Each active drone outside the selected contributing chain at terminal chain success |
 | `useless_agent_at_success_all_agents_reward` | `-750` | Every active drone per useless active drone at terminal chain success; no population divisor; capped per recipient |
-| `useless_agent_at_success_all_agents_reward_cap` | `2000` | Nonnegative maximum absolute amount of the all-agents adjustment per active drone, after counting useless drones |
+| `useless_agent_at_success_all_agents_reward_cap` | `-2000` | Signed bound on the all-agents adjustment per active drone; same sign as the coefficient, or zero to disable |
 | `reinforcement_reward` | `1` | Every qualified deployment voter in full; initial spawns and rejected calls are excluded |
 | `priveleged_vote_reward.withheld_reinforcement_vote_reward` | `-1` | Informed connected source choosing NO on an eligible communication tick while a recruit is needed; nested enabled toggle required |
 | `priveleged_vote_reward.unnecessary_reinforcement_call_reward` | `-200` | Responsible qualified YES source on an unnecessary grant; nested enabled toggle required |
 | `decommission_reward` | `0` | Each removed drone, paid even after removal |
+| `non_contributor_return_reward_per_meter` | `0` | Surplus drone's positive obstacle-geodesic progress toward the decommission-zone centre during an intact chain hold; G03: `3` |
+| `non_contributor_departure_reward_per_meter` | `0` | Surplus drone's metres away from that centre, including inside the zone; G03: `-3` |
+| `non_contributor_decommission_reward` | `0` | One terminal payment to a removed surplus lifetime if the chain survives; local G03: `1500`, G03 CLU: `3000` |
 | `rejected_call_reward` | `-200` | Each qualified YES voter on a rejected fresh voting batch |
 | `all_decommissioned_penalty` | `-1000` | Each last acting drone in full when all drones are decommissioned |
 | `no_movement_termination_penalty` | `0` | Every active drone on idle failure; success and time-limit termination are excluded |
@@ -45,7 +48,7 @@ All-decommissioned deliberately preserves the former single-final-agent loss
 of 1000 rather than calibrating that failure event down to 250.
 
 At default terminal chain success with `U` useless active drones, every active
-drone receives `-min(750 * U, 2000)` from the all-agents adjustment. There is no
+drone receives `max(-750 * U, -2000)` from the all-agents adjustment. There is no
 population divisor: the cap applies separately to each recipient. It limits
 the loss so useful drones retain at least +1000 from their +3000 success reward
 and this adjustment even when many drones are unused, preserving an incentive
@@ -59,12 +62,62 @@ from these terminal components. With three or more, those amounts are +1000 and
 Both useless-agent terms fire once at terminal chain success, work with or
 without adaptive size, and are zero for inactive drones, failures and other
 mission types. Each setting is signed and zero disables it independently.
-The cap is a finite nonnegative magnitude; zero suppresses the all-agents term.
-Positive coefficients also retain their sign and use the same absolute cap.
+The cap is a finite signed bound; zero suppresses the all-agents term.
+Nonzero coefficient and cap must have the same sign. A negative cap is a lower
+bound applied with `max`; a positive cap is an upper bound applied with `min`.
+For example, +750 with a +2000 cap pays `min(750 * U, 2000)`.
+Existing configs pairing a negative coefficient with a positive magnitude cap
+must change that cap to its negative value. `min(-750 * U, -2000)` would impose
+at least a 2000 loss even with no useless drones and would not limit larger losses.
 Both enter recruits' normal rewards before reference shares are computed.
 The contributors-only success switch remains removed.
 
 ## Local attribution and shaping
+
+### Independent surplus-agent rewards
+
+Both `G03_random_buildings` and `G03_CLU_random_buildings` explicitly enable
+return progress at +3/metre and departure at -3/metre. Qualified decommission
+pays +1500 in local G03 and +3000 in G03 CLU. All three global defaults are zero. Each coefficient independently
+disables its own term; when all are zero the new calculation, component keys
+and additional path planning are absent, preserving existing behavior.
+The local +1500 exit amount is half its +3000 success reward; G03 CLU's +3000
+exit amount matches its success reward. Each is a standalone setting: changing
+or disabling success reward does not change the exit amount. G03 CLU also
+enables geometric chain-efficiency reward at 50, with the submission config
+comparing coefficients 25/50/100 under forward and reverse curricula.
+
+These rewards apply only to adaptive `chain_held` or `chain_held_and_cleand_up` missions, starting during
+the holding period, with a complete chain before and after the action. They
+use the same selected contributor membership as `observe_chain_contributor`,
+which both G03 levels already enable. An acting non-contributor need not be
+connected to either endpoint to receive guidance. A surviving drone must also
+remain a non-contributor; becoming a contributor or losing the chain produces
+zero movement shaping. Eligibility changes never create progress payments.
+
+Movement uses the signed change of shortest obstacle-aware distance to the
+decommission-zone centre
+on the existing roadmap, not the legacy gap-change switch. Positive and
+negative progress are multiplied by their separate signed coefficients.
+There is no path-length normalization: a longer return earns more total
+undiscounted reward. Stationary agents receive zero. This permits equivalent
+shortest routes rather than requiring the inspector's exact reference polyline.
+
+There is no radius cutoff or zero-reward region. Decreasing distance to the
+zone centre earns positive movement reward; increasing it incurs the departure
+penalty, including inside the decommission sphere. Arriving at the exact centre
+earns the final progress payment; remaining there earns zero, and moving away
+is penalized immediately. Unchanged distance earns zero at any position.
+The actual decommission sphere and its dwell requirement are unchanged.
+
+The terminal exit payment requires an actual new decommission event, prior
+non-contributor membership, and an intact chain before and after removal.
+It belongs to the removed lifetime even when the slot is immediately reused,
+and does not pay again on later steps. Contributors and chain-breaking exits
+receive none. It is additive to the existing unconditional `decommission_reward`;
+enabling either does not enable the other. Existing rewards and penalties are
+unchanged. Enabled components enter training metrics, replay plots and normal
+reference-reward accounting.
 
 `reward.priveleged_vote_reward.enabled=false` preserves the previous
 reinforcement rewards and protocol exactly. G02 enables it with timestamped
@@ -99,7 +152,9 @@ disabling their computation.
 With `success_reward_as_hold_record=true`, every qualifying holder receives
 `success_reward / env.hold_chain_for` on each new episode hold record. Repeated
 records do not pay, and there is no additional terminal success payout.
-Population does not enter that calculation. This mode requires `chain_held`.
+Population does not enter that calculation. This mode requires a chain-hold
+success condition. With `chain_held_and_cleand_up`, completing hold-record
+payments does not bypass cleanup or pay additional records while cleanup continues.
 
 Reference rewards remain additive decaying shares of each recruit's complete
 normal signed reward, independently paid to every qualified caller, with no

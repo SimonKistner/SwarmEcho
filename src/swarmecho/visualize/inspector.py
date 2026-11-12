@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import mimetypes
@@ -12,6 +13,9 @@ import threading
 import urllib.parse
 import webbrowser
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,7 +26,7 @@ from swarmecho.core.compatibility import canonical_marker, resolve_map_file
 from swarmecho.training.artifacts import load_eval_info_csv, parse_checkpoint_update
 from swarmecho.visualize.replay import load_replay
 from swarmecho.visualize.replay_path import cached_route, compute_and_cache, source_stamp
-from swarmecho.visualize.inspector_metadata import artifact_configuration
+from swarmecho.visualize.inspector_metadata import artifact_configuration, inspector_run_name
 from swarmecho.visualize.validation_view import discover_validations, validation_label, validation_payload
 
 
@@ -160,7 +164,7 @@ async function loadArtifactData(id){
     const parts=[];for(const name of data.chunks){const chunk=await fetch('./'+name);if(!chunk.ok)throw Error('Export data chunk failed to load');parts.push(await chunk.arrayBuffer())}
     return new Response(new Blob(parts).stream().pipeThrough(new DecompressionStream('gzip'))).json();
 }
-function loadReplay(id,keepCamera=false){resetReplayPath();setLoading(true,'Loading artifact...');return loadArtifactData(id).then(d=>{clearValidationView();renderConfiguration(d);if(d.kind==='validation'){loadedArtifactId=String(id);return drawValidation(d)}if(!keepCamera){camera=null;cameraRevision++}loadedArtifactId=String(id);if(d.kind==='roadmap'){D=d;H=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);$('roadmapOrangeGeometry').checked=false;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;rewardPlotData=prepareRewardPlots(d);setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=d.manifest.map_name+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);renderRewardLegend();return draw(0)}).finally(()=>setLoading(false))}
+function loadReplay(id,keepCamera=false){resetReplayPath();setLoading(true,'Loading artifact...');return loadArtifactData(id).then(d=>{clearValidationView();renderConfiguration(d);if(d.kind==='validation'){loadedArtifactId=String(id);return drawValidation(d)}if(!keepCamera){camera=null;cameraRevision++}loadedArtifactId=String(id);if(d.kind==='roadmap'){D=d;H=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);$('roadmapOrangeGeometry').checked=false;setMode('roadmap');$('replayName').textContent=(d.manifest.map_name||'Roadmap')+' · '+d.layouts.length+' layouts';return drawRoadmap()}if(d.kind==='heatmap'){H=d;D=null;rewardPlotData=null;setupBuildingVisibility(keepCamera);setMode('heatmap');$('replayName').textContent=(d.manifest.map_name||'evaluation')+' · '+d.positions.length+' targets';return drawHeatmap()}D=d;H=null;rewardPlotData=prepareRewardPlots(d);setupBuildingVisibility(keepCamera);setMode('replay');frame=0;$('timeline').max=d.manifest.frames-1;$('replayName').textContent=(suiteMapLabel(d.manifest)||d.manifest.map_name)+' · '+d.manifest.frames+' frames';renderKnownList(d.manifest.agents||d.position[0].length);renderRewardLegend();return draw(0)}).finally(()=>setLoading(false))}
 let artifactItems=[],artifactBusy=false,keyboardTrack='types',artifactRunLimit=3,includeTests=false,moreRunsAvailable=false;
 let artifactStars=new Set();try{artifactStars=new Set(JSON.parse(localStorage.getItem('swarmecho.inspector.stars')||'[]'))}catch{}
 function artifactParts(label){const start=label.indexOf('_[');return {run:start<0?label:label.slice(0,start),detail:start<0?'Open artifact':label.slice(start+2).replace(/\]_\[/g,' · ').replace(/\]$/,'')}}
@@ -168,7 +172,8 @@ function suiteMapId(item){return item?.map_suite_map_id||item?.random_eval_map_i
 function suiteGroup(item){return item?.map_suite_group||item?.random_eval_group}
 function manualEvalName(item){return typeof item?.eval_name==='string'&&item.eval_name.trim()?item.eval_name:null}
 function canStarArtifact(item){return ['heatmap','replay'].includes(artifactKind(item))}
-function suiteMapLabel(item){return item?.source_map_name||suiteMapId(item)}
+function suiteMapLabel(item){const mapId=suiteMapId(item)||item?.map_name;return item?.required_agents>0?'required_agents_'+item.required_agents+'_'+mapId:item?.source_map_name||mapId}
+function compareSuiteReplays(a,b){return (a.required_agents||0)-(b.required_agents||0)||String(suiteMapId(a)).localeCompare(String(suiteMapId(b)))}
 function artifactDetail(item){if(suiteMapId(item))return artifactParts(item.label).detail+' · '+suiteMapLabel(item);const duplicates=artifactItems.filter(other=>artifactRun(other)===artifactRun(item)&&other.label===item.label);let detail=artifactParts(item.label).detail;if(artifactKind(item)==='roadmap'&&item.label.startsWith('random_buildings_'))detail=detail.replace(/ · Roadmap$/,'');return detail+(duplicates.length>1?' · '+(duplicates.indexOf(item)+1):'')}
 function clearValidationView(){
     for(const id of ['validationTrend','validationHistogram'])if($(id))Plotly.purge(id);
@@ -208,7 +213,7 @@ function runItems(item){return item?artifactItems.filter(other=>artifactRun(othe
 function columnItems(group,kind){return group.filter(item=>artifactKind(item)===kind).sort((a,b)=>(artifactSteps(b)??-1)-(artifactSteps(a)??-1)||(kind==='heatmap'?Number(/EVAL Heatmap/i.test(b.label))-Number(/EVAL Heatmap/i.test(a.label)):0))}
 function navigationKey(item){return suiteGroup(item)?'maps:'+suiteGroup(item):'item:'+item.id}
 function navigationGroups(item){const groups=new Map();for(const entry of columnItems(runItems(item),artifactKind(item))){const key=navigationKey(entry);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(entry)}return [...groups.values()].reverse()}
-function mapItems(item){return suiteGroup(item)?runItems(item).filter(entry=>artifactKind(entry)===artifactKind(item)&&suiteGroup(entry)===suiteGroup(item)).sort((a,b)=>String(suiteMapId(a)).localeCompare(String(suiteMapId(b)))):[]}
+function mapItems(item){return suiteGroup(item)?runItems(item).filter(entry=>artifactKind(entry)===artifactKind(item)&&suiteGroup(entry)===suiteGroup(item)).sort(compareSuiteReplays):[]}
 function categoryTarget(item,kind){const entries=columnItems(runItems(item),kind);if(!entries.length)return null;const latest=entries.filter(entry=>navigationKey(entry)===navigationKey(entries[0]));return latest.find(entry=>suiteMapId(entry)&&suiteMapId(entry)===suiteMapId(item))||latest[0]}
 function setNavigationTrack(track){keyboardTrack=PUBLIC_INSPECTOR?'frames':(track==='maps'&&$('mapNavigation').classList.contains('hidden'))||(track==='frames'&&$('frameNavigation').classList.contains('hidden'))?'steps':track;for(const name of ['types','steps','maps','frames'])$(name==='types'?'categoryNavigation':name==='steps'?'stepNavigation':name==='maps'?'mapNavigation':'frameNavigation').dataset.active=String(keyboardTrack===name)}
 function updateArtifactNavigation(){
@@ -266,7 +271,7 @@ function openArtifactSubmenu(group,anchor){
         const cell=document.createElement('div');cell.className='artifact-cell artifact-map-cell';
         const detail=artifactParts(item.label).detail;
         const select=document.createElement('select');select.setAttribute('aria-label','Evaluation map for '+detail);
-        siblings.sort((a,b)=>suiteMapId(a).localeCompare(suiteMapId(b)));
+        siblings.sort(compareSuiteReplays);
         for(const entry of siblings)select.add(new Option((artifactStars.has(entry.id)?'★ ':'')+suiteMapLabel(entry),entry.id));
         const current=currentArtifact();if(siblings.includes(current))select.value=current.id;
         const button=document.createElement('button');button.type='button';button.className='artifact-entry';
@@ -813,7 +818,40 @@ function updateAdaptiveInspector(f){
   setupVoteVisualizationControl(enabled);
   let card=document.getElementById('adaptiveBaseCard');
   if(!card&&enabled){card=document.createElement('div');card.id='adaptiveBaseCard';card.className='card';$('episodeColumn').insertBefore(card,$('episodeCard'))}
-  if(card){card.hidden=!enabled;if(enabled){card.replaceChildren();let title=document.createElement('h3');title.textContent='Base votes · Round '+D.adapt_round[f];card.appendChild(title);let cfg=D.manifest.adapt_size;D.active[f].forEach((active,i)=>{if(!active)return;let row=document.createElement('div');const name='D'+(i+1)+' · ';if(latestDecisionProtocol()){const base=D.active[f].length,stamp=D.adapt_decision_step?.[f]?.[base]?.[i]??-1,current=D.adapt_packet_round?.[f]?.[base]?.[i]===D.adapt_round[f]&&stamp>=0;row.textContent=name+(current?(D.adapt_decision_yes[f][base][i]?'YES':'NO')+' · step '+stamp:'UNKNOWN');row.title=current?'Source decision age: '+Math.max(0,(D.step?.[f]??f)-stamp)+' steps':'No decision received for this round'}else{row.textContent=name+D.adapt_available_votes[f][i]+'/'+cfg.vote_holding;row.title='YES credits received this round: '+D.adapt_base_votes[f][i]+'; consumed by rejected calls: '+D.adapt_spent[f][i]}card.appendChild(row)})}}
+  if(card){
+    card.hidden=!enabled;
+    if(enabled){
+      card.replaceChildren();
+      const cfg=D.manifest.adapt_size,title=document.createElement('h3');
+      title.textContent='Base';title.title='Vote round '+D.adapt_round[f];card.appendChild(title);
+      const held=D.adapt_quorum_steps?.[f],lastSpawn=D.adapt_last_spawn_step?.[f],delay=D.manifest.spawn_delay;
+      const step=D.adapt_vote_step?.[f]??D.step?.[f]??f;
+      const recorded=Number.isFinite(held)&&Number.isFinite(lastSpawn)&&Number.isFinite(delay);
+      const cooldown=recorded?Math.max(0,lastSpawn+delay-step):0;
+      const status=document.createElement('div');
+      status.textContent='Status: '+(!recorded?'Not recorded in this replay':cooldown>0?'COOLDOWN: '+cooldown+' STEPS':held>0||D.adapt_spawned?.[f]?.some(Boolean)?'DEPLOYING':'WAITING FOR VOTES');
+      card.appendChild(status);
+      if(cfg.quorum_hold>0){
+        const progress=document.createElement('div');
+        progress.textContent='All YES HELD: '+(Number.isFinite(held)?held:'?')+'/'+cfg.quorum_hold;
+        progress.title='Consecutive online environment steps meeting the configured vote quorum';
+        card.appendChild(progress);
+      }
+      D.active[f].forEach((active,i)=>{
+        if(!active)return;
+        const row=document.createElement('div'),name='D'+(i+1)+' · ';
+        if(latestDecisionProtocol()){
+          const base=D.active[f].length,stamp=D.adapt_decision_step?.[f]?.[base]?.[i]??-1,current=D.adapt_packet_round?.[f]?.[base]?.[i]===D.adapt_round[f]&&stamp>=0;
+          row.textContent=name+(current?(D.adapt_decision_yes[f][base][i]?'YES':'NO')+' · step '+stamp:'UNKNOWN');
+          row.title=current?'Source decision age: '+Math.max(0,step-stamp)+' steps':'No decision received for this round';
+        }else{
+          row.textContent=name+D.adapt_available_votes[f][i]+'/'+cfg.vote_holding;
+          row.title='YES credits received this round: '+D.adapt_base_votes[f][i]+'; consumed by rejected calls: '+D.adapt_spent[f][i];
+        }
+        card.appendChild(row);
+      });
+    }
+  }
   let carrying=document.getElementById('adaptiveCarryingCard');
   if(!carrying&&enabled){carrying=document.createElement('div');carrying.id='adaptiveCarryingCard';carrying.className='card';$('episodeCard').after(carrying)}
   if(carrying){carrying.hidden=!enabled;if(enabled){carrying.replaceChildren();const title=document.createElement('h3');title.textContent='Carried votes';carrying.appendChild(title);D.active[f].forEach((active,i)=>{if(!active)return;const entry=document.createElement('div');entry.className='carried-vote-entry';const heading=document.createElement('strong');heading.textContent='D'+(i+1)+' · Round '+(D.adapt_known_round?.[f]?.[i]??D.adapt_round[f]);entry.appendChild(heading);const lines=carriedVoteLines(f,i);for(const text of lines===null?['Not recorded in this replay']:lines.length?lines:['None']){const row=document.createElement('div');row.textContent=text;entry.appendChild(row)}carrying.appendChild(entry)})}}
@@ -824,6 +862,11 @@ const rewardDebugPanel=document.createElement('div');rewardDebugPanel.className=
 $('relativeRewardPlot').replaceWith(rewardDebugPanel);
 rewardDebugPanel.innerHTML='<div class="reward-debug-controls"><label>View <select id="rewardDebugMode"><option value="breakdown" selected>Reward breakdown</option><option value="relative">Relative advantage</option></select></label><label id="rewardDroneControl">Drone <select id="rewardDebugDrone" aria-label="Drone for reward breakdown"></select></label></div><div id="relativeRewardPlot" class="reward-chart"></div><div id="rewardComponentLegend" aria-label="Reward component legend"></div>';
 const REWARD_COMPONENT_STYLES={exploration_reward:['Exploration reward','#22d3ee'],collision_reward:['Collision reward','#f87171'],finder_reward:['Finder reward','#fbbf24'],target_found_reward:['Target found reward','#60a5fa'],time_presure_reward:['Time pressure reward','#94a3b8'],gap_reward:['Gap reward','#4ade80'],peer_informing_reward:['Peer informing reward','#a78bfa'],success_reward:['Success reward','#a3e635'],useless_agent_at_success_reward:['Useless agent at success reward','#fb7185'],useless_agent_at_success_all_agents_reward:['Useless agents · all agents reward','#f97316'],no_movement_termination_penalty:['No movement termination penalty','#d97706'],chain_efficiency_reward:['Chain efficiency reward','#2dd4bf'],reinforcement_reward:['Reinforcement reward','#f472b6'],withheld_reinforcement_vote_reward:['Withheld reinforcement vote reward','#fb923c'],unnecessary_reinforcement_call_reward:['Unnecessary reinforcement call reward','#e11d48'],decommission_reward:['Decommission reward','#c084fc'],rejected_call_reward:['Rejected call reward','#ef4444'],all_decommissioned_penalty:['All decommissioned penalty','#b91c1c'],reward_by_reference:['Reference reward','#e879f9']};
+Object.assign(REWARD_COMPONENT_STYLES,{
+    non_contributor_return_reward:['Surplus return reward','#38bdf8'],
+    non_contributor_departure_reward:['Surplus departure reward','#f43f5e'],
+    non_contributor_decommission_reward:['Surplus decommission reward','#818cf8']
+});
 const REWARD_COLORS=['#60a5fa','#fb7185','#4ade80','#fbbf24','#a78bfa','#22d3ee','#f472b6','#fb923c','#a3e635','#c084fc'];
 let rewardPlotData=null;
 function prepareRewardPlots(data){
@@ -918,7 +961,7 @@ let targetPresent=D.target_present?Boolean(D.target_present[f]):true,landmarks=t
 if($('showLinks').checked)tr.push(...replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius));
 if($('showCoverage').checked){let coverage=coverageTrace(D.coverage[f],D.manifest.coverage_voxel_size_m||D.manifest.cell_size_m||5,+$('coverageOpacity').value);if(coverage)tr.push(coverage)}
 const renderPromise=renderPlot(tr,'replay-camera',{uirevision:'replay-camera',showlegend:false,sceneAnnotations:droneSceneAnnotations(f,p,active),annotationOccluders:droneAnnotationOccluders(f)});
-$('timeline').value=f;$('frame').textContent=f+'/'+(D.manifest.frames-1);$('frameSelection').textContent=f+'/'+(D.manifest.frames-1);$('previousFrame').disabled=f<=0;$('nextFrame').disabled=f>=D.manifest.frames-1;$('time').textContent=(f*D.manifest.dt).toFixed(1)+' s';let covered=D.coverage[f].flat(2),eligible=D.coverage_eligible?.flat(2),total=eligible?eligible.filter(Boolean).length:covered.length,cov=eligible?covered.filter((value,index)=>value&&eligible[index]).length:covered.filter(Boolean).length;$('coverage').textContent=(100*cov/Math.max(total,1)).toFixed(1)+'%';$('known').textContent=known.filter(Boolean).length;$('baseConn').textContent=D.connected_to_base[f].filter(Boolean).length;let successLabels={coverage:'SUCCESS: COVERAGE',discovery:'SUCCESS: VISUALLY FOUND',delivery:'SUCCESS: DELIVERED',chain_held:'SUCCESS: CHAIN HELD'};$('status').textContent=D.success[f]?(successLabels[D.manifest.success_condition]||'SUCCESS'):D.fully_connected[f]?'CHAIN HELD':known.some(Boolean)?'TARGET KNOWN':'EXPLORING';$('status').style.color=D.success[f]?'#a3e635':'#e5eefc';$('reward').textContent=D.reward_terms?D.reward_terms[f].flat().reduce((a,b)=>a+b,0).toFixed(2):'—';return Promise.all([renderPromise,renderRewardPlots(f)])}
+$('timeline').value=f;$('frame').textContent=f+'/'+(D.manifest.frames-1);$('frameSelection').textContent=f+'/'+(D.manifest.frames-1);$('previousFrame').disabled=f<=0;$('nextFrame').disabled=f>=D.manifest.frames-1;$('time').textContent=(f*D.manifest.dt).toFixed(1)+' s';let covered=D.coverage[f].flat(2),eligible=D.coverage_eligible?.flat(2),total=eligible?eligible.filter(Boolean).length:covered.length,cov=eligible?covered.filter((value,index)=>value&&eligible[index]).length:covered.filter(Boolean).length;$('coverage').textContent=(100*cov/Math.max(total,1)).toFixed(1)+'%';$('known').textContent=known.filter(Boolean).length;$('baseConn').textContent=D.connected_to_base[f].filter(Boolean).length;let successLabels={coverage:'SUCCESS: COVERAGE',discovery:'SUCCESS: VISUALLY FOUND',delivery:'SUCCESS: DELIVERED',chain_held:'SUCCESS: CHAIN HELD',chain_held_and_cleand_up:'SUCCESS: CHAIN HELD AND CLEANED UP'};$('status').textContent=D.success[f]?(successLabels[D.manifest.success_condition]||'SUCCESS'):D.fully_connected[f]?'CHAIN HELD':known.some(Boolean)?'TARGET KNOWN':'EXPLORING';$('status').style.color=D.success[f]?'#a3e635':'#e5eefc';$('reward').textContent=D.reward_terms?D.reward_terms[f].flat().reduce((a,b)=>a+b,0).toFixed(2):'—';return Promise.all([renderPromise,renderRewardPlots(f)])}
 function updateOpacityValue(input,output){$(output).textContent=(Math.round(1000*+$(input).value)/10)+'%'}
 $('timeline').oninput=e=>{setNavigationTrack('frames');const result=draw(e.target.value);anchorPlayback(result)};
 $('showRewardPlots').onchange=()=>{updateRewardPlotsVisibility();if($('showRewardPlots').checked)renderRewardPlots(frame)};
@@ -1111,7 +1154,10 @@ def _nearest_heatmap_checkpoint(info_path: Path, manifest: dict) -> Path | None:
     """Resolve a heatmap to its closest saved checkpoint in the same run."""
     configured = manifest.get("checkpoint")
     if configured:
-        return Path(str(configured))
+        from swarmecho.core.paths import resolve_project_path
+        configured_path = resolve_project_path(configured)
+        if configured_path.is_dir():
+            return configured_path
 
     artifacts_dir = next(
         (parent for parent in info_path.parents if parent.name == "artifacts"),
@@ -1144,16 +1190,63 @@ def inspector_html() -> str:
     return HTML.replace(external, f"<script>{get_plotlyjs()}</script>")
 
 
-def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
-    """Find completed replay manifests in the known replay folders.
+_DISCOVERY_METADATA = ContextVar("inspector_discovery_metadata", default=None)
+
+
+@contextmanager
+def _discovery_metadata_snapshot():
+    """Check each metadata file's timestamp once per HTTP request."""
+    token = _DISCOVERY_METADATA.set({})
+    try:
+        yield
+    finally:
+        _DISCOVERY_METADATA.reset(token)
+
+
+@lru_cache(maxsize=4096)
+def _inspector_metadata_at_stamp(path: Path, modified_ns: int, size: int) -> dict | None:
+    """Cache only picker metadata, never replay arrays or roadmap geometry."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    keys = ("format", "data_file", "robustness_runs", "environment_steps",
+            "target_selection", "artifact_scope", "eval_name",
+            "random_eval_map_id", "random_eval_group", "map_suite_map_id",
+            "map_suite_group", "source_map_name", "required_agents")
+    metadata = {key: data[key] for key in keys if key in data}
+    manifest = data.get("manifest")
+    if isinstance(manifest, dict):
+        metadata["manifest"] = {"map_name": manifest.get("map_name")}
+    return metadata
+
+
+def _inspector_metadata(path: Path) -> dict | None:
+    """Reuse JSON metadata until its file timestamp or size changes."""
+    snapshot = _DISCOVERY_METADATA.get()
+    if snapshot is not None and path in snapshot:
+        return snapshot[path]
+    try:
+        stamp = path.stat()
+        metadata = _inspector_metadata_at_stamp(path, stamp.st_mtime_ns, stamp.st_size)
+    except OSError:
+        metadata = None
+    if snapshot is not None:
+        snapshot[path] = metadata
+    return metadata
+
+
+def _iter_replays(root: str | Path, *, single_run: bool = False):
+    """Yield completed replay manifests without loading their array data.
 
     Replay artifacts use a fixed layout, so scanning only those folders avoids
     walking checkpoints, W&B data, logs, and unrelated JSON files.
     """
     root = Path(root)
-    manifests: list[Path] = []
     if not root.exists():
-        return manifests
+        return
     replay_dirs: set[Path] = set()
     for pattern in (
         "*/replays",
@@ -1166,29 +1259,30 @@ def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) 
     for replay_dir in replay_dirs:
         for path in replay_dir.glob("*.json"):
             data_path: Path | None = None
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                data_file = data.get("data_file") if isinstance(data, dict) else None
-                if isinstance(data_file, str) and data_file:
-                    data_path = path.parent / data_file
-            except (OSError, json.JSONDecodeError):
-                continue
+            data = _inspector_metadata(path) or {}
+            data_file = data.get("data_file")
+            if isinstance(data_file, str) and data_file:
+                data_path = path.parent / data_file
             if (
-                not isinstance(data, dict)
-                or data.get("format") != "swarmecho-replay/v1"
+                data.get("format") != "swarmecho-replay/v1"
                 or data_path is None
                 or not data_path.exists()
             ):
                 continue
-            manifests.append(path.resolve())
-    return sorted(set(manifests), key=lambda path: path.stat().st_mtime, reverse=True)
+            yield path.resolve()
 
 
-def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
-    """Find single-pass and robust heatmaps, excluding action-capture CSVs."""
+def discover_replays(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
+    """Find completed replays in the known artifact folders, newest first."""
+    return sorted(set(_iter_replays(root, single_run=single_run)),
+                  key=lambda path: path.stat().st_mtime_ns, reverse=True)
+
+
+def _iter_heatmaps(root: str | Path, *, single_run: bool = False):
+    """Identify heatmaps from sidecars and CSV headers; defer row validation."""
     root = Path(root)
     if not root.exists():
-        return []
+        return
     data_dirs: set[Path] = set()
     for pattern in (
         "*/artifacts/train/data",
@@ -1196,19 +1290,29 @@ def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False)
         "*/artifacts/eval/*/eval_*/data",
     ):
         data_dirs.update(path for path in root.glob(pattern.removeprefix("*/") if single_run else pattern) if path.is_dir())
-    heatmaps: list[Path] = []
     for data_dir in data_dirs:
         for filename_pattern in ("eval_info_*.csv",):
             for path in data_dir.glob(filename_pattern):
                 try:
-                    manifest = json.loads(path.with_suffix(".heatmap.json").read_text(encoding="utf-8"))
+                    manifest = _inspector_metadata(path.with_suffix(".heatmap.json"))
+                    if manifest is None:
+                        continue
                     if int(manifest.get("robustness_runs", 1)) < 1:
                         continue
-                    if load_eval_info_csv(path)["positions"].shape[-1] == 3:
-                        heatmaps.append(path.resolve())
-                except (OSError, ValueError):
+                    with path.open("r", newline="") as csv_file:
+                        fields = set(next(csv.reader(csv_file), []))
+                    rates = {"chain_success_rate", "found_and_delivered_rate", "visually_found_rate"}
+                    if ({"x", "y", "z", "distance_to_base"}.issubset(fields)
+                            and ("stage" in fields or rates.issubset(fields))):
+                        yield path.resolve()
+                except (OSError, ValueError, TypeError, csv.Error):
                     continue
-    return sorted(set(heatmaps), key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def discover_heatmaps(root: str | Path = "outputs", *, single_run: bool = False) -> list[Path]:
+    """Find single-pass and robust heatmaps without parsing evaluation rows."""
+    return sorted(set(_iter_heatmaps(root, single_run=single_run)),
+                  key=lambda path: path.stat().st_mtime_ns, reverse=True)
 
 
 def discover_roadmap_tests(root: str | Path = "outputs") -> list[Path]:
@@ -1219,7 +1323,7 @@ def discover_roadmap_tests(root: str | Path = "outputs") -> list[Path]:
     results = []
     for path in root.glob("testresults/**/*.roadmap.json"):
         try:
-            if json.loads(path.read_text(encoding="utf-8")).get("format") == "swarmecho-roadmap-test/v1":
+            if (_inspector_metadata(path) or {}).get("format") == "swarmecho-roadmap-test/v1":
                 results.append(path.resolve())
         except (OSError, json.JSONDecodeError):
             continue
@@ -1229,10 +1333,7 @@ def discover_roadmap_tests(root: str | Path = "outputs") -> list[Path]:
 def roadmap_label(path: Path) -> str:
     """Give generated suites a compact run label and per-map route label."""
     stem = path.name.removesuffix(".roadmap.json")
-    try:
-        name = json.loads(path.read_text(encoding="utf-8")).get("manifest", {}).get("map_name")
-    except (OSError, ValueError):
-        name = None
+    name = (_inspector_metadata(path) or {}).get("manifest", {}).get("map_name")
     if not name:
         return f"{stem}_[Roadmap]"
     if path.parent.name.startswith("random_buildings_"):
@@ -1251,13 +1352,10 @@ def map_suite_metadata(kind, path):
     if kind not in {"heatmap", "replay"}:
         return {}
     sidecar = path.with_suffix(".heatmap.json") if kind == "heatmap" else path
-    try:
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    data = _inspector_metadata(sidecar) or {}
     return {key: data[key] for key in ("random_eval_map_id", "random_eval_group",
                                        "map_suite_map_id", "map_suite_group", "source_map_name",
-                                       "eval_name") if key in data}
+                                       "eval_name", "required_agents") if key in data}
 
 
 _REPLAY_STEPS = re.compile(r"(?:^|_)s0*(\d+)([Mk])(?:$|[._])", re.IGNORECASE)
@@ -1268,10 +1366,9 @@ def _replay_steps_label(manifest_path: Path) -> str | None:
     match = _REPLAY_STEPS.search(manifest_path.stem)
     if match:
         return f"{int(match.group(1))}{match.group(2)}"
-    try:
-        metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    metadata_path = (manifest_path.with_suffix(".heatmap.json")
+                     if manifest_path.suffix == ".csv" else manifest_path)
+    metadata = _inspector_metadata(metadata_path) or {}
     steps = metadata.get("environment_steps")
     if steps is None:
         return None
@@ -1299,12 +1396,9 @@ def replay_label(manifest_path: str | Path) -> str:
 def _is_target_replay(manifest_path: str | Path) -> bool:
     """Identify both legacy and coordinate-qualified manual target replays."""
     path = Path(manifest_path)
-    try:
-        metadata = json.loads(path.read_text(encoding="utf-8"))
-        if metadata.get("target_selection") in {"TARGET", "TARGET-REPLAY"}:
-            return True
-    except (OSError, json.JSONDecodeError):
-        pass
+    metadata = _inspector_metadata(path) or {}
+    if metadata.get("target_selection") in {"TARGET", "TARGET-REPLAY"}:
+        return True
     return bool(re.search(r"(?:^|_)TARGET(?:-REPLAY)?(?:_|$)", path.stem))
 
 
@@ -1324,13 +1418,9 @@ def heatmap_label(info_path: str | Path) -> str:
 def _heatmap_scope(info_path: Path) -> str:
     """Read artifact scope, falling back to the canonical folder layout."""
     sidecar = info_path.with_suffix(".heatmap.json")
-    try:
-        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
-        scope = metadata.get("artifact_scope")
-        if scope in {"train", "eval"}:
-            return scope
-    except (OSError, json.JSONDecodeError):
-        pass
+    scope = (_inspector_metadata(sidecar) or {}).get("artifact_scope")
+    if scope in {"train", "eval"}:
+        return scope
 
     parts = info_path.parts
     try:
@@ -1345,18 +1435,14 @@ def _heatmap_scope(info_path: Path) -> str:
 def _artifact_run_name(path: Path, *, fallback: str) -> str:
     parts = path.parts
     try:
-        return parts[parts.index("artifacts") - 1]
+        return inspector_run_name(Path(*parts[:parts.index("artifacts")]))
     except ValueError:
-        return path.parent.parent.name if path.parent.name == "replays" else fallback
+        return inspector_run_name(path.parent.parent) if path.parent.name == "replays" else fallback
 
 
 def _artifact_eval_name(path: Path) -> str | None:
     """Read the optional human evaluation label without exposing timestamps."""
-    try:
-        metadata = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    value = metadata.get("eval_name") if isinstance(metadata, dict) else None
+    value = (_inspector_metadata(path) or {}).get("eval_name")
     return value if isinstance(value, str) and value else None
 
 
@@ -1380,6 +1466,10 @@ def make_handler(
     encoded_html = inspector_html().encode()
     manifests_lock = threading.Lock()
     cached_sources: list[tuple[str, Path]] = [("replay", path) for path in resolved]
+    inventory_lock = threading.Lock()
+    run_inventory: list[tuple[int, Path | None, list[tuple[str, Path]]]] | None = None
+    test_inventory: list[tuple[int, Path | None, list[tuple[str, Path]]]] | None = None
+    tests_available = False
     path_executor = ProcessPoolExecutor(max_workers=1)
     path_jobs: dict[tuple[Path, str], object] = {}
     path_jobs_lock = threading.Lock()
@@ -1457,20 +1547,9 @@ def make_handler(
             cached_sources = current
             return list(cached_sources)
 
-    def refresh_recent_sources(
-        limit: int = 3, *, include_tests: bool = False, exclude_runs: set[str] | None = None
-    ) -> tuple[list[tuple[str, Path]], bool]:
-        """Read a bounded page of the newest unloaded run/test groups."""
-        nonlocal cached_sources
-        exclude_runs = exclude_runs or set()
-        if replay_root is None or not replay_root.is_dir():
-            sources = refresh_sources()
-            groups: dict[str, list[tuple[str, Path]]] = {}
-            for source in sources:
-                identifier = run_id(*source)
-                if identifier not in exclude_runs:
-                    groups.setdefault(identifier, []).append(source)
-            return [source for group in list(groups.values())[:limit] for source in group], len(groups) > limit
+    def recent_candidates(*, refresh: bool, include_tests: bool):
+        """Keep one chronological snapshot while paging; explicit refresh rebuilds it."""
+        nonlocal run_inventory, test_inventory, tests_available
         patterns = (
             "validation/results_u*.json",
             "replays/*.json",
@@ -1482,54 +1561,86 @@ def make_handler(
             "artifacts/eval/*/data/eval_info_*.csv",
             "artifacts/eval/*/eval_*/data/eval_info_*.csv",
         )
-        candidates: list[tuple[int, Path | None, list[tuple[str, Path]]]] = []
-        for directory in replay_root.iterdir():
-            if not directory.is_dir() or directory.name == "testresults":
-                continue
-            if hashlib.sha256(str(directory).encode()).hexdigest() in exclude_runs:
-                continue
-            newest = 0
-            for pattern in patterns:
-                for path in directory.glob(pattern):
-                    try:
-                        newest = max(newest, path.stat().st_mtime_ns)
-                    except OSError:
+        with inventory_lock:
+            if refresh or run_inventory is None:
+                inventory = []
+                for directory in replay_root.iterdir():
+                    if not directory.is_dir() or directory.name == "testresults":
                         continue
-            if newest:
-                candidates.append((newest, directory, []))
-        if include_tests:
-            test_groups: dict[str, list[tuple[str, Path]]] = {}
-            for path in discover_roadmap_tests(replay_root):
-                identifier = run_id("roadmap", path)
+                    newest = 0
+                    for pattern in patterns:
+                        for path in directory.glob(pattern):
+                            try:
+                                newest = max(newest, path.stat().st_mtime_ns)
+                            except OSError:
+                                continue
+                    if newest:
+                        inventory.append((newest, directory, []))
+                run_inventory = inventory
+                test_inventory = None
+                tests_available = any(replay_root.glob("testresults/**/*.roadmap.json"))
+            if include_tests and test_inventory is None:
+                test_groups: dict[str, list[tuple[str, Path]]] = {}
+                for path in discover_roadmap_tests(replay_root):
+                    test_groups.setdefault(run_id("roadmap", path), []).append(("roadmap", path))
+                test_inventory = [
+                    (max(path.stat().st_mtime_ns for _, path in sources), None, sources)
+                    for sources in test_groups.values()
+                ]
+            return list(run_inventory) + (list(test_inventory or []) if include_tests else []), tests_available
+
+    def refresh_recent_sources(
+        limit: int = 3, *, include_tests: bool = False, exclude_runs: set[str] | None = None
+    ) -> tuple[list[tuple[str, Path]], bool]:
+        """Read only the requested page, with a one-artifact lookahead."""
+        nonlocal cached_sources
+        exclude_runs = exclude_runs or set()
+        if replay_root is None or not replay_root.is_dir():
+            sources = refresh_sources()
+            groups: dict[str, list[tuple[str, Path]]] = {}
+            for source in sources:
+                identifier = run_id(*source)
                 if identifier not in exclude_runs:
-                    test_groups.setdefault(identifier, []).append(("roadmap", path))
-            for sources in test_groups.values():
-                newest = max(path.stat().st_mtime_ns for _, path in sources)
-                candidates.append((newest, None, sources))
+                    groups.setdefault(identifier, []).append(source)
+            return [source for group in list(groups.values())[:limit] for source in group], len(groups) > limit
+        candidates, has_tests = recent_candidates(refresh=not exclude_runs, include_tests=include_tests)
         candidates.sort(key=lambda entry: entry[0], reverse=True)
         current: list[tuple[str, Path]] = []
         loaded_runs = 0
         has_more = False
         for _, directory, run_sources in candidates:
+            identifier = (hashlib.sha256(str(directory).encode()).hexdigest()
+                          if directory is not None else run_id(*run_sources[0]))
+            if identifier in exclude_runs:
+                continue
+            if loaded_runs == limit:
+                # Checking for another page must not discover an entire extra
+                # run. Stop after its first usable manifest or CSV header.
+                if directory is None or (
+                    next(_iter_replays(directory, single_run=True), None) is not None
+                    or next(_iter_heatmaps(directory, single_run=True), None) is not None
+                    or discover_validations(directory, single_run=True)
+                ):
+                    has_more = True
+                    break
+                continue
             if directory is not None:
                 run_sources = [("replay", path) for path in discover_replays(directory, single_run=True)]
                 run_sources += [("heatmap", path) for path in discover_heatmaps(directory, single_run=True)]
                 run_sources += [("validation", path) for path in discover_validations(directory, single_run=True)]
             if not run_sources:
                 continue
-            if loaded_runs == limit:
-                has_more = True
-                break
             current.extend(run_sources)
             loaded_runs += 1
         if not exclude_runs and initial is not None and initial.is_file() and ("replay", initial) not in current:
             current.append(("replay", initial))
         current.sort(key=lambda source: source[1].stat().st_mtime_ns, reverse=True)
         if not include_tests:
-            has_more = has_more or any(replay_root.glob("testresults/**/*.roadmap.json"))
+            has_more = has_more or has_tests
         with manifests_lock:
             if exclude_runs:
-                cached_sources = [source for source in cached_sources if source not in current] + current
+                current_set = set(current)
+                cached_sources = [source for source in cached_sources if source not in current_set] + current
             else:
                 cached_sources = current
             return list(current), has_more
@@ -1601,6 +1712,7 @@ def make_handler(
             except (ValueError, TypeError, OSError) as exc:
                 self.send_json({"message": str(exc)}, 400)
 
+        @_discovery_metadata_snapshot()
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             has_more = False

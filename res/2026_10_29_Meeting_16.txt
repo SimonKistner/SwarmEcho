@@ -1,0 +1,36 @@
+2026_10_29_Meeting_16
+
+leon magnus -> cnn -> special representation is being kept
+
+vs 
+
+1d tensor -> each value means something, but special value is lost. 
+
+path as Boolean. 
+
+1st just probe 
+
+2nd auxiliary loss
+
+base latent GRU loss -
+
+during training any agent that has seen the target so far. any agents latent 
+
+naive way: every timestep, every agent that has seen it
+
+each minibatch gets one gradient step. end of each minibatch: for every ppo gradient step one step for this probe
+
+rather small weight lamba auxiliary 
+
+compared to the task loss
+
+
+representation should be relative to base position
+
+
+1. one drone explores and recruits only the necessary
+
+2. spawn everything at the beginning
+
+
+auxiliary loss probe + separate path reconstruct probe eval

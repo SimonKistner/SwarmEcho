@@ -1,0 +1,15 @@
+{
+  "description": "G03 refinement Wave 2 axial check; PPO 8000/50/3/5; training seed 456789; same shared task settings; OOM recovery disabled to preserve this cell",
+  "level": "G03_CLU_random_buildings",
+  "run_name_template": "clu-g03-refine-wave2_{ppo}_seed456789",
+  "wandb_group": "G03_CLU_refinement_wave2_N8000_T50_E3_M5",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=8000",
+    "training.num_steps=50",
+    "training.num_epochs=3",
+    "training.num_minibatches=5",
+    "training.seed=456789",
+    "training.oom_recovery.enabled=false"
+  ]
+}

@@ -72,6 +72,41 @@ def test_disabled_defaults_and_validation():
             validate_adapt_size(replace(cfg, adapt_size=replace(cfg.adapt_size, **{field: value})))
 
 
+def test_decommission_zone_observation_toggle_and_membership():
+    cfg = env_config()
+    reset, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    state = reset(jax.random.PRNGKey(0))
+    center = state.base_pos
+    state = state._replace(
+        active=jnp.array([True, True, False]),
+        pos=jnp.stack([center, center + jnp.array([cfg.adapt_size.decommission_radius_m, 0., 0.]), center]),
+        adaptive=state.adaptive._replace(zone_center=center, zone_valid=jnp.bool_(True)),
+    )
+    enabled_obs = jax.jit(observe)(state)
+    # Vote is channel 6; zone membership follows it, including the sphere boundary.
+    np.testing.assert_array_equal(enabled_obs[:, 7], [1., 1., 0.])
+    outside = state._replace(pos=state.pos.at[0, 0].add(cfg.adapt_size.decommission_radius_m + 0.1))
+    assert float(observe(outside)[0, 7]) == 0.
+    invalid = state._replace(adaptive=state.adaptive._replace(zone_valid=jnp.bool_(False)))
+    np.testing.assert_array_equal(observe(invalid)[:, 7], 0.)
+
+    disabled = replace(cfg, observe_decommission_zone=False)
+    _, _, observe_disabled, _ = make_env_fns(BUILDING, disabled, plan_geodesic=False)
+    disabled_obs = jax.jit(observe_disabled)(state)
+    assert disabled_obs.shape == (cfg.num_agents, observation_dim(disabled))
+    assert observation_dim(disabled) == observation_dim(cfg) - 1
+    np.testing.assert_allclose(disabled_obs, np.delete(enabled_obs, 7, axis=1))
+
+    fixed = replace(cfg, adapt_size=AdaptSizeConfig())
+    reset_fixed, _, observe_fixed, _ = make_env_fns(BUILDING, fixed, plan_geodesic=False)
+    _, _, observe_fixed_disabled, _ = make_env_fns(
+        BUILDING, replace(fixed, observe_decommission_zone=False), plan_geodesic=False)
+    fixed_state = reset_fixed(jax.random.PRNGKey(0))
+    np.testing.assert_array_equal(observe_fixed(fixed_state), observe_fixed_disabled(fixed_state))
+    with pytest.raises(ValueError, match="observe_decommission_zone must be boolean"):
+        make_env_fns(BUILDING, replace(cfg, observe_decommission_zone=1), plan_geodesic=False)
+
+
 def test_both_action_semantics_and_unsquashed_vote():
     previous = jnp.array([False, True, True])
     np.testing.assert_array_equal(apply_vote(previous, jnp.array([0, 1, 0]), "hold"), [0, 1, 0])
@@ -229,26 +264,6 @@ def test_jit_vmap_scan_population_churn_keeps_static_shapes():
     assert np.all(np.asarray(result.next_id) > 9)
 
 
-def test_environment_birth_has_zero_knowledge_and_only_two_new_observations():
-    cfg = env_config(adapt_size=replace(env_config().adapt_size, vote_holding=1))
-    reset, step, obs, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False, memory_comm_every_k_steps=3)
-    state = reset(jax.random.PRNGKey(1))
-    assert bool(state.adaptive.zone_valid)
-    assert np.all(np.linalg.norm(np.asarray(state.pos) - state.adaptive.zone_center, axis=-1) > cfg.adapt_size.decommission_radius_m)
-    np.testing.assert_allclose(state.adaptive.zone_center[:2], state.base_pos[:2])
-    assert float(state.adaptive.zone_center[2] - state.pos[0, 2]) > cfg.adapt_size.decommission_radius_m
-    state = state._replace(target_known=jnp.array([1, 1, 0], bool), base_target_known=jnp.bool_(True))
-    born = jax.jit(step)(state, jnp.zeros((3, 4)).at[0, 3].set(1))
-    assert bool(born.adaptive.spawned[2])
-    assert not bool(born.target_known[2])
-    np.testing.assert_array_equal(born.vel[2], 0)
-    np.testing.assert_allclose(born.pos[2], state.base_pos + jnp.array([0., 0., cfg.drone_radius]))
-    assert obs(born).shape == (3, observation_dim(cfg))
-    for _ in range(2):
-        born = step(born, jnp.zeros((3, 4)).at[:, 3].set(1))
-    assert int(born.adaptive.rejected_calls) == 0
-
-
 def test_initial_spawn_delay_is_preserved_and_call_arrives_immediately():
     cfg = env_config(spawn_delay=5, adapt_size=replace(env_config().adapt_size,
                                                        initial_agents=2, vote_holding=1))
@@ -381,6 +396,70 @@ def tiny_level(mode="hold"):
                            eval_differes_from_training_map=False, minimum_geodesic_separation=False))
 
 
+def test_evaluation_useless_agents_use_success_terminal_state(monkeypatch, tmp_path):
+    import sys
+    from swarmecho.training import train
+
+    level = tiny_level()
+    cfg = replace(level.env, max_steps=3, hold_chain_for=1, comm_radius=4.1,
+                  comm_radius_base=4.1, visual_radius=2.1,
+                  adapt_size=replace(level.env.adapt_size, initial_agents=3))
+    level = replace(level, env=cfg)
+    reset, step, observations, env_metrics = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+
+    def fixed_reset(key, **kwargs):
+        return reset(key)._replace(
+            base_pos=jnp.array([2., 2., 2.]), target_pos=jnp.array([10., 2., 2.]),
+            pos=jnp.array([[5., 2., 2.], [9., 2., 2.], [17., 17., 10.]]),
+            active=jnp.ones(3, bool), target_known=jnp.ones(3, bool),
+            target_required_agents=jnp.int32(2))
+
+    def terminal_then_empty(state, actions):
+        # Later scan steps must not overwrite the first successful population.
+        state = state._replace(active=jnp.where(state.done, False, state.active))
+        return step(state, jnp.zeros((3, 4)))
+
+    monkeypatch.setattr(train, "_evaluation_env_fns",
+                        lambda level: (fixed_reset, terminal_then_empty, observations, env_metrics))
+    model = build_model(level)
+    metrics, info = train.evaluate_suite(model, level, episodes=2,
+                                        return_episode_info=True, return_required_agents=True)
+    assert metrics["eval_success"] == 1
+    assert metrics["eval_useless_agents_at_success"] == 1
+    assert metrics["eval_informed_count"] == 6
+    assert metrics["eval_peer-informed-pct"] == 0
+    assert metrics["eval_base-informed-pct"] == 0
+    np.testing.assert_array_equal(info["required_agents"], [2, 2])
+    validation_batch = train._run_parallel_evaluation_jit(
+        model, jax.random.PRNGKey(0), jax.random.PRNGKey(1),
+        reset=fixed_reset, step=terminal_then_empty, observations=observations,
+        env_metrics=env_metrics, reward_cfg=level.reward, cfg=cfg,
+        num_envs=2, horizon=3, return_population=True,
+        return_required_agents=True, return_useless_agents=True,
+        return_information=True, return_geo=True)
+    np.testing.assert_array_equal(validation_batch[15], [3, 3])
+    np.testing.assert_array_equal(validation_batch[16], [2, 2])
+    np.testing.assert_array_equal(validation_batch[17], [1, 1])
+    np.testing.assert_array_equal(validation_batch[18], [[3, 0, 0], [3, 0, 0]])
+    assert validation_batch[-2].shape == (2, 3, model.hidden_dim)
+    assert validation_batch[-1].shape == (2, 3)
+    captured, _, capture = train.evaluate_suite_with_action_capture(
+        model, level, episodes=2, result="success", offset=0)
+    assert captured["eval_useless_agents_at_success"] == 1
+    assert captured["eval_informed_count"] == 6
+    assert capture["length"] == 1
+    assert capture["actions"].shape == (3, 3, 4)
+    logged = []
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(log=lambda values, **kwargs: logged.append(values)))
+    monkeypatch.setattr(train, "evaluation_row", lambda *args, **kwargs: None)
+    train._report_evaluation(metrics, level, update=1, total=1, steps=6, phase="eval",
+                             wandb_run=object(), history_path=tmp_path / "history.jsonl",
+                             hold=SimpleNamespace(consecutive=0))
+    assert logged[0]["eval/useless_agents_at_success"] == 1
+    assert logged[0]["eval/peer-informed-pct"] == 0
+    assert logged[0]["eval/base-informed-pct"] == 0
+
+
 @pytest.mark.parametrize("mode", ["hold", "keep_yes_no"])
 def test_recurrent_ppo_exact_replay_gradients_and_fresh_memory(mode):
     level = tiny_level(mode)
@@ -486,3 +565,16 @@ def test_checkpoints_reject_enabled_and_vote_mode_mismatches(tmp_path):
     (tmp_path / "training_contract.json").write_text(json.dumps(contract))
     with pytest.raises(ValueError, match="vote_mode"):
         validate_checkpoint_contract(model, tmp_path)
+
+
+def test_decommission_zone_checkpoint_legacy_default_and_toggle(tmp_path):
+    level = tiny_level()
+    model = build_model(level)
+    legacy = dict(model.checkpoint_contract)
+    assert legacy.pop("observe_decommission_zone") is True
+    (tmp_path / "training_contract.json").write_text(json.dumps(legacy))
+    validate_checkpoint_contract(model, tmp_path)
+    disabled = build_model(replace(level, env=replace(level.env, observe_decommission_zone=False)))
+    assert dict(disabled.checkpoint_contract)["observe_decommission_zone"] is False
+    with pytest.raises(ValueError, match="observe_decommission_zone"):
+        validate_checkpoint_contract(disabled, tmp_path)

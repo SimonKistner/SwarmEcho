@@ -1,0 +1,29 @@
+{
+  "description": "Six-hour G01 exploration: broad memory boundaries then fresh learning trials, durable results and bounded recovery",
+  "level": "G01_CLU_static",
+  "wandb_mode": "online",
+  "overrides": [],
+  "tuning": {
+    "phase": "explore",
+    "search_seconds": 21600,
+    "capacity_seconds": 3600,
+    "capacity_candidate_seconds": 480,
+    "probe_updates": 2,
+    "trials": 16,
+    "startup_trials": 6,
+    "startup_trial_seconds": 1800,
+    "trial_seconds": 5400,
+    "prune_rungs_seconds": [600, 1200, 2400],
+    "min_updates": 10,
+    "min_completed_episodes": 1000,
+    "headroom_fraction": 0.10,
+    "envs": [500, 1000, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000, 48000, 64000, 128000],
+    "steps": [25, 50, 100, 200, 400, 700, 1400],
+    "epochs": [1, 2, 4, 8, 16, 32],
+    "minibatches": [5, 10, 20, 40, 80, 160, 320],
+    "worker_retries": 1,
+    "max_consecutive_errors": 3,
+    "controller_restarts": 2,
+    "seed": 456789
+  }
+}

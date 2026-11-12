@@ -35,6 +35,22 @@ Random training maps are sampled uniformly at episode resets when adaptive map
 sampling is disabled. The split and validation remain available independently;
 enabling adaptation only changes training map probabilities.
 
+### Training time budgets
+
+`training.max_wall_seconds` retains its setup-inclusive wall-time limit.
+`training.max_training_seconds` is an optional per-training-attempt limit that
+starts after map/bank/model preparation, at tracking initialization. It includes
+first JIT, optimization, periodic evaluation and checkpoint overhead. Both
+default to `null`; when both are set, the earlier deadline wins. Stops occur
+after a complete update and in-flight evaluation; final validation/saving/media
+may follow. The training-only clock is per attempt; OOM retry supervision retains
+its existing shared `max_wall_seconds` limit.
+
+`G03_CLU_random_buildings` sets `max_training_seconds: 14400` and disables OOM
+recovery for the four-hour Wave 3 comparisons. Its local G03 counterpart keeps
+the existing unlimited defaults. `perf/wall_seconds` retains setup-inclusive
+timing; `perf/training_seconds` reports the new setup-excluded clock.
+
 ### Optional reinforcement vote rewards
 
 G02 enables `reward.priveleged_vote_reward.enabled=true`; the global
@@ -170,12 +186,13 @@ target delivery +125, and time pressure -0.75 per acting drone per step.
 agent at terminal chain success. In addition,
 `useless_agent_at_success_all_agents_reward=-750` applies to every active drone
 per useless active drone at that success, without dividing by population.
-`useless_agent_at_success_all_agents_reward_cap=2000` limits the absolute amount
-per recipient: each gets `-min(750 * useless_count, 2000)`. The min cap leaves a
+`useless_agent_at_success_all_agents_reward_cap=-2000` is the signed lower bound
+per recipient: each gets `max(-750 * useless_count, -2000)`. This bound leaves a
 useful drone at least +1000 from success and this adjustment, so completing still
 pays even with many unused drones. For two useless drones each active drone gets
 -1500 from this term; useless drones also receive their separate -3000 adjustment.
-The cap is a finite nonnegative magnitude. Zero disables either
+The cap is finite and has the same sign as the coefficient when both are nonzero;
+positive rewards use a positive upper bound instead. Zero disables either
 term independently. Contributors-only success remains removed. Local voxel, peer-sender and soft
 cluster attribution remain. See [signed individual rewards](../01_reference/11_individual_rewards.md).
 
@@ -192,6 +209,27 @@ same smaller window. `req_agent_K/total_eps_in_eps_window` measures the category
 fraction in the ordinary `training.num_envs` completed-episode window. The
 curriculum's spare slot does not change `K`. See
 [adaptive diagnostics](../01_reference/07_adaptive_swarm_diagnostics.md).
+
+`env.spawn_delay` unconditionally sets the minimum environment steps between
+base deployments, including adaptive reinforcements and scheduled initial
+arrivals. Reset's initial deployment starts the cooldown. Due initial arrivals
+take priority. During cooldown the base ignores incoming votes, holds active
+sources at NO and resets the quorum hold to zero; it starts receiving and
+counting again when online. Cooldown alone causes no rejection or withheld-vote
+penalty. Zero disables the delay. Each newborn is registered at the base as NO
+at its actual birth step, before its first GRU policy decision.
+Both G03 levels use `adapt_size.quorum_hold: 3`, requiring three consecutive
+online environment steps of agreement at the base. The inspector's Base card
+shows WAITING FOR VOTES, DEPLOYING or COOLDOWN with remaining steps, plus
+`All YES HELD: X/Y` when `quorum_hold` is positive. `adapt_size.vote_holding` remains
+ignored by their `latest_decision` protocol.
+
+`env.observe_decommission_zone: true` lets adaptive agents observe whether they
+are inside the valid decommission sphere (1 inside or on the boundary, 0 outside).
+This preserves the existing default and is explicitly enabled in both G03 levels.
+Set it to `false` to remove the scalar from the actor input; decommissioning itself
+still works. The toggle has no effect when `adapt_size.enabled` is false. Older
+adaptive checkpoints without this setting retain the enabled interpretation.
 
 Adaptive-size actors default to `env.observe_base_vote_ratio: false` and
 `env.observe_base_population: false`; only G02 enables both. While connected to the base network they
@@ -220,6 +258,18 @@ names, old cost aliases and removed switches are rejected rather than converted.
 `reinforcement_reward` defaults to +1 per qualified deployment voter,
 `decommission_reward` to 0 per removed drone, and `rejected_call_reward` to -200
 per qualified rejected voter. Removal events pay the lifetime that acted.
+
+Three independent surplus-agent settings default to zero globally. Both G03
+levels explicitly set `non_contributor_return_reward_per_meter: 3.0`,
+`non_contributor_departure_reward_per_meter: -3.0`, and
+`non_contributor_decommission_reward: 1500`. They guide non-contributors to
+the decommission-zone centre during an intact chain hold and pay a one-shot qualified exit amount
+(half G03's current success reward, configured independently). Movement inside
+the zone continues to earn reward toward its centre and a penalty away from it;
+there is no radius cutoff. Holding at the exact centre earns zero. Setting all
+three to zero preserves the previous behavior.
+See [individual rewards](../01_reference/11_individual_rewards.md#independent-surplus-agent-rewards)
+for eligibility and boundary rules.
 
 Reference rewards remain optional under `adapt_size`: defaults are disabled,
 0.10 initial fraction and 200 transitions. G02 keeps them enabled at 0.20 over
@@ -290,8 +340,15 @@ the Phase 0 checkpoint has 136 inputs. The enabled radius is checkpoint-critical
 because it sets the measurement's normalization. See the
 [sensor semantics and realism assumptions](../01_reference/02_environment_and_physics.md#observations).
 
-`env.success_condition` selects `coverage`, `discovery`, `delivery`, or
-`chain_held`. Coverage episodes omit the target and end when every eligible
+`env.success_condition` selects `coverage`, `discovery`, `delivery`,
+`chain_held`, or `chain_held_and_cleand_up`. The latter requires both
+`env.hold_chain_for` consecutive connected steps and no active drones outside
+the selected contributing chain. The hold counter continues during cleanup;
+any chain break resets it to zero, even after the threshold was reached.
+Cleanup may finish before or after the hold threshold. Time-limit, idle and
+all-decommissioned failures still end the episode without success when either
+requirement is missing. `chain_held` retains its hold-only completion rule.
+Coverage episodes omit the target and end when every eligible
 interior voxel has been seen. Voxel centres inside solid geometry are excluded.
 `evaluation.success_condition` can override the training goal; B02a uses
 `coverage` during training and `discovery` during evaluation. The target remains
@@ -326,12 +383,28 @@ full, including both successful and failed episodes.
 continues run accounting, `branch` carries cumulative progress into another run,
 and `init` loads weights with fresh accounting. Use compatible architecture,
 observation settings and normalization.
+For uniform forward/reverse target curricula, `branch` also inherits the saved
+group when the curriculum mode, gate settings and agent cap match. A different
+or absent curriculum starts at its normal initial group. `resume` continues to
+require matching saved curriculum state. Branches start fresh optimizer/update
+state while retaining cumulative environment-step provenance from their parent,
+including when that parent was itself resumed.
 
 See [PPO controls](../01_reference/05_ppo_controls.md) for clipping, entropy,
 and normalization. Training action perturbations use
 `training.training_noise` and `training.noise_level`.
 
 ## Evaluation
+
+`inspection_evaluation.target_sampling` selects `independent` (the default) or
+`training`. The latter uses the live adaptive target weights and virtual target
+budget on a single authored training map, preserving the full recruitment cap.
+Both G01 levels enable it: `eval/success_rate` measures the current training
+distribution and `validation/success_rate` measures independent uniform full-task
+targets. Inspection still advances the virtual curriculum; validation owns the
+full-level stop gate. Setting `dynamic_max_geo_distance=true` alone does not
+select curriculum sampling. See [inspection and validation](../01_reference/12_validation.md)
+for constraints, checkpoint inspection and the independent fallback.
 
 `evaluation.num_agents` defaults to `null` (`None` in Python), which uses the
 training count from `env.num_agents`. Set it to a positive integer to deploy

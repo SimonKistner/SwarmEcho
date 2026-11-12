@@ -1,0 +1,9 @@
+{
+  "description": "G01 cluster ablation: PPO 4000/100/4/5; shared task, budget and reporting settings from G01_CLU_static",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_minibatches=5"
+  ]
+}

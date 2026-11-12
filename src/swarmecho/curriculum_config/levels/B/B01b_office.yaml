@@ -56,7 +56,7 @@ reward:
 #   all_decommissioned_penalty: -1000.0 # Full signed amount to each last acting drone.
 #   useless_agent_at_success_reward: -3000.0 # Each active drone outside the selected success chain.
 #   useless_agent_at_success_all_agents_reward: -750.0 # Each active drone per useless drone at terminal chain success; no population divisor.
-#   useless_agent_at_success_all_agents_reward_cap: 2000.0 # Limits the absolute adjustment per active drone so useful success remains rewarding.
+#   useless_agent_at_success_all_agents_reward_cap: -2000.0 # Signed lower bound per active drone; max(-750 * useless_count, -2000).
 #   target_found_requires_delivery: true
 #   chain_reward_system: euclidean
 #   progress_based_cluster_tiebreaker_soft: false

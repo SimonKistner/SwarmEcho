@@ -2,8 +2,10 @@
 [CmdletBinding()]
 param(
     [string]$Run,
+    [string]$Config,
     [switch]$DryRun,
     [switch]$ImageInfo,
+    [switch]$OverrideExisting,
     [string]$Python = 'python'
 )
 
@@ -12,14 +14,16 @@ $pythonCommand = Get-Command $Python -CommandType Application -ErrorAction Stop 
 if ($pythonCommand.Source -match '[/\\](\.venv|venv)[/\\]') {
     throw 'Select a system Python with -Python; do not use the project virtual environment.'
 }
-$submitArgs = @((Join-Path $PSScriptRoot 'submit.py'))
+$submitArgs = @((Join-Path $PSScriptRoot 'tools/submit.py'))
 if ($ImageInfo) {
-    if ($Run -or $DryRun) { throw '-ImageInfo cannot be combined with -Run or -DryRun.' }
+    if ($Run -or $Config -or $DryRun -or $OverrideExisting) { throw '-ImageInfo cannot be combined with submission options.' }
     $submitArgs += '--image-info'
 } else {
-    if (-not $Run) { throw 'Specify -Run g03-smoke or -Run g03-full.' }
-    $submitArgs += @('--run', $Run)
+    if ($Run -and $Config) { throw 'Use -Config or the historical -Run selector, not both.' }
+    if ($Run) { $submitArgs += @('--run', $Run) }
+    elseif ($Config) { $submitArgs += @('--config', $Config) }
     if ($DryRun) { $submitArgs += '--dry-run' }
+    if ($OverrideExisting) { $submitArgs += '--override-existing' }
 }
 & $pythonCommand.Source @submitArgs
 if ($LASTEXITCODE -ne 0) { throw "Cluster preparation/submission failed (exit $LASTEXITCODE)." }

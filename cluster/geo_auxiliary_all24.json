@@ -1,0 +1,67 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "geo_aux_v1",
+  "seeds": [
+    456789,
+    456790
+  ],
+  "wandb_mode": "online",
+  "description": "G03 CLU from-scratch path auxiliary lambda/snapshot comparison",
+  "overrides": [
+    "training.geo_probe_auxiliary.enabled=true",
+    "training.oom_recovery.enabled=true",
+    "training.oom_recovery.parameter=optimizer_microbatches",
+    "training.oom_recovery.factor=2.0",
+    "training.oom_recovery.max_retries=null"
+  ],
+  "variations": {
+    "policy_only": [
+      "training.geo_probe_auxiliary.enabled=false",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "aux_l0p01_k1": [
+      "training.geo_probe_auxiliary.lambda_target=0.01",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=1"
+    ],
+    "aux_l0p01_k5": [
+      "training.geo_probe_auxiliary.lambda_target=0.01",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ],
+    "aux_l0p03_k1": [
+      "training.geo_probe_auxiliary.lambda_target=0.03",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=1"
+    ],
+    "aux_l0p03_k5": [
+      "training.geo_probe_auxiliary.lambda_target=0.03",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ],
+    "aux_l0p1_k1": [
+      "training.geo_probe_auxiliary.lambda_target=0.1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=1"
+    ],
+    "aux_l0p1_k5": [
+      "training.geo_probe_auxiliary.lambda_target=0.1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ],
+    "aux_l0p1_k2": [
+      "training.geo_probe_auxiliary.lambda_target=0.1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=2"
+    ],
+    "aux_l0p3_k1": [
+      "training.geo_probe_auxiliary.lambda_target=0.3",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=1"
+    ],
+    "aux_l0p3_k5": [
+      "training.geo_probe_auxiliary.lambda_target=0.3",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ],
+    "aux_l1_k1": [
+      "training.geo_probe_auxiliary.lambda_target=1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=1"
+    ],
+    "aux_l1_k5": [
+      "training.geo_probe_auxiliary.lambda_target=1",
+      "training.geo_probe_auxiliary.sampling.snapshots_per_agent=5"
+    ]
+  }
+}

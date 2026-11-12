@@ -1,0 +1,12 @@
+{
+  "description": "G01 uniform-solvable 30-minute comparison: repeat-fast-sampling, PPO 16000/25/1/10, fresh initialization, no adaptive target weighting or virtual curriculum, seven recruitment slots",
+  "level": "G01_CLU_static",
+  "run_name_template": "clu-g01-uniform-30m_{ppo}",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.num_envs=16000",
+    "training.num_steps=25",
+    "training.num_epochs=1",
+    "training.num_minibatches=10"
+  ]
+}
