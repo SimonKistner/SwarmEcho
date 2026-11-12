@@ -29,6 +29,7 @@ IMPORTANT_AI-AGENT_MUST_READ/
 # Generated, allowlisted Determined model contexts
 cluster/.context-*/
 cluster/.submissions/
+cluster/.fetch/
 
 # Outputs — large binary artifacts, never commit
 outputs/
