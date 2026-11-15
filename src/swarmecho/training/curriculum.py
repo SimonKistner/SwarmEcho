@@ -10,7 +10,7 @@ from swarmecho.core.paths import resolve_project_path
 import sys
 import time
 
-from swarmecho.core.config import load_level_cli
+from swarmecho.core.config import DEFAULT_LEVEL_NAME, load_level_cli
 from swarmecho.training.orchestration import (
     checkpoint_total_steps,
     explicit_override,
@@ -122,16 +122,8 @@ def train_agent_counts(level, *, output_dir=None, checkpoint_path=None):
 
 def main() -> None:
     """Train the requested levels in order, handing off final weights."""
-    levels, shared_args = split_levels(
-        sys.argv[1:], "M00_no_maze_open_cuboid"
-    )
-    feature_override = any(arg.lower() in {
-        "training.dynamic_max_geo_distance.enabled=true",
-        "training.agent_count_curriculum.enabled=true",
-    } for arg in shared_args)
-    # The default placeholder may be a coverage level, which cannot validate
-    # target-filter overrides intended for the actual first requested level.
-    base_level = load_level_cli([f"level={levels[0]}", *shared_args] if feature_override else shared_args)
+    levels, shared_args = split_levels(sys.argv[1:], DEFAULT_LEVEL_NAME)
+    base_level = load_level_cli([f"level={levels[0]}", *shared_args])
     base_run_name = base_level.logging.run_name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if base_run_name:

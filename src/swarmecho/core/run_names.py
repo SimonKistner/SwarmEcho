@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 import re
 
+from swarmecho.core.compatibility import DEFAULT_LEVEL_NAME
+
 
 PPO_PARAMETERS = (
     ("num_envs", "numEnvs"),
@@ -13,7 +15,7 @@ PPO_PARAMETERS = (
     ("num_epochs", "numEpochs"),
     ("num_minibatches", "numMinibatches"),
 )
-BASELINE_LEVEL = Path(__file__).resolve().parents[1] / "curriculum_config/levels/G/G03_random_buildings.yaml"
+BASELINE_LEVEL = Path(__file__).resolve().parents[1] / f"curriculum_config/levels/G/{DEFAULT_LEVEL_NAME}.yaml"
 
 
 def wandb_display_name(run_name):

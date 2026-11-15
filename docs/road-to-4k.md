@@ -190,4 +190,4 @@ a fast run that trains on one cell per building is not a successful scale-up.
 Related implementation and behavior:
 [G02 guide](02_guide/06_G_curriculum.md),
 [adaptive spawning reference](01_reference/08_adaptive_target_spawning.md),
-[relay-budget integration](../max_geo_distance/integration.md).
+[relay-budget integration](../ablations/max_geo_distance/integration.md).

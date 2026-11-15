@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    from swarmecho.training.evaluate_cli import main as launch
+
+    raise SystemExit(launch())
+
 import os
 import json
 import re
@@ -19,7 +24,11 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 import numpy as np
 import yaml
 
-from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS, load_level_cli, resolve_evaluation_level
+from swarmecho.core.compatibility import LEGACY_LOCAL_G03_LEVEL
+from swarmecho.core.config import (
+    CHAIN_SUCCESS_CONDITIONS, load_level, load_level_cli, normalize_inspection_sections,
+    resolve_evaluation_level,
+)
 from swarmecho.core.paths import normalize_wsl_path
 from swarmecho.training.artifacts import (
     checkpoint_artifact_suffix,
@@ -49,7 +58,7 @@ from swarmecho.visualize.replay import ReplayRewards, building_snapshot, planner
 
 
 _EVAL_INFO_UPDATE = re.compile(r"eval_info_u(\d+)_")
-_EVAL_MODES = {"parallel", "selective_auto_pick", "selective_manual_pick"}
+_EVAL_MODES = {"parallel", "selective_auto_pick", "selective_manual_pick", "required_agent_replays"}
 _REPLAY_EXECUTIONS = {"single", "parallel_capture"}
 
 
@@ -95,9 +104,35 @@ def _checkpoint_level_name(checkpoint: Path) -> str | None:
     except (OSError, yaml.YAMLError):
         return None
     level_name = config.get("name")
+    if level_name == "G03_random_buildings":
+        # This name in a saved run denotes the original local preset.
+        return LEGACY_LOCAL_G03_LEVEL
     if isinstance(level_name, str) and level_name:
         return level_name
     return None
+
+
+def _load_checkpoint_on_map(run_dir: Path, map_name: str, overrides: list[str]):
+    """Use the saved policy configuration on an authored inspection map."""
+    source = run_dir / "config.yaml"
+    data = normalize_inspection_sections(yaml.safe_load(source.read_text(encoding="utf-8")))
+    data.pop("name", None)
+    data.pop("building", None)
+    data.setdefault("env", {})["map_names"] = [map_name]
+    data["random_buildings"] = {"enabled": False}
+    data["validation"] = {"enabled": False}
+    training = data.setdefault("training", {})
+    training.update(num_maps=None, map_pool_path=None, checkpoint_path=None)
+    training.setdefault("target_curriculum", {})["mode"] = "none"
+    for key in ("agent_count_curriculum", "adaptive_map_sampling", "adaptive_target_spawn",
+                "target_spawn_eligibility"):
+        training.pop(key, None)
+    data.setdefault("evaluation", {}).update(
+        early_exit=False, early_exit_source="evaluation", random_eval=False, random_eval_maps=None,
+        training_robustness=False, eval_differes_from_training_map=False, eval_map=None,
+        eval_fixed_obstacle_bounds=None, target_sampling="independent",
+    )
+    return load_level(source, overrides, config_data=data)
 
 
 def _heatmap_manifest(
@@ -644,7 +679,13 @@ def render_csv_replays(
         )
 
 
-def main() -> None:
+def main() -> int:
+    from swarmecho.training.evaluate_cli import main as launch
+
+    return launch()
+
+
+def _run_evaluation() -> None:
     checkpoint: Path | None = None
     output: Path | None = None
     max_steps: int | None = None
@@ -655,6 +696,7 @@ def main() -> None:
     replay_after = False
     replay_by_required_agents = False
     replay_count = 1
+    eval_samples: int | None = None
     target_mode = "csv"
     replay_execution = "single"
     eval_name: str | None = None
@@ -663,13 +705,14 @@ def main() -> None:
     target_argument_seen = False
     config_arguments: list[str] = []
     suite_map_id = None
+    eval_map = None
     for argument in sys.argv[1:]:
         if "=" not in argument:
             raise ValueError(
                 "Use checkpoint=<path>, mode=parallel|selective_auto_pick|"
-                "selective_manual_pick, result=success|fail, offset=<n>, "
+                "selective_manual_pick|required_agent_replays, result=success|fail, offset=<n>, "
                 "replay_after=true|false, replay_by_required_agents=true|false, replays=<positive count>, "
-                "eval_name=<label>, "
+                "eval_name=<label>, eval_map=<authored map>, eval_samples=<total episodes per map in parallel mode>, "
                 "target_position=x,y,z, replay_execution=single|"
                 "parallel_capture, and "
                 "key=value overrides."
@@ -698,6 +741,10 @@ def main() -> None:
             replay_count = int(value)
         elif key == "eval_name":
             eval_name = value
+        elif key == "eval_samples":
+            eval_samples = int(value)
+        elif key == "eval_map":
+            eval_map = value
         elif key == "target":
             target_mode = value.lower()
             target_argument_seen = True
@@ -719,7 +766,7 @@ def main() -> None:
     if mode not in _EVAL_MODES:
         raise ValueError(
             "mode must be parallel, selective_auto_pick, or "
-            "selective_manual_pick."
+            "selective_manual_pick, or required_agent_replays."
         )
     if replay_execution not in _REPLAY_EXECUTIONS:
         raise ValueError("replay_execution must be single or parallel_capture.")
@@ -744,13 +791,23 @@ def main() -> None:
     explicit_level = any(
         argument.split("=", 1)[0] == "level" for argument in config_arguments
     )
-    checkpoint_level = None if explicit_level else _checkpoint_level_name(checkpoint)
-    if checkpoint_level is not None:
-        config_arguments.insert(0, f"level={checkpoint_level}")
-    level = load_level_cli(config_arguments)
-    if replay_by_required_agents and not (level.evaluation.random_eval or level.static_map_suite or suite_map_id):
-        raise ValueError("replay_by_required_agents requires a saved evaluation map suite.")
-    if replay_by_required_agents:
+    if eval_map is not None:
+        if explicit_level or suite_map_id is not None:
+            raise ValueError("eval_map uses the checkpoint's saved config and cannot be combined with level or map_suite_map_id.")
+        level = _load_checkpoint_on_map(run_dir, eval_map, config_arguments)
+    else:
+        checkpoint_level = None if explicit_level else _checkpoint_level_name(checkpoint)
+        if checkpoint_level is not None:
+            config_arguments.insert(0, f"level={checkpoint_level}")
+        level = load_level_cli(config_arguments)
+    if eval_samples is not None and (eval_samples < 1 or mode != "parallel"):
+        raise ValueError("eval_samples requires a positive episode count and mode=parallel.")
+    use_map_suite = bool(level.evaluation.random_eval or level.static_map_suite or suite_map_id)
+    authored_single_map = not use_map_suite and (replay_by_required_agents or eval_samples is not None)
+    if mode == "required_agent_replays" and (use_map_suite or level.training.randomize_base
+                                             or level.evaluation.eval_differes_from_training_map):
+        raise ValueError("required_agent_replays needs one authored map with a fixed base.")
+    if replay_by_required_agents or mode == "required_agent_replays":
         from swarmecho.core.config import evaluation_dynamic_max_geo_distance
         if not level.evaluation.eval_video or not evaluation_dynamic_max_geo_distance(level):
             raise ValueError("Required-agent replays need inspection_evaluation.eval_video=true and dynamic_max_geo_distance=true.")
@@ -782,16 +839,22 @@ def main() -> None:
     )
     model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
-    if (level.evaluation.random_eval or level.static_map_suite or suite_map_id is not None) and mode == "parallel":
+    if mode == "required_agent_replays":
+        from swarmecho.training.random_evaluation import write_geometry_selected_replays
+
+        root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
+        write_geometry_selected_replays(model, level, root, checkpoint=checkpoint, eval_name=eval_name)
+        return
+    if (use_map_suite or authored_single_map) and mode == "parallel":
         from swarmecho.training.random_evaluation import prepare_evaluation_maps, evaluate_map_suite
-        if suite_map_id is not None:
+        if suite_map_id is not None or authored_single_map:
             levels = [level]
         else:
             static = level.static_map_suite
             directory = run_dir / ("static_eval_maps" if static else "random_eval_maps")
             levels = prepare_evaluation_maps(level, directory,
                 static_maps=level.map_paths if static else None, log=terminal_print)
-        # Same frozen maps as training, with no robust/noise ensemble.
+        # Evaluate the selected maps with no robust/noise ensemble.
         root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
         from swarmecho.training.artifacts import parse_checkpoint_update
         update = parse_checkpoint_update(checkpoint) or 0
@@ -805,10 +868,12 @@ def main() -> None:
             eval_name=eval_name,
             sampling_kwargs=inspection_sampling_kwargs(level, checkpoint=checkpoint),
             replay_by_required_agents=replay_by_required_agents,
+            eval_samples=eval_samples,
+            authored_single_map=authored_single_map,
         )
         terminal_print(
             f"[EVAL] successfully completed: {len(levels)} map(s), "
-            f"{level.effective_eval_parallel_envs:,} episodes/map, "
+            f"{eval_samples or level.effective_eval_parallel_envs:,} episodes/map, "
             f"overall success={metrics['eval_success']:.1%}.",
             flush=True,
         )
@@ -981,7 +1046,3 @@ def main() -> None:
             **({"eval_name": eval_name} if eval_name is not None else {}),
         },
     )
-
-
-if __name__ == "__main__":
-    main()

@@ -9,7 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 
+DEFAULT_LEVEL_NAME = "G03_CLU_random_buildings"
+LEGACY_LOCAL_G03_LEVEL = "G03_legacy_random_buildings"
+
 LEVEL_ALIASES = {
+    "G03": DEFAULT_LEVEL_NAME,
+    "G03_random_buildings": DEFAULT_LEVEL_NAME,
     "CLU_G01_static": "G01_CLU_static",
     "M00_no_maze_open_cuboid_3D": "M00_no_maze_open_cuboid",
     "M01_no_maze_open_cuboid_tall_3D": "M01_no_maze_open_cuboid_tall",

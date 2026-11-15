@@ -1,0 +1,24 @@
+{
+  "level": "G04_CLU_random_buildings",
+  "name": "G04_v3",
+  "seeds": [456789,456790],
+  "wandb_mode": "online",
+  "description": "Matched agent-count curricula from five to eight automatically deployed agents on 4x4x4 buildings: auxiliary path probe with feedback, auxiliary probe without feedback, and no probe.",
+  "overrides": [
+    "training.max_training_seconds=86400"
+  ],
+  "variations": {
+    "aux_obsPathProb": [
+      "training.geo_probe_auxiliary.enabled=true",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=true"
+    ],
+    "aux": [
+      "training.geo_probe_auxiliary.enabled=true",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=false"
+    ],
+    "no_aux": [
+      "training.geo_probe_auxiliary.enabled=false",
+      "training.geo_probe_auxiliary.observe_prev_path_probe=false"
+    ]
+  }
+}

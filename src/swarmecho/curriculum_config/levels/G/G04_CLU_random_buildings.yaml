@@ -1,9 +1,9 @@
-# Cluster G04: 4 × 4 × 4 cells, 3600 training / 400 held-out maps and nine drones.
+# Cluster G04: 4 × 4 × 4 cells, 3600 training / 400 held-out maps and five to eight drones.
 env:
   map_names: [] # Use the persistent G04 random building bank.
 
-  num_agents: 9 # All nine drones are reserved for automatic initial deployment.
-  relay_agent_budget: null # Use full nine-agent feasibility for validation.
+  num_agents: 8 # Final agent-count stage.
+  relay_agent_budget: null # Target feasibility follows each stage's deployable population.
   spawn_delay: 5 # Minimum environment steps between automatic initial deployments.
 
   max_force: 50.0
@@ -14,7 +14,7 @@ env:
 
   comm_radius_base: 15.0
   base_keeps_informing: false
-  comm_radius: 15.0
+  comm_radius: 30.0
   visual_radius: 5.0
   wall_sensing_layout: fibonacci # fibonacci (legacy) | xyz
   wall_sensing_rays: 32 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
@@ -65,7 +65,7 @@ random_buildings:
 adapt_size:
   enabled: true
   recruitment_enabled: false # Keep decommissioning; retired drones cannot be replaced this episode.
-  initial_agents: 9 # Reserve all nine at reset and release them using env.spawn_delay.
+  initial_agents: 8 # Each stage reserves its own population and releases it using env.spawn_delay.
   vote_mode: hold # Inactive without recruitment; hold | keep_yes_no.
   vote_protocol: latest_decision # Inactive without recruitment; credits | latest_decision.
   vote_holding: 1 # Used only by credits; latest_decision always uses the latest YES/NO.
@@ -122,9 +122,9 @@ reward:
   no_movement_termination_penalty: 0.0 # Full signed amount to each active drone at idle failure.
 
 training:
-  total_timesteps: 5000000000 # One continuous run; virtual budget changes do not reset this limit.
+  total_timesteps: 5000000000 # Maximum training steps per stage.
   max_wall_seconds: null # Setup/pool preparation does not consume the learning-comparison budget.
-  max_training_seconds: 86400 # 24h from training-run initialization, including first JIT and evaluation; final saving/media follow.
+  max_training_seconds: 86400 # 24h per stage, including first JIT and evaluation; final saving/media follow.
   num_envs: 6000
   num_maps: 3600 # Persistent training maps: 90% of the 4000-map dataset.
   oom_recovery:
@@ -140,12 +140,11 @@ training:
   base_memory_replay: differentiable # Reconstruct base writes inside PPO replay for sender gradients.
 
   target_curriculum:
-    mode: forward # Admit targets requiring up to 2, then 3, through 9 agents.
-    success_threshold: 0.75 # Validation success on the newest added required-agent group only.
+    mode: none # Agent-count stages set the target feasibility cap.
 
   target_spawn_eligibility:
     enabled: true # Startup preparation is independent of success-based adaptive spawning.
-    samples_per_map: 800 # Accepted full-budget targets; shared cached per-cell requirement histograms.
+    samples_per_map: 800 # Accepted targets at the stage budget; cached per-cell requirement histograms.
     minimum_cell_fraction: 0.01 # Retain cells with at least 8 of the 800 accepted probes.
 
   geo_probe_auxiliary:
@@ -181,13 +180,13 @@ training:
     candidate_spacing_fraction: 0.5 # 512 accepted uniform-random points, plus legal roadmap/launch anchors.
     max_candidates_per_map: 4096 # Explicit preparation limit, never silent truncation.
   agent_count_curriculum:
-    enabled: false # Keep nine reserved slots while target_curriculum controls difficulty.
-    start_agents: 2
-    additional_agents: 1 # Inactive while the classic agent-count curriculum is disabled.
+    enabled: true
+    start_agents: 5
+    additional_agents: 0 # Deploy exactly the number of agents allowed by the stage's target budget.
 
   adaptive_target_spawn:
-    enabled: false # Uniform target positions within target_curriculum's allowed groups.
-    curriculum_start_agents: null # Use target_curriculum instead of the legacy adaptive-spawn gate.
+    enabled: false
+    curriculum_start_agents: null
     min_probability_fraction: 0.20
     success_window_episodes_per_cell: 500
     probability_smoothing_half_life_updates: 3.0
@@ -213,10 +212,10 @@ network:
   tarmac_include_self: false
 
 inspection_evaluation:
-  success_condition: chain_held # Measure chain holding independently of training's surplus cleanup.
+  success_condition: chain_held_and_cleand_up
   seed: 456789 # Freeze inspection reset cases while training.seed varies.
   num_agents: null # Use the training agent cap in every eval/replay.
-  dynamic_max_geo_distance: true # Uniform solvable targets under the full nine-agent budget.
+  dynamic_max_geo_distance: true # Solvable targets at the current stage's agent budget.
   target_sampling: independent # Inspection stays independent of the training curriculum.
   apply_trainings_min_geo_separation: false
   eval_parallel_envs: 1000 # Fixed per-map episode/lane budget: 3000 episodes across three held-out maps.
@@ -224,9 +223,9 @@ inspection_evaluation:
   inspection_maps: 3 # Fixed inspection subset from the 400 validation maps.
 
   early_exit: true
-  early_exit_source: validation # Validation controls full-task stopping and any target progression.
-  early_exit_success_rate: 0.99 # Full-task stopping; target_curriculum has its own 75% group gate.
-  final_early_exit_success_rate: 0.99 # Full-task held-out validation threshold, independent of the virtual budget.
+  early_exit_source: validation # Held-out validation controls agent-count progression.
+  early_exit_success_rate: 0.80 # Success threshold before advancing to the next stage.
+  final_early_exit_success_rate: 0.99 # Success threshold for the eight-agent stage.
   early_exit_min_success_length_reduction: null # Success alone controls progression.
   early_exit_hold_evals: 1 # Fresh windows per map for training source; eval calls otherwise.
 
@@ -258,8 +257,8 @@ logging:
 
 validation:
   enabled: true
-  success_condition: chain_held # Full-task validation does not require surplus cleanup.
-  mode: held_out_maps # Uniform full nine-agent task without a curriculum restriction.
+  success_condition: chain_held_and_cleand_up
+  mode: held_out_maps # Use the current stage's deployable population and target budget.
 
   # Held-out maps and validation episodes; no heatmaps or replays.
   num_maps: 400

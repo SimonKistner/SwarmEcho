@@ -33,7 +33,7 @@ These features remain deferred. G03 refinement now supports an explicit pinned
 PFSS pool and a map-selection seed independent of the training seed; this keeps
 the existing dataset fixed across paired training seeds. It does not yet define
 deterministic pool creation from the experiment seed. See the
-[combined-wave submission guide](../../cluster/README.md#g03-refinement-one-combined-wave-two-training-seeds).
+[Wave 1 refinement manifests](../../cluster/manifests/historical/g03/refinement/wave-1/).
 
 ## Chain contribution visibility
 

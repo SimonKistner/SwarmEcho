@@ -195,7 +195,7 @@ minimum-separation sampling when enabled.
 ## Inspect five maps
 
 ```sh
-uv run python tests/generate_random_buildings_testresult.py
+uv run python -m swarmecho.analysis.generate_random_maps
 # Equivalent:
 uv run python -m swarmecho.analysis.generate_random_maps
 ```
@@ -220,8 +220,8 @@ the same first map IDs as training; it is not a different preview generator.
 The existing scanner is reused, preserving both old commands:
 
 ```sh
-uv run python tests/scan_roadmap_distances.py --map office_mirrored
-uv run python tests/generate_obstacle_roadmap_testresult.py --map office_mirrored
+uv run python -m swarmecho.analysis.roadmap_scan --map office_mirrored
+uv run python -m swarmecho.analysis.roadmap_paths --map office_mirrored
 ```
 
 The scanner rasterizes valid points, finds each point's farthest reachable
@@ -455,7 +455,7 @@ pair has a stair, successive stairs use different cells, and all raster points
 remain mutually reachable:
 
 ```sh
-uv run python tests/generate_random_buildings_testresult.py
+uv run python -m swarmecho.analysis.generate_random_maps
 ```
 
 Then run a small training-machine smoke run before a full run:

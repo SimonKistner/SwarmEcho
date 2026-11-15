@@ -3,7 +3,7 @@
 `G01_static` is the executable local level. Its cluster counterpart is
 `G01_CLU_static`, in the same `levels/G/` directory. Cluster ablations use
 `<family>_CLU_<variant>.yaml` beside the local level, and concrete job-specific
-New PPO variations belong in `cluster/config.json`; historical manifests are in `cluster/archive/runs/*.json`. Do not create `levels/CLU/`.
+New PPO variations belong in `cluster/manifests/chain-efficiency/fresh-sweep.json`; historical manifests are in `cluster/manifests/historical/**/*.json`. Do not create `levels/CLU/`.
 
 Both levels use **exactly the current G03 reward block**, current G03 voting
 and observation settings, and the single authored `B02c_static_map_noSpawn`.
@@ -51,7 +51,7 @@ No dependency-image rebuild is needed for these source/config changes.
 
 Both cluster manifests use `"run_name_template": "clu-g01_{ppo}"`. The `{ppo}`
 part compares the effective YAML settings plus manifest overrides with the
-current `G03_random_buildings` values for `num_envs`, `num_steps`, `num_epochs`
+current `G03_legacy_random_buildings` values for `num_envs`, `num_steps`, `num_epochs`
 and `num_minibatches`. Matching all four produces `baseline`. Otherwise only
 differences appear, in that order, joined with underscores:
 
@@ -215,6 +215,6 @@ The machines can have numerical differences despite identical settings/seeds;
 this is one observed comparison, not a universal hardware or PPO optimum.
 
 The historical no-curriculum study remains
-`cluster/docs/g01_capacity_review_20261029/2026-10-29_exp54837_G01_no-curriculum_capacity-and-PPO-review.md`.
+`ablations/cluster/ppo-tuning/g01_capacity_review_20261029/2026-10-29_exp54837_G01_no-curriculum_capacity-and-PPO-review.md`.
 Legacy `clu-g01-probe`, `clu-g01-search` and `clu-g01-explore` explicitly disable
 the progressive spawn filter and are not the commands for this comparison.

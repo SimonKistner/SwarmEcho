@@ -89,7 +89,10 @@ def expand_config(config, root, stamp):
         raise ValueError("Unknown cluster config keys; expected: " + ", ".join(sorted(allowed)))
     level = config.get("level")
     if not isinstance(level, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", level):
-        raise ValueError("level must be the exact source YAML name, without its extension.")
+        raise ValueError("level must be a source YAML name or level alias, without its extension.")
+    from swarmecho.core.compatibility import canonical_level_name
+
+    level = canonical_level_name(level)
     name = config.get("name")
     if "name" in config and (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", name)):
         raise ValueError("name must contain 1-100 letters, numbers, underscores or hyphens.")

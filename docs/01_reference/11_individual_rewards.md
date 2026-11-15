@@ -76,7 +76,7 @@ The contributors-only success switch remains removed.
 
 ### Independent surplus-agent rewards
 
-Both `G03_random_buildings` and `G03_CLU_random_buildings` explicitly enable
+Both `G03_legacy_random_buildings` and `G03_CLU_random_buildings` explicitly enable
 return progress at +3/metre and departure at -3/metre. Qualified decommission
 pays +1500 in local G03 and +3000 in G03 CLU. All three global defaults are zero. Each coefficient independently
 disables its own term; when all are zero the new calculation, component keys

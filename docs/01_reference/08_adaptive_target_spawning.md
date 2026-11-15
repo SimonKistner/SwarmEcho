@@ -37,7 +37,7 @@ for five maps. Other levels inherit the disabled default.
 When combined with the relay filter, eligibility discovery and sampler identity
 use the geometric stage budget. Curriculum `additional_agents` adds deployable
 slots without admitting harder targets or expanding the discovery distribution.
-See [relay-budget integration](../../max_geo_distance/integration.md) for the
+See [relay-budget integration](../../ablations/max_geo_distance/integration.md) for the
 startup support mask and spare-agent stage semantics.
 
 ## Configuration
@@ -270,7 +270,7 @@ training-time video generation is used. See the
 ## Focused verification before a training run
 
 ```bash
-uv run pytest tests/test_adaptive_spawn.py -q
+uv run pytest tests/test_environment.py -q
 ```
 
 This checks volume-derived baseline/floors, redistribution, independent episode

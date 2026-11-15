@@ -10,7 +10,9 @@ from swarmecho.core.compatibility import resolve_map_file
 from swarmecho.core.terminal import terminal_print
 from swarmecho.env.buildings import compile_building, target_spawn_boxes
 from swarmecho.env.random_buildings import generate_building, map_seed, save_generated_map
-from swarmecho.training.artifacts import artifact_suffix, save_eval_info_csv, write_manifest
+from swarmecho.training.artifacts import (
+    artifact_suffix, parse_checkpoint_update, save_eval_info_csv, steps_for_checkpoint, write_manifest,
+)
 from swarmecho.visualize.replay import building_snapshot, planner_metadata, write_replay
 from swarmecho.training.orchestration import representative_map_indices
 from swarmecho.training.information_metrics import (
@@ -120,7 +122,8 @@ def _replay_level_for_storey(level):
 
 def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=True, replay_due=False, on_run=None,
                        artifact_root=None, scope="train", checkpoint=None, eval_name=None,
-                       sampling_kwargs=None, spawn_sampler=None, replay_by_required_agents=False):
+                       sampling_kwargs=None, spawn_sampler=None, replay_by_required_agents=False,
+                       eval_samples=None, authored_single_map=False):
     from swarmecho.training.train import evaluate_suite, evaluate_model
     destination = Path(destination)
     artifact_root = Path(artifact_root) if artifact_root is not None else destination / "artifacts" / "train"
@@ -131,7 +134,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
         raise ValueError("Required-agent replays need a fresh evaluation batch.")
     score_spawn = getattr(spawn_sampler, "curriculum_source", None) == "evaluation"
     curriculum_outcomes = []
-    static = levels[0].building_name.startswith("static_eval_")
+    static = authored_single_map or levels[0].building_name.startswith("static_eval_")
     replay_indices = set(representative_map_indices(len(levels), levels[0].evaluation.map_suite_replay_limit))
     for index, level in enumerate(levels):
         level = resolve_evaluation_level(level)
@@ -152,10 +155,12 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                   **({"checkpoint": str(checkpoint)} if checkpoint is not None else {}),
                   **({"eval_name": eval_name} if eval_name else {})}
         if eval_due:
-            metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
+            batch_size = level.effective_eval_parallel_envs
+            batching = {"batch_size": batch_size, "show_progress": True} if eval_samples is not None else {}
+            metrics, info = evaluate_suite(model, level, episodes=eval_samples or batch_size,
                                           return_episode_info=True,
                                           return_required_agents=score_spawn or replay_by_required_agents,
-                                          action_noise_max=0., **sampling_kwargs)
+                                          action_noise_max=0., **batching, **sampling_kwargs)
             results.append(metrics)
             if score_spawn:
                 curriculum_outcomes.append(info)
@@ -176,6 +181,8 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
         if replay_due and index in replay_indices:
             if replay_by_required_agents:
+                if eval_samples is not None:
+                    terminal_print(f"[EVAL] {name}: sweep complete. Generating required-agent replays.")
                 _write_required_agent_replays(model, level, info, artifact_root, suffix, common)
                 continue
             replay_level = _replay_level_for_storey(level)
@@ -230,6 +237,38 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
     return aggregate
 
 
+def write_geometry_selected_replays(model, level, artifact_root, *, checkpoint, eval_name):
+    """Classify spawn candidates with the environment reset, then run only the selected replays."""
+    import jax
+    from swarmecho.training.train import _evaluation_env_fns
+
+    level = resolve_evaluation_level(level)
+    name = level.building_name
+    candidate_count = 256
+    terminal_print(f"[REPLAY] {name}: classifying {candidate_count} target candidates.")
+    reset, _, _, _ = _evaluation_env_fns(level)
+
+    def classify(key):
+        state = reset(key)
+        return state.target_pos, state.target_required_agents, state.spawn_pair_attempts > 0
+
+    keys = jax.random.split(jax.random.PRNGKey(level.training.seed + 10_000), candidate_count)
+    positions, required, valid = jax.device_get(jax.jit(jax.vmap(classify))(keys))
+    if not np.any(valid):
+        raise ValueError(f"No certified replay targets sampled on {name}.")
+    info = {"target_positions": positions[valid], "required_agents": required[valid]}
+    classes = np.unique(info["required_agents"])
+    terminal_print(f"[REPLAY] {name}: selected one target for each observed count {classes.tolist()}.")
+    update = parse_checkpoint_update(checkpoint) or 0
+    steps = steps_for_checkpoint(checkpoint, level)
+    _write_required_agent_replays(model, level, info, artifact_root, artifact_suffix(update, steps), {
+        "map_name": name, "num_agents": level.env.num_agents,
+        "map_suite_map_id": name, "map_suite_group": str(artifact_root), "map_suite_maps": 1,
+        "training_update": update, "environment_steps": steps, "artifact_scope": "eval",
+        "checkpoint": str(checkpoint), **({"eval_name": eval_name} if eval_name else {}),
+    })
+
+
 def _write_required_agent_replays(model, level, info, artifact_root, suffix, common):
     """Replay one evaluated target per observed estimator class on this map."""
     from swarmecho.training.train import evaluate_model
@@ -246,11 +285,11 @@ def _write_required_agent_replays(model, level, info, artifact_root, suffix, com
             continue
         lane = int(lanes[0])
         target = np.asarray(info["target_positions"][lane])
+        terminal_print(f"[REPLAY] {level.building_name}: target requiring {count} agent(s).", flush=True)
         states, rewards = evaluate_model(model, level, max_steps=cfg.max_steps, target_position=target)
         actual = int(np.asarray(states[0].target_required_agents))
         if actual != count:
             raise ValueError(f"Replay target required-agent class changed from {count} to {actual}.")
-        terminal_print(f"[REPLAY] {level.building_name}: target requiring {count} agent(s).", flush=True)
         write_replay(artifact_root / "replays" / f"eval_{suffix}_{level.building_name}_required_agents_{count}",
             states, map_name=level.building_name, building=level.building, dt=cfg.dt,
             reward_terms=rewards, progress=False,

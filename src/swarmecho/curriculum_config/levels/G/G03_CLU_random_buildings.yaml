@@ -1,6 +1,6 @@
 # Cluster G03: 3600 training / 400 held-out maps, automatic seven-drone deployment.
 # Shared sweep defaults live here; manifests select target curriculum, auxiliary lambda and seeds.
-# The local G03_random_buildings level remains unchanged.
+# Shared G03 default for local and cluster training.
 env:
   map_names: [] # Persistent random buildings replace the authored G02 suite.
 
@@ -106,7 +106,7 @@ reward:
 
   allow_redundancy_reward: false
   enable_chain_efficiency_reward: true
-  chain_efficiency_reward: 50.0 # Per eligible drone times its path efficiency; no population divisor.
+  chain_efficiency_reward: 25.0 # Per eligible drone times its path efficiency; no population divisor.
 
   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
   finder_reward: 100 # Each direct base deliverer, or first visual finder without delivery gating.

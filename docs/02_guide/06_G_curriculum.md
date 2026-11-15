@@ -190,7 +190,7 @@ run, not evidence of equal total returns across population sizes.
 
 ## Later: 4000 maps
 
-[`G03_random_buildings`](07_G03_random_buildings.md) now copies G02 with explicit
+[`G03_legacy_random_buildings`](07_G03_legacy_random_buildings.md) now copies G02 with explicit
 15 m random-bank generation settings and bounded evaluation/map warmup budgets.
 Its guide lists the corrected journal dispatch, old-pool compatibility
 and runtime verification work; configuration alone does not establish readiness.

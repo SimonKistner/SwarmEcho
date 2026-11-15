@@ -1,6 +1,6 @@
 # G03 CLU: path supervision of informed-agent GRUs
 
-Status: implemented, opt-in; see [execution guide](../../cluster/docs/GEO_AUXILIARY.md).
+Status: implemented, opt-in; see [execution guide](../../ablations/cluster/path-probe/GEO_AUXILIARY.md).
 Confirmed: train from scratch. Use twelve variants with the same two seeds,
 including one clean policy-only variant. Existing G03 CLU baselines
 remain useful historical references. Available experiment capacity: 24 slots.
@@ -209,7 +209,7 @@ large coefficients deliberately test negligible through potentially disruptive
 policy pressure; none is an established safe/optimal scale. Record gradient norms
 and KL so the results explain the range rather than only naming a winning loss.
 
-This plan does not modify `cluster/config.json` or submit any experiments.
+This plan does not modify `cluster/manifests/chain-efficiency/fresh-sweep.json` or submit any experiments.
 
 ## Efficient JAX integration and memory handling
 

@@ -23,6 +23,8 @@ The [repository README](../README.md) is the entry point for the current runtime
 - [Configuration](02_guide/01_configuration_guide.md)
 - [Analysis and tools](02_guide/02_analysis_and_tools.md)
 - [Commands](02_guide/03_commands.md)
+- [Cluster quickstart](../cluster/README/README.md)
+- [Cluster experiment reports](../ablations/cluster/README.md)
 - [Public inspector exports and GitHub Pages](02_guide/04_public_inspector.md)
 - [C relay curriculum and geometry previews](02_guide/05_C_curriculum.md)
 - [G curriculum: five static maps and independent adaptive spawning](02_guide/06_G_curriculum.md)
@@ -33,6 +35,7 @@ The separate inspector handles replay and evaluation visualization.
 
 ## Status, proposals, and history
 
+- [G03 CLU cleanup record](cleanup.md)
 - [Geo Phase 0 completed: frozen probes and observation-ambiguity results](geo/Phase0.md)
 - [Geo Phase 1: visual baseline, own-cell diagnostics and proposed auxiliary loss](geo/Phase1.md)
 - [Geo Phase 2: unscoped long-term spatial research ideas](geo/Phase2.md)
@@ -46,6 +49,7 @@ The separate inspector handles replay and evaluation visualization.
 - [Archived editor plan](04_archive/03_building_editor_plan.md)
 - [Idea archive](04_archive/01_idea_archive.md)
 - [Experimental setup archive](04_archive/02_rl_experimental_setup.md)
+- [Early relay policy research notes](04_archive/04_early_relay_policy_issues.md)
 
 Historical documents preserve context and are not operational instructions.
 Current code, selected level YAML, and current guides take precedence.

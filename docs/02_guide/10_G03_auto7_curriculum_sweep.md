@@ -1,6 +1,6 @@
 # G03 automatic deployment / curriculum sweep
 
-Prepared 2 November 2026. Manifest: `cluster/g03_curriculum_auto7_21.json`.
+Prepared 2 November 2026. Manifest: `cluster/manifests/target-curriculum/g03_curriculum_auto7_21.json`.
 
 Shared sweep settings are defaults in `G03_CLU_random_buildings.yaml`; the
 manifest only varies curriculum mode, auxiliary lambda and seeds. A plain G03
@@ -93,10 +93,10 @@ From the repository root in PowerShell:
 
 ```powershell
 # Prepare only; no allocation or submission.
-.\cluster\submit.ps1 -Config cluster/g03_curriculum_auto7_21.json -DryRun
+.\cluster\submit.ps1 -Config cluster/manifests/target-curriculum/g03_curriculum_auto7_21.json -DryRun
 
 # Submit all 21 when ready.
-.\cluster\submit.ps1 -Config cluster/g03_curriculum_auto7_21.json
+.\cluster\submit.ps1 -Config cluster/manifests/target-curriculum/g03_curriculum_auto7_21.json
 ```
 
 The earlier v2 dry run expanded and packaged 21 experiments successfully. The
@@ -109,7 +109,7 @@ Full runtime testing is left to the user. Focused contracts cover the sweep,
 volume weights, group masks, map CDFs and frozen eligibility persistence:
 
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python -m pytest -q tests/test_g03_curriculum_sweep.py tests/test_target_spawn_eligibility.py
+JAX_PLATFORMS=cpu .venv/bin/python -m pytest -q ablations/target-curriculum/check_sweep.py ablations/target-curriculum/check_eligibility.py
 ```
 
 An earlier broader check completed 16 tests and encountered stale existing
@@ -171,14 +171,8 @@ evaluations are left for the user.
 
 ## Continue the six screenshot groups for another 12 hours
 
-From PowerShell at the repository root, prepare or submit the nine continuations:
+The nine proposed continuations are recorded below.
 
-```powershell
-$Py = 'C:\Users\Simon\AppData\Local\Programs\Python\Python310\python.exe'
-& .\cluster\submit-g03-resume12h.ps1 -DryRun -Python $Py
-# With the cluster VPN connected and the usual Determined login:
-& .\cluster\submit-g03-resume12h.ps1 -Python $Py
-```
 
 The local preparation completed on 3 November 2026. No jobs were submitted.
 Nine jobs request nine GPU slots; allow for other jobs within the shared 24-slot
@@ -225,7 +219,7 @@ after a partial/ambiguous submission before retrying.
 
 ## Chain-efficiency and retirement sweep, 3 November 2026
 
-The current `cluster/config.json` prepares 12 fresh training runs:
+The saved `cluster/manifests/chain-efficiency/fresh-sweep.json` describes 12 fresh training runs:
 
 | Target curriculum | Chain-efficiency coefficient | Training seeds | Auxiliary lambda |
 | --- | --- | --- | --- |
@@ -244,8 +238,8 @@ variation, giving six comparison groups. Job names include, for example,
 From the repository root in PowerShell:
 
 ```powershell
-.\cluster\submit.ps1 -DryRun
-.\cluster\submit.ps1
+.\cluster\submit.ps1 -Config .\cluster\manifests\chain-efficiency\fresh-sweep.json -DryRun
+.\cluster\submit.ps1 -Config .\cluster\manifests\chain-efficiency\fresh-sweep.json
 ```
 
 Each job starts from fresh weights with the level's 86,400-second (24-hour)
@@ -264,14 +258,6 @@ live PFSS readiness markers, cumulative step history, saved curriculum state
 and source dataset; it never substitutes the original pre-resume checkpoint
 or a best-validation checkpoint. Checkpoint lookup requires no model/map download.
 
-```powershell
-# Inspect using live parent metadata; does not stop or submit training jobs.
-.\cluster\replace-g03-efficiency-with-branches.ps1 -DryRun
-# Inspect cached parent metadata without network calls.
-.\cluster\replace-g03-efficiency-with-branches.ps1 -DryRun -Offline
-# Prepare all twelve replacements, stop the named original sweep, submit branches.
-.\cluster\replace-g03-efficiency-with-branches.ps1
-```
 
 This is a specific replacement operation, not a generic retry command. The
 helper verifies experiment names, project and ownership before changing state,
@@ -341,11 +327,8 @@ network recovery rather than rerunning the replacement operation blindly.
 
 The user will execute all subsequent submissions. A single network retry of
 55462 is prepared under a new identity, using the same source checkpoint and
-remaining training allowance:
+remaining training allowance.
 
-```powershell
-.\cluster\submit.ps1 -Config .\cluster\g03_efficiency_branch_dns_retry_test.json
-```
 
 Its local dry run does not submit. Check that this one job returns from W&B
 initialization and completes its first optimizer update before retrying the
@@ -355,23 +338,20 @@ fresh container DNS works, nor do these logs alone establish the network fault's
 root cause. No per-experiment DNS/network override was introduced in the failed
 branch batch, which used the same dependency image as its working parent.
 
-Static retry splits are available through `cluster/submit-g03-efficiency-retry.ps1`:
+The original retry plan split the twelve runs into three selections:
 `-Batch all12`, `-Batch test1`, or `-Batch remaining11`. The single job is
 forward/auxiliary 0.3/efficiency 25/seed 456789; the remaining eleven exclude
 exactly that job. All three selections share the same static per-run configs
-under `cluster/g03_efficiency_branch_retry/`, retaining the saved parent paths,
+under `cluster/manifests/chain-efficiency/checkpoint-retries/`, retaining the saved parent paths,
 paired W&B groups and remaining time allowances. Choose all twelve together,
-or submit one followed by the other eleven. These commands submit directly;
+or submit one followed by the other eleven. The original wrapper submitted the selected runs directly;
 the user executes them. No tests or dry runs were performed for this split.
 
 A separate fresh-weight comparison removes checkpoint loading while preserving
 the same forward curriculum, auxiliary lambda 0.3, efficiency reward 25, image
 and pinned dataset. It has a new output identity and separate W&B group, with a
-600-second training budget:
+600-second training budget.
 
-```powershell
-.\cluster\submit.ps1 -Config .\cluster\g03_efficiency_scratch_network_test.json
-```
 
 This config has not been submitted, tested or dry-run by the assistant. If it
 also fails initializing W&B, checkpoint loading is not required to trigger that
@@ -393,11 +373,8 @@ An unchanged historical control is prepared from successful experiment 55384's
 original submission receipt, copying the entire model context and experiment
 config. Only the experiment/run name and W&B group are changed. It retains the
 original source, driver, dependency image, overrides, level YAML and 12-hour
-training budget, without packaging any current repository changes:
+training budget, without packaging current repository changes.
 
-```powershell
-.\cluster\submit-g03-unchanged-control.ps1
-```
 
 The frozen copy is under
 `cluster/.submissions/CLU_G03_forward_aux_l0p3_seed456789_exact55384_v1/`.
@@ -450,9 +427,6 @@ this is approximately 15.72 training hours. Checkpoint recovery may roll back
 to the latest complete published update, so the command calculates its exact
 allowance at execution rather than using that last log row as a checkpoint.
 
-```powershell
-.\cluster\submit-g03-recover-reverse.ps1
-```
 
 The command checks conflicts before creating its temporary zero-GPU metadata
 shell. It selects the latest complete numbered checkpoint of experiment
@@ -497,9 +471,6 @@ The six seed-456790 original branches were explicitly terminated and confirmed
 | Reverse | 50 | 55498 | 55499 |
 | Reverse | 100 | 55500 | 55501 |
 
-```powershell
-.\cluster\submit-g03-efficiency-shared-parent.ps1
-```
 
 The static six-job helper copies each retained experiment's frozen submission.
 Forward replacements load `CLU_G03_forward_aux_l0p3_seed456789_resume12h/checkpoints/ckpt_002520`
@@ -617,7 +588,7 @@ These are deliberately taken from the live runs instead of the older frozen
 submission summaries, which contain the previous group-name ordering. Original
 group names remain `CLU_G03_<curriculum>_<policy_only|aux_l0p3>`.
 
-`cluster/tools/extend_g03_promising.py` checks complete run/seed coverage, reads
+The historical continuation helper checked run and seed coverage and read
 the latest numbered checkpoints through a temporary zero-GPU shell, preserves
 optimizer/controller state and frozen source/image, and continues existing
 W&B IDs with the corrected groups. Completed sources receive 43,200 new seconds;
@@ -718,11 +689,11 @@ reached by both members of each pair.
 Run the proof of concept from the repository root in WSL.
 
 ```bash
-uv run pytest -q tests/test_path_probe_feedback.py
+uv run pytest -q ablations/path-probe/check_feedback.py
 ```
 
 Submit the eight v2 experiments from the repository root in PowerShell.
 
 ```powershell
-.\cluster\submit.ps1 -Config .\cluster\g03_path_probe_feedback.json
+.\cluster\submit.ps1 -Config .\cluster\manifests\path-probe-feedback\g03_path_probe_feedback.json
 ```

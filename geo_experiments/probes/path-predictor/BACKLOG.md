@@ -11,7 +11,7 @@ clean policy-only variant with the same two seeds in the 24-slot sweep. Vary
 lambda and snapshots per agent across twelve configurations. Fresh
 independent probes remain manual post-training suite runs. See the [feature design](../../../docs/03_roadmap/06_G03_CLU_path_auxiliary_loss.md)
 for sampling, gradient flow and open scientific questions, and the
-[execution guide](../../../cluster/docs/GEO_AUXILIARY.md) for the 24-run sweep.
+[execution guide](../../../ablations/cluster/path-probe/GEO_AUXILIARY.md) for the 24-run sweep.
 This changes policy training and is separate from the implemented offline probe.
 
 ## Inspector: one agent's path belief over a full replay

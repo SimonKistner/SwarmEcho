@@ -30,6 +30,7 @@ IMPORTANT_AI-AGENT_MUST_READ/
 cluster/.context-*/
 cluster/.submissions/
 cluster/.fetch/
+cluster/scratch/
 
 # Outputs — large binary artifacts, never commit
 outputs/

@@ -4,7 +4,7 @@ Experiment 54837 completed the broad exploration but produced no 95%-converged
 configuration. Its unequal time budgets must not be treated as a completed
 convergence comparison. The downloaded study's detailed review and proposed
 two-run follow-up are in
-`cluster/docs/g01_capacity_review_20261029/2026-10-29_exp54837_G01_no-curriculum_capacity-and-PPO-review.md`.
+`ablations/cluster/ppo-tuning/g01_capacity_review_20261029/2026-10-29_exp54837_G01_no-curriculum_capacity-and-PPO-review.md`.
 The historical exploration commands below remain documented for reproducibility.
 
 For the current curriculum comparison, use
@@ -119,7 +119,7 @@ progress. No jobs are submitted by adding these files or running `-DryRun`.
 
 Search uses online W&B. The existing `WANDB_API_KEY` environment variable or
 owner-only PFSS `.wandb_api_key` file must already be available as documented in
-[cluster submission](../../cluster/README.md#persistence-and-wb). Credentials
+[cluster submission](../../cluster/README/COMMANDS.md#3-configure-wb-on-pfss). Credentials
 are never included in model snapshots. `setup-wandb.ps1` securely installs an
 existing local key through a separate SSH connection when needed; the probe
 needs no W&B key.
@@ -174,7 +174,7 @@ retries; shared setup failures and repeated unresolved errors stop the study.
 
 ## Phase 2: adaptive joint learning search
 
-Defaults in `cluster/archive/runs/clu-g01-search.json`:
+Defaults in `cluster/manifests/historical/g01/clu-g01-search.json`:
 
 | Budget | Default |
 | --- | --- |

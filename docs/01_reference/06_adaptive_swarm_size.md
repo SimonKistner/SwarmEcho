@@ -263,9 +263,9 @@ The vote protocol is also recorded in checkpoint contracts. Missing protocol met
 From WSL in the repository root:
 
 ```bash
-JAX_PLATFORMS=cpu uv run pytest -q tests/test_reward_by_reference.py
-uv run pytest -q tests/test_adapt_size.py
-node --test tests/test_inspector_adapt_size.cjs
+JAX_PLATFORMS=cpu uv run pytest -q tests/test_population.py
+uv run pytest -q tests/test_population.py
+node --test tests/ui_checks.cjs
 ```
 
 The dedicated reference-reward checks use only 2-4 drone slots, the real vote

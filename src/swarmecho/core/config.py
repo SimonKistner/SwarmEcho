@@ -6,7 +6,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import math
 import warnings
-from swarmecho.core.compatibility import canonical_level_name, canonical_map_name, resolve_level_file, resolve_map_file
+from swarmecho.core.compatibility import (
+    DEFAULT_LEVEL_NAME,
+    canonical_level_name,
+    canonical_map_name,
+    resolve_level_file,
+    resolve_map_file,
+)
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 MAP_DIR = _SRC_ROOT / "curriculum_config" / "maps"
@@ -337,6 +343,7 @@ DEFAULT_ACTION_NOISE_LEVEL = 0.011
 class TargetCurriculumConfig:
     mode: str = "none"  # none | forward | reverse; uniform targets within the allowed groups.
     success_threshold: float = 0.75
+    start_agents: int = 2  # Initial forward budget or final reverse group.
 
 
 @dataclass(frozen=True)
@@ -359,6 +366,8 @@ def validate_target_spawn_eligibility(cfg):
 def validate_target_curriculum(cfg):
     if cfg.mode not in {"none", "forward", "reverse"}:
         raise ValueError("training.target_curriculum.mode must be none, forward or reverse.")
+    if type(cfg.start_agents) is not int or cfg.start_agents < 2:
+        raise ValueError("training.target_curriculum.start_agents must be an integer >= 2.")
     if type(cfg.success_threshold) not in (int, float) or not math.isfinite(cfg.success_threshold) or not 0 <= cfg.success_threshold <= 1:
         raise ValueError("training.target_curriculum.success_threshold must be in [0, 1].")
 
@@ -878,22 +887,24 @@ def _strict_dataclass(cls, values: object, label: str):
         if cls is RewardConfig:
             raise ValueError(
                 f"Unsupported reward fields: {', '.join(sorted(unknown))}. "
-                "Use the signed individual reward settings in G02_static or "
-                "the commented replacement beneath this level's reward block."
+                f"See {DEFAULT_LEVEL_NAME} for the current signed reward fields."
             )
         raise ValueError(f"Unknown {label} fields: {', '.join(sorted(unknown))}.")
     return cls(**values)
 
 
-def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: list[str] | None = None) -> Level:
+def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[str] | None = None,
+               *, config_data: dict | None = None) -> Level:
     """Load a strict level through the canonical config module."""
     from omegaconf import OmegaConf
     from swarmecho.env.buildings import load_building
 
     source = resolve_level_file(name_or_path, LEVEL_DIR)
-    if not source.exists():
-        raise FileNotFoundError(f"level not found: {name_or_path}")
-    data = normalize_inspection_sections(OmegaConf.to_container(OmegaConf.load(source), resolve=True))
+    if config_data is None:
+        if not source.exists():
+            raise FileNotFoundError(f"level not found: {name_or_path}")
+        config_data = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
+    data = normalize_inspection_sections(config_data)
     if overrides:
         override_data = normalize_inspection_sections(OmegaConf.to_container(OmegaConf.from_dotlist(overrides), resolve=True))
         data = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(data), OmegaConf.create(override_data)), resolve=True)
@@ -1060,7 +1071,8 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
     if training.target_curriculum.mode != "none":
         if (training.adaptive_target_spawn.enabled or training.adaptive_map_sampling.enabled
                 or curriculum.enabled or not training.dynamic_max_geo_distance.enabled
-                or env.num_agents < 2 or env.relay_agent_budget not in (None, env.num_agents)
+                or env.num_agents < training.target_curriculum.start_agents
+                or env.relay_agent_budget not in (None, env.num_agents)
                 or not data.get("validation", {}).get("enabled", False)
                 or data.get("evaluation", {}).get("early_exit_source") != "validation"):
             raise ValueError("Target curriculum requires uniform sampling, full population, dynamic feasibility and validation progression.")
@@ -1381,7 +1393,7 @@ def load_level(name_or_path: str | Path = "M00_no_maze_open_cuboid", overrides: 
 
 def load_level_cli(arguments: list[str]) -> Level:
     """Load a level with the same key=value CLI contract as training."""
-    level_name = "M00_no_maze_open_cuboid"
+    level_name = DEFAULT_LEVEL_NAME
     overrides = []
     for argument in arguments:
         if "=" not in argument:

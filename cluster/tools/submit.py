@@ -30,10 +30,14 @@ from swarmecho.core.run_names import ppo_name, submission_ppo_parameters
 
 
 CLUSTER = Path(__file__).resolve().parents[1]
+MANIFESTS = CLUSTER / "manifests"
+DEFAULT_MANIFEST = MANIFESTS / "g03-default.json"
+HISTORICAL_MANIFESTS = MANIFESTS / "historical"
 DEPENDENCY_FILES = ("cluster/Dockerfile", "pyproject.toml", "uv.lock")
 RESERVED_OVERRIDES = {"level", "levels", "logging.run_name", "logging.log_dir", "logging.wandb_mode",
                       "logging.wandb_group", "logging.use_timestamp_postfix"}
 APPROVED_EXISTING_RUNS = {}
+PRIORITY = 41
 
 
 def read_json(path):
@@ -282,7 +286,7 @@ def prepare_submission(settings, info, name, run, stamp, dry_run, source_context
         "entrypoint": "python cluster/tools/run_driver.py",
         "environment": {"image": info["image"], "environment_variables": [
             "SWARMECHO_PERSIST_ROOT=" + settings["persist_root"]]},
-        "resources": {"resource_pool": settings["resource_pool"], "slots_per_trial": settings["slots_per_trial"]},
+        "resources": {"resource_pool": settings["resource_pool"], "slots_per_trial": settings["slots_per_trial"], "priority": PRIORITY},
         "bind_mounts": [{"host_path": settings["pfss_mount"], "container_path": settings["pfss_mount"], "read_only": False}],
         "searcher": {"name": "single", "metric": "job_completed", "max_length": {"epochs": 1}, "smaller_is_better": False},
         "max_restarts": validate_tuning(run["tuning"])["controller_restarts"] if "tuning" in run else 0,
@@ -312,8 +316,11 @@ def prepare_submission(settings, info, name, run, stamp, dry_run, source_context
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--config", type=Path, help="Batch config; defaults to cluster/config.json")
-    selection.add_argument("--run", help="Historical manifest name under cluster/archive/runs, without .json")
+    selection.add_argument(
+        "--config", type=Path,
+        help=f"Batch config; defaults to {DEFAULT_MANIFEST.relative_to(ROOT).as_posix()}",
+    )
+    selection.add_argument("--run", help="Historical manifest name without .json, such as g03-smoke")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--override-existing", action="store_true",
                         help="Use existing-name override approval already given to a batch wrapper")
@@ -330,10 +337,17 @@ def main():
     if args.run:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.run):
             parser.error("--run must name a historical config such as g03-smoke")
-        config_path = CLUSTER / "archive/runs" / (args.run + ".json")
+        matches = sorted(
+            path for path in HISTORICAL_MANIFESTS.rglob(args.run + ".json") if path.is_file()
+        )
+        if not matches:
+            parser.error(f"No historical manifest named {args.run!r}.")
+        if len(matches) > 1:
+            parser.error(f"Historical manifest name {args.run!r} is ambiguous.")
+        config_path = matches[0]
         plans = [(args.run, read_json(config_path))]
     else:
-        config_path = (args.config or CLUSTER / "config.json").resolve()
+        config_path = (args.config or DEFAULT_MANIFEST).resolve()
         plans = expand_config(read_json(config_path), ROOT, stamp)
     for _, run in plans:
         validate(settings, run)

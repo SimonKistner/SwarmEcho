@@ -22,6 +22,7 @@ import functools
 import json
 import time
 from collections import OrderedDict, deque
+from contextlib import nullcontext
 from dataclasses import asdict, fields, replace
 from swarmecho.models.actions import physical_actions, deterministic_actions
 from swarmecho.env.adapt_size import policy_resets
@@ -927,7 +928,10 @@ def train(
     target_curriculum = None
     if training.target_curriculum.mode != "none":
         from swarmecho.training.target_curriculum import UniformTargetCurriculum
-        target_curriculum = UniformTargetCurriculum(training.target_curriculum, cfg.num_agents)
+        target_curriculum = UniformTargetCurriculum(
+            training.target_curriculum, cfg.num_agents,
+            skip_empty_forward_groups=level.validation.mode == "uniform_full_task",
+        )
         if resume_from and training.ckpt_loading_mode in {"resume", "branch"}:
             restored_curriculum = target_curriculum.restore(
                 resume_from, strict=training.ckpt_loading_mode == "resume")
@@ -2375,7 +2379,7 @@ def _collect_replay_impl(
     reward_cfg,
     cfg,
     horizon: int,
-    target_position: tuple[float, float, float] | None = None,
+    target_position: jax.Array | None = None,
     obstacle_min: jax.Array | None = None,
     obstacle_max: jax.Array | None = None,
     target_spawn_weights: jax.Array | None = None,
@@ -2569,7 +2573,6 @@ def _collect_replay_impl(
         "reward_cfg",
         "cfg",
         "horizon",
-        "target_position",
     ),
 )
 def _collect_replay_jit(
@@ -2582,7 +2585,7 @@ def _collect_replay_jit(
     reward_cfg,
     cfg,
     horizon: int,
-    target_position: tuple[float, float, float] | None = None,
+    target_position: jax.Array | None = None,
     obstacle_min: jax.Array | None = None,
     obstacle_max: jax.Array | None = None,
     target_spawn_weights: jax.Array | None = None,
@@ -2628,11 +2631,7 @@ def evaluate_model(
             reward_cfg=level.reward,
             cfg=cfg,
             horizon=horizon,
-            target_position=(
-                None
-                if target_position is None
-                else tuple(float(value) for value in target_position)
-            ),
+            target_position=None if target_position is None else jnp.asarray(target_position, dtype=jnp.float32),
             obstacle_min=None if obstacle_min is None else jnp.asarray(obstacle_min),
             obstacle_max=None if obstacle_max is None else jnp.asarray(obstacle_max),
             target_spawn_weights=target_spawn_weights,
@@ -2675,6 +2674,7 @@ def evaluate_model(
         "return_useless_agents",
         "return_information",
         "return_geo",
+        "on_progress",
     ),
 )
 def _run_parallel_evaluation_jit(
@@ -2709,6 +2709,7 @@ def _run_parallel_evaluation_jit(
     return_geo: bool = False,
     target_spawn_weights: jax.Array | None = None,
     target_agent_budget: jax.Array | None = None,
+    on_progress=None,
 ):
     """Run deterministic metrics and optionally retain one lane's actions."""
     if (return_population or return_required_agents) and capture_actions:
@@ -2933,6 +2934,12 @@ def _run_parallel_evaluation_jit(
                 selected = jnp.where(replace_snapshot[:,None],next_actor_hidden,selected)
                 best = jnp.where(replace_snapshot,priority,best)
                 next_carry = (*next_carry,selected,best)
+            if on_progress is not None:
+                steps_done = step_index + 1
+                # The scan index is shared across lanes, so vmap reports once per interval.
+                jax.lax.cond(steps_done % 25 == 0,
+                             lambda: jax.debug.callback(on_progress, steps_done, ordered=True),
+                             lambda: None)
             return next_carry, executed_actions if capture_actions else None
 
         final_carry, action_history = jax.lax.scan(
@@ -3003,6 +3010,8 @@ def evaluate_suite(
     level: Level,
     *,
     episodes: int,
+    batch_size: int | None = None,
+    show_progress: bool = False,
     max_steps: int | None = None,
     return_episode_info: bool = False,
     return_required_agents: bool = False,
@@ -3013,11 +3022,13 @@ def evaluate_suite(
     target_spawn_weights: np.ndarray | None = None,
     target_agent_budget: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
-    """Evaluate a deterministic batch without collecting replay frames."""
+    """Evaluate deterministic episodes without collecting replay frames."""
     level = resolve_evaluation_level(level)
     if level.evaluation.target_sampling == "training" and target_spawn_weights is None:
         raise ValueError("Training target sampling requires a snapshot of the adaptive spawn controller.")
     cfg = level.env
+    if show_progress:
+        terminal_print(f"[EVAL] {level.building_name}: preparing environment for {episodes:,} episodes.")
     reset, step, observations, env_metrics = _evaluation_env_fns(level)
     layout_mode = layout_mode or ("fixed" if cfg.num_obstacles else "per_environment")
     fixed_layout = bool(cfg.num_obstacles)
@@ -3044,6 +3055,62 @@ def evaluate_suite(
             fixed_vertices = reference_state.roadmap_vertices
             fixed_distances = reference_state.roadmap_distances
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
+    batch_size = episodes if batch_size is None else batch_size
+    if batch_size < 1 or episodes < 1:
+        raise ValueError("Evaluation episode count and batch size must be positive.")
+    reset_key = jax.random.PRNGKey(level.training.seed + 10_000)
+    noise_key = jax.random.PRNGKey(
+        level.training.seed + 20_000 if action_noise_seed is None else action_noise_seed
+    )
+    batches = []
+    progress = nullcontext()
+    if show_progress:
+        from tqdm import tqdm
+
+        progress = tqdm(total=episodes * horizon, desc=f"{level.building_name} sweep",
+                        unit="env-step", unit_scale=True, dynamic_ncols=True)
+    with progress as bar:
+        def report_progress(steps_done):
+            if int(steps_done) <= 25:
+                bar.set_postfix_str(f"batch {batch_index + 1}/{batch_count}", refresh=False)
+            completed_work = start * horizon + size * int(steps_done)
+            bar.update(completed_work - bar.n)
+
+        batch_count = (episodes + batch_size - 1) // batch_size
+        for batch_index, start in enumerate(range(0, episodes, batch_size)):
+            size = min(batch_size, episodes - start)
+            if bar is not None:
+                bar.set_postfix_str(f"batch {batch_index + 1}/{batch_count} starting (includes JIT)")
+            metrics_batch = _run_parallel_evaluation_jit(
+                model,
+                reset_key if batch_index == 0 else jax.random.fold_in(reset_key, batch_index),
+                noise_key if batch_index == 0 else jax.random.fold_in(noise_key, batch_index),
+                reset=reset,
+                step=step,
+                observations=observations,
+                env_metrics=env_metrics,
+                reward_cfg=level.reward,
+                cfg=cfg,
+                num_envs=size,
+                horizon=horizon,
+                action_noise_max=action_noise_max,
+                fixed_layout=fixed_layout,
+                fixed_obstacle_min=fixed_min,
+                fixed_obstacle_max=fixed_max,
+                fixed_roadmap_vertices=fixed_vertices,
+                fixed_roadmap_distances=fixed_distances,
+                return_required_agents=return_required_agents,
+                return_useless_agents=cfg.adapt_size.enabled,
+                return_information=True,
+                target_spawn_weights=target_spawn_weights,
+                target_agent_budget=target_agent_budget,
+                on_progress=report_progress if bar is not None else None,
+            )
+            batches.append(jax.device_get(metrics_batch))
+            if bar is not None:
+                # Drain callbacks before advancing the batch state they read.
+                jax.effects_barrier()
+                report_progress(horizon)
     (
         returns,
         lengths,
@@ -3061,35 +3128,8 @@ def evaluate_suite(
         base_delivered,
         zone_valid,
         *extra_metrics,
-    ) = jax.device_get(
-        _run_parallel_evaluation_jit(
-            model,
-            jax.random.PRNGKey(level.training.seed + 10_000),
-            jax.random.PRNGKey(
-                level.training.seed + 20_000
-                if action_noise_seed is None
-                else action_noise_seed
-            ),
-            reset=reset,
-            step=step,
-            observations=observations,
-            env_metrics=env_metrics,
-            reward_cfg=level.reward,
-            cfg=cfg,
-            num_envs=episodes,
-            horizon=horizon,
-            action_noise_max=action_noise_max,
-            fixed_layout=fixed_layout,
-            fixed_obstacle_min=fixed_min,
-            fixed_obstacle_max=fixed_max,
-            fixed_roadmap_vertices=fixed_vertices,
-            fixed_roadmap_distances=fixed_distances,
-            return_required_agents=return_required_agents,
-            return_useless_agents=cfg.adapt_size.enabled,
-            return_information=True,
-            target_spawn_weights=target_spawn_weights,
-            target_agent_budget=target_agent_budget,
-        )
+    ) = batches[0] if len(batches) == 1 else tuple(
+        np.concatenate(values) for values in zip(*batches, strict=True)
     )
     _validate_evaluation_pairs(level, spawn_pair_attempts)
     if cfg.adapt_size.enabled:

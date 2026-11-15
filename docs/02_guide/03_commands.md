@@ -50,7 +50,7 @@ The inspector labels these replays by required-agent class and map ID, such as
 `required_agents_3_random_eval_0000`. Set
 `inspection_evaluation.map_suite_replay_limit=1` to replay only one map while
 retaining metrics for the full suite. The current cluster checkpoint command is
-registered in [Cluster commands](../../cluster/docs/COMMANDS.md#12-evaluate-a-fetched-checkpoint-in-wsl).
+registered in [Cluster commands](../../cluster/README/COMMANDS.md#12-evaluate-a-fetched-checkpoint-in-wsl).
 
 Select from an existing evaluation, or request an XYZ position:
 
@@ -127,8 +127,8 @@ uv run swarmecho-benchmark num_envs=64 steps=64 wall_sensing_rays=32 drone_radar
 uv run swarmecho-benchmark num_envs=64 steps=64 wall_sensing_layout=xyz wall_sensing_rays=14,18,26 wall_sensing_ray_max_distance=8 drone_radar_bins=16 radar_mode=band_sep_counting distance_bands=3
 uv run pytest tests
 uv run pytest tests/test_environment.py -k counting_radar -v
-JAX_PLATFORMS=cpu uv run pytest tests/test_wall_sensing.py -v
-node --test tests/test_map_builder_ui.cjs tests/test_inspector_visibility.cjs
+JAX_PLATFORMS=cpu uv run pytest ablations/radar/check_wall_sensing.py -v
+node --test tests/ui_checks.cjs
 ```
 
 Validation and benchmark implementations are packaged under
