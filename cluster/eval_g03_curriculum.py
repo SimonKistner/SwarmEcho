@@ -1,7 +1,6 @@
 """Evaluate six G03 curriculum checkpoints (seed 456789) on one shared map.
 
 From the repository root in WSL:
-    uv run python cluster/eval_g03_curriculum.py --dry-run
     uv run python cluster/eval_g03_curriculum.py
 """
 from __future__ import annotations
@@ -29,9 +28,7 @@ MAP_ID = "random_eval_0000"
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Prepare configs and print commands; no rollouts.")
-    args = parser.parse_args()
+    argparse.ArgumentParser(description=__doc__).parse_args()
     prepared = []
     map_hashes = set()
     for experiment_id, suffix in RUNS:
@@ -81,8 +78,7 @@ def main():
         score = marker["metrics"]["validation/success_rate"]
         print(f"\nex{experiment_id} {suffix}: best update {marker['update']}, validation {score:.2%}", flush=True)
         print(shlex.join(command), flush=True)
-        if not args.dry_run:
-            subprocess.run(command, cwd=ROOT, check=True)
+        subprocess.run(command, cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":

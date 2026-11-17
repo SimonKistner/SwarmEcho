@@ -119,8 +119,8 @@ def main():
     for argument in sys.argv[1:]:
         key, separator, value = argument.partition("=")
         if not separator:
-            raise ValueError("Use config=<yaml>, plan=true, resume=<suite folder>, or execute.<index>.repeats=<count>.")
-        if key in ("config", "plan", "resume"):
+            raise ValueError("Use config=<yaml>, resume=<suite folder>, or execute.<index>.repeats=<count>.")
+        if key in ("config", "resume"):
             options[key] = value
         else:
             overrides.append(argument)
@@ -144,8 +144,6 @@ def main():
     print(f"[suite] {len(plan)} sequential experiments; {len({j['collection_key'] for j in plan})} shared collections", flush=True)
     for job in plan:
         print(f"  {display_name({'config': job['config']})}: {job['config']['policy']['checkpoint']}", flush=True)
-    if options.get("plan", "false").lower() == "true":
-        return
     root.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(OmegaConf.create(settings), root / "config.yaml")
     update_run(root, suite_config=settings, execution_plan=plan, progress={"stage": "starting"})

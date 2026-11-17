@@ -33,7 +33,6 @@ class SharedRoadmap:
     distances: np.ndarray
     clearance: float
     visible_edges: np.ndarray | None = None
-    corner_distances: np.ndarray | None = None
 
     def tree_flatten(self):
         return (), self
@@ -52,7 +51,7 @@ from swarmecho.env.roadmap_cpu import building_roadmap as _cpu_building_roadmap
 @lru_cache(maxsize=8)
 def _as_shared_roadmap(graph):
     return SharedRoadmap(graph.solid_min, graph.solid_max, graph.vertices, graph.distances,
-                         graph.clearance, graph.visible_edges, graph.corner_distances)
+                         graph.clearance, graph.visible_edges)
 
 def shared_roadmap(*args, **kwargs):
     return _as_shared_roadmap(_cpu_shared_roadmap(*args, **kwargs))
@@ -114,68 +113,6 @@ def _segments_blocked_block(start, end, obstacle_min, obstacle_max, epsilon):
     return jnp.any(hit & ~jnp.any(outside_parallel, axis=-1), axis=-1)
 
 
-def generate_obstacles(
-    key,
-    world_size,
-    *,
-    count: int,
-    size_min: float,
-    size_max: float,
-    z_min: float,
-    z_max: float,
-    boundary_buffer: float,
-):
-    """Generate a deterministic fixed-shape AABB layout from one environment key."""
-    if count == 0:
-        empty = jnp.zeros((0, 3), dtype=jnp.float32)
-        return empty, empty
-    mins = jnp.zeros((count, 3), dtype=jnp.float32)
-    maxs = jnp.zeros((count, 3), dtype=jnp.float32)
-    for index in range(count):
-        def draw(draw_key):
-            size_key, centre_key = jax.random.split(draw_key)
-            size = jax.random.uniform(size_key, (3,), minval=size_min, maxval=size_max)
-            low = jnp.asarray([boundary_buffer, boundary_buffer, z_min]) + size / 2
-            high = jnp.asarray([world_size[0] - boundary_buffer, world_size[1] - boundary_buffer, z_max]) - size / 2
-            centre = jax.random.uniform(centre_key, (3,), minval=low, maxval=jnp.maximum(low, high))
-            return centre - size / 2, centre + size / 2
-
-        key, first_key = jax.random.split(key)
-        first_min, first_max = draw(first_key)
-
-        def overlaps(candidate_min, candidate_max):
-            separated = (candidate_max <= mins - boundary_buffer) | (
-                candidate_min >= maxs + boundary_buffer
-            )
-            return jnp.any(jnp.all(~separated, axis=-1) & (jnp.arange(count) < index))
-
-        def condition(carry):
-            attempt, _, candidate_min, candidate_max = carry
-            return (attempt < 64) & overlaps(candidate_min, candidate_max)
-
-        def retry(carry):
-            attempt, retry_key, _, _ = carry
-            retry_key, draw_key = jax.random.split(retry_key)
-            candidate_min, candidate_max = draw(draw_key)
-            return attempt + 1, retry_key, candidate_min, candidate_max
-
-        _, key, candidate_min, candidate_max = jax.lax.while_loop(
-            condition, retry, (0, key, first_min, first_max)
-        )
-        fallback_size = jnp.full(3, size_min)
-        fallback_centre = jnp.asarray([
-            world_size[0] * (index + 1) / (count + 1),
-            world_size[1] * (0.35 + 0.3 * (index % 2)),
-            (z_min + z_max) / 2,
-        ])
-        still_overlaps = overlaps(candidate_min, candidate_max)
-        candidate_min = jnp.where(still_overlaps, fallback_centre - fallback_size / 2, candidate_min)
-        candidate_max = jnp.where(still_overlaps, fallback_centre + fallback_size / 2, candidate_max)
-        mins = mins.at[index].set(candidate_min)
-        maxs = maxs.at[index].set(candidate_max)
-    return mins, maxs
-
-
 def roadmap_vertices(obstacle_min, obstacle_max, clearance: float):
     """Return the eight clearance-expanded corners of every cuboid."""
     corners = jnp.asarray(ROADMAP_CORNERS)
@@ -184,8 +121,7 @@ def roadmap_vertices(obstacle_min, obstacle_max, clearance: float):
     return (lower[:, None, :] + corners[None, :, :] * (upper - lower)[:, None, :]).reshape(-1, 3)
 
 
-def roadmap_distances(vertices, obstacle_min, obstacle_max, clearance: float,
-                      corner_bonus_m=0.0, corner_merge_distance_m=0.0):
+def roadmap_distances(vertices, obstacle_min, obstacle_max, clearance: float):
     """Build a visibility graph and its fixed-size Floyd-Warshall distance matrix."""
     # Slightly shrink the forbidden volume so edges lying on the clearance
     # boundary remain legal while paths through its interior remain blocked.
@@ -197,8 +133,7 @@ def roadmap_distances(vertices, obstacle_min, obstacle_max, clearance: float,
     def row(index, distance):
         visible = ~segments_blocked(vertices[index], vertices, expanded_min, expanded_max)
         length = jnp.linalg.norm(vertices[index] - vertices, axis=-1)
-        weighted = length + jnp.where(length > corner_merge_distance_m + 1e-4, corner_bonus_m, 0.0)
-        return distance.at[index].set(jnp.where(visible, weighted, INF))
+        return distance.at[index].set(jnp.where(visible, length, INF))
 
     distance = jax.lax.fori_loop(0, vertices.shape[0], row,
                                jnp.full((vertices.shape[0], vertices.shape[0]), INF))
@@ -250,7 +185,7 @@ def pairwise_free_space_distance(points, vertices, roadmap, obstacle_min, obstac
     return jnp.minimum(direct, via)
 
 
-def free_space_distance(start, end, vertices, roadmap, obstacle_min, obstacle_max, corner_bonus_m=0.0):
+def free_space_distance(start, end, vertices, roadmap, obstacle_min, obstacle_max):
     """Obstacle-aware distance between all pairs in ``start`` and ``end``."""
     start = jnp.atleast_2d(start)
     end = jnp.atleast_2d(end)
@@ -262,7 +197,7 @@ def free_space_distance(start, end, vertices, roadmap, obstacle_min, obstacle_ma
     )
     if vertices.shape[0] == 0:
         return direct
-    start_cost = _roadmap_attachment(start, vertices, obstacle_min, obstacle_max) + corner_bonus_m
+    start_cost = _roadmap_attachment(start, vertices, obstacle_min, obstacle_max)
     end_cost = _roadmap_attachment(end, vertices, obstacle_min, obstacle_max)
     attached = _route_costs(start_cost, roadmap)
     via = jnp.min(attached[:, :, None] + end_cost.T[None, :, :], axis=1)

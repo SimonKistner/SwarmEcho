@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from swarmecho.core.config import EvaluationConfig, TrainingConfig
 from swarmecho.env.buildings import load_building, make_cuboid_building
 from swarmecho.env.environment import EnvConfig, make_env_fns
 from swarmecho.training import evaluate, random_evaluation, random_evaluation as evaluation
@@ -71,83 +72,39 @@ def test_replay_configs_are_selected_only_from_csv_metrics():
     assert lanes.tolist() == [0, 2, 3]
 
 
-def test_parallel_evaluation_reuses_targets_and_writes_five_run_rates(
-    tmp_path, monkeypatch
-):
-    level = SimpleNamespace(
-        evaluation=SimpleNamespace(
-            eval_parallel_envs=2,
-            eval_robustness_runs=5,
-            eval_action_noise_max=0.011,
-            success_condition=None,
-            eval_differes_from_training_map=False,
-        ),
-        env=SimpleNamespace(success_condition="chain_held", max_steps=100),
-        reward=SimpleNamespace(target_found_requires_delivery=True),
-        training=SimpleNamespace(seed=7, num_envs=4000, num_steps=100),
-        building_name="test_map",
-        building=make_cuboid_building((4, 4, 6)),
-    )
-    targets = np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    bases = np.zeros((2, 3))
-    success_by_run = [
-        [True, True],
-        [True, True],
-        [True, True],
-        [True, True],
-        [False, True],
-    ]
+def test_parallel_evaluation_writes_single_pass_outcomes(tmp_path, monkeypatch):
+    from swarmecho.core.config import load_level
+
+    level = load_level("G03_CLU_random_buildings")
     calls = []
 
-    def fake_evaluate_suite(model, passed_level, **kwargs):
-        calls.append(kwargs)
-        run_index = kwargs["action_noise_seed"] - (passed_level.training.seed + 20_000)
-        successes = np.asarray(success_by_run[run_index])
-        return {"eval_success": float(np.mean(successes)),
-                "eval_episode_length": 10.0, "eval_coverage": 0.5,
-                "eval_target_found_rate": float(np.mean(successes)),
-                "eval_visually_found_rate": 1.0,
-                "eval_chain_progress_pct": 50.0}, {
-            "target_positions": targets.copy(),
-            "base_positions": bases.copy(),
-            "successes": successes,
-            "lengths": np.where(successes, 10, 100),
-            "delivered": successes.copy(),
-            "visually_found": np.ones(2, dtype=bool),
-            "final_chain_lengths": np.asarray([7.0, 8.0]),
-            "obstacle_min": np.empty((2, 0, 3), dtype=np.float32),
-            "obstacle_max": np.empty((2, 0, 3), dtype=np.float32),
+    def evaluate_batch(model, level, *, episodes, return_episode_info):
+        calls.append((episodes, return_episode_info))
+        return {
+            "eval_success": 1 / 3, "eval_episode_length": 10., "eval_coverage": 0.5,
+            "eval_target_found_rate": 1 / 3, "eval_chain_progress_pct": 50.,
+        }, {
+            "target_positions": np.asarray([[1., 2., 3.], [4., 5., 6.], [7., 8., 9.]]),
+            "base_positions": np.zeros((3, 3)),
+            "successes": np.asarray([False, False, True]),
+            "delivered": np.asarray([False, False, True]),
+            "visually_found": np.asarray([False, True, True]),
+            "final_chain_lengths": np.asarray([1., 2., 3.]),
+            "obstacle_min": np.empty((3, 0, 3)),
+            "obstacle_max": np.empty((3, 0, 3)),
         }
 
-    monkeypatch.setattr(
-        "swarmecho.training.evaluate.evaluate_suite",
-        fake_evaluate_suite,
-    )
-    run_dir = tmp_path / "run"
-    checkpoint = run_dir / "checkpoints" / "ckpt_000001"
-
-    path = run_parallel_evaluation(object(), level, checkpoint, run_dir)
+    monkeypatch.setattr(evaluate, "evaluate_suite", evaluate_batch)
+    checkpoint = tmp_path / "checkpoints" / "ckpt_000001"
+    path = run_parallel_evaluation(object(), level, checkpoint, tmp_path)
     records = load_eval_info_csv(path)
 
-    assert len(calls) == 5
-    assert [call["action_noise_seed"] for call in calls] == [
-        20_007,
-        20_008,
-        20_009,
-        20_010,
-        20_011,
-    ]
-    assert all(call["action_noise_max"] == 0.011 for call in calls)
-    np.testing.assert_allclose(records["chain_success_rate"], [0.8, 1.0])
-    np.testing.assert_allclose(
-        records["found_and_delivered_rate"], [0.8, 1.0]
-    )
-    np.testing.assert_allclose(records["visually_found_rate"], [1.0, 1.0])
-    assert records["stages"].tolist() == ["visually_found", "chain_success"]
+    assert calls == [(1_000, True)]
+    assert records["stages"].tolist() == ["not_found", "visually_found", "chain_success"]
+    np.testing.assert_array_equal(records["chain_success_rate"], [0., 0., 1.])
+    np.testing.assert_array_equal(records["visually_found_rate"], [0., 1., 1.])
     assert path.parent.name == "data"
     assert path.parent.parent.name.startswith("eval_")
-    assert path.parent.parent.parent.name == "ckpt_u000001_s00400k"
-
 
 def test_successful_replay_priority_uses_final_chain_length(tmp_path):
     path = save_eval_info_csv(
@@ -187,9 +144,8 @@ def test_final_checkpoint_evaluation_falls_back_to_failure(tmp_path, monkeypatch
     monkeypatch.setattr(
         "swarmecho.training.evaluate.render_csv_replays", fake_render
     )
-    _create_final_checkpoint_evaluation(
-        object(), object(), tmp_path / "ckpt", tmp_path
-    )
+    level = SimpleNamespace(evaluation=EvaluationConfig(eval_video=True), training=TrainingConfig())
+    _create_final_checkpoint_evaluation(object(), level, tmp_path / "ckpt", tmp_path)
 
     assert results == ["success", "fail"]
     assert "[WARNING] Final success replay selection failed" in capsys.readouterr().out
@@ -213,9 +169,8 @@ def test_final_checkpoint_evaluation_skips_replay_after_both_selections_fail(
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no lanes")),
     )
 
-    _create_final_checkpoint_evaluation(
-        object(), object(), tmp_path / "ckpt", tmp_path
-    )
+    level = SimpleNamespace(evaluation=EvaluationConfig(eval_video=True), training=TrainingConfig())
+    _create_final_checkpoint_evaluation(object(), level, tmp_path / "ckpt", tmp_path)
     output = capsys.readouterr().out
     assert "[WARNING] Final success and failure replay creation both failed" in output
 
@@ -319,7 +274,7 @@ def test_robust_eval_csv_rejects_non_cumulative_rates(tmp_path):
 
 def test_replay_round_trip_and_atomic_manifest(tmp_path):
     building = load_building(
-        "src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml"
+        "src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml"
     )
     cfg = EnvConfig()
     reset, step, _, _ = make_env_fns(building, cfg)
@@ -332,7 +287,7 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     data_path, manifest_path = write_replay(
         tmp_path / "rollout",
         states,
-        map_name="M00_no_maze_open_cuboid",
+        map_name="open_cuboid",
         dt=cfg.dt,
         building=building,
         reward_terms=np.zeros((4, cfg.num_agents, 2), dtype=np.float32),
@@ -344,7 +299,8 @@ def test_replay_round_trip_and_atomic_manifest(tmp_path):
     metadata, arrays = load_replay(manifest_path)
     assert metadata["frames"] == 4
     assert arrays["position"].shape == (4, cfg.num_agents, 3)
-    assert arrays["exploration_reward"].shape == (4, 4, 4, 4)
+    np.testing.assert_array_equal(arrays["coverage"], np.stack([s.coverage for s in states]))
+    assert arrays["coverage_eligible"].shape == arrays["coverage"].shape[1:]
     assert arrays["reward_terms"].shape == (4, cfg.num_agents, 2)
     assert arrays["obstacle_min"].shape == (4, 0, 3)
     np.testing.assert_array_equal(arrays["base_target_known"], [s.base_target_known for s in states])
@@ -361,7 +317,7 @@ def test_replay_rejects_unknown_format(tmp_path):
 # Required-agent replays
 
 def replay_fixture(monkeypatch, *, actual=None):
-    cfg = SimpleNamespace(geometric_agent_budget=7, max_steps=700, dt=0.1,
+    cfg = SimpleNamespace(num_agents=7, max_steps=700, dt=0.1,
                           coverage_voxel_size=2.5, comm_radius=15,
                           comm_radius_base=15, visual_radius=5,
                           success_condition="chain_held")
@@ -439,6 +395,36 @@ def test_map_suite_requests_classes_and_uses_class_replays(tmp_path, monkeypatch
     assert metrics["eval_success"] == 0.5
 
 
+def test_authored_evaluation_records_map_path_and_writes_heatmap(tmp_path, monkeypatch):
+    level, info, _, _ = replay_fixture(monkeypatch)
+    level.building_name = "custom_map"
+    level.building.world_size_m = np.array([15, 15, 15])
+    level.map_paths = (tmp_path / "my map.yaml",)
+    level.map_source_name = None
+    level.evaluation = EvaluationConfig(training_heatmap_creation=False)
+    level.logging = SimpleNamespace(individual_map_diagnostics=False)
+    level.effective_eval_parallel_envs = 4
+    info.update(
+        base_positions=np.zeros((4, 3)), final_chain_lengths=np.zeros(4),
+        successes=np.zeros(4, dtype=bool), delivered=np.zeros(4, dtype=bool),
+        visually_found=np.zeros(4, dtype=bool),
+    )
+    monkeypatch.setattr("swarmecho.training.train.evaluate_suite", lambda *a, **kw: (
+        {"eval_success": 0.0, "eval_success_episode_count": 0}, info,
+    ))
+    monkeypatch.setattr(evaluation, "resolve_evaluation_level", lambda level: level)
+    monkeypatch.setattr(evaluation, "building_snapshot", lambda building: {})
+
+    evaluation.evaluate_map_suite(None, [level], tmp_path, update=1, steps=12,
+                                  artifact_root=tmp_path / "artifacts/eval", scope="eval",
+                                  authored_single_map=True, eval_samples=4)
+
+    sidecar, = (tmp_path / "artifacts/eval/data").glob("*.heatmap.json")
+    manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert manifest["source_map_path"] == str(level.map_paths[0])
+    assert "map_suite_map_id" not in manifest and "random_eval_map_id" not in manifest
+
+
 # Success and population metrics
 
 @pytest.mark.parametrize("success, expected", [([True, False, True], 2.), ([False] * 3, None)])
@@ -448,33 +434,6 @@ def test_validation_useless_agents_excludes_failures(success, expected):
     outcomes.update(success=np.array(success), useless_agents=np.array([1, 99, 3]))
     metrics, _ = summarize_outcomes(np.zeros(3, dtype=int), outcomes, ["map"], 100)
     assert metrics.get("useless_agents_at_success") == expected
-
-
-@pytest.mark.parametrize("counts", [(0, 1, 3), (1, 0, 3), (0, 0, 0)])
-def test_robust_evaluation_pools_successful_agent_counts(monkeypatch, counts):
-    level = SimpleNamespace(effective_eval_parallel_envs=3,
-        evaluation=SimpleNamespace(eval_robustness_runs=3, eval_action_noise_max=.01),
-        training=SimpleNamespace(seed=7), env=SimpleNamespace(success_condition="chain_held", max_steps=100),
-        reward=SimpleNamespace(target_found_requires_delivery=True))
-
-    def batch(model, level, *, action_noise_seed, **kwargs):
-        run = action_noise_seed - 20_007
-        success = np.arange(3) < counts[run]
-        metrics = {"eval_success": float(success.mean()), "eval_success_episode_count": counts[run]}
-        if counts[run]:
-            metrics["eval_useless_agents_at_success"] = [7., 1., 3.][run]
-        return metrics, dict(target_positions=np.zeros((3, 3)), base_positions=np.zeros((3, 3)),
-            final_chain_lengths=np.ones(3), obstacle_min=np.empty((3, 0, 3)), obstacle_max=np.empty((3, 0, 3)),
-            successes=success, lengths=np.ones(3), delivered=success, visually_found=success)
-
-    monkeypatch.setattr(evaluate, "resolve_evaluation_level", lambda level: level)
-    monkeypatch.setattr(evaluate, "evaluate_suite", batch)
-    metrics, _ = evaluate.collect_robust_evaluation(None, level, on_run=lambda *args: None)
-    if sum(counts):
-        assert metrics["eval_useless_agents_at_success"] == pytest.approx(
-            np.dot(counts, [7., 1., 3.]) / sum(counts))
-    else:
-        assert "eval_useless_agents_at_success" not in metrics
 
 
 @pytest.mark.parametrize("counts", [(0, 1, 3), (1, 0, 3), (0, 0, 0)])

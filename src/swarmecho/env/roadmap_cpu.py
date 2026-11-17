@@ -17,7 +17,6 @@ class RoadmapArrays:
     distances: np.ndarray
     clearance: float
     visible_edges: np.ndarray | None = None
-    corner_distances: np.ndarray | None = None
 
 
 def shortest_path(matrix, directed=False, method="D"):
@@ -195,8 +194,6 @@ def _merge_perpendicular_wall_corner_nodes(vertices, building, extra, lower, upp
 
 
 def validate_roadmap_settings(cfg):
-    if cfg.roadmap_approach not in ("full", "minimal"):
-        raise ValueError("roadmap_approach must be 'full' or 'minimal'.")
     if (isinstance(cfg.roadmap_node_density, bool)
             or not isinstance(cfg.roadmap_node_density, (int, float, np.number))
             or not math.isfinite(cfg.roadmap_node_density)
@@ -263,31 +260,6 @@ def _stair_feature_vertices(building, stairs, clearance, spacing, lower, upper):
     if not samples:
         return np.empty((0, 3), dtype=np.float32)
     return np.unique(np.asarray(samples, dtype=np.float32), axis=0)
-
-
-def _compact_building_vertices(building, extra, clearance):
-    """Cell and portal anchors for minimal mode or maps without saved hints."""
-    cell = building.cell_size_m
-    nodes = (np.argwhere(building.interior_cells).astype(np.float32) + .5) * cell
-    points = [nodes]
-    for axis_name, axis in (("x", 0), ("y", 1)):
-        for kind in ("doors", "windows"):
-            for face in extra.get(f"{axis_name}_{kind}", []):
-                point = (np.asarray(face, dtype=np.float32) + .5) * cell
-                point[axis] -= .5 * cell
-                if kind == "doors":
-                    point[2] -= .15 * cell
-                for sign in (-1, 1):
-                    candidate = point.copy()
-                    candidate[axis] += sign * (building.wall_thickness_m / 2 + clearance + .01)
-                    points.append(candidate[None])
-    for x, y, z, direction in extra.get("stairs", []):
-        for layer in (z, z + 1):
-            point = (np.asarray([x, y, layer], dtype=np.float32) + .5) * cell
-            sign = 1 if direction < 2 else -1
-            point[direction % 2] += (-.375 if layer == z else .375) * sign * cell
-            points.append(point[None])
-    return np.unique(np.concatenate(points), axis=0)
 
 
 def _full_building_feature_vertices(building, extra, clearance, spacing, lower, upper):
@@ -418,54 +390,45 @@ def building_candidate_vertices(building, cfg):
     clearance = cfg.drone_radius + cfg.obstacle_planning_clearance_m
     spacing = building.cell_size_m / cfg.roadmap_node_density
     extra = json.loads(getattr(building, "extra_geometry_json", "{}"))
-    compact = extra.get("roadmap_nodes_m")
-    if cfg.roadmap_approach == "minimal":
-        vertices = (np.asarray(compact, dtype=np.float32).reshape(-1, 3) if compact is not None else
-                    _compact_building_vertices(building, extra, clearance))
-    else:
-        # Full building roadmaps use only genuine wall/opening features. Saved
-        # compact hints belong to minimal and must not add cell centres.
-        feature_spacing = spacing / 5  # 1 m at density 1 for a 5 m cell.
-        wall_nodes = _full_building_feature_vertices(building, extra, clearance,
-                                                      feature_spacing, lower, upper)
-        stair_nodes = _stair_feature_vertices(building, extra.get("stairs", []), clearance, feature_spacing,
-                                              lower, upper)
-        vertices = np.unique(np.concatenate((wall_nodes, stair_nodes)), axis=0)
+    feature_spacing = spacing / 5  # 1 m at density 1 for a 5 m cell.
+    wall_nodes = _full_building_feature_vertices(building, extra, clearance,
+                                                  feature_spacing, lower, upper)
+    stair_nodes = _stair_feature_vertices(building, extra.get("stairs", []), clearance, feature_spacing,
+                                          lower, upper)
+    vertices = np.unique(np.concatenate((wall_nodes, stair_nodes)), axis=0)
     vertices = np.unique(vertices, axis=0)
     forbidden_lo = building.solid_min_m - clearance + 1e-4
     forbidden_hi = building.solid_max_m + clearance - 1e-4
     valid = [np.all((v >= lower) & (v <= upper)) and
              not np.any(np.all((v >= forbidden_lo) & (v <= forbidden_hi), axis=-1)) for v in vertices]
     vertices = vertices[np.asarray(valid, dtype=bool)]
-    if cfg.roadmap_approach == "full" and cfg.roadmap_merge_wall_end_nodes:
+    if cfg.roadmap_merge_wall_end_nodes:
         vertices = _merge_perpendicular_wall_corner_nodes(vertices, building, extra, lower, upper, clearance)
     return vertices
 
 
 def shared_roadmap(obstacle_min, obstacle_max, lower, upper, clearance, *, plan,
-                   edge_spacing=5.0, corner_bonus_m=0.0, corner_merge_distance_m=0.0,
+                   edge_spacing=5.0,
                    candidate_vertices=None):
     arrays = [np.asarray(a, dtype=np.float32) for a in (obstacle_min, obstacle_max, lower, upper)]
     return _shared_roadmap(*(a.tobytes() for a in arrays), float(clearance), bool(plan),
-                           float(edge_spacing), float(corner_bonus_m), float(corner_merge_distance_m),
+                           float(edge_spacing),
                            None if candidate_vertices is None else np.asarray(candidate_vertices, dtype=np.float32).tobytes())
 
 
-def building_roadmap(building, cfg, *, plan=True, corner_bonus_m=0.0):
+def building_roadmap(building, cfg, *, plan=True):
     validate_roadmap_settings(cfg)
     lower = np.asarray([building.wall_thickness_m / 2 + cfg.drone_radius] * 2 +
                        [building.tile_thickness_m / 2 + cfg.drone_radius], dtype=np.float32)
     return shared_roadmap(building.solid_min_m, building.solid_max_m, lower, building.world_size_m - lower,
         cfg.drone_radius + cfg.obstacle_planning_clearance_m, plan=plan,
         edge_spacing=building.cell_size_m / cfg.roadmap_node_density,
-        corner_bonus_m=corner_bonus_m,
-        corner_merge_distance_m=building.wall_thickness_m + 2 * (cfg.drone_radius + cfg.obstacle_planning_clearance_m),
         candidate_vertices=building_candidate_vertices(building, cfg) if plan else None)
 
 
 @lru_cache(maxsize=8)
 def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, plan, edge_spacing,
-                    corner_bonus_m, corner_merge_distance_m, candidate_bytes=None):
+                    candidate_bytes=None):
     """Build static all-pairs distances on the host, once per geometry/configuration."""
     lo = np.frombuffer(min_bytes, dtype=np.float32).reshape(-1, 3)
     hi = np.frombuffer(max_bytes, dtype=np.float32).reshape(-1, 3)
@@ -474,7 +437,6 @@ def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, p
     vertices = np.empty((0, 3), dtype=np.float32)
     distances = np.empty((0, 0), dtype=np.float32)
     visible_edges = np.empty((0, 0), dtype=bool)
-    corner_distances = distances
     # Tight convex maps can have only boundary walls, which are represented
     # by world bounds rather than internal solids. Still connect their saved
     # or minimal-mode anchors so map-bank planning has a usable graph.
@@ -508,18 +470,12 @@ def _shared_roadmap(min_bytes, max_bytes, lower_bytes, upper_bytes, clearance, p
         np.fill_diagonal(distances, 0)
         visible_edges = np.isfinite(distances)
         np.fill_diagonal(visible_edges, False)
-        # Entering the first waypoint group is charged at query time. Short
-        # internal links stay in that group; longer links enter another one.
-        corner_distances = distances + np.where(
-            visible_edges & (distances > corner_merge_distance_m + 1e-4), corner_bonus_m, 0.)
         if len(vertices):
             distances = shortest_path(distances, directed=False, method="D").astype(np.float32)
             distances = np.minimum(distances, 1e6)
-            corner_distances = (np.minimum(shortest_path(corner_distances, directed=False, method="D"), 1e6)
-                                .astype(np.float32)) if corner_bonus_m else distances
         init_message(f"Shared geodesic roadmap ready: {len(vertices)} vertices in {perf_counter() - started:.1f}s")
-    for array in (vertices, distances, visible_edges, corner_distances):
+    for array in (vertices, distances, visible_edges):
         array.setflags(write=False)
-    return RoadmapArrays(lo, hi, vertices, distances, clearance, visible_edges, corner_distances)
+    return RoadmapArrays(lo, hi, vertices, distances, clearance, visible_edges)
 
 

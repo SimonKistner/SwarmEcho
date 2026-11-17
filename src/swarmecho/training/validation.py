@@ -1,4 +1,4 @@
-"""Independent held-out validation: frozen cases, bounded batches, statistics only.
+"""Independent validation with frozen cases, bounded batches, and statistics.
 
 Host-side planning/reporting has no JAX dependency. Device imports are confined
 to preparation/execution so configuration and persistence can be checked on CPU.
@@ -125,37 +125,65 @@ class ValidationRunner:
     def __init__(self, level, destination, paths, *, checkpoint_path=None, checkpoint_dir=None, log=lambda text: None):
         from swarmecho.core.config import resolve_validation_level
         level = resolve_validation_level(level)
-        self.training_target_budget = level.env.geometric_agent_budget
+        self.training_target_budget = level.env.num_agents
         if level.validation.mode == "uniform_full_task":
             paths = level.map_paths
             # A virtual training budget must never restrict the full-task cases.
-            # Reset gets no adaptive weights, so targets retain uniform legal-volume
-            # proposals conditioned only on full-population feasibility.
-            level = replace(level, env=replace(level.env, relay_agent_budget=level.env.num_agents))
+            # Reset uses uniform legal-volume proposals at the full population.
         self.level, self.config = level, level.validation
         self.directory = Path(destination) / "validation"
         self.directory.mkdir(parents=True, exist_ok=True)
         self.paths = tuple(Path(path) for path in paths or ())
         self.geo_labels = None
+        self.probe_grid_shape = None
         if len(self.paths) != self.config.num_maps:
             raise ValueError("Validation map selection differs from validation.num_maps.")
         self.map_names = [path.stem for path in self.paths]
         identities = [{"name": path.stem, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                       for path in self.paths]
-        task = {"maps": identities, "env": asdict(level.env), "reward": asdict(level.reward),
-                "dynamic_max_geo_distance": asdict(level.training.dynamic_max_geo_distance),
+        # Keep the saved validation identity for G03 contracts predating these fixed choices.
+        env_identity = {
+            **asdict(level.env), "wall_sensing_layout": "fibonacci", "base_keeps_informing": False,
+            "observe_base_vector": False, "observe_target_vector": False, "observe_seeing_target": False,
+            "observe_base_vote_ratio": False, "observe_current_timestep": False, "observe_coverage_probe": False,
+            "no_movement_termination_steps": 1000, "relay_agent_budget": None, "roadmap_approach": "full",
+            "num_obstacles": 0, "obstacle_size_min_m": 2.0, "obstacle_size_max_m": 4.0,
+            "obstacle_spawn_layer_min": 2, "obstacle_spawn_layer_max": 5, "obstacle_boundary_buffer_m": 0.5,
+            "obstacle_target_buffer_m": 0.5, "roadmap_corner_bonus_m": 0.0,
+        }
+        env_identity["adapt_size"] = {
+            **env_identity["adapt_size"], "initial_agents": level.env.num_agents,
+            "vote_mode": "hold", "vote_protocol": "latest_decision", "vote_holding": 1,
+            "quorum_fraction": 1.0, "quorum_hold": 3, "recruitment_enabled": False,
+            "reward_by_reference_enabled": False, "reward_by_reference_fraction": 0.2,
+            "reward_by_reference_steps": 500,
+        }
+        reward_identity = {
+            **asdict(level.reward), "no_movement_termination_penalty": 0.0,
+            "success_reward_as_hold_record": False, "peer_informing_reward_enabled": False,
+            "peer_informing_reward": 50, "gap_reward_uses_change": False, "gap_change_reward_per_meter": 3.0,
+            "delivery_gap_vesting_enabled": False, "delivery_gap_vesting_steps": 10,
+            "reinforcement_reward": 0, "rejected_call_reward": 0,
+            "chain_reward_system": "obstacle_geodesic", "allow_redundancy_reward": False,
+            "progress_based_cluster_tiebreaker_soft": True, "target_found_requires_delivery": True,
+            "enable_chain_efficiency_reward": level.reward.chain_efficiency_reward != 0,
+            "priveleged_vote_reward": {"enabled": False, "withheld_reinforcement_vote_reward": -1.0,
+                                       "unnecessary_reinforcement_call_reward": -500},
+        }
+        task = {"maps": identities, "env": env_identity, "reward": reward_identity,
+                "dynamic_max_geo_distance": {"enabled": True, "mode": "global_candidates", **asdict(level.training.dynamic_max_geo_distance)},
                 "seed": self.config.seed, "num_episodes": self.config.num_episodes,
                 "fixed_targets": self.config.fixed_targets,
                 "gate": [level.evaluation.early_exit_success_rate, level.evaluation.early_exit_hold_evals,
                          level.evaluation.early_exit_min_success_length_reduction]}
-        if self.config.mode != "held_out_maps":
+        if self.config.mode is not None:
             task["mode"] = self.config.mode
         self.identity = hashlib.sha256(json.dumps(task, sort_keys=True).encode()).hexdigest()
         metadata = self.directory / "metadata.json"
         if metadata.is_file() and json.loads(metadata.read_text(encoding="utf-8"))["identity"] != self.identity:
             raise ValueError("Validation maps, stage or case settings changed; use a new run.")
         atomic_json(metadata, {"format": "swarmecho-validation/v1", "identity": self.identity,
-            "maps": identities, "config": asdict(self.config), "stage": level.env.geometric_agent_budget,
+            "maps": identities, "config": asdict(self.config), "stage": level.env.num_agents,
             "success_condition": level.env.success_condition})
         self.best_success_rate = None
         self.hold_count, self.last_update = 0, -1
@@ -192,7 +220,7 @@ class ValidationRunner:
             self._check_cases()
         else:
             self.map_ids, self.case_keys = case_plan(self.config.seed, len(self.paths), self.config.num_episodes,
-                                                   level.env.geometric_agent_budget)
+                                                   level.env.num_agents)
         # A newer best model remains valid when explicitly rewinding a run to an older checkpoint.
         best = self._best_state_path(destination)
         if (resume or os.environ.get("SWARMECHO_RECOVERY_RETRY") == "1") and best.is_file():
@@ -201,7 +229,7 @@ class ValidationRunner:
                 self.best_success_rate = max(self.best_success_rate or -1., state["best_success_rate"])
         with history.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"kind": "session", "update": self._resume_update() if resume else 0}) + "\n")
-        scope = "uniform full-task authored maps" if self.config.mode == "uniform_full_task" else "held-out maps"
+        scope = "uniform full-task authored maps" if self.config.mode == "uniform_full_task" else "validation maps"
         log(f"Validation: {len(self.paths)} {scope}, {self.config.num_episodes} episodes, "
             f"batches of at most {self.config.parallel_envs}; success={level.env.success_condition}; no heatmaps/replays.")
 
@@ -241,33 +269,28 @@ class ValidationRunner:
         from swarmecho.env.environment import make_env_fns
         level, cfg = self.level, self.level.env
         buildings = [load_building(path) for path in self.paths]
-        plan = level.reward.requires_geodesic
-        options = dict(dynamic_max_geo_distance=level.training.dynamic_max_geo_distance.enabled,
+        plan = True
+        options = dict(dynamic_max_geo_distance=True,
             relay_options=level.training.dynamic_max_geo_distance, randomize_base=False)
         pool = self.paths[0].parent.parent
         records = None
         if all(path.parent == self.paths[0].parent and (pool / "records" / f"{path.stem}.npz").is_file()
                for path in self.paths):
             from swarmecho.curriculum_config.maps.random_building_bank.generate_bank import load_records
-            records = load_records(pool, [{"id": path.stem} for path in self.paths], include_target=True)
+            records = load_records(pool, [{"id": path.stem} for path in self.paths])
             bank = prepare_bank_from_records(records, buildings[0], cfg,
                 interiors=[b.interior_cells for b in buildings], relay_cache_dir=pool / "relay_cache", **options)
         else:
             bank = prepare_bank(buildings, cfg, plan=plan, **options)
-        if level.training.geo_probe_auxiliary.enabled:
+        if self.probe_grid_shape is not None:
             from swarmecho.training.geo_auxiliary import PathLabels
             self.geo_labels = PathLabels(self.paths,cfg,buildings=buildings,records=records,
                 directory=self.directory/"geo_probe_auxiliary",
-                grid_shape=level.training.geo_probe_auxiliary.grid_shape)
+                grid_shape=self.probe_grid_shape)
         self._functions = make_env_fns(buildings[0], cfg, building_bank=bank,
-            plan_geodesic=plan, allow_redundancy_reward=level.reward.allow_redundancy_reward,
-            target_found_requires_delivery=level.reward.target_found_requires_delivery,
-            minimum_geodesic_separation=False, spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
-            memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
-            chain_reward_system=level.reward.chain_reward_system,
-            progress_based_cluster_tiebreaker_soft=level.reward.progress_based_cluster_tiebreaker_soft,
-            delivery_gap_vesting_enabled=level.reward.delivery_gap_vesting_enabled,
-            priveleged_vote_reward=level.reward.priveleged_vote_reward, **options)
+            plan_geodesic=plan,
+            spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
+            **options)
         return self._functions
 
     def run(self, model, *, update, steps, spawn_sampler=None):
@@ -275,13 +298,14 @@ class ValidationRunner:
         import jax.numpy as jnp
         from swarmecho.training.train import _run_parallel_evaluation_jit
         from swarmecho.core.terminal import terminal_print
+        self.probe_grid_shape = getattr(getattr(model, "geo_probe_head", None), "grid_shape", None)
         reset, step, observations, env_metrics = self._prepare()
         score_spawn = getattr(spawn_sampler, "curriculum_source", None) == "validation"
-        return_required = self.level.training.dynamic_max_geo_distance.enabled
-        self.training_target_budget = getattr(spawn_sampler, "curriculum_budget", None) or self.level.env.geometric_agent_budget
+        return_required = True
+        self.training_target_budget = getattr(spawn_sampler, "curriculum_budget", None) or self.level.env.num_agents
         if not self.config.fixed_targets:
             self.map_ids, self.case_keys = case_plan(self.config.seed, len(self.paths), self.config.num_episodes,
-                self.level.env.geometric_agent_budget, generation=update)
+                self.level.env.num_agents, generation=update)
             self.case_targets = None
         fields = {name: [] for name in ("return", "length", "success", "target_found", "visually_found", "population")}
         if self.level.env.adapt_size.enabled:
@@ -297,10 +321,10 @@ class ValidationRunner:
             end = min(start+batch_size, self.config.num_episodes)
             indices = np.minimum(np.arange(start, start+batch_size), self.config.num_episodes-1)
             batch = jax.device_get(_run_parallel_evaluation_jit(model,
-                jax.random.PRNGKey(self.config.seed), jax.random.PRNGKey(self.config.seed ^ 0x517),
+                jax.random.PRNGKey(self.config.seed),
                 reset=reset, step=step, observations=observations, env_metrics=env_metrics,
                 reward_cfg=self.level.reward, cfg=self.level.env, num_envs=batch_size,
-                horizon=self.level.env.max_steps, action_noise_max=0.,
+                horizon=self.level.env.max_steps,
                 case_map_ids=jnp.asarray(self.map_ids[indices]), case_keys=jnp.asarray(self.case_keys[indices]),
                 case_targets=jnp.asarray(self.case_targets[indices]) if self.case_targets is not None else None,
                 return_population=True, return_required_agents=return_required,
@@ -326,7 +350,7 @@ class ValidationRunner:
                 from swarmecho.training.geo_auxiliary import score_head
                 features = np.asarray(batch[-2])[:size]
                 valid = np.array(batch[-1][:size],copy=True)
-                grid_width = self.level.training.geo_probe_auxiliary.grid_width
+                grid_width = self.geo_labels.grid_width
                 labels = np.zeros((size, grid_width), bool)
                 for lane in range(size):
                     if not valid[lane].any():
@@ -375,7 +399,7 @@ class ValidationRunner:
             metrics.update({"spawn_curriculum_" + key: value for key, value in scores.items()})
         self.last_update, self.last_metrics = int(update), metrics
         row = {"format": "swarmecho-validation-result/v1", "kind": "validation", "identity": self.identity,
-               "update": int(update), "global_step": int(steps), "stage": self.level.env.geometric_agent_budget,
+               "update": int(update), "global_step": int(steps), "stage": self.level.env.num_agents,
                "agents": self.level.env.num_agents,
                "success_condition": self.level.env.success_condition,
                "metrics": metrics, "information_counts": information_counts.tolist()}
@@ -392,12 +416,11 @@ class ValidationRunner:
         return metrics
 
     def observe_gate(self, metrics):
-        from swarmecho.core.config import evaluation_stop_source
         ev = self.level.evaluation
-        if not ev.early_exit or evaluation_stop_source(ev) != "validation":
+        if not ev.early_exit:
             return False
         threshold = (ev.final_early_exit_success_rate
-                     if (ev.target_sampling == "curriculum" or self.level.training.target_curriculum.mode != "none")
+                     if (ev.target_sampling == "curriculum" or self.level.training.forward_target_curriculum.enabled)
                      and ev.final_early_exit_success_rate is not None
                      else ev.early_exit_success_rate)
         qualifies = metrics["success_rate"] >= threshold

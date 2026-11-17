@@ -5,7 +5,6 @@ binary MLP training and report blocks. The checked-in suite selects it against
 the existing frozen checkpoint; no policy training is performed.
 
 ```bash
-uv run python geo_experiments/suite.py plan=true
 uv run python geo_experiments/suite.py
 ```
 

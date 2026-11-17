@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+from swarmecho.core.config import MAP_DIR
 from swarmecho.env.buildings import BUILDING_FORMAT, compile_building, distance_comment
 
 DEFAULT_CELL_SIZE_M = 5.0
@@ -14,7 +15,6 @@ DEFAULT_TILE_THICKNESS_M = 0.25
 DEFAULT_WALL_THICKNESS_M = 0.25
 MAX_GRID_AXIS = 120
 OPENING_KEYS = ("x_doors", "x_windows", "y_doors", "y_windows")
-MAP_DIR = Path(__file__).resolve().parents[2]
 
 
 def _coordinates(

@@ -49,7 +49,6 @@ class MAPPORolloutBuffer:
     act_dim    : action dimension A
     gamma      : discount factor
     gae_lambda : GAE λ
-    recurrent  : True → minibatches preserve rollout time order
     """
 
     def __init__(
@@ -61,13 +60,9 @@ class MAPPORolloutBuffer:
         act_dim:    int,
         gamma:      float = 0.99,
         gae_lambda: float = 0.95,
-        recurrent:  bool  = False,
         hidden_dim: int   = 0,
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
-        actor_memory:  bool = False,
-        critic_memory: bool = False,
-        mask_inactive: bool = False,
         host_minibatches: bool = False,
     ) -> None:
         self.T          = num_steps
@@ -77,13 +72,9 @@ class MAPPORolloutBuffer:
         self.A          = act_dim
         self.gamma      = gamma
         self.gae_lambda = gae_lambda
-        self.recurrent  = recurrent
         self.hidden_dim = hidden_dim
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
-        self.actor_memory = actor_memory
-        self.critic_memory = critic_memory
-        self.mask_inactive = mask_inactive
         self.host_minibatches = host_minibatches
 
         self._obs       = np.zeros((self.T, self.E, self.N, self.D), dtype=np.float32)
@@ -109,17 +100,12 @@ class MAPPORolloutBuffer:
 
         self._ptr = 0
 
-    def reset(self, actor_h=None, critic_h=None, actor_signature=None, actor_value=None) -> None:
+    def reset(self, *, actor_h, critic_h, actor_signature, actor_value) -> None:
         self._ptr = 0
-        if self.recurrent:
-            if self.actor_memory:
-                self._initial_actor_h = np.asarray(actor_h, dtype=np.float32)
-                if actor_signature is not None:
-                    self._initial_actor_signature = np.asarray(actor_signature, dtype=np.float32)
-                if actor_value is not None:
-                    self._initial_actor_value = np.asarray(actor_value, dtype=np.float32)
-            if self.critic_memory:
-                self._initial_critic_h = np.asarray(critic_h, dtype=np.float32)
+        self._initial_actor_h = np.asarray(actor_h, dtype=np.float32)
+        self._initial_critic_h = np.asarray(critic_h, dtype=np.float32)
+        self._initial_actor_signature = np.asarray(actor_signature, dtype=np.float32)
+        self._initial_actor_value = np.asarray(actor_value, dtype=np.float32)
 
     def add(self, tr: MAPPOTransition) -> None:
         assert self._ptr < self.T, "Buffer full — call reset() first."
@@ -138,17 +124,17 @@ class MAPPORolloutBuffer:
         self._dones[self._ptr]     = np.asarray(tr.dones)
         self._agent_terminated[self._ptr] = (False if tr.agent_terminated is None
                                             else np.asarray(tr.agent_terminated, dtype=bool))
-        if self.recurrent and tr.rnn_resets is not None:
+        if tr.rnn_resets is not None:
             self._rnn_resets[self._ptr] = np.asarray(tr.rnn_resets).astype(bool)
-        if self.recurrent and tr.comm_masks is not None:
+        if tr.comm_masks is not None:
             self._comm_masks[self._ptr] = np.asarray(tr.comm_masks).astype(bool)
-        if self.recurrent and tr.active_masks is not None:
+        if tr.active_masks is not None:
             self._active_masks[self._ptr] = np.asarray(tr.active_masks).astype(bool)
-        if self.recurrent and tr.base_signatures is not None:
+        if tr.base_signatures is not None:
             self._base_signatures[self._ptr] = np.asarray(tr.base_signatures, dtype=np.float32)
-        if self.recurrent and tr.base_values is not None:
+        if tr.base_values is not None:
             self._base_values[self._ptr] = np.asarray(tr.base_values, dtype=np.float32)
-        if self.recurrent and tr.base_memory_masks is not None:
+        if tr.base_memory_masks is not None:
             self._base_memory_masks[self._ptr] = np.asarray(tr.base_memory_masks).astype(bool)
         self._base_write_indices[self._ptr] = (-1 if tr.base_write_indices is None else np.asarray(tr.base_write_indices))
         self._ptr += 1
@@ -196,8 +182,7 @@ class MAPPORolloutBuffer:
                 - self._values[t]
             )
             gae = delta + self.gamma * self.gae_lambda * next_nonterminal * gae
-            if self.mask_inactive:
-                gae = np.where(self._active_masks[t], gae, 0.0)
+            gae = np.where(self._active_masks[t], gae, 0.0)
             advantages[t] = gae
 
         returns = advantages + self._values
@@ -206,62 +191,6 @@ class MAPPORolloutBuffer:
     # ── Minibatch sampling ───────────────────────────────────────────────────
 
     def get_minibatches(
-        self,
-        advantages:    np.ndarray,   # (T, E, N)
-        returns:       np.ndarray,   # (T, E, N)
-        n_minibatches: int,
-        key:           jax.Array,
-    ) -> list[dict]:
-        """
-        Flatten (T, E) → (T*E,), shuffle, split into n_minibatches.
-
-        Minibatch dict keys:
-            obs, actions, old_log_probs, old_values, advantages, returns
-
-        Shapes:
-            obs           : (MB, N, D)
-            actions       : (MB, N, A)
-            old_log_probs : (MB, N)
-            old_values    : (MB, N)
-            advantages    : (MB, N)
-            returns       : (MB, N)
-        """
-        if self.recurrent:
-            return self._get_sequence_minibatches(advantages, returns, n_minibatches, key)
-
-        total = self.T * self.E
-
-        def _flat(arr):
-            # (T, E, ...) → (T*E, ...)
-            return arr.reshape(total, *arr.shape[2:])
-
-        obs_f       = _flat(self._obs)        # (B, N, D)
-        actions_f   = _flat(self._actions)    # (B, N, A)
-        lp_f        = _flat(self._log_probs)  # (B, N)
-        values_f    = _flat(self._values)     # (B, N)
-        adv_f       = _flat(advantages)        # (B, N)
-        returns_f   = _flat(returns)           # (B, N)
-
-        # Normalise advantages over the whole batch
-        adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
-
-        perm    = np.array(jax.random.permutation(key, total))
-        mb_size = total // n_minibatches
-
-        minibatches = []
-        for i in range(n_minibatches):
-            idx = perm[i * mb_size : (i + 1) * mb_size]
-            minibatches.append({
-                "obs":           jnp.array(obs_f[idx]),
-                "actions":       jnp.array(actions_f[idx]),
-                "old_log_probs": jnp.array(lp_f[idx]),
-                "old_values":    jnp.array(values_f[idx]),
-                "advantages":    jnp.array(adv_f[idx]),
-                "returns":       jnp.array(returns_f[idx]),
-            })
-        return minibatches
-
-    def _get_sequence_minibatches(
         self,
         advantages:    np.ndarray,
         returns:       np.ndarray,
@@ -272,15 +201,12 @@ class MAPPORolloutBuffer:
         Recurrent minibatches preserve the time axis and keep all agents in an
         environment together so the ACC can attend over the full team.
         """
-        assert self.E % n_minibatches == 0, "num_envs must divide num_minibatches for recurrent MAPPO."
+        assert self.E % n_minibatches == 0, "num_minibatches must divide num_envs for recurrent MAPPO."
 
-        if self.mask_inactive:
-            selected = advantages[self._active_masks]
-            mean = selected.mean() if selected.size else 0.0
-            std = selected.std() if selected.size else 1.0
-            adv = np.where(self._active_masks, (advantages - mean) / (std + 1e-8), 0.0)
-        else:
-            adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        selected = advantages[self._active_masks]
+        mean = selected.mean() if selected.size else 0.0
+        std = selected.std() if selected.size else 1.0
+        adv = np.where(self._active_masks, (advantages - mean) / (std + 1e-8), 0.0)
         perm = np.array(jax.random.permutation(key, self.E))
         mb_envs = self.E // n_minibatches
 

@@ -31,7 +31,6 @@ from swarmecho.env.obstacles import (
     _route_costs,
     _segments_blocked_block,
     free_space_distance,
-    generate_obstacles,
     pairwise_free_space_distance,
     points_inside_aabbs,
     roadmap_distances,
@@ -49,7 +48,7 @@ from swarmecho.env.random_buildings import (
 
 # Authored buildings
 
-BUILDING_PATH = Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")
+BUILDING_PATH = Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml")
 
 
 def _data():
@@ -122,24 +121,6 @@ def test_generated_cuboid_has_closed_shell_and_central_base():
 
 
 # Obstacle geometry
-
-def test_seeded_layout_is_valid_deterministic_and_non_overlapping():
-    args = dict(
-        count=3, size_min=2.0, size_max=4.0, z_min=10.0, z_max=25.0,
-        boundary_buffer=0.5,
-    )
-    first = generate_obstacles(jax.random.PRNGKey(7), jnp.array([20.0, 20.0, 30.0]), **args)
-    second = generate_obstacles(jax.random.PRNGKey(7), jnp.array([20.0, 20.0, 30.0]), **args)
-    np.testing.assert_allclose(first[0], second[0])
-    np.testing.assert_allclose(first[1], second[1])
-    assert np.all(np.asarray(first[0])[:, 2] >= 10.0)
-    assert np.all(np.asarray(first[1])[:, 2] <= 25.0)
-    for left in range(3):
-        for right in range(left + 1, 3):
-            assert np.any(np.asarray(first[1][left]) <= np.asarray(first[0][right])) or np.any(
-                np.asarray(first[1][right]) <= np.asarray(first[0][left])
-            )
-
 
 def test_one_aabb_consistently_blocks_points_segments_and_roadmap_direct_path():
     lower = jnp.array([[4.0, 4.0, 4.0]])
@@ -368,8 +349,8 @@ def test_serialized_generated_maps_preserve_exclusions_and_environment(tmp_path)
     assert manifest["target_exclusion_parameters"]["comm_radius_base"] == 15.
 
 
-@pytest.mark.parametrize("level_name", ["G03_legacy_random_buildings", "G03_CLU_random_buildings"])
-def test_cli_and_bank_identity_include_toggle_and_active_ranges(level_name):
+def test_g03_cli_and_bank_identity_include_toggle_and_active_ranges():
+    level_name = "G03_CLU_random_buildings"
     level = load_level_cli([f"level={level_name}", "random_buildings.advanced_exclustion_base_LOS=false"])
     assert not level.random_buildings.advanced_exclustion_base_LOS
     advanced = load_level_cli([f"level={level_name}"])
@@ -392,7 +373,7 @@ def test_bank_worker_saves_only_nonexcluded_target_boxes(tmp_path):
     data, _ = generate_building(enabled, 456789, name="map_00000", env_cfg=cfg)
     (tmp_path / "maps").mkdir()
     (tmp_path / "records").mkdir()
-    _compile_one(0, 456789, _map_digest(data), enabled, cfg, False, 0., tmp_path)
+    _compile_one(0, 456789, _map_digest(data), enabled, cfg, False, tmp_path)
     building = load_building(tmp_path / "maps/map_00000.yaml")
     with np.load(tmp_path / "records/map_00000.npz") as record:
         centres = (record["target_lower"] + record["target_upper"]) * .5
@@ -404,7 +385,7 @@ def test_bank_worker_saves_only_nonexcluded_target_boxes(tmp_path):
 def test_generated_validation_reloads_matching_policy_and_rejects_changed_range(tmp_path):
     from swarmecho.training.validation import prepare_generated_validation_maps
 
-    level = load_level_cli(["level=G03_legacy_random_buildings", "validation.num_maps=2",
+    level = load_level_cli(["level=G03_CLU_random_buildings", "validation.num_maps=2",
                            "inspection_evaluation.inspection_maps=2",
                            "random_buildings.advanced_exclustion_base_LOS=true",
                            "env.comm_radius_base=9", "env.visual_radius=3"])
@@ -447,24 +428,13 @@ def test_visibility_blocks_crossings_but_allows_parallel_clear_paths():
     assert visible.tolist() == [False, True]
 
 
-def test_obstacles_default_off_even_for_an_obstacle_level(tmp_path):
-    from types import SimpleNamespace
-    from swarmecho.env.environment import EnvConfig
-
-    building = SimpleNamespace(
-        world_size_m=np.array([10., 10., 10.]), base_position_m=np.array([1., 1., 1.]),
-        cell_size_m=5., interior_cells=np.ones((2, 2, 2), dtype=bool),
-        wall_thickness_m=.25, tile_thickness_m=.25,
-        solid_min_m=np.zeros((0, 3)), solid_max_m=np.zeros((0, 3)),
-    )
-    def unexpected(*args, **kwargs):
-        raise AssertionError("Random obstacles must be opt-in")
+def test_roadmap_export_uses_only_authored_geometry(tmp_path):
+    building = load_building(BUILDING_PATH)
     output = generator.generate(
-        tmp_path / "test.roadmap.json", building=building, cfg=EnvConfig(num_obstacles=3),
-        target=[8., 8., 8.], obstacle_generator=unexpected,
+        tmp_path / "test.roadmap.json", building=building, cfg=EnvConfig(),
+        start=[4., 4., 4.], target=[8., 8., 8.],
     )
     data = generator.json.loads(output.read_text())
-    assert not data["manifest"]["generated_obstacles"]
     assert len(data["layouts"]) == 1
     assert data["layouts"][0]["obstacle_min"] == []
     assert len(data["layouts"][0]["paths"]) == 1

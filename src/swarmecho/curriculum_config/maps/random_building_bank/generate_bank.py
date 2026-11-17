@@ -67,25 +67,26 @@ def required_settings(level):
     for runtime_option in ("enabled", "save_training_maps", "load_maps_from_bank"):
         generation.pop(runtime_option)
     cfg = level.env
-    plan = (level.reward.chain_reward_system == "obstacle_geodesic"
-            or level.reward.enable_chain_efficiency_reward)
-    return {
+    settings = {
         "format": POOL_FORMAT,
         "generator_version": GENERATOR_VERSION,
         "source_sha256": _source_digest(),
         "random_buildings": generation,
         "roadmap": {
-            "plan": plan,
-            "approach": cfg.roadmap_approach,
+            "plan": True,
+            "approach": "full",
             "node_density": cfg.roadmap_node_density,
             "merge_wall_end_nodes": cfg.roadmap_merge_wall_end_nodes,
-            "corner_bonus_m": cfg.roadmap_corner_bonus_m if level.training.minimum_geodesic_separation else 0.,
+            "corner_bonus_m": 0.,
             "drone_radius": cfg.drone_radius,
             "obstacle_planning_clearance_m": cfg.obstacle_planning_clearance_m,
         },
         "spawn": {"target_wall_buffer_fraction": cfg.target_wall_buffer_fraction,
                   **target_exclusion_parameters(level.random_buildings, cfg)},
     }
+    if level.training.seed_map_pool:
+        settings["generation_seed"] = level.training.seed
+    return settings
 
 
 def _settings_digest(settings):
@@ -101,10 +102,11 @@ def _map_digest(data):
 
 
 @contextmanager
-def _generation_lock():
-    """Serialize pool creation/extension across concurrent training processes."""
+def _generation_lock(fingerprint=None):
+    """Serialize writers to the same pool or to the shared legacy bank."""
     POOL_ROOT.mkdir(parents=True, exist_ok=True)
-    with (POOL_ROOT / ".generation.lock").open("a+b") as handle:
+    lock_name = ".generation.lock" if fingerprint is None else f".generation.{fingerprint}.lock"
+    with (POOL_ROOT / lock_name).open("a+b") as handle:
         if os.name == "nt":
             import msvcrt
             handle.seek(0, os.SEEK_END)
@@ -161,12 +163,16 @@ def _read_metadata(folder):
     if (not isinstance(data.get("settings"), dict)
             or data.get("settings_sha256") != _settings_digest(data["settings"])):
         return None
+    if "generation_seed" in data["settings"] and (
+            type(data.get("seed")) is not int or data["seed"] != data["settings"]["generation_seed"]):
+        return None
     return data
 
 
 def find_compatible_pool(level, required_count=0, *, exclude=None, log=terminal_print):
     """Find a complete pool and explain every incompatible pool's settings."""
     wanted = required_settings(level)
+    wanted_seed = wanted.get("generation_seed")
     if not POOL_ROOT.exists():
         return None
     compatible = []
@@ -181,7 +187,9 @@ def find_compatible_pool(level, required_count=0, *, exclude=None, log=terminal_
             message = f"Ignoring incomplete or invalid map pool: {folder.name}"
             terminal_print(f"[BANK WARNING] {message}")
             continue
-        disagreements = _differences(wanted, metadata.get("settings", {}))
+        if metadata["settings"].get("generation_seed") != wanted_seed:
+            continue
+        disagreements = _differences(wanted, metadata["settings"])
         if metadata["count"] < required_count:
             disagreements.append(f"count: bank={metadata['count']}, required={required_count}")
         if disagreements:
@@ -189,10 +197,13 @@ def find_compatible_pool(level, required_count=0, *, exclude=None, log=terminal_
             terminal_print(f"[BANK WARNING] {message}")
         else:
             compatible.append((folder, metadata))
-    return max(compatible, key=lambda pair: (pair[1]["count"], pair[0].name)) if compatible else None
+    # For a fixed seed, prefer the smallest sufficient pool so a later build
+    # at a larger capacity does not displace an earlier pool and its caches.
+    count_order = -1 if wanted_seed is not None else 1
+    return max(compatible, key=lambda pair: (count_order * pair[1]["count"], pair[0].name), default=None)
 
 
-def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_bonus_m, folder,
+def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, folder,
                  relay_options=None, randomize_base=False):
     """Worker: write one YAML map and one unpadded numeric record."""
     name = f"map_{index:05d}"
@@ -200,7 +211,7 @@ def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_b
         drone_clearance=cfg.drone_radius + cfg.obstacle_planning_clearance_m, env_cfg=cfg)
     if _map_digest(data) != expected_hash:
         raise ValueError(f"Generated map {index} changed between deduplication and roadmap compilation.")
-    graph = building_roadmap(building, cfg, plan=plan, corner_bonus_m=corner_bonus_m)
+    graph = building_roadmap(building, cfg, plan=plan)
     if plan and (not len(graph.vertices) or np.any(graph.distances[0] >= 1e6)):
         raise ValueError(f"Generated map {index} has a disconnected planning graph (seed {child_seed}).")
     target = target_spawn_boxes(building, cfg)
@@ -213,11 +224,9 @@ def _compile_one(index, child_seed, expected_hash, settings, cfg, plan, corner_b
     for prefix, boxes in (("target", target), ("base", base)):
         for suffix, value in zip(("lower", "upper", "volumes"), boxes):
             record[f"{prefix}_{suffix}"] = value
-    if corner_bonus_m:
-        record["corner_distances"] = graph.corner_distances
     save_generated_map(data, folder / "maps" / f"{name}.yaml")
     np.savez(folder / "records" / f"{name}.npz", **record)
-    if relay_options is not None and relay_options.enabled and relay_options.mode == "global_candidates":
+    if relay_options is not None:
         from swarmecho.env.relay_candidates import prepare_record
         prepare_record(record, cfg, building, relay_options,
                        randomize_base=randomize_base, cache_dir=folder / "relay_cache")
@@ -271,11 +280,13 @@ def _append_batch(level, folder, metadata, count, seed, workers, *, new_pool, fi
     planned = []
     skipped = 0
     attempts = 0
-    # Explicit seeds cover exactly count candidate positions. Automatically
-    # chosen seeds keep sampling until count genuinely new maps are planned.
+    # Manual batches with an explicit seed examine exactly count candidates.
+    # Automatic preparation keeps sampling until it has enough unique maps.
+    seed_specific = "generation_seed" in settings
     limit = max(count * 10, count + 1000) if fill_unique else count
     while attempts < limit and len(planned) < count:
-        child_seed = map_seed(seed, attempts)
+        # Reserve a distinct range of child seeds for each seed-specific pool.
+        child_seed = (seed << 32) + attempts if seed_specific else map_seed(seed, attempts)
         attempts += 1
         if child_seed in seen_seeds:
             skipped += 1
@@ -299,11 +310,10 @@ def _append_batch(level, folder, metadata, count, seed, workers, *, new_pool, fi
     if planned:
         log(f"Appending {len(planned)} unique maps to {folder} with {workers} CPU workers")
         plan = settings["roadmap"]["plan"]
-        corner_bonus_m = settings["roadmap"]["corner_bonus_m"]
         # Spawn avoids inheriting the training process's JAX runtime in workers.
         with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as executor:
             futures = {executor.submit(_compile_one, index, child_seed, digest,
-                                       level.random_buildings, level.env, plan, corner_bonus_m, folder,
+                                       level.random_buildings, level.env, plan, folder,
                                        level.training.dynamic_max_geo_distance, level.training.randomize_base): position
                        for position, (index, child_seed, digest) in enumerate(planned)}
             for completed, future in enumerate(as_completed(futures), 1):
@@ -349,15 +359,24 @@ def _new_pool(level, seed):
     return folder, metadata
 
 
+def _pool_workers(workers):
+    workers = min(4, max(1, (os.cpu_count() or 2) - 1)) if workers is None else workers
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer.")
+    return workers
+
+
 def build_pool(level, *, seed=None, count=DEFAULT_POOL_SIZE, workers=None, avoid_pool=None, log=terminal_print):
-    """Add a manual batch to a compatible pool, or create one if needed."""
+    """Add a manual batch to a shared pool or prepare a seed-specific pool."""
     if not level.random_buildings.enabled:
         raise ValueError("A bank requires random_buildings.enabled=true.")
     if type(count) is not int or count < 1:
         raise ValueError("Pool count must be positive.")
-    workers = min(4, max(1, (os.cpu_count() or 2) - 1)) if workers is None else workers
-    if type(workers) is not int or workers < 1:
-        raise ValueError("workers must be a positive integer.")
+    workers = _pool_workers(workers)
+    if level.training.seed_map_pool:
+        if seed is not None and seed != level.training.seed:
+            raise ValueError("An explicit pool seed must match training.seed when training.seed_map_pool is enabled.")
+        return ensure_pool(level, count, workers=workers, avoid_pool=avoid_pool, log=log)
     with _generation_lock():
         found = find_compatible_pool(level, exclude=avoid_pool, log=log)
         if found is None:
@@ -378,10 +397,11 @@ def build_pool(level, *, seed=None, count=DEFAULT_POOL_SIZE, workers=None, avoid
                                  new_pool=True, fill_unique=seed is None, log=log)
 
 
-def ensure_pool(level, required_count, *, log=terminal_print):
-    """Reuse a sufficient pool; otherwise extend a matching pool to capacity."""
+def ensure_pool(level, required_count, *, workers=None, avoid_pool=None, log=terminal_print):
+    """Reuse a sufficient pool or prepare a pool with enough maps."""
     if type(required_count) is not int or required_count < 1:
         raise ValueError("required_count must be positive.")
+    settings = required_settings(level)
     pinned = getattr(level.training, "map_pool_path", None)
     if pinned is not None:
         folder = Path(pinned).expanduser()
@@ -390,28 +410,36 @@ def ensure_pool(level, required_count, *, log=terminal_print):
         metadata = _read_metadata(folder)
         if metadata is None:
             raise ValueError(f"Pinned map pool is missing or invalid: {folder}")
-        differences = _differences(required_settings(level), metadata["settings"])
+        differences = _differences(settings, metadata["settings"])
         if metadata["count"] < required_count:
             differences.append(f"count: bank={metadata['count']}, required={required_count}")
         if differences:
             raise ValueError(f"Pinned map pool {folder} is incompatible: " + "; ".join(differences))
         log(f"Using pinned map pool: {folder} ({metadata['count']} maps)")
         return folder, metadata
-    with _generation_lock():
-        found = find_compatible_pool(level, log=log)
+    seed = settings.get("generation_seed")
+    target = max(DEFAULT_POOL_SIZE, required_count)
+    fingerprint = _settings_digest(settings) if seed is not None else None
+    with _generation_lock(fingerprint):
+        found = find_compatible_pool(level, required_count=target if seed is not None else 0,
+                                     exclude=avoid_pool, log=log)
         if found is not None and found[1]["count"] >= required_count:
             log(f"Using compatible map pool: {found[0]} ({found[1]['count']} maps)")
             return found
-        workers = min(4, max(1, (os.cpu_count() or 2) - 1))
+        workers = _pool_workers(workers)
+        if seed is not None:
+            log(f"Building a map pool for training seed {seed} ({target} maps)")
+            folder, metadata = _new_pool(level, seed)
+            return _append_batch(level, folder, metadata, target, seed, workers,
+                                 new_pool=True, fill_unique=True, log=log)
         if found is None:
             message = "No compatible map pool found; generating one before training."
             terminal_print(f"[BANK WARNING] {message}")
             seed = secrets.randbits(32)
             folder, metadata = _new_pool(level, seed)
-            return _append_batch(level, folder, metadata, max(DEFAULT_POOL_SIZE, required_count),
-                                 seed, workers, new_pool=True, fill_unique=True, log=log)
+            return _append_batch(level, folder, metadata, target, seed, workers,
+                                 new_pool=True, fill_unique=True, log=log)
         folder, metadata = found
-        target = max(DEFAULT_POOL_SIZE, required_count)
         additional = target - metadata["count"]
         log(f"Extending compatible map pool {folder.name} from {metadata['count']} to {target} maps")
         try:
@@ -431,7 +459,11 @@ def select_maps(folder, metadata, seed, training_count, evaluation_count=0):
     if needed > metadata["count"]:
         raise ValueError(f"Pool has {metadata['count']} maps but {needed} distinct maps are required.")
     sequence = np.random.SeedSequence([int(seed), 0xB02B])
-    indices = np.random.default_rng(sequence).permutation(metadata["count"])[:needed]
+    count = metadata["count"]
+    if "generation_seed" in metadata.get("settings", {}):
+        # Seeded pools of different capacities share the same generated prefix.
+        count = min(count, max(DEFAULT_POOL_SIZE, needed))
+    indices = np.random.default_rng(sequence).permutation(count)[:needed]
     choices = [metadata["maps"][int(index)] for index in indices]
     for item in choices:
         if not re.fullmatch(r"map_\d{5,}", item["id"]):
@@ -439,7 +471,7 @@ def select_maps(folder, metadata, seed, training_count, evaluation_count=0):
     return choices[:training_count], choices[training_count:]
 
 
-def load_records(folder, choices, *, require_corner=False, include_target=True):
+def load_records(folder, choices):
     """Read only selected maps; values retain their natural, unpadded shapes."""
     maps = []
     for item in choices:
@@ -449,27 +481,16 @@ def load_records(folder, choices, *, require_corner=False, include_target=True):
                 raise ValueError(f"Unexpected record keys in {source}")
             if not set(_RECORD_KEYS).issubset(archive.files):
                 raise ValueError(f"Incomplete roadmap record: {source}")
-            if require_corner and "corner_distances" not in archive.files:
-                raise ValueError(f"Missing corner-distance matrix in {source}")
-            keys = (_RECORD_KEYS if include_target else
-                    ("solid_min", "solid_max", "base_position", "base_lower", "base_upper", "base_volumes"))
-            record = {key: np.asarray(archive[key], dtype=np.float32) for key in keys}
-            if include_target:
-                record["corner_distances"] = (np.asarray(archive["corner_distances"], dtype=np.float32)
-                                              if "corner_distances" in archive.files else record["distances"])
-        graph_valid = True
-        if include_target:
-            nodes = len(record["vertices"])
-            graph_valid = (record["vertices"].shape == (nodes, 3)
-                           and record["distances"].shape == (nodes, nodes)
-                           and record["corner_distances"].shape == (nodes, nodes))
-        prefixes = ("target", "base") if include_target else ("base",)
+            record = {key: np.asarray(archive[key], dtype=np.float32) for key in _RECORD_KEYS}
+        nodes = len(record["vertices"])
+        graph_valid = (record["vertices"].shape == (nodes, 3)
+                       and record["distances"].shape == (nodes, nodes))
         boxes_valid = all(
             record[f"{prefix}_lower"].shape == record[f"{prefix}_upper"].shape
             and record[f"{prefix}_lower"].ndim == 2
             and record[f"{prefix}_lower"].shape[1] == 3
             and record[f"{prefix}_volumes"].shape == (len(record[f"{prefix}_lower"]),)
-            for prefix in prefixes
+            for prefix in ("target", "base")
         )
         if (not graph_valid or not boxes_valid
                 or record["solid_min"].shape != record["solid_max"].shape
@@ -482,7 +503,7 @@ def load_records(folder, choices, *, require_corner=False, include_target=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--level", default="B02a_random_buildings_find_only")
+    parser.add_argument("--level", default="G03_CLU_random_buildings")
     parser.add_argument("--seed", type=int, help="Override the pool generation seed")
     parser.add_argument("--workers", type=int, help="Parallel CPU workers (default: up to 4)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="Level override")

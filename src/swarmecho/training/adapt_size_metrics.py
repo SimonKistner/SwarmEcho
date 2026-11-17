@@ -2,24 +2,13 @@
 from collections import deque
 import numpy as np
 
-REWARD_NAMES = (
-    "reinforcement_reward", "decommission_reward", "rejected_call_reward",
-    "all_decommissioned_penalty",
-    "reward_by_reference",
-)
-VOTE_SHAPING_REWARD_NAMES = (
-    "withheld_reinforcement_vote_reward", "unnecessary_reinforcement_call_reward",
-)
+REWARD_NAMES = ("decommission_reward", "all_decommissioned_penalty")
 NON_CONTRIBUTOR_REWARD_NAMES = (
     "non_contributor_return_reward", "non_contributor_departure_reward",
     "non_contributor_decommission_reward",
 )
-# Breakdowns of an existing reward, excluded from the additive reward terms.
-REFERENCE_DIAGNOSTIC_NAMES = (
-    "reward_by_reference_positive", "reward_by_reference_negative",
-)
 INFO_NAMES = (
-    "adapt_calls", "adapt_decommissions", "adapt_rejected_calls", "adapt_end_agents",
+    "adapt_decommissions", "adapt_end_agents",
     "adapt_all_decommissioned", "adapt_useless_agents", "adapt_zone_valid",
 )
 
@@ -31,11 +20,8 @@ def validate_zones(valid):
 
 
 class AdaptiveWindow:
-    def __init__(self, size, *, target_agents=None, max_agents=None, initial_agents=1):
+    def __init__(self, size):
         self.episodes = deque(maxlen=size)
-        self.target_agents = target_agents
-        self.max_agents = max_agents
-        self.initial_agents = initial_agents
 
     def append(self, info, *, success):
         validate_zones(info["adapt_zone_valid"])
@@ -46,34 +32,20 @@ class AdaptiveWindow:
             return {}
         rows = list(self.episodes)
         values = lambda name: np.asarray([r[name] for r in rows])
-        calls, decomm = values("adapt_calls"), values("adapt_decommissions")
+        decomm = values("adapt_decommissions")
         success = values("success").astype(bool)
         end = values("adapt_end_agents")
-        returned = np.minimum(calls, decomm)
         result = {
-            "calls_mean": calls.mean(), "decommissions_mean": decomm.mean(),
+            "decommissions_mean": decomm.mean(),
             "active_agents_at_EP_end_mean/all": end.mean(),
-            "called_decommissioned_mean": returned.mean(),
-            "total_calls": calls.sum(), "total_decommissions": decomm.sum(),
+            "total_decommissions": decomm.sum(),
             "decommission_termination_rate": values("adapt_all_decommissioned").mean(),
-            "rejected_calls_mean": values("adapt_rejected_calls").mean(),
         }
-        if self.target_agents is not None:
-            result["max_agents_called_rate"] = np.mean(
-                calls >= max(0, self.target_agents - self.initial_agents))
-            if self.max_agents is not None and self.max_agents > self.target_agents:
-                result["max_agents_plus_one_called_rate"] = np.mean(
-                    calls >= max(0, self.target_agents + 1 - self.initial_agents))
         for label, subset in (("success", success), ("fail", ~success)):
             if subset.any():
                 result[f"active_agents_at_EP_end_mean/{label}"] = end[subset].mean()
         if success.any():
             result["useless_agents_at_success"] = values("adapt_useless_agents")[success].mean()
-        if (calls > 0).any():
-            result["called_decommissioned_fraction"] = (returned[calls > 0] / calls[calls > 0]).mean()
-            result["called_decommissioned_fraction_pooled"] = returned.sum() / calls.sum()
-        if decomm.sum() > 0:
-            result["total_calls_to_decommissions_ratio"] = calls.sum() / decomm.sum()
         return {f"adapt_size/{k}": float(v) for k, v in result.items()}
 
 

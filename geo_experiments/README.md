@@ -47,9 +47,8 @@ three inputs produce nine fits. Repetitions do not repeat policy rollout.
 From the repository root in the existing WSL environment:
 
 ```bash
-uv run python geo_experiments/suite.py plan=true
 uv run python geo_experiments/suite.py
-uv run python geo_experiments/suite.py execute.0.repeats=5 plan=true
+uv run python geo_experiments/suite.py execute.0.repeats=5
 uv run python geo_experiments/suite.py resume=geo_experiments/outputs/<suite-folder>
 ```
 

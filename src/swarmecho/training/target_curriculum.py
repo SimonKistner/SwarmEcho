@@ -1,5 +1,4 @@
 """Validation-gated target groups, independent of adaptive spawn weights."""
-from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -8,26 +7,29 @@ import numpy as np
 from swarmecho.training.adaptive_spawn import atomic_json
 
 
-class UniformTargetCurriculum:
+START_AGENTS = 2
+SUCCESS_THRESHOLD = 0.75
+
+
+class ForwardTargetCurriculum:
     curriculum_source = "validation"
 
-    def __init__(self, config, maximum, *, skip_empty_forward_groups=False):
-        self.config = config
+    def __init__(self, maximum, *, skip_empty_forward_groups=False):
         self.maximum = maximum
-        self.group = config.start_agents if config.mode == "forward" else maximum
+        self.group = START_AGENTS
         self.skip_empty_forward_groups = skip_empty_forward_groups
 
     @property
     def curriculum_budget(self):
-        return self.group if self.config.mode == "forward" else self.maximum
+        return self.group
 
     @property
     def minimum(self):
-        return 1 if self.config.mode == "forward" else self.group
+        return 1
 
     @property
     def complete(self):
-        return self.group == (self.maximum if self.config.mode == "forward" else self.config.start_agents)
+        return self.group == self.maximum
 
     def reset_kwargs(self):
         return {"target_agent_budget": np.int32(self.curriculum_budget),
@@ -44,7 +46,7 @@ class UniformTargetCurriculum:
         count = int(selected.sum())
         rate = float(success[selected].mean()) if count else 0.0
         if not self.complete:
-            if self.config.mode == "forward" and self.skip_empty_forward_groups:
+            if self.skip_empty_forward_groups:
                 # Fixed same-map cases may contain no examples of a group.
                 # Gate on the hardest available group within the current budget.
                 current = required[required <= group]
@@ -52,17 +54,18 @@ class UniformTargetCurriculum:
                     selected = required == current.max()
                     count = int(selected.sum())
                     rate = float(success[selected].mean())
-                if count and rate >= self.config.success_threshold:
+                if count and rate >= SUCCESS_THRESHOLD:
                     higher = required[required > group]
                     self.group = int(higher.min()) if higher.size else self.maximum
-            elif count and rate >= self.config.success_threshold:
-                self.group += 1 if self.config.mode == "forward" else -1
+            elif count and rate >= SUCCESS_THRESHOLD:
+                self.group += 1
         return {"group": group, "next_group": self.group, "success_rate": rate,
                 "eligible_episodes": count, "target_budget": self.curriculum_budget}
 
     def save(self, checkpoint):
         atomic_json(Path(checkpoint) / "target_curriculum_state.json", {
-            "format": "swarmecho-target-curriculum/v1", "config": asdict(self.config),
+            "format": "swarmecho-target-curriculum/v1",
+            "config": {"mode": "forward", "start_agents": START_AGENTS, "success_threshold": SUCCESS_THRESHOLD},
             "maximum": self.maximum, "group": self.group})
 
     def restore(self, checkpoint, *, strict=True):
@@ -75,11 +78,12 @@ class UniformTargetCurriculum:
         saved = json.loads(path.read_text(encoding="utf-8"))
         saved_config = saved.get("config")
         if isinstance(saved_config, dict):
-            saved_config = {"start_agents": 2, **saved_config}
+            saved_config = {"start_agents": START_AGENTS, **saved_config}
         if (saved.get("format") != "swarmecho-target-curriculum/v1"
-                or saved_config != asdict(self.config) or saved.get("maximum") != self.maximum
+                or saved_config != {"mode": "forward", "start_agents": START_AGENTS,
+                                    "success_threshold": SUCCESS_THRESHOLD} or saved.get("maximum") != self.maximum
                 or type(saved.get("group")) is not int
-                or not self.config.start_agents <= saved["group"] <= self.maximum):
+                or not START_AGENTS <= saved["group"] <= self.maximum):
             if not strict:
                 return False
             raise ValueError("Target curriculum checkpoint settings changed; start a new run.")

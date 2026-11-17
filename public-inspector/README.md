@@ -24,5 +24,5 @@ compressed JSON data, building geometry and an optional reference path, and
 uses the same renderer as the local inspector. A shared Plotly runtime is
 written to `assets/plotly.min.js`. No Python runs on the public website.
 
-See [the export and deployment guide](../docs/02_guide/04_public_inspector.md)
+See [the export and deployment guide](../docs/03_evaluation.md#share-an-inspector-artifact)
 for command-line exports and the one-time GitHub Pages setup.

@@ -14,7 +14,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from swarmecho.curriculum_config.maps.scripts.maze_builder.building_builder_core import (
     add_outer_walls,
@@ -72,7 +72,7 @@ class MazeBuilderHandler(BaseHTTPRequestHandler):
                 if path.startswith("/api/buildings/template/"):
                     self._send_json(HTTPStatus.OK, {"ok": True, "document": template_document(path.rsplit("/", 1)[1])})
                     return
-                name = validate_map_name(path.removeprefix("/api/buildings/"))
+                name = validate_map_name(unquote(path.removeprefix("/api/buildings/")))
                 self._send_json(
                     HTTPStatus.OK,
                     {"ok": True, "document": load_document(MAP_DIR / f"{name}.yaml")},

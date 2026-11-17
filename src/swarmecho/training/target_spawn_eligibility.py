@@ -47,7 +47,7 @@ class TargetSpawnEligibility:
             map_identities = [building_identity(level.building, level.building_name)]
         self.map_identities = map_identities
         self.config = level.training.target_spawn_eligibility
-        self.maximum = level.env.geometric_agent_budget
+        self.maximum = level.env.num_agents
         self.cell_size = (bank.envelope if bank is not None else level.building).cell_size_m
         if bank is None:
             lower, upper, volumes = target_spawn_boxes(level.building, level.env)

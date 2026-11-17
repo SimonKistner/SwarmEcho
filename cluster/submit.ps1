@@ -3,7 +3,6 @@
 param(
     [string]$Run,
     [string]$Config,
-    [switch]$DryRun,
     [switch]$ImageInfo,
     [switch]$OverrideExisting,
     [string]$Python = 'python'
@@ -16,13 +15,12 @@ if ($pythonCommand.Source -match '[/\\](\.venv|venv)[/\\]') {
 }
 $submitArgs = @((Join-Path $PSScriptRoot 'tools/submit.py'))
 if ($ImageInfo) {
-    if ($Run -or $Config -or $DryRun -or $OverrideExisting) { throw '-ImageInfo cannot be combined with submission options.' }
+    if ($Run -or $Config -or $OverrideExisting) { throw '-ImageInfo cannot be combined with submission options.' }
     $submitArgs += '--image-info'
 } else {
     if ($Run -and $Config) { throw 'Use -Config or the historical -Run selector, not both.' }
     if ($Run) { $submitArgs += @('--run', $Run) }
     elseif ($Config) { $submitArgs += @('--config', $Config) }
-    if ($DryRun) { $submitArgs += '--dry-run' }
     if ($OverrideExisting) { $submitArgs += '--override-existing' }
 }
 & $pythonCommand.Source @submitArgs

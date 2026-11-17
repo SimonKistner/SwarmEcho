@@ -1,7 +1,7 @@
 """Standard-library-only preparation and submission; requires Python 3.7+.
 
-No training imports, project environment, Docker daemon or network are used by
---dry-run or --image-info. Paths are resolved relative to this script.
+The --image-info command uses no training imports, project environment, Docker
+daemon or network. Paths are resolved relative to this script.
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ def submission_run_name(name, run, stamp):
     return run_name
 
 
-def prepare_submission(settings, info, name, run, stamp, dry_run, source_context=None):
+def prepare_submission(settings, info, name, run, stamp, source_context=None):
     """Freeze each receipt separately, reusing one source snapshot across the batch."""
     run_name = submission_run_name(name, run, stamp)
     ensure_unused_run_name(run_name)
@@ -293,7 +293,7 @@ def prepare_submission(settings, info, name, run, stamp, dry_run, source_context
     }
     config_path = output / "experiment.yaml"
     write_json(config_path, experiment)
-    write_json(output / "summary.json", {"dry_run": dry_run, "settings": settings,
+    write_json(output / "summary.json", {"settings": settings,
                "run": manifest, "dependency_image": info,
                "source_files": count, "source_bytes": size})
     print("Run:       " + run_name)
@@ -321,14 +321,13 @@ def main():
         help=f"Batch config; defaults to {DEFAULT_MANIFEST.relative_to(ROOT).as_posix()}",
     )
     selection.add_argument("--run", help="Historical manifest name without .json, such as g03-smoke")
-    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--override-existing", action="store_true",
                         help="Use existing-name override approval already given to a batch wrapper")
     parser.add_argument("--image-info", action="store_true", help="Print image metadata JSON; no writes/network")
     args = parser.parse_args()
     settings = read_json(CLUSTER / "settings.json")
     if args.image_info:
-        if args.run or args.config or args.dry_run or args.override_existing:
+        if args.run or args.config or args.override_existing:
             parser.error("--image-info cannot be combined with submission options")
         print(json.dumps(image_info(settings), indent=2))
         return
@@ -360,12 +359,11 @@ def main():
         ensure_unused_run_name(run_name, override_existing=args.override_existing)
     check_capacity(plans, settings["slots_per_trial"])
     info = image_info(settings)
-    unresolved_image = "REPLACE_" in info["repository"]
-    if not unresolved_image and (info["repository"] != info["repository"].lower()
-                                 or not re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+", info["repository"])):
-        raise ValueError("image_repository must be lowercase and contain no tag or digest.")
-    if unresolved_image and not args.dry_run:
+    repository = info["repository"]
+    if "REPLACE_" in repository:
         raise ValueError("Set image_repository in cluster/settings.json and publish the image first.")
+    if repository != repository.lower() or not re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+", repository):
+        raise ValueError("image_repository must be lowercase and contain no tag or digest.")
 
     print("Config:    " + str(config_path))
     print("Batch:     {} experiment(s), {} GPU slot(s); shared workspace limit 24, including other jobs.".format(
@@ -374,20 +372,14 @@ def main():
     source_context = None
     for name, run in plans:
         output, experiment_path, source_context = prepare_submission(
-            settings, info, name, run, stamp, args.dry_run, source_context)
+            settings, info, name, run, stamp, source_context)
         prepared.append((output, experiment_path, source_context[0]))
     batch_path = CLUSTER / ".submissions" / ("batch-" + batch_id + ".json")
-    batch = {"config_path": str(config_path), "dry_run": args.dry_run,
+    batch = {"config_path": str(config_path),
              "experiments": [{"submission_dir": str(output), "state": "PREPARED"}
                              for output, _, _ in prepared]}
     write_json(batch_path, batch)
     print("Batch receipt: " + str(batch_path))
-    if args.dry_run:
-        print("DRY RUN: local files prepared; no det command, login, network or GPU allocation.")
-        if unresolved_image:
-            print("IMAGE NOT CONFIGURED: preparation is inspectable; actual submission is blocked until step 2.")
-        print("This checks packaging and basic config structure, not training override semantics or cluster compatibility.")
-        return
     for index, (output, experiment_path, context) in enumerate(prepared):
         record = batch["experiments"][index]
         record["state"] = "SUBMITTING"

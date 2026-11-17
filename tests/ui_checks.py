@@ -51,7 +51,7 @@ from swarmecho.visualize.replay import building_snapshot, write_replay
 # Inspector artifacts and controls
 
 def test_snapshot_geometry_survives_missing_original_map():
-    building = load_building(MAP_DIR / "office_mirrored.yaml")
+    building = load_building(MAP_DIR / "mirrored_office.yaml")
     snapshot = building_snapshot(building)
     geometry = building_geometry({"map_name": "does_not_exist", "building_snapshot": snapshot})
     assert geometry["source"] == "replay snapshot"
@@ -61,8 +61,8 @@ def test_snapshot_geometry_survives_missing_original_map():
 
 
 def test_legacy_office_visibility_bounds_match_runtime():
-    building = load_building(MAP_DIR / "office_mirrored.yaml")
-    geometry = building_geometry({"map_name": "office_mirrored"})
+    building = load_building(MAP_DIR / "mirrored_office.yaml")
+    geometry = building_geometry({"map_name": "mirrored_office"})
     actual = sorted(tuple(lo + hi) for lo, hi in zip(geometry["solid_min"], geometry["solid_max"]))
     expected = sorted(tuple(lo.tolist() + hi.tolist()) for lo, hi in zip(building.solid_min_m, building.solid_max_m))
     assert actual == expected
@@ -70,8 +70,8 @@ def test_legacy_office_visibility_bounds_match_runtime():
 
 def test_inspector_payload_and_controls(tmp_path):
     level = SimpleNamespace(
-        building=load_building(MAP_DIR / "M00_no_maze_open_cuboid.yaml"),
-        building_name="M00_no_maze_open_cuboid",
+        building=load_building(MAP_DIR / "open_cuboid.yaml"),
+        building_name="open_cuboid",
         env=EnvConfig(num_agents=4, coverage_voxel_size=2.5),
     )
     reset, step, _, _ = make_env_fns(level.building, level.env)
@@ -355,7 +355,7 @@ def test_new_builder_document_passes_training_map_contract():
 def test_existing_v1_map_opens_without_migration():
     source = yaml.safe_load(
         open(
-            "src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml",
+            "src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml",
             encoding="utf-8",
         )
     )

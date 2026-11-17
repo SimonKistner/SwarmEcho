@@ -11,7 +11,6 @@ import pytest
 from swarmecho.core.config import AdaptiveTargetSpawnConfig, EnvConfig, RewardConfig
 from swarmecho.env.buildings import load_building, target_spawn_boxes
 from swarmecho.env.environment import (
-    chain_diagnostics,
     compute_rewards,
     coverage_grid_geometry,
     EnvState,
@@ -30,29 +29,8 @@ from swarmecho.training.adaptive_spawn import AdaptiveTargetSpawnController
 # Environment and sensors
 
 BUILDING = load_building(
-    Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")
+    Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml")
 )
-
-
-def test_observe_seeing_target():
-    cfg = replace(EnvConfig(), num_agents=1, spawn_delay=0, visual_radius=2.)
-    assert not cfg.observe_seeing_target
-    enabled = replace(cfg, observe_seeing_target=True)
-    reset, step, observe, _ = make_env_fns(BUILDING, enabled, plan_geodesic=False)
-    _, _, observe_disabled, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
-    state = reset(jax.random.PRNGKey(0), target_pos=jnp.array([8., 5., 5.]))
-
-    # See the target, then move out of visual range while remembering it.
-    for x, expected in ((7., 1.), (11., 0.)):
-        state = step(state._replace(pos=jnp.array([[x, 5., 5.]])), jnp.zeros((1, 3)))
-        values = np.asarray(observe(state))
-        assert values.shape == (1, observation_dim(cfg) + 1)
-        assert observation_dim(enabled) == values.shape[1]
-        assert values[0, 6] == expected
-        assert bool(state.target_known[0])
-        np.testing.assert_array_equal(np.delete(values, 6, axis=1), observe_disabled(state))
-
-    np.testing.assert_array_equal(observe(state._replace(active=jnp.array([False]))), 0.)
 
 
 def _partial_wall_building():
@@ -73,7 +51,7 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
     building = _partial_wall_building()
     cfg = replace(EnvConfig(), num_agents=1, visual_radius=1.,
                   comm_radius=1., comm_radius_base=1., max_steps=1)
-    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic")
+    reward_cfg = RewardConfig()
     reset, step, _, _ = make_autoreset_fns(building, cfg, reward_cfg)
     states = jax.jit(jax.vmap(reset))(jax.random.split(jax.random.PRNGKey(21), 2))
     assert states.obstacle_min.shape == (2, 0, 3)
@@ -94,7 +72,7 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
 
 def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
     building = _partial_wall_building()
-    cfg = replace(EnvConfig(), num_agents=1, num_obstacles=1)
+    cfg = replace(EnvConfig(), num_agents=1)
     reset, _, _, _ = make_env_fns(building, cfg)
     lo, hi = jnp.array([[2., 2., 2.]]), jnp.array([[3., 3., 3.]])
     state = reset(jax.random.PRNGKey(4), target_pos=jnp.array([15., 10., 10.]),
@@ -104,7 +82,8 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
     assert state.roadmap_vertices.shape[0] > 8
     assert state.solid_min.shape == (2, 3)
     np.testing.assert_allclose(state.solid_min[0], building.solid_min_m[0])
-    assert state.shared_geometry.distances.shape == (0, 0)
+    assert state.shared_geometry.distances.size > 0
+    np.testing.assert_array_equal(state.planning_distances, state.roadmap_distances)
     query = state._replace(
         base_pos=jnp.array([5., 10., 10.]),
         is_conn_base=jnp.array([False]), is_conn_target=jnp.array([False]),
@@ -124,8 +103,7 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
 def test_combined_chain_query_preserves_original_frontier_selection():
     from swarmecho.env.obstacles import free_space_distance
 
-    cfg = replace(EnvConfig(), num_agents=3, num_obstacles=1,
-                  obstacle_spawn_layer_min=1, obstacle_spawn_layer_max=2)
+    cfg = replace(EnvConfig(), num_agents=3)
     reset, _, _, _ = make_env_fns(BUILDING, cfg)
     state = reset(jax.random.PRNGKey(51), target_pos=jnp.array([15., 10., 5.]),
                   obstacle_min=jnp.array([[9., 5., 0.]]),
@@ -164,7 +142,7 @@ def test_euclidean_factory_does_not_build_authored_or_dynamic_roadmaps():
         solid_min_m=np.array([[9., 5., 0.]], dtype=np.float32),
         solid_max_m=np.array([[11., 15., 20.]], dtype=np.float32),
     )
-    cfg = replace(EnvConfig(), num_agents=1, num_obstacles=1)
+    cfg = replace(EnvConfig(), num_agents=1)
     reset, _, _, _ = make_env_fns(building, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(4), target_pos=jnp.array([15., 10., 10.]),
                   obstacle_min=jnp.array([[2., 2., 2.]]),
@@ -183,12 +161,10 @@ def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base
     cfg = replace(
         EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=1.5,
         comm_radius_base=1.5, visual_radius=1.0, max_steps=20,
-        no_movement_termination_steps=20, hold_chain_for=20,
-        success_condition="delivery",
+        hold_chain_for=20,
     )
     reset, step, _, _ = make_env_fns(
-        BUILDING, cfg, target_found_requires_delivery=True,
-        memory_comm_every_k_steps=3,
+        BUILDING, cfg,
     )
     state = reset(jax.random.PRNGKey(91), target_pos=jnp.array([17., 17., 12.]))
     state = state._replace(
@@ -202,9 +178,7 @@ def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base
     state = step(state, action)  # Tick 0: A informs B, but B cannot relay yet.
     np.testing.assert_array_equal(state.target_known, [True, True, False])
     assert not state.base_target_known
-    state = step(step(state, action), action)  # No sharing on ticks 1 and 2.
-    np.testing.assert_array_equal(state.target_known, [True, True, False])
-    state = step(state, action)  # Tick 3: B informs C without a target sighting.
+    state = step(state, action)  # B informs C without a target sighting.
     np.testing.assert_array_equal(state.target_known, [True, True, True])
     assert not state.fully_connected
 
@@ -213,11 +187,9 @@ def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base
         pos=state.pos.at[1].set(jnp.array([3., 2., 2.])),
         vel=jnp.zeros((3, 3)),
     )
-    state = step(step(state, action), action)
-    assert not state.base_target_known
-    state = step(state, action)  # Tick 6.
+    state = step(state, action)
     assert state.base_target_known
-    assert state.success
+    assert not state.success
     assert not state.fully_connected
 
 
@@ -225,10 +197,10 @@ def test_informed_base_broadcasts_remembered_target_on_a_later_tick():
     cfg = replace(
         EnvConfig(), num_agents=2, spawn_delay=0, comm_radius=1.5,
         comm_radius_base=1.5, visual_radius=1.0, max_steps=20,
-        no_movement_termination_steps=20, hold_chain_for=20,
+        hold_chain_for=20,
     )
     reset, step, _, _ = make_env_fns(
-        BUILDING, cfg, memory_comm_every_k_steps=3,
+        BUILDING, cfg,
     )
     state = reset(jax.random.PRNGKey(92), target_pos=jnp.array([17., 17., 12.]))
     state = state._replace(
@@ -250,9 +222,9 @@ def test_informed_base_broadcasts_remembered_target_on_a_later_tick():
 
 def test_target_knowledge_respects_line_of_sight():
     cfg = replace(
-        EnvConfig(), num_agents=2, spawn_delay=0, num_obstacles=1,
+        EnvConfig(), num_agents=2, spawn_delay=0,
         comm_radius=3.0, comm_radius_base=1.0, visual_radius=1.0,
-        no_movement_termination_steps=20,
+
     )
     reset, step, _, _ = make_env_fns(BUILDING, cfg)
     state = reset(
@@ -267,18 +239,6 @@ def test_target_knowledge_respects_line_of_sight():
     )
     next_state = step(state, jnp.zeros((2, 3)))
     np.testing.assert_array_equal(next_state.target_known, [True, False])
-
-
-def test_fixed_base_separation_sampling_is_bounded_without_target_skipping():
-    cfg = replace(EnvConfig(), num_agents=1)
-    reset, _, _, _ = make_env_fns(
-        BUILDING, cfg, minimum_geodesic_separation=True,
-        minimum_geodesic_separation_multiplier=100.0,
-        skip_on_no_pair_found=True, spawn_pair_max_attempts=2,
-    )
-    state = reset(jax.random.PRNGKey(94))
-    np.testing.assert_allclose(state.base_pos, BUILDING.base_position_m)
-    assert int(state.spawn_pair_attempts) == 0
 
 
 def test_octant_radar_and_configured_distance_contracts():
@@ -410,8 +370,7 @@ def test_counting_radar_single_band_counts_without_subdivision(distance_bands):
 def test_counting_radar_respects_line_of_sight_in_all_categories_and_bands(geometry):
     cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=8.,
                   wall_sensing_rays=16, drone_radar_bins=8,
-                  radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3,
-                  num_obstacles=int(geometry == "generated_obstacle"))
+                  radar_mode="band_sep_counting", distance_bands=4, radar_count_cap=3)
     building = _partial_wall_building() if geometry == "authored_wall" else BUILDING
     reset, _, observations, _ = make_env_fns(building, cfg, plan_geodesic=False)
     reset_kwargs = {}
@@ -447,18 +406,6 @@ def test_counting_radar_respects_line_of_sight_in_all_categories_and_bands(geome
         expected_counts[4] = 0.
         np.testing.assert_allclose(blocked_counts[0], expected_counts, rtol=1e-6, atol=0.,
                                    err_msg=f"{geometry}: count leak in band {band}")
-
-
-def test_optional_observation_features_match_the_maintained_config_switches():
-    # Exercise legacy debugging switches only; this test is not design guidance.
-    cfg, (reset, _, observations, _) = _functions(
-        observe_base_vector=True,
-        observe_target_vector=True,
-        observe_coverage_probe=True,
-    )
-    obs = observations(reset(jax.random.PRNGKey(7)))
-
-    assert obs.shape == (cfg.num_agents, observation_dim(cfg))
 
 
 @pytest.mark.parametrize("bins", [8, 16, 32])
@@ -596,7 +543,6 @@ def test_coverage_voxel_size_is_independent_of_building_cell_size():
     # Coverage probes are enabled here only to exercise the legacy debug option.
     cfg, (reset, step, observations, _) = _functions(
         coverage_voxel_size=2.5,
-        observe_coverage_probe=True,
     )
     state = reset(jax.random.PRNGKey(11))
     next_state = step(state, jnp.zeros((cfg.num_agents, 3)))
@@ -630,32 +576,9 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
     )
 
 
-def test_coverage_pays_time_cost_without_chain_gap_computation(monkeypatch):
-    cfg = replace(EnvConfig(), success_condition="coverage", num_agents=2)
-    reset, _, _, _ = make_env_fns(BUILDING, cfg)
-    state = reset(jax.random.PRNGKey(8))
-    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic")
-
-    def unexpected_gap_calculation(*_args, **_kwargs):
-        raise AssertionError("Coverage must not calculate a target-chain gap")
-
-    monkeypatch.setattr("swarmecho.env.environment.chain_distance_matrix", unexpected_gap_calculation)
-    monkeypatch.setattr("swarmecho.env.environment.obstacle_chain_diagnostics", unexpected_gap_calculation)
-    _, terms = compute_rewards(state, state, reward_cfg, cfg)
-    np.testing.assert_allclose(jnp.sum(terms["time_presure_reward"]), -0.75)
-    assert jnp.all(terms["time_presure_reward"][~state.active] == 0.0)
-    np.testing.assert_array_equal(terms["gap_reward"], [0., 0.])
-
-    both_active = state._replace(active=jnp.ones(2, dtype=jnp.bool_))
-    _, terms = compute_rewards(both_active, both_active, reward_cfg, cfg)
-    np.testing.assert_allclose(terms["time_presure_reward"], [-0.75, -0.75])
-    np.testing.assert_array_equal(terms["gap_reward"], [0., 0.])
-
-
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     """must retain 2D's delivery milestone and resist finder farming."""
     reward_cfg = RewardConfig(
-        target_found_requires_delivery=True,
         finder_reward=50.0,
         target_found_reward=100.0,
         success_reward=500.0,
@@ -754,7 +677,7 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
     np.testing.assert_allclose(terms["gap_reward"], [1.75] * 3 + [0.0])
 
 
-def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
+def test_partial_chain_gap_credit_uses_geodesic_leaders():
     """Training reward must trace to the same leaders used to measure its gap."""
     env_cfg = EnvConfig(num_agents=5, comm_radius_base=5., comm_radius=5., visual_radius=5.)
     state = EnvState(
@@ -787,9 +710,7 @@ def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
     np.testing.assert_array_equal(leaders, [1, 3])
     np.testing.assert_allclose(gap, 12.)
 
-    obstacle_cfg = RewardConfig(chain_reward_system="obstacle_geodesic",
-                                time_presure_reward=-1., gap_progress_reward_per_meter=0.125,
-                                allow_redundancy_reward=True)
+    obstacle_cfg = RewardConfig(time_presure_reward=-1., gap_progress_reward_per_meter=0.125)
     _, obstacle_terms = compute_rewards(
         state, state, obstacle_cfg, env_cfg, roadmap_distances,
     )
@@ -823,10 +744,6 @@ def test_partial_chain_gap_credit_uses_the_selected_reward_system_leaders():
     np.testing.assert_allclose(endpoint_terms["gap_reward"],
                                [1., 1., 0., 0., 0.], rtol=1e-6)
 
-    euclidean_cfg = replace(obstacle_cfg, chain_reward_system="euclidean")
-    _, euclidean_terms = compute_rewards(state, state, euclidean_cfg, env_cfg)
-    np.testing.assert_allclose(euclidean_terms["gap_reward"],
-                               [1., 0., 1., 0., 0.], rtol=1e-6)
 
 
 def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
@@ -851,46 +768,14 @@ def test_time_limit_autoreset_preserves_terminal_info_and_changes_target():
     assert not next_state.done
 
 
-def test_idle_termination_applies_configured_penalty():
-    cfg = replace(
-        EnvConfig(),
-        num_agents=1,
-        max_steps=10,
-        no_movement_termination_steps=1,
-    )
-    reward_cfg = RewardConfig(
-        exploration_reward=0.0,
-        collision_reward=0.0,
-        finder_reward=0.0,
-        time_presure_reward=0.0,
-        gap_progress_reward_per_meter=0.0,
-        target_found_reward=0.0,
-        success_reward=0.0,
-        no_movement_termination_penalty=-300.0,
-    )
-    reset, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
-    _, reward, done, info = autoreset_step(
-        reset(jax.random.PRNGKey(101)),
-        jnp.zeros((cfg.num_agents, 3)),
-    )
-
-    assert done
-    assert info["idle_terminated"]
-    np.testing.assert_allclose(reward, [-300.0])
-    np.testing.assert_allclose(info["no_movement_termination_penalty"], [-300.0])
-
-
-@pytest.mark.parametrize("obstacles", [0, 1])
-def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
+def test_batched_autoreset_matches_reset_only_for_terminal_lanes():
     cfg = replace(EnvConfig(), num_agents=1, max_steps=10,
-                  no_movement_termination_steps=5, hold_chain_for=1,
-                  num_obstacles=obstacles, obstacle_spawn_layer_min=1,
-                  obstacle_spawn_layer_max=2)
+                  hold_chain_for=1)
     reward_cfg = RewardConfig()
-    reset, plain_step, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    reset, plain_step, _, _ = make_env_fns(BUILDING, cfg)
     _, autoreset_step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(823), 4))
-    # Ongoing, time limit, idle termination, successful chain respectively.
+    # Ongoing, time limit, ongoing stationary, and successful chain.
     states = states._replace(
         step=jnp.array([0, 9, 0, 0], dtype=jnp.int32),
         stationary_steps=jnp.array([0, 0, 4, 0], dtype=jnp.int32),
@@ -898,7 +783,7 @@ def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
     )
     actions = jnp.zeros((4, 1, 3))
     actual, rewards, done, info = jax.jit(autoreset_step.batched)(states, actions)
-    np.testing.assert_array_equal(done, [False, True, True, True])
+    np.testing.assert_array_equal(done, [False, True, False, True])
     for lane in range(4):
         previous = jax.tree_util.tree_map(lambda a: a[lane], states)
         terminal = plain_step(previous, actions[lane])
@@ -921,12 +806,10 @@ def test_batched_autoreset_matches_reset_only_for_terminal_lanes(obstacles):
 
 
 @pytest.mark.parametrize("terminal_count", [0, 1, 17, 18, 35])
-@pytest.mark.parametrize("geodesic", [False, True])
-def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(terminal_count, geodesic):
+def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(terminal_count):
     cfg = replace(EnvConfig(), num_agents=1, max_steps=10,
-                  no_movement_termination_steps=5, hold_chain_for=50,
-                  num_obstacles=1, obstacle_spawn_layer_min=1, obstacle_spawn_layer_max=2)
-    reward_cfg = RewardConfig(chain_reward_system="obstacle_geodesic" if geodesic else "euclidean")
+                  hold_chain_for=50)
+    reward_cfg = RewardConfig()
     reset, step, _, _ = make_autoreset_fns(BUILDING, cfg, reward_cfg)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(436), 35))
     # Put terminal lanes at the end to exercise sparse gather/scatter indices.
@@ -965,7 +848,7 @@ def test_sparse_and_dense_reset_paths_match_reference_over_multiple_steps(termin
         reference, optimized = reference_out[0], optimized_out[0]
 
 
-def test_redundancy_and_efficiency_reward_modes():
+def test_chain_efficiency_rewards_one_path_and_gap_credit_splits_ties():
     from swarmecho.env.environment import simple_chain_paths, chain_path_efficiencies
 
     cfg = replace(EnvConfig(), num_agents=4, comm_radius=2.3,
@@ -986,29 +869,21 @@ def test_redundancy_and_efficiency_reward_modes():
     reference = jnp.zeros((6, 6)).at[0, 1].set(6.)
     expected = 6. / (2. + 2. * np.sqrt(5.))
     np.testing.assert_allclose(jnp.max(chain_path_efficiencies(paths, 6.)), expected)
-    for redundancy in (False, True):
-        for efficiency in (False, True):
-            reward_cfg = RewardConfig(allow_redundancy_reward=redundancy,
-                                               time_presure_reward=-1.25,
-                                               gap_progress_reward_per_meter=0.125,
-                                               chain_efficiency_reward=0.125,
-                                               enable_chain_efficiency_reward=efficiency)
-            reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
-            np.testing.assert_allclose(terms["time_presure_reward"], [-1.25] * 4)
-            np.testing.assert_allclose(terms["gap_reward"],
-                                       [.75, .75, .75 if redundancy else 0., 0.])
-            credit = np.array([expected, expected, expected if redundancy else 0., 0.]) * .125
-            if efficiency:
-                np.testing.assert_allclose(terms["chain_efficiency_reward"], credit, rtol=1e-6)
-                _, disconnected = compute_rewards(state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference)
-                np.testing.assert_array_equal(disconnected["chain_efficiency_reward"], np.zeros(4))
-            else:
-                assert "chain_efficiency_reward" not in terms
-                credit = np.zeros(4)
-            np.testing.assert_allclose(reward, terms["time_presure_reward"] + terms["gap_reward"] + credit, rtol=1e-6)
-        _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False,
-                                              allow_redundancy_reward=redundancy)
-        np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., float(redundancy), 0.])
+    reward_cfg = RewardConfig(time_presure_reward=-1.25, gap_progress_reward_per_meter=.125,
+                              chain_efficiency_reward=.125)
+    reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
+    np.testing.assert_allclose(terms["time_presure_reward"], [-1.25] * 4)
+    np.testing.assert_allclose(terms["gap_reward"], [.75, .375, .375, 0.])
+    credit = np.asarray(terms["chain_efficiency_reward"])
+    np.testing.assert_allclose(credit[[0, 3]], [expected * .125, 0.])
+    np.testing.assert_allclose(np.sort(credit[1:3]), [0., expected * .125])
+    np.testing.assert_allclose(reward, terms["time_presure_reward"] + terms["gap_reward"] + credit)
+    _, disconnected = compute_rewards(
+        state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference,
+    )
+    np.testing.assert_array_equal(disconnected["chain_efficiency_reward"], np.zeros(4))
+    _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
+    np.testing.assert_array_equal(observe(state)[:, 6], [1., 1., 0., 0.])
     straight = state._replace(pos=state.pos.at[1].set(jnp.array([5., 1., 2.])))
     np.testing.assert_allclose(jnp.max(chain_path_efficiencies(simple_chain_paths(straight, cfg), 6.)), 1.)
 
@@ -1034,36 +909,6 @@ def test_autoreset_step_uses_the_configured_reward_terms():
     np.testing.assert_allclose(reward, 0.0)
 
 
-def test_episode_terminates_after_configured_consecutive_stationary_steps():
-    cfg, (reset, step, _, metrics) = _functions(
-        max_steps=10,
-        no_movement_termination_steps=3,
-    )
-    state = reset(jax.random.PRNGKey(17))
-    zero_action = jnp.zeros((cfg.num_agents, 3))
-
-    for expected_steps in (1, 2):
-        state = step(state, zero_action)
-        assert state.stationary_steps == expected_steps
-        assert not state.idle_terminated
-        assert not state.done
-
-    state = step(state, zero_action)
-    assert state.stationary_steps == 3
-    assert state.idle_terminated
-    assert state.done
-    assert metrics(state)["idle_terminated"]
-
-
-def test_any_agent_motion_resets_stationary_step_counter():
-    cfg, (reset, step, _, _) = _functions(no_movement_termination_steps=3)
-    state = step(reset(jax.random.PRNGKey(19)), jnp.zeros((cfg.num_agents, 3)))
-    state = step(state, jnp.ones((cfg.num_agents, 3)))
-
-    assert state.stationary_steps == 0
-    assert not state.idle_terminated
-
-
 def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain():
     state = EnvState(
         pos=jnp.asarray([[4.0, 1.0, 1.0], [8.0, 1.0, 1.0]]),
@@ -1085,7 +930,7 @@ def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain()
         collided=jnp.zeros(2, dtype=jnp.bool_),
         coverage_credit=jnp.zeros(2),
     )
-    gap, progress = chain_diagnostics(state)
+    gap, progress, _, _ = obstacle_chain_diagnostics(state)
     assert gap == 0.0
     assert progress == 100.0
     state = state._replace(directly_sees_target=jnp.asarray([False, True]))
@@ -1094,7 +939,7 @@ def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain()
 
 # Adaptive target sampling
 
-ADAPTIVE_SPAWN_BUILDING = load_building(Path("src/swarmecho/curriculum_config/maps/B02c_static_map_noSpawn.yaml"))
+ADAPTIVE_SPAWN_BUILDING = load_building(Path("src/swarmecho/curriculum_config/maps/custom_maps/g01_static_map.yaml"))
 ENV = replace(EnvConfig(), num_agents=1, success_condition="chain_held", max_steps=3)
 
 
@@ -1203,7 +1048,7 @@ def test_disabled_reset_keeps_the_legacy_keyed_volume_draw():
 @pytest.mark.parametrize("sparse", [False, True])
 def test_weights_reach_dense_and_sparse_autoresets_and_disabled_results_match(sparse):
     c = controller()
-    reset, step, _, _ = make_autoreset_fns(ADAPTIVE_SPAWN_BUILDING, ENV, RewardConfig(chain_reward_system="euclidean"))
+    reset, step, _, _ = make_autoreset_fns(ADAPTIVE_SPAWN_BUILDING, ENV, RewardConfig())
     states = jax.jit(jax.vmap(reset))(jax.random.split(jax.random.PRNGKey(227), 4))
     # A 50-step chain hold cannot finish here: only selected lanes reach the time limit.
     steps = jnp.asarray([2, 0, 0, 0] if sparse else [2, 2, 2, 2], dtype=jnp.int32)

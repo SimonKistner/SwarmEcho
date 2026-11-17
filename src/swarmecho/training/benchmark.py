@@ -18,7 +18,7 @@ from swarmecho.env.environment import (
 from swarmecho.env.buildings import load_building, make_cuboid_building
 
 
-DEFAULT_BUILDING = MAP_DIR / "M00_no_maze_open_cuboid.yaml"
+DEFAULT_BUILDING = MAP_DIR / "open_cuboid.yaml"
 
 
 def run_benchmark(
@@ -28,7 +28,6 @@ def run_benchmark(
     drone_radar_bins: int,
     grid: tuple[int, int, int] = (4, 4, 4),
     *,
-    wall_sensing_layout: str = EnvConfig.wall_sensing_layout,
     wall_sensing_ray_max_distance: float = EnvConfig.wall_sensing_ray_max_distance,
     radar_mode: str = "legacy",
     distance_bands: int = 1,
@@ -40,7 +39,6 @@ def run_benchmark(
         else make_cuboid_building(grid)
     )
     cfg = EnvConfig(wall_sensing_rays=wall_sensing_rays, drone_radar_bins=drone_radar_bins,
-                    wall_sensing_layout=wall_sensing_layout,
                     wall_sensing_ray_max_distance=wall_sensing_ray_max_distance,
                     radar_mode=radar_mode, distance_bands=distance_bands,
                     radar_count_cap=radar_count_cap)
@@ -82,7 +80,6 @@ def run_benchmark(
         "num_envs": num_envs,
         "steps": steps,
         "wall_sensing_rays": wall_sensing_rays,
-        "wall_sensing_layout": wall_sensing_layout,
         "wall_sensing_ray_max_distance": wall_sensing_ray_max_distance,
         "drone_radar_bins": drone_radar_bins,
         "radar_mode": radar_mode,
@@ -105,7 +102,6 @@ def run_benchmark(
 
 def main() -> None:
     options = {"num_envs": "256", "steps": "100", "wall_sensing_rays": str(EnvConfig.wall_sensing_rays),
-               "wall_sensing_layout": EnvConfig.wall_sensing_layout,
                "wall_sensing_ray_max_distance": str(EnvConfig.wall_sensing_ray_max_distance),
                "drone_radar_bins": "8", "radar_mode": "legacy",
                "distance_bands": "1", "radar_count_cap": "3", "grid": "4x4x4"}
@@ -122,7 +118,6 @@ def main() -> None:
             raise ValueError(f"Unknown benchmark option {key!r}.")
     environment_counts = [int(value) for value in options["num_envs"].split(",")]
     wall_counts = [int(value) for value in options["wall_sensing_rays"].split(",")]
-    wall_layouts = options["wall_sensing_layout"].split(",")
     wall_ranges = [float(value) for value in options["wall_sensing_ray_max_distance"].split(",")]
     drone_counts = [int(value) for value in options["drone_radar_bins"].split(",")]
     modes = options["radar_mode"].split(",")
@@ -134,11 +129,10 @@ def main() -> None:
     steps = int(options["steps"])
     reports = [
         run_benchmark(num_envs, steps, wall_rays, drone_bins, grid,
-                      wall_sensing_layout=wall_layout, wall_sensing_ray_max_distance=wall_range,
+                      wall_sensing_ray_max_distance=wall_range,
                       radar_mode=mode, distance_bands=band_count, radar_count_cap=cap)
         for num_envs in environment_counts
         for wall_rays in wall_counts
-        for wall_layout in wall_layouts
         for wall_range in wall_ranges
         for drone_bins in drone_counts
         for mode in modes

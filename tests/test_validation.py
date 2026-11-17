@@ -39,21 +39,18 @@ def test_goals_default_to_training_independently(inspection, validation):
 @pytest.mark.parametrize("overrides,match", [
     (["validation.success_condition=typo"], r"validation.success_condition"),
     (["validation.enabled=false", "validation.success_condition=typo"], r"validation.success_condition"),
-    (["validation.success_condition=coverage"], "requires a target task"),
-    (["validation.success_condition=discovery"], "Adaptive size requires"),
-    (["adapt_size.enabled=false", "reward.priveleged_vote_reward.enabled=false",
-      "reward.success_reward_as_hold_record=true",
-      "validation.success_condition=delivery"], "chain-hold validation success condition"),
+    (["validation.success_condition=coverage"], r"validation.success_condition"),
+    (["validation.success_condition=discovery"], r"validation.success_condition"),
 ])
 def test_invalid_validation_goals_are_rejected(overrides, match):
     with pytest.raises(ValueError, match=match):
         load_level("G03_CLU_random_buildings", overrides)
 
 
-@pytest.mark.parametrize("mode", ["held_out_maps", "uniform_full_task"])
+@pytest.mark.parametrize("mode", [None, "uniform_full_task"])
 def test_runner_uses_validation_goal_and_guards_saved_identity(tmp_path, mode):
     level = load_level("G03_CLU_random_buildings")
-    paths = [Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")]
+    paths = [Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml")]
     level = replace(level, map_paths=tuple(paths), validation=replace(level.validation, num_maps=1, mode=mode))
     runner = ValidationRunner(level, tmp_path, paths)
     assert runner.level.env.success_condition == "chain_held"

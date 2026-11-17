@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
-from swarmecho.models.actions import vote_statistics
 
 class RunningValueNormalizer(nnx.Module):
     """Pooled running target moments (parallel variance merge), checkpointed by NNX."""
@@ -46,49 +45,43 @@ def masked_mean(values, active, normalizer=None):
 
 def replay(model, mb, key, *, capture_auxiliary=False):
     """Replay complete sequences with exactly the stored communication masks."""
-    differentiable = getattr(model, "base_memory_replay", "stored") == "differentiable"
-    if differentiable and not {"base_write_indices", "episode_dones"} <= mb.keys():
+    if not {"base_write_indices", "episode_dones"} <= mb.keys():
         raise ValueError("Differentiable base replay requires recorded cache writes and episode boundaries.")
     def one_env(obs, resets, active, comm, base_sig, base_val, base_mask, writes, dones, h, sig, val, selected_times):
         def step(carry, inputs):
-            t, obs_t, reset_t, active_t, comm_t, bs, bv, bm, writer, done = inputs
-            if differentiable:
-                bs, bv = carry[3:5]
+            t, obs_t, reset_t, active_t, comm_t, bm, writer, done = inputs
+            bs, bv = carry[3:5]
             h_t, sig_t, val_t, mu, log_std = model.actor.__call_team__(
                 obs_t, *carry[:3], reset=reset_t | ~active_t, comm_mask=comm_t,
                 active=active_t, base_signature=bs, base_value=bv, base_memory_mask=bm,
             )
-            logits = (model.actor.vote_logits(h_t) if getattr(model.actor, "vote_mode", None) is not None
-                      else jnp.zeros((*mu.shape[:-1], 0), dtype=mu.dtype))
             next_bs, next_bv = carry[3:5]
-            if differentiable:
-                index = jnp.maximum(writer, 0)
-                next_bs = jnp.where(writer >= 0, sig_t[index], next_bs)
-                next_bv = jnp.where(writer >= 0, val_t[index], next_bv)
-                next_bs = jnp.where(done, 0., next_bs)
-                next_bv = jnp.where(done, 0., next_bv)
+            index = jnp.maximum(writer, 0)
+            next_bs = jnp.where(writer >= 0, sig_t[index], next_bs)
+            next_bv = jnp.where(writer >= 0, val_t[index], next_bv)
+            next_bs = jnp.where(done, 0., next_bs)
+            next_bv = jnp.where(done, 0., next_bv)
             next_carry = (h_t, sig_t, val_t, next_bs, next_bv)
             if capture_auxiliary:
                 chosen = jnp.where((selected_times == t)[...,None], h_t[:,None,:], carry[5])
                 next_carry = (*next_carry, chosen)
-            return next_carry, (mu, log_std, logits)
+            return next_carry, (mu, log_std)
         initial = (h,sig,val,jax.lax.stop_gradient(base_sig[0]),jax.lax.stop_gradient(base_val[0]))
         if capture_auxiliary:
             initial = (*initial, jnp.zeros((*selected_times.shape,h.shape[-1]),h.dtype))
         final, distribution = jax.lax.scan(
-            step, initial, (jnp.arange(obs.shape[0]),obs, resets, active, comm, base_sig, base_val, base_mask, writes, dones)
+            step, initial, (jnp.arange(obs.shape[0]), obs, resets, active, comm, base_mask, writes, dones)
         )
         return (*distribution, final[5]) if capture_auxiliary else distribution
 
     output = jax.vmap(one_env, in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0))(
         mb["obs"], mb["rnn_resets"], mb["active_masks"], mb["comm_masks"],
         mb["base_signatures"], mb["base_values"], mb["base_memory_masks"],
-        mb.get("base_write_indices", jnp.full(mb["obs"].shape[:2], -1, jnp.int32)),
-        mb.get("episode_dones", jnp.zeros(mb["obs"].shape[:2], bool)),
+        mb["base_write_indices"], mb["episode_dones"],
         mb["initial_actor_h"], mb["initial_actor_signature"], mb["initial_actor_value"],
         mb["aux_times"] if capture_auxiliary else jnp.zeros((*mb["initial_actor_h"].shape[:-1],0),jnp.int32),
     )
-    mu,log_std,logits = output[:3]
+    mu, log_std = output[:2]
     mu, log_std = jnp.swapaxes(mu, 0, 1), jnp.swapaxes(log_std, 0, 1)
     std = jnp.exp(log_std)
     actions = jnp.where(mb["active_masks"][..., None], mb["actions"][..., :3], 0.0)
@@ -100,35 +93,26 @@ def replay(model, mb, key, *, capture_auxiliary=False):
     def correction(u):
         return jnp.sum(2 * (jnp.log(2.0) - u - jax.nn.softplus(-2 * u)), axis=-1)
 
-    legacy = gaussian + correction(actions)
     # Fresh reparameterized samples: gradients include mean/std and tanh compression.
     sampled = mu + std * (mb["entropy_noise"] if "entropy_noise" in mb else jax.random.normal(key, mu.shape))
     squashed = gaussian + correction(sampled)
-    if getattr(model.actor, "vote_mode", None) is not None:
-        logits = jnp.swapaxes(logits, 0, 1)
-        vote_lp, vote_entropy = vote_statistics(logits, mb["actions"][..., 3], model.actor.vote_mode)
-        log_probs += vote_lp
-        legacy += vote_entropy
-        squashed += vote_entropy
     active = mb["active_masks"]
     _, values = model.critic.values_sequence(
-        model.critic_observations(mb["obs"]), mb["initial_critic_h"], mb["rnn_resets"] | ~active,
+        mb["obs"], mb["initial_critic_h"], mb["rnn_resets"] | ~active,
         deterministic=False, active=active,
     )
-    result = (values, log_probs, legacy, gaussian, squashed)
-    return (*result, output[3]) if capture_auxiliary else result
+    result = (values, log_probs, gaussian, squashed)
+    return (*result, output[2]) if capture_auxiliary else result
 
 
-def loss(model, mb, key, *, actor_clip_eps, value_clip_eps, entropy_mode, vf_coef, ent_coef, aux_lambda=None):
+def loss(model, mb, key, *, actor_clip_eps, value_clip_eps, vf_coef, ent_coef, aux_lambda=None):
     auxiliary = hasattr(model,"geo_probe_head") and "aux_times" in mb
     replayed = replay(model, mb, key, capture_auxiliary=auxiliary)
-    values, log_probs, legacy, _, squashed = replayed[:5]
+    values, log_probs, _, squashed = replayed[:4]
     active = mb["active_masks"]
     mean = lambda value: masked_mean(value,active,mb.get("ppo_normalizer"))
-    targets, old = mb["returns"], mb["old_values"]
-    if hasattr(model, "value_normalizer"):
-        targets = model.value_normalizer.normalize(targets)
-        old = model.value_normalizer.normalize(old)
+    targets = model.value_normalizer.normalize(mb["returns"])
+    old = model.value_normalizer.normalize(mb["old_values"])
     targets = jnp.where(active, targets, 0.0)
     old = jnp.where(active, old, 0.0)
     values = jnp.where(active, values, 0.0)
@@ -140,14 +124,12 @@ def loss(model, mb, key, *, actor_clip_eps, value_clip_eps, entropy_mode, vf_coe
         -advantages * jnp.clip(ratio, 1 - actor_clip_eps, 1 + actor_clip_eps),
     ))
     errors = (values - targets) ** 2
-    blocked = jnp.zeros_like(active)
-    if value_clip_eps is not None:
-        clipped = old + jnp.clip(values - old, -value_clip_eps, value_clip_eps)
-        clipped_errors = (clipped - targets) ** 2
-        blocked = (jnp.abs(values - old) > value_clip_eps) & (clipped_errors > errors)
-        errors = jnp.maximum(errors, clipped_errors)
+    clipped = old + jnp.clip(values - old, -value_clip_eps, value_clip_eps)
+    clipped_errors = (clipped - targets) ** 2
+    blocked = (jnp.abs(values - old) > value_clip_eps) & (clipped_errors > errors)
+    errors = jnp.maximum(errors, clipped_errors)
     value = 0.5 * mean(errors)
-    entropy = mean(squashed if entropy_mode == "squashed" else legacy)
+    entropy = mean(squashed)
     total = policy + vf_coef * value - ent_coef * entropy
     stats = {
         "policy_loss": policy, "value_loss": value, "entropy": entropy, "total_loss": total,
@@ -158,7 +140,7 @@ def loss(model, mb, key, *, actor_clip_eps, value_clip_eps, entropy_mode, vf_coe
     }
     if auxiliary:
         from swarmecho.training.geo_auxiliary import scores
-        h = replayed[5]
+        h = replayed[4]
         coefficient = model.geo_probe_head.weight() if aux_lambda is None else aux_lambda
         stopped = jax.lax.stop_gradient(h)
         logits = model.geo_probe_head(stopped + coefficient * (h-stopped))
@@ -180,9 +162,8 @@ def step(model, optimizer, mb, key, **settings):
 
 
 def diagnostics(model, mb, key, target_mean):
-    values, _, _, gaussian, squashed = replay(model, mb, key)
-    if hasattr(model, "value_normalizer"):
-        values = model.value_normalizer.denormalize(values)
+    values, _, gaussian, squashed = replay(model, mb, key)
+    values = model.value_normalizer.denormalize(values)
     active = mb["active_masks"]
     target = mb["returns"]
     return {
@@ -209,7 +190,7 @@ class PPOTrainer:
         self.head_optimizer = None
         self.auxiliary_data = None
         self._settings = dict(actor_clip_eps=training.actor_clip_eps,value_clip_eps=training.value_clip_eps,
-            entropy_mode=training.entropy_mode,vf_coef=training.vf_coef,ent_coef=training.ent_coef)
+            vf_coef=training.vf_coef,ent_coef=training.ent_coef)
         wrt = nnx.Param
         if self.has_auxiliary:
             from swarmecho.training.geo_auxiliary import POLICY_FILTER
@@ -221,7 +202,7 @@ class PPOTrainer:
         ), wrt=wrt)
         self._step = nnx.jit(functools.partial(
             step, actor_clip_eps=training.actor_clip_eps, value_clip_eps=training.value_clip_eps,
-            entropy_mode=training.entropy_mode, vf_coef=training.vf_coef, ent_coef=training.ent_coef,
+            vf_coef=training.vf_coef, ent_coef=training.ent_coef,
         ))
         self._diagnostics = nnx.jit(diagnostics)
 

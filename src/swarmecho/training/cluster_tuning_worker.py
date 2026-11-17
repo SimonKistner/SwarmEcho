@@ -93,7 +93,6 @@ def main():
         overrides = [*spec["overrides"],
                      *[f"training.{key}={value}" for key, value in spec["candidate"].items()],
                      "training.checkpoint_path=null", "training.oom_recovery.enabled=false",
-                     "training.agent_count_curriculum.enabled=false",
                      "training.max_wall_seconds=null",
                      "training.adaptive_target_spawn.curriculum_start_agents=null",
                      "inspection_evaluation.target_sampling=independent",
@@ -104,11 +103,11 @@ def main():
                      "logging.wandb_group=" + spec["group"],
                      "logging.wandb_mode=" + spec["wandb_mode"]]
         if spec["mode"] == "probe":
-            overrides += ["adapt_size.initial_agents=7", "env.spawn_delay=0",
+            overrides += ["env.spawn_delay=0",
                           "adapt_size.decommission_hold_steps=701",
                           "inspection_evaluation.save_model=false",
                           "inspection_evaluation.eval_video=false",
-                          "inspection_evaluation.eval_every_env_steps=2147483647",
+                          "inspection_evaluation.eval_freq=2147483647",
                           "inspection_evaluation.early_exit=false",
                           "training.total_timesteps=" + str(
                               spec["candidate"]["num_envs"] * spec["candidate"]["num_steps"]

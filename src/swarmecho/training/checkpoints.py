@@ -10,11 +10,20 @@ from pathlib import Path
 from swarmecho.core.terminal import terminal_print, display_path
 from typing import Any
 
-from flax import nnx
 from swarmecho.core.config import DEFAULT_PATH_GRID_SHAPE
 
 
 _DEFAULT_GEO_PATH_GRID = "x".join(map(str, DEFAULT_PATH_GRID_SHAPE))
+
+
+def checkpoint_probe_grid(path):
+    """Preserve the trained decoder shape when restoring on another map."""
+    checkpoint = Path(str(path).replace("\\", "/")).absolute()
+    source = checkpoint / "training_contract.json"
+    if not source.is_file():
+        return DEFAULT_PATH_GRID_SHAPE
+    shape = json.loads(source.read_text(encoding="utf-8")).get("geo_path_grid", _DEFAULT_GEO_PATH_GRID)
+    return tuple(map(int, shape.split("x")))
 
 
 def validate_checkpoint_contract(model: Any, path: Path) -> None:
@@ -31,7 +40,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         if expected.get("observe_visually_gated_target_displacement", False):
             raise ValueError("Visually gated target displacement requires matching checkpoint observation metadata.")
         if expected.get("adaptive_size", False):
-            raise ValueError("Adaptive voting checkpoints require matching action/observation metadata.")
+            raise ValueError("Automatic deployment checkpoints require matching observation metadata.")
         if expected["value_normalization"] != "none":
             raise ValueError(
                 "Checkpoint has no value-normalization metadata. It cannot be loaded as a "
@@ -66,6 +75,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     for contract in (actual, expected):
         contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
         contract.setdefault("adaptive_size", False)
+        contract.setdefault("vote_observation_slot", contract["adaptive_size"])
         contract.setdefault("recruitment_enabled", contract["adaptive_size"])
         contract.setdefault("vote_mode", None)
         # Contracts predating timestamped decisions used accumulating credits.
@@ -115,7 +125,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         else:
             contract["distance_bands"] = max(1, contract["distance_bands"])
     critical = {
-        "adaptive_size", "recruitment_enabled", "vote_mode", "vote_protocol",
+        "adaptive_size", "recruitment_enabled", "vote_mode", "vote_protocol", "vote_observation_slot",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
@@ -126,6 +136,8 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         "geo_path_grid",
         *[name for name in expected if name.startswith("observe_")],
     }
+    if actual["vote_observation_slot"] and not expected.get("vote_observation_slot", False):
+        raise ValueError("Checkpoint has a retired vote observation input. Convert its input weights or use the original revision.")
     critical.intersection_update(expected)
     mismatches = [f"{name}: checkpoint={actual.get(name)!r}, level={expected[name]!r}"
                   for name in sorted(critical) if actual.get(name) != expected[name]]
@@ -139,6 +151,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
 
 def restore_model_checkpoint(model: Any, checkpoint_path: str | Path) -> Path:
     """Restore model weights from one Orbax checkpoint directory."""
+    from flax import nnx
     import orbax.checkpoint as ocp
 
     path = Path(str(checkpoint_path).replace("\\", "/")).absolute()
@@ -205,6 +218,7 @@ def save_model_checkpoint(
     total_steps: int | None = None,
 ) -> Path:
     """Replace and save one complete Orbax model checkpoint."""
+    from flax import nnx
     import orbax.checkpoint as ocp
 
     path = Path(checkpoint_path).absolute()

@@ -98,28 +98,13 @@ The helper transfers the key over SSH stdin and stores it as
 `<persist_root>/.wandb_api_key` with mode `600`; it does not print the key or add
 it to the source snapshot. Do not put credentials in run manifests.
 
-## 4. Prepare and inspect a submission
-
-```powershell
-& .\cluster\submit.ps1 -DryRun -Python $Py
-```
-
-A dry run prepares `.submissions/<unique-name>/` and checks packaging/basic
-config structure. Inspect each experiment's `summary.json`, `experiment.yaml` and
-`model/cluster/run.json` at the printed path. It does not submit, allocate a GPU,
-check the published image, or prove runtime compatibility.
+## 4. Configure a submission
 
 Shared task, evaluation cadence, artifacts, and time budgets come from the
 level YAML. The default [g03-default.json](../manifests/g03-default.json) selects
 G03 CLU with one seed and no overrides. In an explicit batch config, `seeds: 2`
 uses the level's training seed and the next integer. An integer list chooses
 specific seeds. See [configuration examples](README.md).
-
-If PowerShell execution policy blocks a wrapper, the process-scoped form is:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\cluster\submit.ps1 -DryRun -Python $Py
-```
 
 ## 5. Submit the configured run or seed/variation batch
 
@@ -130,7 +115,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\cluster\submit.ps1 -DryRun
 The default submits one `G03_CLU_random_buildings` experiment using the level's
 settings. For a custom batch, pass `-Config`. Each seed and variation creates
 a separate experiment with its own output identity. Check the printed receipt
-if a submission is interrupted.
+if a submission is interrupted. Each experiment receipt includes `summary.json`,
+`experiment.yaml` and `model/cluster/run.json`.
+
+If PowerShell execution policy blocks the wrapper, use the process-scoped form
+to submit the default run.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\cluster\submit.ps1 -Python $Py
+```
+
+Submit the five-seed G03 CLU baseline with the following command.
+
+```powershell
+$Config = '.\cluster\manifests\g03-baseline-5-seeds.json'
+& .\cluster\submit.ps1 -Config $Config -Python $Py
+```
 
 Before submission, the launcher checks all selected names for existing local
 tracking and experiment receipts. A tracking override retains the remote
@@ -273,7 +273,6 @@ Python equivalents, using the same system interpreter:
 ```powershell
 & $Py .\cluster\tools\submit.py
 & $Py .\cluster\tools\submit.py --config .\path\to\config.json
-& $Py .\cluster\tools\submit.py --run $Run --dry-run
 & $Py .\cluster\tools\submit.py --run $Run
 & $Py .\cluster\tools\submit.py --image-info
 & $Py .\cluster\tools\setup_wandb.py
@@ -357,18 +356,15 @@ For the six curriculum comparison groups fetched on **3 November 2026**, run
 six best checkpoints (training seed 456789 in every group) on the same frozen map:
 
 ```bash
-uv run python cluster/eval_g03_curriculum.py --dry-run
 uv run python cluster/eval_g03_curriculum.py
 ```
 
-The first command only prepares configurations and prints commands. The second
-runs sequential one-map metrics, heatmaps and required-agent replays. See the
-[selected runs and checkpoint scores](../../docs/02_guide/10_G03_auto7_curriculum_sweep.md#one-map-replay-comparison-3-november-2026).
+The script runs sequential one-map metrics, heatmaps and required-agent replays. See the
+[selected runs and checkpoint scores](../../docs/legacy-ablation/02_guide/10_G03_auto7_curriculum_sweep.md#one-map-replay-comparison-3-november-2026).
 
 ## 13. Geometry-probe suite and local compatible pools (WSL)
 
 ```bash
-uv run python geo_experiments/suite.py plan=true
 uv run python geo_experiments/suite.py
 uv run python geo_experiments/suite.py resume=geo_experiments/outputs/YOUR_SUITE_FOLDER
 ```
@@ -379,14 +375,11 @@ it does not need the original cluster validation maps. Selection and map hashes
 are frozen under the checkpoint run's `probe_maps/`. Compatibility includes the
 recorded generator version and generation/geometry settings.
 
-**`plan=true` may prepare a missing CPU map pool** while resolving the plan;
-it does not execute policy rollout or decoder fitting. The second command does
-execute the suite. Resume uses the saved suite plan/configuration.
+Resume uses the saved suite plan and configuration.
 
-Explicit map-source and reporting commands:
+Reporting commands:
 
 ```bash
-uv run python geo_experiments/suite.py policies.g03_agents_7.map_source=compatible_pool plan=true
 uv run python geo_experiments/report.py run=geo_experiments/outputs/YOUR_SUITE_FOLDER/runs/YOUR_READOUT
 uv run python geo_experiments/reproduce.py run=geo_experiments/outputs/YOUR_SUITE_FOLDER/runs/YOUR_READOUT
 uv run python geo_experiments/auditing.py run=geo_experiments/outputs/YOUR_SUITE_FOLDER/collections/YOUR_COLLECTION
@@ -465,4 +458,4 @@ det shell --help
 
 Related references: [cluster workflow](README.md),
 [dependency images](IMAGE_BUILD.md), [reports](../../ablations/cluster/README.md),
-[local command guide](../../docs/02_guide/03_commands.md).
+[local training guide](../../docs/01_training.md).

@@ -89,7 +89,7 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
         result.append(replace(level, map_names=[name], map_paths=(target,), building=building,
             map_source_name=level.map_names[index] if static_maps is not None else None,
             random_buildings=replace(level.random_buildings, enabled=False),
-            evaluation=replace(level.evaluation, random_eval=False, training_robustness=False,
+            evaluation=replace(level.evaluation, random_eval=False,
                                eval_differes_from_training_map=False, eval_map=None)))
         log(f"Persistent evaluation map {index + 1}/{count}: {target.name}")
     return result
@@ -140,11 +140,15 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
         level = resolve_evaluation_level(level)
         cfg, evaluation = level.env, level.evaluation
         name = level.building_name
-        suite_metadata = ({"map_suite_map_id": name, "map_suite_group": f"{artifact_root}:{suffix}",
-                           "map_suite_maps": len(levels)} if static else
-                          {"random_eval_map_id": name, "random_eval_group": f"{artifact_root}:{suffix}",
-                           "random_eval_maps": len(levels)})
-        common = {"map_name": name, "num_agents": cfg.num_agents, **suite_metadata,
+        if authored_single_map:
+            map_metadata = {"source_map_path": str(level.map_paths[0])}
+        elif static:
+            map_metadata = {"map_suite_map_id": name, "map_suite_group": f"{artifact_root}:{suffix}",
+                            "map_suite_maps": len(levels)}
+        else:
+            map_metadata = {"random_eval_map_id": name, "random_eval_group": f"{artifact_root}:{suffix}",
+                            "random_eval_maps": len(levels)}
+        common = {"map_name": name, "num_agents": cfg.num_agents, **map_metadata,
                   "target_sampling": evaluation.target_sampling,
                   **({"target_budget": int(sampling_kwargs["target_agent_budget"])}
                      if "target_agent_budget" in sampling_kwargs else {}),
@@ -160,13 +164,13 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
             metrics, info = evaluate_suite(model, level, episodes=eval_samples or batch_size,
                                           return_episode_info=True,
                                           return_required_agents=score_spawn or replay_by_required_agents,
-                                          action_noise_max=0., **batching, **sampling_kwargs)
+                                          **batching, **sampling_kwargs)
             results.append(metrics)
             if score_spawn:
                 curriculum_outcomes.append(info)
             if on_run:
                 on_run(metrics, index + 1, len(levels))
-            if evaluation.training_heatmap_creation:
+            if authored_single_map or evaluation.training_heatmap_creation:
                 success = np.asarray(info["successes"], dtype=bool)
                 chain_success = success & (resolve_evaluation_level(level).env.success_condition in CHAIN_SUCCESS_CONDITIONS)
                 delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
@@ -193,7 +197,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                     "replay_targets_from_storey": evaluation.replay_targets_from_storey,
                     "coverage_voxel_size_m": cfg.coverage_voxel_size or level.building.cell_size_m,
                     "comm_radius_m": cfg.comm_radius, "comm_radius_base_m": cfg.comm_radius_base,
-                    "visual_radius_m": cfg.visual_radius, "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                    "visual_radius_m": cfg.visual_radius, "allow_redundancy_reward": False,
                     "success_condition": resolve_evaluation_level(level).env.success_condition})
     if not results:
         return None
@@ -275,7 +279,7 @@ def _write_required_agent_replays(model, level, info, artifact_root, suffix, com
 
     required = np.asarray(info["required_agents"])
     cfg = level.env
-    expected = int(common.get("target_budget", cfg.geometric_agent_budget))
+    expected = int(common.get("target_budget", cfg.num_agents))
     if np.any((required < 1) | (required > expected)):
         raise ValueError("Required-agent replays need classified targets; enable inspection_evaluation.dynamic_max_geo_distance.")
     for count in range(1, expected + 1):
@@ -297,7 +301,7 @@ def _write_required_agent_replays(model, level, info, artifact_root, suffix, com
                 "coverage_voxel_size_m": cfg.coverage_voxel_size or level.building.cell_size_m,
                 "comm_radius_m": cfg.comm_radius, "comm_radius_base_m": cfg.comm_radius_base,
                 "visual_radius_m": cfg.visual_radius,
-                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                "allow_redundancy_reward": False,
                 "success_condition": cfg.success_condition, "required_agents": count,
                 "replay_source_lane": lane, "selected_target_position": target.tolist(),
                 "target_selection": f"required_agents_{count}", "replay_execution": "single"})

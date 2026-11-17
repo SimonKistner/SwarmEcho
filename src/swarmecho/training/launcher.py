@@ -165,9 +165,6 @@ def train(level, *, output_dir=None, checkpoint_path=None):
     """Route curricula or run one stage, retrying only recognized OOM errors."""
     if checkpoint_path is not None:
         level = replace(level, training=replace(level.training, checkpoint_path=str(checkpoint_path)))
-    if level.training.agent_count_curriculum.enabled:
-        from swarmecho.training.curriculum import train_agent_counts
-        return train_agent_counts(level, output_dir=output_dir)
     if not level.training.oom_recovery.enabled:
         from swarmecho.training.train import train as train_once
         return train_once(level, output_dir=output_dir)

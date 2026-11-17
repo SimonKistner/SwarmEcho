@@ -42,7 +42,6 @@ h1{font-size:18px;margin:0;letter-spacing:.04em}.tag{color:var(--cyan);font-weig
 #layout{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 116px)}#mainView{display:grid;grid-template-rows:minmax(0,2fr) minmax(0,1fr);min-width:0;min-height:0}#mainView.plots-hidden{grid-template-rows:minmax(0,1fr)}#scene{min-width:0;min-height:0}#rewardPlots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:auto minmax(0,1fr);column-gap:8px;min-width:0;min-height:0;padding:5px 8px 7px;border-top:1px solid var(--line);background:#0c1422}.reward-plots-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;font-size:11px;color:var(--muted)}#rewardPlotLegend{display:flex;flex-wrap:wrap;gap:3px 12px;justify-content:flex-end}.reward-key{white-space:nowrap}.reward-key i{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:5px}.reward-chart{min-width:0;min-height:0}.reward-unavailable{align-self:center;text-align:center;color:var(--muted);font-size:13px}.panel{padding:18px;background:var(--panel);border-left:1px solid var(--line);overflow:auto}
 .reward-plots-head{order:-1}#absoluteRewardPlot{order:1}.reward-debug-panel{order:2;display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}.reward-debug-controls{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;padding:4px 0;font-size:11px;color:var(--muted)}.reward-debug-controls label{display:flex;align-items:center;gap:5px}.reward-debug-controls select{width:auto;max-width:100%;padding:3px 5px;font-size:11px}#rewardComponentLegend{display:flex;flex-wrap:wrap;gap:4px 12px;max-height:55px;overflow:auto;padding:3px 6px;font-size:10px;color:var(--muted)}#rewardComponentLegend .reward-key i{height:8px;width:10px;border-radius:2px}
 .card{padding:14px;margin-bottom:12px;background:#0c1422;border:1px solid var(--line);border-radius:10px}.label{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.1em;margin-bottom:8px}
-.carried-vote-entry{margin-top:10px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.carried-vote-entry strong{font-size:12px}
 .value{font-size:24px;font-weight:750}.row{display:flex;justify-content:space-between;gap:12px;margin:7px 0;color:var(--muted)}.row b{color:var(--text)}
 #layout{grid-template-columns:clamp(360px,33vw,470px) minmax(0,1fr) 280px}
 #buildingPanel{display:grid;grid-template-columns:minmax(140px,.9fr) minmax(180px,1.1fr);align-content:start;align-items:start;gap:12px;padding:12px;min-width:0}
@@ -407,7 +406,20 @@ const HEATMAP_CATEGORY_CONTROLS={chain_success:'heatmapShowChainSuccess',found_a
 let heatmapAgreementData=null;
 function renderHeatmapAgreementButtons(){let buttons=$('heatmapAgreementButtons');buttons.replaceChildren();let total=Number(H?.manifest?.robustness_runs)||1;if(heatmapAgreementData!==H){heatmapAgreementData=H;heatmapAgreement=total}for(let agreement=1;agreement<=total;agreement++){let button=document.createElement('button');button.type='button';button.textContent=agreement+'/'+total;button.classList.toggle('selected',agreement===heatmapAgreement);button.onclick=()=>{heatmapAgreement=agreement;renderHeatmapAgreementButtons();updateHeatmapStats();drawHeatmap()};buttons.appendChild(button)}}
 function updateHeatmapStats(){let counts={chain_success:0,found_and_delivered:0,visually_found:0,not_found:0};H.positions.forEach((_,index)=>counts[heatmapStage(index)]++);let total=H.positions.length||1,chain=counts.chain_success/total,delivered=(counts.chain_success+counts.found_and_delivered)/total,visual=(counts.chain_success+counts.found_and_delivered+counts.visually_found)/total,percent=value=>Math.round(value*100)+'%',delta=value=>(value>=0?'+':'')+Math.round(value*100)+'%';$('heatmapStatChain').textContent=percent(chain);$('heatmapStatDelivered').textContent=percent(delivered);$('heatmapStatDeliveredDelta').textContent='('+delta(delivered-chain)+')';$('heatmapStatVisual').textContent=percent(visual);$('heatmapStatVisualDelta').textContent='('+delta(visual-chain)+')';$('heatmapStatNotFound').textContent=percent(counts.not_found/total)}
-function showHeatmapCommand(point,stage){let coords=point.map(value=>Number(value).toPrecision(9)).join(',');$('selectedPoint').textContent=stage+' · ('+coords+')';if(PUBLIC_INSPECTOR)return;let checkpoint=H.manifest.checkpoint||'<checkpoint-path>';let mapId=H.manifest.map_suite_map_id||H.manifest.random_eval_map_id;let command='uv run swarmecho-evaluate checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords+(mapId?' map_suite_map_id='+mapId:'');$('heatmapCommand').value=command}
+function quoteShellArg(value){return "'" + String(value).replaceAll("'", "'\\''") + "'"}
+function showHeatmapCommand(point,stage){
+  const coords=point.map(value=>Number(value).toPrecision(9)).join(',');
+  $('selectedPoint').textContent=stage+' · ('+coords+')';
+  if(PUBLIC_INSPECTOR)return;
+  const manifest=H.manifest;
+  const checkpoint=quoteShellArg(manifest.checkpoint||'<checkpoint-path>');
+  const mapId=manifest.map_suite_map_id||manifest.random_eval_map_id;
+  const authoredMap=manifest.source_map_path;
+  let mapArg='';
+  if(authoredMap)mapArg=' eval_map='+quoteShellArg(authoredMap);
+  else if(mapId)mapArg=' map_suite_map_id='+quoteShellArg(mapId);
+  $('heatmapCommand').value='uv run swarmecho-evaluate checkpoint='+checkpoint+' mode=selective_manual_pick target_position='+coords+mapArg;
+}
 function heatmapStage(index){if(!H.stage_rates)return H.stages[index];let total=Number(H.manifest.robustness_runs)||1,confidence=Math.min(total,Math.max(1,heatmapAgreement))/total,epsilon=1e-9;if(H.stage_rates.chain_success[index]+epsilon>=confidence)return 'chain_success';if(H.stage_rates.found_and_delivered[index]+epsilon>=confidence)return 'found_and_delivered';if(H.stage_rates.visually_found[index]+epsilon>=confidence)return 'visually_found';return 'not_found'}
 function drawHeatmap(){let traces=buildingTraces(),groups={chain_success:[],found_and_delivered:[],visually_found:[],not_found:[]};H.positions.forEach((point,index)=>{let stage=heatmapStage(index),rates=H.stage_rates?{chain:H.stage_rates.chain_success[index],delivered:H.stage_rates.found_and_delivered[index],visual:H.stage_rates.visually_found[index]}:{chain:Number(stage==='chain_success'),delivered:Number(stage==='chain_success'||stage==='found_and_delivered'),visual:Number(stage!=='not_found')};(groups[stage]||groups.not_found).push({point,stage,rates})});if(H.manifest.world_size_m)traces.push(boxTrace(H.manifest.world_size_m));if(H.obstacle_min?.length&&H.manifest.obstacle_layout_mode==='fixed')H.obstacle_min[0].forEach((lo,i)=>{traces.push(cuboidMesh(lo,H.obstacle_max[0][i]));traces.push(cuboidLines(lo,H.obstacle_max[0][i],'rgba(255,190,100,.8)'))});Object.entries(groups).forEach(([stage,entries])=>{if(!entries.length||!$(HEATMAP_CATEGORY_CONTROLS[stage]).checked)return;let points=entries.map(entry=>entry.point),color=HEATMAP_COLORS[stage];traces.push({type:'scatter3d',mode:'markers',x:points.map(point=>point[0]),y:points.map(point=>point[1]),z:points.map(point=>point[2]),customdata:entries.map(entry=>[entry.point,entry.stage,entry.rates.chain,entry.rates.delivered,entry.rates.visual,(H.final_chain_length||[])[H.positions.indexOf(entry.point)]||0]),marker:{size:8,color,opacity:.55,line:{color:'#e5eefc',width:1}},hovertemplate:stage+'<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>chain success=%{customdata[2]:.0%}<br>found and delivered=%{customdata[3]:.0%}<br>visually found=%{customdata[4]:.0%}<br>final chain length=%{customdata[5]:.2f}m<extra>Click to create replay command</extra>'})});return renderPlot(traces,'heatmap-camera',{uirevision:'heatmap-camera',showlegend:false})}
 function updateElevation(){let eye=(camera||DEFAULT_CAMERA).eye,angle=Math.round(Math.atan2(eye.z,Math.hypot(eye.x,eye.y))*180/Math.PI);$('cameraElevation').value=angle;$('cameraElevationValue').textContent=angle+'°'}
@@ -627,38 +639,7 @@ function replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius)
 }
 function baseKnowsTarget(f,base){if(D.base_target_known)return Boolean(D.base_target_known[f]);for(let q=0;q<=f;q++){if(D.fully_connected?.[q])return true;if(!D.fully_connected&&D.connected_to_base&&D.connected_to_target&&D.active[q].some((on,i)=>on&&D.connected_to_base[q][i]&&D.connected_to_target[q][i]))return true}return false}
 function renderKnownList(agentCount){let list=$('knownList');list.replaceChildren();['BASE',...Array.from({length:agentCount},(_,i)=>'D'+(i+1))].forEach(name=>{let item=document.createElement('button');item.type='button';item.className='known-item';item.textContent=name;list.appendChild(item)})}
-function adaptiveDroneStatus(f,i){const cfg=D.manifest.adapt_size;return 'D'+(i+1)+' · '+(D.adapt_vote[f][i]?'✓ YES':'○ NO')+' · Decommission '+D.adapt_dwell[f][i]+'/'+cfg.decommission_hold_steps}
-function latestDecisionProtocol(){return D.manifest.adapt_size?.vote_protocol==='latest_decision'}
-function carriedVoteLines(f,receiver){
-  const rounds=D.adapt_packet_round?.[f]?.[receiver];
-  if(latestDecisionProtocol()){
-    const timestamps=D.adapt_decision_step?.[f]?.[receiver],decisions=D.adapt_decision_yes?.[f]?.[receiver];
-    if(!rounds||!timestamps||!decisions)return null;
-    return timestamps.flatMap((stamp,source)=>stamp<0?[]:['D'+(source+1)+' · ID '+D.adapt_ids[f][source]+': '+(decisions[source]?'YES':'NO')+' · step '+stamp+' · age '+Math.max(0,(D.step?.[f]??f)-stamp)+' · round '+rounds[source]]);
-  }
-  const packets=D.adapt_packet_bits?.[f]?.[receiver];
-  if(!rounds||!packets)return null;
-  return packets.flatMap((words,source)=>{
-    const ids=[];words.forEach((word,w)=>{for(let bit=0;bit<32;bit++)if((word>>>bit)&1)ids.push(w*32+bit)});
-    if(!ids.length)return [];
-    const ranges=[];for(let k=0;k<ids.length;){let end=k;while(end+1<ids.length&&ids[end+1]===ids[end]+1)end++;ranges.push('#'+ids[k]+(end>k?'–#'+ids[end]:''));k=end+1}
-    return ['D'+(source+1)+' · ID '+D.adapt_ids[f][source]+': '+ids.length+' YES · packets '+ranges.join(', ')+' · round '+rounds[source]];
-  });
-}
-function droneHoverText(f,i){
-  const lines=['<b>D'+(i+1)+'</b>'];
-  if(D.adapt_vote&&D.manifest.adapt_size?.enabled){
-    lines.push('Vote round ID '+D.adapt_ids[f][i]);
-    const carried=carriedVoteLines(f,i);
-    if(carried?.length)lines.push('<b>Carried votes</b>',...carried);
-  }
-  return lines.join('<br>');
-}
-function setupVoteVisualizationControl(enabled){
-  let card=$('voteVisualizationCard');
-  if(!card){card=document.createElement('section');card.id='voteVisualizationCard';card.className='card';card.setAttribute('aria-label','Vote visualization');card.innerHTML='<div class="label">Vote visualization</div><label class="layer-control"><span><input id="showVoteIcons" type="checkbox" checked> Show vote icons</span></label><p class="meta" style="margin-bottom:0">➕ YES · crossed out ➕ NO</p>';$('buildingVisibilityCard').after(card);$('showVoteIcons').onchange=()=>draw(frame)}
-  card.hidden=!enabled;
-}
+function adaptiveDroneStatus(f,i){return 'D'+(i+1)+' · Decommission '+D.adapt_dwell[f][i]+'/'+D.manifest.adapt_size.decommission_hold_steps}
 function droneAnnotationOccluders(f){
   const boxes=[],g=D.building,opacity=1-(+$('wallTransparency').value/100);
   if(g&&+$('wallTransparency').value<100){
@@ -704,7 +685,7 @@ function clipDroneLabelPolygon(polygon,axis,bound,keepGreater){
 function layoutDroneAnnotations(scene){
   const entries=[],masks=[];
   for(const [index,ann] of (scene.fullSceneLayout.annotations||[]).entries()){
-    if(!/^drone-(?:name|vote|prohibition)-\d+$/.test(ann.name||''))continue;
+    if(!/^drone-name-\d+$/.test(ann.name||''))continue;
     ann.visible=true;entries.push({ann,index});
   }
   const params=scene.glplot.cameraParams,m=params?.model,v=params?.view,projection=params?.projection;
@@ -795,73 +776,27 @@ function droneAnnotationPlacement(f,i,point){
   if(previous!==undefined&&clearance[previous]>=distance&&(chosen!==0||clearance[0]<distance+.2))chosen=previous;
   choices.set(i,chosen);
   const [axis,sign]=directions[chosen],reach=Math.min(distance,clearance[chosen]);
-  const at=fraction=>point.map((n,k)=>n+(k===axis?sign*reach*fraction:0));
-  return {name:at(.4),icon:at(1)};
+  return point.map((n,k)=>n+(k===axis?sign*reach*.4:0));
 }
 function droneSceneAnnotations(f,p,active){
-  const annotations=[],enabled=Boolean(D.adapt_vote&&D.manifest.adapt_size?.enabled)&&$('showVoteIcons')?.checked!==false;
-  const emojiFont='Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji,sans-serif';
+  const annotations=[];
   active.forEach((isActive,i)=>{
     if(!isActive)return;
     const placement=droneAnnotationPlacement(f,i,p[i]);
     const anchor=point=>({x:point[0],y:point[1],z:point[2],showarrow:false,xanchor:'center',yanchor:'middle',captureevents:false,borderpad:0,borderwidth:0});
-    annotations.push({...anchor(placement.name),name:'drone-name-'+i,text:'<b>D'+(i+1)+'</b>',font:{family:'Arial,sans-serif',size:16,color:'#f8fafc'}});
-    if(!enabled)return;
-    const badge={...anchor(placement.icon),width:40,height:40,bgcolor:'rgba(0,0,0,0)',font:{family:emojiFont,size:22}};
-    annotations.push({...badge,name:'drone-vote-'+i,text:'➕'});
-    if(!D.adapt_vote[f][i])annotations.push({...badge,name:'drone-prohibition-'+i,text:'⊘',font:{family:'Arial,sans-serif',size:30,color:'#ef4444'}});
+    annotations.push({...anchor(placement),name:'drone-name-'+i,text:'<b>D'+(i+1)+'</b>',font:{family:'Arial,sans-serif',size:16,color:'#f8fafc'}});
   });
   return annotations;
 }
 function updateAdaptiveInspector(f){
-  const enabled=Boolean(D.adapt_vote&&D.manifest.adapt_size?.enabled);
-  setupVoteVisualizationControl(enabled);
-  let card=document.getElementById('adaptiveBaseCard');
-  if(!card&&enabled){card=document.createElement('div');card.id='adaptiveBaseCard';card.className='card';$('episodeColumn').insertBefore(card,$('episodeCard'))}
-  if(card){
-    card.hidden=!enabled;
-    if(enabled){
-      card.replaceChildren();
-      const cfg=D.manifest.adapt_size,title=document.createElement('h3');
-      title.textContent='Base';title.title='Vote round '+D.adapt_round[f];card.appendChild(title);
-      const held=D.adapt_quorum_steps?.[f],lastSpawn=D.adapt_last_spawn_step?.[f],delay=D.manifest.spawn_delay;
-      const step=D.adapt_vote_step?.[f]??D.step?.[f]??f;
-      const recorded=Number.isFinite(held)&&Number.isFinite(lastSpawn)&&Number.isFinite(delay);
-      const cooldown=recorded?Math.max(0,lastSpawn+delay-step):0;
-      const status=document.createElement('div');
-      status.textContent='Status: '+(!recorded?'Not recorded in this replay':cooldown>0?'COOLDOWN: '+cooldown+' STEPS':held>0||D.adapt_spawned?.[f]?.some(Boolean)?'DEPLOYING':'WAITING FOR VOTES');
-      card.appendChild(status);
-      if(cfg.quorum_hold>0){
-        const progress=document.createElement('div');
-        progress.textContent='All YES HELD: '+(Number.isFinite(held)?held:'?')+'/'+cfg.quorum_hold;
-        progress.title='Consecutive online environment steps meeting the configured vote quorum';
-        card.appendChild(progress);
-      }
-      D.active[f].forEach((active,i)=>{
-        if(!active)return;
-        const row=document.createElement('div'),name='D'+(i+1)+' · ';
-        if(latestDecisionProtocol()){
-          const base=D.active[f].length,stamp=D.adapt_decision_step?.[f]?.[base]?.[i]??-1,current=D.adapt_packet_round?.[f]?.[base]?.[i]===D.adapt_round[f]&&stamp>=0;
-          row.textContent=name+(current?(D.adapt_decision_yes[f][base][i]?'YES':'NO')+' · step '+stamp:'UNKNOWN');
-          row.title=current?'Source decision age: '+Math.max(0,step-stamp)+' steps':'No decision received for this round';
-        }else{
-          row.textContent=name+D.adapt_available_votes[f][i]+'/'+cfg.vote_holding;
-          row.title='YES credits received this round: '+D.adapt_base_votes[f][i]+'; consumed by rejected calls: '+D.adapt_spent[f][i];
-        }
-        card.appendChild(row);
-      });
-    }
-  }
-  let carrying=document.getElementById('adaptiveCarryingCard');
-  if(!carrying&&enabled){carrying=document.createElement('div');carrying.id='adaptiveCarryingCard';carrying.className='card';$('episodeCard').after(carrying)}
-  if(carrying){carrying.hidden=!enabled;if(enabled){carrying.replaceChildren();const title=document.createElement('h3');title.textContent='Carried votes';carrying.appendChild(title);D.active[f].forEach((active,i)=>{if(!active)return;const entry=document.createElement('div');entry.className='carried-vote-entry';const heading=document.createElement('strong');heading.textContent='D'+(i+1)+' · Round '+(D.adapt_known_round?.[f]?.[i]??D.adapt_round[f]);entry.appendChild(heading);const lines=carriedVoteLines(f,i);for(const text of lines===null?['Not recorded in this replay']:lines.length?lines:['None']){const row=document.createElement('div');row.textContent=text;entry.appendChild(row)}carrying.appendChild(entry)})}}
-  $('knownList').querySelectorAll('.known-item').forEach((item,index)=>{if(!index)return;let i=index-1;item.hidden=enabled&&!D.active[f][i];item.textContent=enabled?adaptiveDroneStatus(f,i):'D'+(i+1);item.title=enabled?'Lifetime ID '+D.adapt_ids[f][i]:''});
+  const hasDeployment=Boolean(D.adapt_dwell&&D.adapt_ids&&D.manifest.adapt_size?.enabled);
+  $('knownList').querySelectorAll('.known-item').forEach((item,index)=>{if(!index)return;let i=index-1;item.hidden=hasDeployment&&!D.active[f][i];item.textContent=hasDeployment?adaptiveDroneStatus(f,i):'D'+(i+1);item.title=hasDeployment?'Lifetime ID '+D.adapt_ids[f][i]:''});
 }
 function updateKnownList(agentKnown,baseKnown){let statuses=[baseKnown,...agentKnown];$('knownList').querySelectorAll('.known-item').forEach((item,i)=>item.classList.toggle('known',Boolean(statuses[i])));updateAdaptiveInspector(frame)}
 const rewardDebugPanel=document.createElement('div');rewardDebugPanel.className='reward-debug-panel';
 $('relativeRewardPlot').replaceWith(rewardDebugPanel);
 rewardDebugPanel.innerHTML='<div class="reward-debug-controls"><label>View <select id="rewardDebugMode"><option value="breakdown" selected>Reward breakdown</option><option value="relative">Relative advantage</option></select></label><label id="rewardDroneControl">Drone <select id="rewardDebugDrone" aria-label="Drone for reward breakdown"></select></label></div><div id="relativeRewardPlot" class="reward-chart"></div><div id="rewardComponentLegend" aria-label="Reward component legend"></div>';
-const REWARD_COMPONENT_STYLES={exploration_reward:['Exploration reward','#22d3ee'],collision_reward:['Collision reward','#f87171'],finder_reward:['Finder reward','#fbbf24'],target_found_reward:['Target found reward','#60a5fa'],time_presure_reward:['Time pressure reward','#94a3b8'],gap_reward:['Gap reward','#4ade80'],peer_informing_reward:['Peer informing reward','#a78bfa'],success_reward:['Success reward','#a3e635'],useless_agent_at_success_reward:['Useless agent at success reward','#fb7185'],useless_agent_at_success_all_agents_reward:['Useless agents · all agents reward','#f97316'],no_movement_termination_penalty:['No movement termination penalty','#d97706'],chain_efficiency_reward:['Chain efficiency reward','#2dd4bf'],reinforcement_reward:['Reinforcement reward','#f472b6'],withheld_reinforcement_vote_reward:['Withheld reinforcement vote reward','#fb923c'],unnecessary_reinforcement_call_reward:['Unnecessary reinforcement call reward','#e11d48'],decommission_reward:['Decommission reward','#c084fc'],rejected_call_reward:['Rejected call reward','#ef4444'],all_decommissioned_penalty:['All decommissioned penalty','#b91c1c'],reward_by_reference:['Reference reward','#e879f9']};
+const REWARD_COMPONENT_STYLES={exploration_reward:['Exploration reward','#22d3ee'],collision_reward:['Collision reward','#f87171'],finder_reward:['Finder reward','#fbbf24'],target_found_reward:['Target found reward','#60a5fa'],time_presure_reward:['Time pressure reward','#94a3b8'],gap_reward:['Gap reward','#4ade80'],peer_informing_reward:['Peer informing reward','#a78bfa'],success_reward:['Success reward','#a3e635'],useless_agent_at_success_reward:['Useless agent at success reward','#fb7185'],useless_agent_at_success_all_agents_reward:['Useless agents · all agents reward','#f97316'],no_movement_termination_penalty:['No movement termination penalty','#d97706'],chain_efficiency_reward:['Chain efficiency reward','#2dd4bf'],decommission_reward:['Decommission reward','#c084fc'],all_decommissioned_penalty:['All decommissioned penalty','#b91c1c'],reward_by_reference:['Reference reward','#e879f9']};
 Object.assign(REWARD_COMPONENT_STYLES,{
     non_contributor_return_reward:['Surplus return reward','#38bdf8'],
     non_contributor_departure_reward:['Surplus departure reward','#f43f5e'],
@@ -956,7 +891,7 @@ function moveFrame(direction){if(mode==='replay'&&D){const result=draw(Math.max(
 $('timeline').addEventListener('keydown',event=>{if(event.key==='ArrowUp'){event.preventDefault();event.target.blur();setNavigationTrack($('mapNavigation').classList.contains('hidden')?'steps':'maps')}else if(event.key==='ArrowDown'){event.preventDefault();setNavigationTrack('frames')}});
 function draw(f){if(!D)return;frame=+f;let p=D.position[f],active=D.active[f],known=D.target_known[f],tr=[],agents=p.filter((_,i)=>active[i]),b=D.base_position[f],t=D.target_position[f],visualRadius=D.manifest.visual_radius_m||4,commRadius=D.manifest.comm_radius_m||5,baseCommRadius=D.manifest.comm_radius_base_m||6,baseKnown=baseKnowsTarget(f,b);if($('showShell').checked)tr.push(boxTrace(D.manifest.world_size_m||[20,20,20]));tr.push(...buildingTraces());if(D.obstacle_min)D.obstacle_min[f].forEach((lo,i)=>{tr.push(cuboidMesh(lo,D.obstacle_max[f][i]));tr.push(cuboidLines(lo,D.obstacle_max[f][i],'rgba(255,190,100,.8)'))});if($('showReplayPath').checked&&replayPath){const path=replayPath.path,color='hsl(70 85% 60%)';tr.push(lineTrace(path,color,7));if($('showReplayPathNodes').checked&&path.length>2){const nodes=path.slice(1,-1);tr.push({type:'scatter3d',mode:'markers',x:nodes.map(v=>v[0]),y:nodes.map(v=>v[1]),z:nodes.map(v=>v[2]),marker:{size:5,color:'#22d3ee',line:{color:'#e5eefc',width:1}},hovertemplate:'Path waypoint<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>'})}}if($('showVisualRange').checked&&agents.length)tr.push(sphereTrace(agents,visualRadius,'#fbbf24',+$('visualOpacity').value));if($('showCommRange').checked&&agents.length)tr.push(sphereTrace(agents,commRadius,'#a78bfa',+$('commOpacity').value));if($('showCommRange').checked)tr.push(sphereTrace([b],baseCommRadius,'#a78bfa',+$('commOpacity').value));updateKnownList(known,baseKnown);
 if(D.adapt_zone_center&&D.adapt_zone_valid[f])tr.push(sphereTrace([D.adapt_zone_center[f]],D.manifest.adapt_size.decommission_radius_m,'#f97316',.18));
-let visible=p.map((_,i)=>i).filter(i=>active[i]),colors=visible.map(i=>known[i]?'#fb7185':'#22d3ee');tr.push({type:'scatter3d',mode:'markers',x:visible.map(i=>p[i][0]),y:visible.map(i=>p[i][1]),z:visible.map(i=>p[i][2]),marker:{size:7,color:colors,line:{color:'#e5eefc',width:1}},customdata:visible.map(i=>droneHoverText(f,i)),hovertemplate:'%{customdata}<extra></extra>'});
+let visible=p.map((_,i)=>i).filter(i=>active[i]),colors=visible.map(i=>known[i]?'#fb7185':'#22d3ee');tr.push({type:'scatter3d',mode:'markers',x:visible.map(i=>p[i][0]),y:visible.map(i=>p[i][1]),z:visible.map(i=>p[i][2]),marker:{size:7,color:colors,line:{color:'#e5eefc',width:1}},customdata:visible.map(i=>'<b>D'+(i+1)+'</b>'),hovertemplate:'%{customdata}<extra></extra>'});
 let targetPresent=D.target_present?Boolean(D.target_present[f]):true,landmarks=targetPresent?[b,t]:[b];tr.push({type:'scatter3d',mode:'markers+text',x:landmarks.map(v=>v[0]),y:landmarks.map(v=>v[1]),z:landmarks.map(v=>v[2]),text:targetPresent?['BASE','TARGET']:['BASE'],textposition:'top center',marker:{size:targetPresent?[11,9]:[11],color:targetPresent?[baseKnown?'#fb7185':'#60a5fa','#fb7185']:[baseKnown?'#fb7185':'#60a5fa'],symbol:targetPresent?['diamond','circle']:['diamond']}});
 if($('showLinks').checked)tr.push(...replayLinkTraces(f,p,active,b,t,commRadius,baseCommRadius,visualRadius));
 if($('showCoverage').checked){let coverage=coverageTrace(D.coverage[f],D.manifest.coverage_voxel_size_m||D.manifest.cell_size_m||5,+$('coverageOpacity').value);if(coverage)tr.push(coverage)}

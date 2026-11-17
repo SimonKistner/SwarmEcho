@@ -58,7 +58,7 @@ def write_top_farthest(output, stem, map_name, building, cfg, graph, points, cos
     static = [[] for _ in range(len(vertices) + 2)]
     for left, right in edges:
         distance = float(np.linalg.norm(vertices[left] - vertices[right]))
-        weight = distance + (cfg.roadmap_corner_bonus_m if distance > merge_distance + 1e-4 else 0.)
+        weight = distance
         static[int(left) + 2].append((int(right) + 2, weight))
         static[int(right) + 2].append((int(left) + 2, weight))
 
@@ -67,7 +67,7 @@ def write_top_farthest(output, stem, map_name, building, cfg, graph, points, cos
         base, target = points[base_index], points[target_index]
         adjacency = [neighbors.copy() for neighbors in static]
         for vertex_index in np.flatnonzero(np.isfinite(costs[base_index])):
-            weight = float(costs[base_index, vertex_index]) + cfg.roadmap_corner_bonus_m
+            weight = float(costs[base_index, vertex_index])
             adjacency[0].append((int(vertex_index) + 2, weight))
             adjacency[int(vertex_index) + 2].append((0, weight))
         for vertex_index in np.flatnonzero(np.isfinite(costs[target_index])):
@@ -86,7 +86,7 @@ def write_top_farthest(output, stem, map_name, building, cfg, graph, points, cos
         corners = (0 if len(route[0]) <= 2 else 1 + sum(
             np.linalg.norm(path[k + 1] - path[k]) > merge_distance + 1e-4
             for k in range(1, len(path) - 2)))
-        length = float(physical + corners * cfg.roadmap_corner_bonus_m)
+        length = float(physical)
         pairs.append({"rank": rank, "base": base.tolist(), "target": target.tolist(),
                       "path": path.tolist(), "path_length_m": length,
                       "path_corner_count": int(corners), "raster_distance_m": raster_distance})
@@ -98,12 +98,11 @@ def write_top_farthest(output, stem, map_name, building, cfg, graph, points, cos
                      "building_snapshot": building_snapshot(building),
                      "pair_ranking": "longest_farthest", "requested_pairs": count,
                      "clearance_m": graph.clearance, "comm_radius_m": cfg.comm_radius,
-                     "roadmap_approach": cfg.roadmap_approach,
+                     "roadmap_approach": "full",
                      "roadmap_node_density": cfg.roadmap_node_density,
                      "roadmap_merge_wall_end_nodes": cfg.roadmap_merge_wall_end_nodes,
-                     "roadmap_corner_bonus_m": cfg.roadmap_corner_bonus_m,
                      "corner_merge_distance_m": merge_distance,
-                     "path_metric": "Shortest-route distance including corner allowance (equivalent m)",
+                     "path_metric": "Shortest physical path length (m)",
                      "level": level_name, "generated_obstacles": False},
         "layouts": [{"obstacle_min": graph.solid_min.tolist(), "obstacle_max": graph.solid_max.tolist(),
                      "vertices": vertices.tolist(), "edges": edges.tolist(), "pairs": pairs,
@@ -118,16 +117,10 @@ def scan(args, *, building=None, cfg=None):
         from swarmecho.env.environment import EnvConfig
         level = load_level(args.level) if args.level else None
         cfg = level.env if level else EnvConfig()
-    if args.corner_bonus_m is not None:
-        cfg = replace(cfg, roadmap_corner_bonus_m=args.corner_bonus_m)
-    if getattr(args, "roadmap_approach", None) is not None:
-        cfg = replace(cfg, roadmap_approach=args.roadmap_approach)
     if getattr(args, "roadmap_node_density", None) is not None:
         cfg = replace(cfg, roadmap_node_density=args.roadmap_node_density)
     if getattr(args, "merge_wall_end_nodes", None) is not None:
         cfg = replace(cfg, roadmap_merge_wall_end_nodes=args.merge_wall_end_nodes)
-    if not np.isfinite(cfg.roadmap_corner_bonus_m) or cfg.roadmap_corner_bonus_m < 0:
-        raise ValueError("Corner bonus must be finite and nonnegative.")
     if building is not None:
         name = Path(args.map).stem
     elif args.map:
@@ -151,7 +144,7 @@ def scan(args, *, building=None, cfg=None):
                         building.tile_thickness_m / 2 + cfg.drone_radius], dtype=np.float32)
     upper = world - lower
     clearance = cfg.drone_radius + cfg.obstacle_planning_clearance_m
-    graph = building_roadmap(building, cfg, plan=True, corner_bonus_m=cfg.roadmap_corner_bonus_m)
+    graph = building_roadmap(building, cfg, plan=True)
     solid_lo, solid_hi = graph.solid_min, graph.solid_max
     planning_lo, planning_hi = solid_lo - clearance + 1e-4, solid_hi + clearance - 1e-4
     axes = []
@@ -168,24 +161,20 @@ def scan(args, *, building=None, cfg=None):
     # Mark the actual sampler's target boxes and base/drone-offset clearance.
     target_lo, target_hi, _ = target_spawn_boxes(building, cfg)
     target_allowed = inside(points, np.asarray(target_lo), np.asarray(target_hi))
-    target_allowed &= ~inside(points, solid_lo - cfg.obstacle_target_buffer_m,
-                             solid_hi + cfg.obstacle_target_buffer_m)
     drone = points + np.asarray([0., 0., cfg.drone_radius], dtype=np.float32)
     base_allowed = np.all((drone >= lower) & (drone <= upper), axis=1)
     base_allowed &= ~inside(drone, solid_lo - cfg.drone_radius, solid_hi + cfg.drone_radius)
     vertices = graph.vertices
     print(f"Scanning {len(points):,} points at {spacing:g} m spacing; {len(vertices)} roadmap nodes. "
           f"Drone comm range: {cfg.comm_radius:g} m. Static authored geometry only.", flush=True)
-    print(f"All distances include {cfg.roadmap_corner_bonus_m:g} m per waypoint group before ranking; "
-          f"short links up to {building.wall_thickness_m + 2 * clearance:g} m share a group.", flush=True)
     costs = np.full((len(points), len(vertices)), np.inf, dtype=np.float32)
     for i, point in enumerate(points):
         clear = visible(point, vertices, planning_lo, planning_hi)
         costs[i, clear] = np.linalg.norm(vertices[clear] - point, axis=-1)
-    graph_distances = np.where(graph.corner_distances < 1e6, graph.corner_distances, np.inf)
+    graph_distances = np.where(graph.distances < 1e6, graph.distances, np.inf)
     attached = np.full_like(costs, np.inf)
     for node in range(len(vertices)):
-        np.minimum(attached, costs[:, node, None] + cfg.roadmap_corner_bonus_m + graph_distances[node], out=attached)
+        np.minimum(attached, costs[:, node, None] + graph_distances[node], out=attached)
     farthest = np.full(len(points), -1, dtype=int)
     farthest_base = farthest.copy()
     maximum = np.full(len(points), np.nan)
@@ -212,7 +201,7 @@ def scan(args, *, building=None, cfg=None):
             print(f"  {i + 1:,}/{len(points):,} points", flush=True)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    stem = f"{Path(name).stem}_raster_{spacing:g}m_corner_{cfg.roadmap_corner_bonus_m:g}m"
+    stem = f"{Path(name).stem}_raster_{spacing:g}m"
     csv_path = output / f"{stem}.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
@@ -236,7 +225,7 @@ def scan(args, *, building=None, cfg=None):
         if save:
             path = generate(output / f"{stem}_{label}.roadmap.json", level_name=args.level,
                             map_name=args.map, start=points[j], target=points[i], path_count=1,
-                            corner_bonus_m=cfg.roadmap_corner_bonus_m, building=building, cfg=cfg)
+                            building=building, cfg=cfg)
             print(f"Inspectable roadmap: {path}")
     finite = np.isfinite(maximum)
     report("shortest_farthest", finite, farthest, maximum)
@@ -253,11 +242,6 @@ def scan(args, *, building=None, cfg=None):
     print(f"Points with no reachable other raster point: {np.count_nonzero(~finite)}")
     print(f"Points unable to reach every other raster point: {np.count_nonzero(reachable_count < len(points) - 1)}")
     print(f"Allowed targets with no reachable base sample: {np.count_nonzero(target_allowed & ~np.isfinite(maximum_base))}")
-    if level:
-        threshold = level.training.minimum_geodesic_separation_multiplier * cfg.comm_radius
-        count = np.count_nonzero(target_allowed & (~np.isfinite(maximum_base) | (maximum_base < threshold)))
-        print(f"Allowed targets without a qualifying base sample at {threshold:g} m "
-              f"({threshold / cfg.comm_radius:g} ranges): {count}/{np.count_nonzero(target_allowed)}")
     print(f"Point list: {csv_path}\nRaster approximation, not a continuous-space feasibility proof. Unreachable pairs are excluded from maxima.")
 
 
@@ -269,8 +253,6 @@ def main():
     parser.add_argument("--paths", type=int, default=1, help="Legacy option; each of the two extreme pairs exports its best route only")
     parser.add_argument("--top-pairs", type=int, default=1,
                         help="Export this many distinct longest-farthest raster pairs in one inspectable artifact")
-    parser.add_argument("--corner-bonus-m", type=float, help="Override env.roadmap_corner_bonus_m (default: general/level config)")
-    parser.add_argument("--roadmap-approach", choices=("full", "minimal"), help="Override env.roadmap_approach")
     parser.add_argument("--roadmap-node-density", type=float, help="Override env.roadmap_node_density (full only)")
     parser.add_argument("--merge-wall-end-nodes", action=argparse.BooleanOptionalAction, default=None,
                         help="Override env.roadmap_merge_wall_end_nodes (full only)")

@@ -40,14 +40,9 @@ def test_unknown_environment_parameter_is_rejected(tmp_path):
         load_level(path)
 
 
-def test_geodesic_reward_does_not_require_generated_obstacles():
-    level = load_level_cli([
-        "level=G03_CLU_random_buildings", "reward.chain_reward_system=obstacle_geodesic",
-        "env.num_obstacles=0",
-    ])
-    assert level.env.num_obstacles == 0
+def test_g03_geodesic_reward_uses_authored_geometry():
+    level = load_level("G03_CLU_random_buildings")
     assert level.building.solid_min_m.shape[0] > 0
-    assert level.reward.chain_reward_system == "obstacle_geodesic"
 
 
 def test_cli_accepts_dotlist_overrides():
@@ -67,23 +62,6 @@ def test_cli_accepts_dotlist_overrides():
     assert level.env.wall_sensing_rays == level.env.drone_radar_bins == 16
     assert level.env.coverage_voxel_size == 2.5
     assert level.num_updates == 1
-
-
-def test_cli_can_enable_training_only_action_noise():
-    level = load_level_cli(
-        [
-            "level=G03_CLU_random_buildings",
-            "training.training_noise=true",
-            "training.noise_level=0.02",
-        ]
-    )
-
-    assert level.training.training_noise
-    assert level.training.noise_level == 0.02
-    # This setting is solely consumed by the training rollout; it must not
-    # alter the standalone robust-evaluation configuration.
-    assert level.evaluation.eval_action_noise_max == 0.0
-    assert not level.evaluation.training_heatmap_creation
 
 
 def test_replays_use_the_maintained_artifact_hierarchy(tmp_path):
@@ -114,17 +92,18 @@ def test_manual_evaluations_use_unique_named_run_folders(tmp_path):
     assert named.parent == tmp_path / "artifacts/eval/ckpt_u000050_s00015M"
 
 
-def test_g03_clu_is_solvable_with_automatic_deployment_and_held_out_validation():
+def test_g03_clu_is_solvable_with_automatic_deployment_and_generated_validation():
     level = load_level()
     canonical = LEVEL_DIR / "G" / "G03_CLU_random_buildings.yaml"
     assert level.name == canonical.stem
     assert resolve_level_file("G03", LEVEL_DIR) == canonical
     assert resolve_level_file("G03_random_buildings", LEVEL_DIR) == canonical
     assert level.ideal_chain_margin_m > 0
-    assert level.env.num_agents == level.env.adapt_size.initial_agents == 7
-    assert not level.env.adapt_size.recruitment_enabled
+    assert level.env.num_agents == 7
+    assert level.env.adapt_size.enabled
     assert level.training.num_maps == 3600
     assert level.validation.enabled and level.validation.num_maps == 400
+    assert level.validation.mode is None
 
 
 # Orchestration

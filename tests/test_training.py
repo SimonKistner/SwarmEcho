@@ -25,7 +25,7 @@ from swarmecho.training.information_metrics import (
 )
 from swarmecho.training.ppo import loss, RunningValueNormalizer
 from swarmecho.training.run_lifecycle import resolve_resume_state, resolve_run_layout, schedule_due
-from swarmecho.training.train import _communication_inputs, _update_base_memory, communication_due
+from swarmecho.training.train import _communication_inputs, _update_base_memory
 
 
 # PPO controls
@@ -50,6 +50,7 @@ class Critic(nnx.Module):
 class Model(nnx.Module):
     def __init__(self):
         self.actor, self.critic = Actor(), Critic()
+        self.value_normalizer = RunningValueNormalizer()
 
 
 def minibatch():
@@ -63,6 +64,8 @@ def minibatch():
         "comm_masks": jnp.zeros((*shape, 2), dtype=bool),
         "base_signatures": jnp.zeros((2, 1, 1)), "base_values": jnp.zeros((2, 1, 1)),
         "base_memory_masks": jnp.zeros(shape, dtype=bool),
+        "base_write_indices": jnp.full(shape[:2], -1, dtype=jnp.int32),
+        "episode_dones": jnp.zeros(shape[:2], dtype=bool),
         "initial_actor_h": jnp.zeros((1, 2, 1)),
         "initial_actor_signature": jnp.zeros((1, 2, 1)),
         "initial_actor_value": jnp.zeros((1, 2, 1)),
@@ -71,15 +74,14 @@ def minibatch():
 
 
 def objective(model, batch, **overrides):
-    settings = dict(actor_clip_eps=0.2, value_clip_eps=0.2, entropy_mode="legacy", vf_coef=0.5, ent_coef=0.01)
+    settings = dict(actor_clip_eps=0.2, value_clip_eps=0.2, vf_coef=0.5, ent_coef=0.01)
     settings.update(overrides)
     return loss(model, batch, jax.random.PRNGKey(0), **settings)
 
 
-def test_clip_none_is_unclipped_and_zero_is_not():
+def test_value_clipping_includes_zero_clip():
     model, batch = Model(), minibatch()
     assert float(objective(model, batch)[1]["value_loss"]) == pytest.approx(196.02)
-    assert float(objective(model, batch, value_clip_eps=None)[1]["value_loss"]) == pytest.approx(50.0)
     assert float(objective(model, batch, value_clip_eps=0.0)[1]["value_loss"]) == pytest.approx(200.0)
     assert float(objective(model, batch, actor_clip_eps=0.9)[1]["value_loss"]) == pytest.approx(196.02)
 
@@ -88,20 +90,17 @@ def test_inactive_targets_do_not_change_loss_or_gradients():
     model, batch = Model(), minibatch()
     changed = {**batch, "returns": batch["returns"].at[:, :, 1].set(1e10),
                "advantages": batch["advantages"].at[:, :, 1].set(1e10)}
-    for mode in ("legacy", "squashed"):
-        value, grad = nnx.value_and_grad(lambda m: objective(m, batch, entropy_mode=mode)[0])(model)
-        other, other_grad = nnx.value_and_grad(lambda m: objective(m, changed, entropy_mode=mode)[0])(model)
-        np.testing.assert_allclose(value, other)
-        for a, b in zip(jax.tree.leaves(grad), jax.tree.leaves(other_grad)):
-            np.testing.assert_allclose(a, b)
+    value, grad = nnx.value_and_grad(lambda m: objective(m, batch)[0])(model)
+    other, other_grad = nnx.value_and_grad(lambda m: objective(m, changed)[0])(model)
+    np.testing.assert_allclose(value, other)
+    for a, b in zip(jax.tree.leaves(grad), jax.tree.leaves(other_grad)):
+        np.testing.assert_allclose(a, b)
 
 
 def test_squashed_entropy_pushes_saturated_mean_back_toward_center():
     model, batch = Model(), minibatch()
-    def gradient(mode):
-        return nnx.grad(lambda m: objective(m, batch, entropy_mode=mode, vf_coef=0.0, ent_coef=1.0)[0])(model)
-    assert float(gradient("legacy")["actor"]["mean"].value) == pytest.approx(0.0)
-    assert float(gradient("squashed")["actor"]["mean"].value) > 0.0
+    grad = nnx.grad(lambda m: objective(m, batch, vf_coef=0.0, ent_coef=1.0)[0])(model)
+    assert float(grad["actor"]["mean"].value) > 0.0
 
 
 def test_value_normalizer_merges_moments_and_round_trips():
@@ -116,11 +115,6 @@ def test_value_normalizer_merges_moments_and_round_trips():
     assert float(normalizer.mean[...]) == pytest.approx(4.0)
 
 
-def test_episode_clock_does_not_restart_at_rollout_boundary():
-    steps = jnp.array([98, 99, 100, 101, 102, 0, 1])
-    np.testing.assert_array_equal(communication_due(steps, 3), [False, True, False, False, True, True, False])
-
-
 def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
     critic = RecurrentAgentCentricCritic(3, 8, 1, nnx.Rngs(0))
     obs, hidden = jnp.ones((1, 2, 3)), jnp.zeros((1, 2, 8))
@@ -131,24 +125,6 @@ def test_inactive_critic_tokens_are_invisible_and_all_inactive_is_finite():
     h, values = critic(obs, hidden, active=jnp.zeros_like(active))
     np.testing.assert_array_equal(h, 0.0)
     np.testing.assert_array_equal(values, 0.0)
-
-
-def test_defaults_and_g02_overrides():
-    defaults = TrainingConfig()
-    assert defaults.entropy_mode == "squashed" and defaults.value_normalization == "running"
-    assert RewardConfig().no_movement_termination_penalty == 0.0
-    cfg = EnvConfig()
-    assert not cfg.observe_current_timestep
-    assert observation_dim(replace(cfg, observe_current_timestep=True)) == observation_dim(cfg) + 1
-    level = load_level("G02_static", [
-        "env.observe_current_timestep=true",
-        "training.value_clip_eps=null",
-        "reward.no_movement_termination_penalty=-100000.0",
-    ])
-    assert level.training.value_clip_eps is None
-    assert level.training.entropy_mode == "squashed" and level.training.value_normalization == "running"
-    assert level.env.observe_current_timestep
-    assert level.reward.no_movement_termination_penalty == -100000.0
 
 
 def test_checkpoint_rejects_silent_value_unit_changes(tmp_path):
@@ -164,7 +140,7 @@ def test_checkpoint_rejects_silent_value_unit_changes(tmp_path):
 
 def test_base_stores_first_reporter_replays_and_clears_on_reset():
     cfg = EnvConfig(num_agents=4, comm_radius=10.0, comm_radius_base=10.0)
-    building = load_building(MAP_DIR / "M00_no_maze_open_cuboid.yaml")
+    building = load_building(MAP_DIR / "open_cuboid.yaml")
     reset, _, _, _ = make_env_fns(building, cfg)
     state = reset(jax.random.PRNGKey(0))
     state = state._replace(
@@ -225,11 +201,10 @@ def test_base_stores_first_reporter_replays_and_clears_on_reset():
     assert not saved_value.any()
 
 
-def test_obstacle_blocks_tarmac_reporting_and_base_memory_replay():
+def test_obstacle_blocks_tarmac_base_reporting_during_rollout_and_replay():
     cfg = EnvConfig(num_agents=4, comm_radius=10.0, comm_radius_base=10.0)
-    building = load_building(MAP_DIR / "M00_no_maze_open_cuboid.yaml")
+    building = load_building(MAP_DIR / "open_cuboid.yaml")
     reset, _, _, _ = make_env_fns(building, cfg)
-    cfg = replace(cfg, num_obstacles=1)
     state = reset(jax.random.PRNGKey(1))._replace(
         pos=jnp.asarray([
             [2.0, 0.0, 1.0],
@@ -274,9 +249,9 @@ def test_obstacle_blocks_tarmac_reporting_and_base_memory_replay():
     assert memory_mask[0, 2]  # An unobstructed drone can receive base memory.
 
 
-def test_base_keeps_informing_replays_to_already_informed_agents():
+def test_base_memory_is_delivered_only_to_uninformed_agents():
     cfg = EnvConfig(num_agents=4, comm_radius=10.0, comm_radius_base=10.0)
-    building = load_building(MAP_DIR / "M00_no_maze_open_cuboid.yaml")
+    building = load_building(MAP_DIR / "open_cuboid.yaml")
     reset, _, _, _ = make_env_fns(building, cfg)
     state = reset(jax.random.PRNGKey(19))._replace(
         active=jnp.ones(cfg.num_agents, dtype=jnp.bool_),
@@ -289,37 +264,8 @@ def test_base_keeps_informing_replays_to_already_informed_agents():
     _, in_base, default_mask, _, _ = _communication_inputs(
         states, cfg, valid, signature, value,
     )
-    _, _, repeated_mask, _, _ = _communication_inputs(
-        states, replace(cfg, base_keeps_informing=True),
-        valid, signature, value,
-    )
     assert not default_mask.any()
     assert in_base.any()
-    assert jnp.array_equal(repeated_mask, in_base[0][None, :])
-
-
-def test_base_stores_report_only_on_a_communication_tick():
-    cfg = EnvConfig(num_agents=4, comm_radius=10.0, comm_radius_base=10.0)
-    building = load_building(MAP_DIR / "M00_no_maze_open_cuboid.yaml")
-    reset, _, _, _ = make_env_fns(building, cfg)
-    state = reset(jax.random.PRNGKey(20))._replace(
-        active=jnp.ones(cfg.num_agents, dtype=jnp.bool_),
-        target_known=jnp.ones(cfg.num_agents, dtype=jnp.bool_),
-    )
-    states = jax.tree_util.tree_map(lambda item: item[None], state)
-    _, in_base, _, _, _ = _communication_inputs(
-        states, cfg, jnp.asarray([False]),
-        jnp.zeros((1, 4)), jnp.zeros((1, 3)),
-    )
-    emitted_signature = jnp.ones((1, cfg.num_agents, 4))
-    emitted_value = jnp.ones((1, cfg.num_agents, 3))
-    saved = _update_base_memory(
-        states, in_base, emitted_signature, emitted_value,
-        jnp.asarray([False]), jnp.zeros((1, 4)), jnp.zeros((1, 3)),
-        jnp.asarray([False]), share_now=jnp.asarray([False]),
-    )
-    assert not saved[0][0]
-    assert not saved[1].any()
 
 
 # Training lifecycle
@@ -417,18 +363,18 @@ def test_map_and_robustness_pooling_uses_counts_even_if_first_pass_has_no_inform
     assert result["eval_peer-informed-pct"] == pytest.approx(900 / sum(row[0] for row in counts))
 
 
-def test_environment_emits_source_counts_with_real_radio_cadence():
+def test_environment_emits_source_counts_with_one_hop_delivery():
     from dataclasses import replace
     from pathlib import Path
     from swarmecho.core.config import EnvConfig
     from swarmecho.env.buildings import load_building
     from swarmecho.env.environment import make_env_fns
 
-    building = load_building(Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml"))
+    building = load_building(Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml"))
     cfg = replace(EnvConfig(), num_agents=3, spawn_delay=0, comm_radius=1.5,
                   comm_radius_base=1.5, visual_radius=1., max_steps=20,
-                  no_movement_termination_steps=20, hold_chain_for=20)
-    reset, step, _, _ = make_env_fns(building, cfg, memory_comm_every_k_steps=3)
+                  hold_chain_for=20)
+    reset, step, _, _ = make_env_fns(building, cfg)
     state = reset(jax.random.PRNGKey(91), target_pos=jnp.array([17., 17., 12.]))._replace(
         pos=jnp.array([[3., 2., 2.], [4., 2., 2.], [5., 2., 2.]]),
         vel=jnp.zeros((3, 3)), base_pos=jnp.array([2., 2., 2.]),
@@ -439,8 +385,6 @@ def test_environment_emits_source_counts_with_real_radio_cadence():
     current = step(state, action)
     np.testing.assert_array_equal(information_counts(state, current), [1, 1, 0])
     state = current
-    current = step(state, action)
-    np.testing.assert_array_equal(information_counts(state, current), [0, 0, 0])
     # Both base and informed peer are in range: base takes precedence.
     state = state._replace(pos=state.pos.at[2].set(jnp.array([3.2, 2., 2.])), step=jnp.int32(6))
     current = step(state, action)
@@ -459,17 +403,19 @@ def test_validation_counts_only_its_episodes_excluding_batch_padding(tmp_path, m
     level = replace(level, validation=replace(level.validation, num_maps=1,
         num_episodes=3, parallel_envs=2, fixed_targets=False))
     runner = ValidationRunner(level, tmp_path,
-        [Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")])
+        [Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml")])
     monkeypatch.setattr(runner, "_prepare", lambda: (None, None, None, None))
     calls = []
 
     def batch(*args, **kwargs):
-        assert kwargs["return_information"]
-        values = [np.zeros(2) for _ in range(18)]
+        assert kwargs["return_population"] and kwargs["return_required_agents"]
+        assert kwargs["return_useless_agents"] and kwargs["return_information"]
+        values = [np.zeros(2) for _ in range(19)]
         values[8] = np.zeros((2, 3))
         values[12] = np.ones(2)  # Valid target samples.
         values[14] = np.ones(2, bool)  # Valid decommission zones.
-        values[17] = np.array([[4, 1, 2], [2, 1, 1]] if not calls else
+        values[16] = np.ones(2, dtype=np.int32)  # Required agent counts.
+        values[18] = np.array([[4, 1, 2], [2, 1, 1]] if not calls else
                               [[1, 1, 0], [999, 0, 999]])
         calls.append(True)
         return tuple(values)

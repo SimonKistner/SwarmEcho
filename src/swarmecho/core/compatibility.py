@@ -16,11 +16,28 @@ LEVEL_ALIASES = {
     "G03": DEFAULT_LEVEL_NAME,
     "G03_random_buildings": DEFAULT_LEVEL_NAME,
     "CLU_G01_static": "G01_CLU_static",
-    "M00_no_maze_open_cuboid_3D": "M00_no_maze_open_cuboid",
-    "M01_no_maze_open_cuboid_tall_3D": "M01_no_maze_open_cuboid_tall",
-    "M02_random_cuboid_obstacles_3D": "M02_random_cuboid_obstacles",
 }
-MAP_ALIASES = {"custom_3d_building": "custom_building"}
+MAP_ALIASES = {
+    "Cellar": "cellar",
+    "Custom Building": "custom_building",
+    "G01_static_map": "g01_static_map",
+    "G02_static_map_01": "g02_static_map_01",
+    "G02_static_map_02": "g02_static_map_02",
+    "G02_static_map_03": "g02_static_map_03",
+    "G02_static_map_04": "g02_static_map_04",
+    "G02_static_map_05": "g02_static_map_05",
+    "Mirrored Office": "mirrored_office",
+    "Open Cuboid": "open_cuboid",
+    "Space Station": "space_station",
+    "B02c_static_map_noSpawn": "g01_static_map",
+    "C03_station": "space_station",
+    "C05_cellar": "cellar",
+    "B02c_static_map_cellar": "cellar",
+    "M00_no_maze_open_cuboid": "open_cuboid",
+    "M00_no_maze_open_cuboid_3D": "open_cuboid",
+    "office_mirrored": "mirrored_office",
+    "custom_3d_building": "custom_building",
+}
 MARKER_ALIASES = {
     "compact_3d_v1": "compact_v1",
     "swarmecho-3d-obstacle-layout/v1": "swarmecho-obstacle-layout/v1",

@@ -17,8 +17,8 @@ from swarmecho.env.roadmap_cpu import building_candidate_vertices
 
 
 CACHE_VERSION = 1
-SETTINGS = ("drone_radius", "obstacle_planning_clearance_m", "roadmap_approach",
-            "roadmap_node_density", "roadmap_merge_wall_end_nodes", "roadmap_corner_bonus_m")
+SETTINGS = ("drone_radius", "obstacle_planning_clearance_m",
+            "roadmap_node_density", "roadmap_merge_wall_end_nodes")
 
 
 def cache_path(manifest_path: Path) -> Path:
@@ -113,6 +113,7 @@ def compute_route(manifest_path: Path) -> dict:
     cfg = replace(defaults, **settings)
     clearance = cfg.drone_radius + cfg.obstacle_planning_clearance_m
     corner_merge = building.wall_thickness_m + 2 * clearance
+    legacy_corner_bonus = float(manifest.get("roadmap_corner_bonus_m", 0.))
     base = np.asarray(arrays["base_position"][0], dtype=np.float32)
     target = np.asarray(arrays["target_position"][0], dtype=np.float32)
     if "target_present" in arrays and not bool(np.asarray(arrays["target_present"][0]).any()):
@@ -152,7 +153,7 @@ def compute_route(manifest_path: Path) -> dict:
             for relative in np.flatnonzero(_visible(nodes[left], ends, planning_lo, planning_hi)):
                 right = offset + int(relative)
                 distance = float(np.linalg.norm(nodes[left] - nodes[right]))
-                bonus = (cfg.roadmap_corner_bonus_m if
+                bonus = (legacy_corner_bonus if
                          (left == 0 and right >= 2) or
                          (left >= 2 and distance > corner_merge + 1e-4) else 0.)
                 adjacency[left].append((right, distance + bonus))

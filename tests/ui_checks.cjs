@@ -14,7 +14,7 @@ const source = readFileSync(join(__dirname, '../src/swarmecho/visualize/inspecto
 const script = source.split('</aside></div><script>')[1].split('</script></body>')[0];
 const statusFunctions = 'function renderKnownList' + script.split('function renderKnownList')[1].split('const rewardDebugPanel')[0];
 
-test('adaptive replay inspector shows current lifetimes, votes, dwell and base receipts', () => {
+test('adaptive replay inspector shows drone lifetimes and decommission dwell', () => {
     const elements = new Map();
     function element(id = '') {
         return {
@@ -34,7 +34,7 @@ test('adaptive replay inspector shows current lifetimes, votes, dwell and base r
     const context = createContext({
         document: {
             getElementById(id) {
-                if (!elements.has(id) && id !== 'adaptiveBaseCard') elements.set(id, element(id));
+                if (!elements.has(id)) elements.set(id, element(id));
                 return elements.get(id) || null;
             },
             createElement: () => element(), addEventListener() {},
@@ -44,36 +44,40 @@ test('adaptive replay inspector shows current lifetimes, votes, dwell and base r
     runInContext('let D, frame=0; const $=id=>document.getElementById(id);' + statusFunctions, context);
     runInContext(`
         D = {
-            manifest: {adapt_size: {enabled:true, vote_holding:10, decommission_hold_steps:15}},
+            manifest: {adapt_size: {enabled:true, decommission_hold_steps:15}},
             active: [[true,false,true],[true,true,true]],
-            adapt_vote: [[true,false,false],[false,true,false]],
             adapt_ids: [[0,1,2],[0,1,3]],
             adapt_dwell: [[4,0,0],[0,8,0]],
-            adapt_round: [1,2],
-            adapt_available_votes: [[7,0,0],[0,4,0]],
-            adapt_base_votes: [[7,0,0],[0,14,0]],
-            adapt_spent: [[0,0,0],[0,10,0]],
         };
         renderKnownList(3);
         frame=0;updateKnownList([true,false,false],true);
     `, context);
     const rows = elements.get('knownList').children;
-    assert.match(rows[1].textContent, /YES.*4\/15/);
+    assert.match(rows[1].textContent, /Decommission 4\/15/);
     assert.equal(rows[2].hidden, true);
     assert.equal(rows[3].hidden, false);
-    let card = elements.get('adaptiveBaseCard');
-    assert.match(card.children[0].textContent, /Round 1/);
-    assert.equal(card.children.length, 3);
-    assert.match(card.children[1].textContent, /ID 0.*7\/10/);
 
     runInContext('frame=1;updateKnownList([true,true,false],true)', context);
-    card = elements.get('adaptiveBaseCard');
     assert.equal(rows[2].hidden, false);
-    assert.match(rows[2].textContent, /YES.*8\/15/);
+    assert.match(rows[2].textContent, /Decommission 8\/15/);
     assert.match(rows[3].title, /Lifetime ID 3/);
-    assert.match(card.children[0].textContent, /Round 2/);
-    assert.match(card.children[2].textContent, /ID 1.*4\/10/);
-    assert.match(card.children[2].title, /consumed by rejected calls: 10/);
+});
+
+test('heatmap replay commands use authored paths or saved suite IDs', () => {
+    const controls = {selectedPoint: {}, heatmapCommand: {}};
+    const context = createContext({
+        $: id => controls[id],
+        PUBLIC_INSPECTOR: false,
+        H: {manifest: {checkpoint: '/runs/my run/checkpoints/best', source_map_path: "/maps/team's map.yaml"}},
+    });
+    const functions = script.slice(script.indexOf('function quoteShellArg'), script.indexOf('\n}', script.indexOf('function showHeatmapCommand')) + 2);
+    runInContext(functions + "\nshowHeatmapCommand([1, 2, 3], 'Delivered');", context);
+    assert.ok(controls.heatmapCommand.value.includes("checkpoint='/runs/my run/checkpoints/best'"));
+    assert.ok(controls.heatmapCommand.value.endsWith("eval_map='/maps/team'\\''s map.yaml'"));
+
+    context.H.manifest = {checkpoint: '/runs/best', map_suite_map_id: 'static_eval_0000'};
+    runInContext("showHeatmapCommand([1, 2, 3], 'Delivered');", context);
+    assert.ok(controls.heatmapCommand.value.endsWith("map_suite_map_id='static_eval_0000'"));
 });
 }
 

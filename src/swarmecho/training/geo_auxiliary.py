@@ -22,9 +22,10 @@ POLICY_FILTER = nnx.All(nnx.Param, nnx.Not(nnx.PathContains("geo_probe_head")))
 
 
 class PathHead(nnx.Module):
-    def __init__(self, hidden_dim, config, seed):
+    def __init__(self, hidden_dim, config, seed, grid_shape):
+        self.grid_shape = grid_shape
         rng = nnx.Rngs(seed ^ 0x6E0A)
-        widths = (hidden_dim, *config.head.hidden_sizes, config.grid_width)
+        widths = (hidden_dim, *config.head.hidden_sizes, int(np.prod(grid_shape)))
         self.layers = nnx.List([nnx.Linear(a, b, rngs=rng) for a,b in zip(widths[:-1], widths[1:])])
         self.supervised_updates = nnx.Variable(jnp.int32(0))
         self.lambda_target = config.lambda_target
@@ -77,6 +78,7 @@ class PathLabels:
     def __init__(self, paths, cfg, *, buildings=None, records=None, directory=None,
                  grid_shape=DEFAULT_PATH_GRID_SHAPE):
         from swarmecho.env.buildings import load_building
+        self.grid_width = int(np.prod(grid_shape))
         self.planners = []
         for i, path in enumerate(paths):
             path = Path(path)
@@ -139,7 +141,7 @@ class AuxiliaryData:
             self.next_episode += len(done)
         K = self.config.sampling.snapshots_per_agent
         times = np.full((E,N,K), -1, np.int32)
-        targets = np.zeros((E, N, K, self.config.grid_width), bool)
+        targets = np.zeros((E, N, K, self.labels.grid_width), bool)
         ep = np.full((E,N,K), -1, np.int64)
         valid = np.zeros((E,N,K), bool)
         if update % self.config.sampling.every_updates == 0:
@@ -159,7 +161,7 @@ class AuxiliaryData:
             tt,ee = times[valid],lane[valid]
             selected_episodes = episodes[tt,ee]
             unique,first,inverse = np.unique(selected_episodes,return_index=True,return_inverse=True)
-            masks = np.zeros((len(unique), self.config.grid_width), bool)
+            masks = np.zeros((len(unique), self.labels.grid_width), bool)
             available = np.zeros(len(unique),bool)
             for i,index in enumerate(first):
                 t,e = tt[index],ee[index]
@@ -204,7 +206,7 @@ class AuxiliaryData:
 
 
 def gradients_diagnostics(ppo_grads, path_grads, coefficient):
-    """Shared representation only; exclude critic, decoder and action/vote trunks."""
+    """Compare PPO and path gradients on the actor encoder, GRU, and TarMAC projections."""
     def shared(state):
         return {k:v for k,v in state["actor"].items() if k in
             {"encoder", "gru", "tarmac_query", "tarmac_signature", "tarmac_value"}}

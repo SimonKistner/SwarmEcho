@@ -50,7 +50,7 @@ def main():
             path = (maps_dir / f"{record['id']}.yaml").resolve()
             scan(SimpleNamespace(level=str(settings_path), map=str(path), spacing=args.spacing,
                                  paths=1, top_pairs=args.top_pairs,
-                                 corner_bonus_m=None, output_dir=str(root)))
+                                 output_dir=str(root)))
     print(f"Inspectable maps and routes: {root.resolve()}")
     print(f"Maze builder: uv run swarmecho-maze-builder --map-dir {maps_dir.resolve()}")
 

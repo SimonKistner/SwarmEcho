@@ -1,0 +1,10 @@
+{
+  "name": "G03_final_baseline_v2",
+  "description": "G03 CLU baseline with seed-specific training and validation maps",
+  "level": "G03_CLU_random_buildings",
+  "seeds": [456789, 456790, 456791, 456792, 456793],
+  "overrides": [
+    "training.seed_map_pool=true",
+    "training.map_selection_seed=null"
+  ]
+}

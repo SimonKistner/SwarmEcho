@@ -36,8 +36,7 @@ def inspection_sampling_kwargs(level, spawn_sampler=None, *, checkpoint=None):
 
         spawn_sampler = AdaptiveTargetSpawnController(
             level.building, level.env, level.training.adaptive_target_spawn,
-            feasibility_budget=(level.env.geometric_agent_budget
-                                if level.training.dynamic_max_geo_distance.enabled else None),
+            feasibility_budget=level.env.num_agents,
             relay_options=level.training.dynamic_max_geo_distance,
             progression_config=level.evaluation,
         )
@@ -46,6 +45,6 @@ def inspection_sampling_kwargs(level, spawn_sampler=None, *, checkpoint=None):
                              "Use inspection_evaluation.target_sampling=independent for independent targets.")
     if spawn_sampler is None:
         raise ValueError("Training target sampling requires the live or checkpointed adaptive spawn controller.")
-    budget = getattr(spawn_sampler, "curriculum_budget", None) or level.env.geometric_agent_budget
+    budget = getattr(spawn_sampler, "curriculum_budget", None) or level.env.num_agents
     return {"target_spawn_weights": np.array(spawn_sampler.box_weights, dtype=np.float32, copy=True),
             "target_agent_budget": np.int32(budget)}

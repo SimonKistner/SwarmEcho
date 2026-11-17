@@ -1,22 +1,4 @@
-"""
-swarmecho/models/mappo.py
-==========================
-MAPPO model wrapper for SwarmEcho.
-
-Holds a DecentralizedActor and an AgentCentricCritic that returns one value
-per agent.
-
-Optional recurrent actor and critic paths are selected by config flags. When
-disabled, the architecture and call contract are the original feed-forward MAPPO.
-
-All heavy lifting (network definitions) lives in actor.py and critic.py.
-The trainer and workflow validator construct this shared model.
-
-CTDE contract
--------------
-  Rollout  : actor(obs_i) per agent — decentralised
-  Training : critic(all_obs)        — centralised (sees full team)
-"""
+"""Recurrent MAPPO actor and agent-centric critic for SwarmEcho."""
 
 from __future__ import annotations
 
@@ -24,16 +6,9 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from swarmecho.models.actor import DecentralizedActor, RecurrentDecentralizedActor
-from swarmecho.models.critic import (
-    AgentCentricCritic,
-    RecurrentAgentCentricCritic,
-)
+from swarmecho.models.actor import RecurrentDecentralizedActor
+from swarmecho.models.critic import RecurrentAgentCentricCritic
 
-
-# ---------------------------------------------------------------------------
-# MAPPOModel — actor + critic wrapper
-# ---------------------------------------------------------------------------
 
 class MAPPOModel(nnx.Module):
     """
@@ -43,12 +18,10 @@ class MAPPOModel(nnx.Module):
     ----------
     obs_dim          : per-agent observation dimension
     act_dim          : action dimension (3 for the SwarmEcho runtime)
-    num_agents       : N — swarm size (used for shape assertions only)
+    num_agents       : default swarm size for recurrent state allocation
     hidden_dim       : hidden layer width (shared by actor and critic)
-    num_layers       : number of hidden layers in the CRITIC
-    actor_num_layers : number of hidden layers in the ACTOR (recommended: 2)
-    actor_memory     : if True, use a per-agent GRU actor
-    critic_memory    : if True, use a per-agent GRU agent-centric critic
+    num_layers       : number of hidden layers in the critic value head
+    actor_num_layers : number of hidden layers in the actor policy trunk
     rngs             : Flax NNX RNG state
     """
 
@@ -61,112 +34,31 @@ class MAPPOModel(nnx.Module):
         num_layers:       int,
         actor_num_layers: int,
         rngs:             nnx.Rngs,
-        actor_memory:     bool = False,
-        critic_memory:    bool = False,
-        memory_comm_enabled: bool = False,
-        memory_comm_every_k_steps: int = 5,
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
-        tarmac_include_self: bool = True,
-        vote_mode: str | None = None,
-        path_probe_width: int = 0,
     ) -> None:
         self.num_agents  = num_agents
-        self.obs_dim     = obs_dim + path_probe_width
-        self.critic_obs_dim = obs_dim
-        self.path_probe_width = path_probe_width
-        self.act_dim     = act_dim + int(vote_mode is not None)
+        self.obs_dim     = obs_dim
+        self.act_dim     = act_dim
         self.hidden_dim  = hidden_dim
-        self.actor_memory = actor_memory
-        self.critic_memory = critic_memory
-        self.memory_comm_enabled = memory_comm_enabled
-        self.memory_comm_every_k_steps = memory_comm_every_k_steps
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
-        self.tarmac_include_self = tarmac_include_self
 
-        if actor_memory:
-            self.actor = RecurrentDecentralizedActor(
-                obs_dim          = self.obs_dim,
-                act_dim          = act_dim,
-                hidden_dim       = hidden_dim,
-                actor_num_layers = actor_num_layers,
-                rngs             = rngs,
-                memory_comm_enabled = memory_comm_enabled,
-                memory_comm_every_k_steps = memory_comm_every_k_steps,
-                tarmac_sig_dim = tarmac_sig_dim,
-                tarmac_val_dim = tarmac_val_dim,
-                tarmac_include_self = tarmac_include_self,
-                vote_mode        = vote_mode,
-            )
-        else:
-            self.actor = DecentralizedActor(
-                obs_dim          = self.obs_dim,
-                act_dim          = act_dim,
-                hidden_dim       = hidden_dim,
-                actor_num_layers = actor_num_layers,
-                rngs             = rngs,
-            )
-
-        if critic_memory:
-            self.critic = RecurrentAgentCentricCritic(
-                obs_dim    = obs_dim,
-                hidden_dim = hidden_dim,
-                num_layers = num_layers,
-                rngs       = rngs,
-            )
-        else:
-            self.critic = AgentCentricCritic(
-                obs_dim    = obs_dim,
-                hidden_dim = hidden_dim,
-                num_layers = num_layers,
-                rngs       = rngs,
-            )
-
-    # ── Convenience wrappers ────────────────────────────────────────────────
-
-    def initial_path_probe(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
-        n = self.num_agents if num_agents is None else num_agents
-        return jnp.zeros((*tuple(batch_shape), n, self.path_probe_width), dtype=jnp.float32)
-
-    def actor_observations(self, obs, prev_path_probe, active, target_known, resets):
-        if not self.path_probe_width:
-            return obs
-        available = active & target_known & ~resets
-        feedback = jnp.where(available[..., None], prev_path_probe, 0.0)
-        return jnp.concatenate((obs, feedback), axis=-1)
-
-    def next_path_probe(self, actor_hidden, active, target_known):
-        if not self.path_probe_width:
-            return actor_hidden[..., :0]
-        probabilities = jax.lax.stop_gradient(jax.nn.sigmoid(self.geo_probe_head(actor_hidden)))
-        return jnp.where((active & target_known)[..., None], probabilities, 0.0)
-
-    def critic_observations(self, obs):
-        return obs[..., :self.critic_obs_dim] if self.path_probe_width else obs
-
-    def get_value(self, all_obs: jax.Array, deterministic: bool = True,
-                  active: jax.Array | None = None) -> jax.Array:
-        """
-        Centralised value estimate.
-
-        Parameters
-        ----------
-        all_obs : (..., N, obs_dim)
-
-        Returns
-        -------
-        (..., N) — one value per agent
-        """
-        if self.critic_memory:
-            hidden = self.initial_critic_hidden(all_obs.shape[:-2])
-            if getattr(self, "mask_inactive", False):
-                return self.get_value_recurrent(
-                    all_obs, hidden, None, deterministic=deterministic, active=active
-                )[1]
-            _, values = self.critic(self.critic_observations(all_obs), hidden, deterministic=deterministic)
-            return values
-        return self.critic(self.critic_observations(all_obs), deterministic=deterministic)
+        self.actor = RecurrentDecentralizedActor(
+            obs_dim          = self.obs_dim,
+            act_dim          = act_dim,
+            hidden_dim       = hidden_dim,
+            actor_num_layers = actor_num_layers,
+            rngs             = rngs,
+            tarmac_sig_dim = tarmac_sig_dim,
+            tarmac_val_dim = tarmac_val_dim,
+        )
+        self.critic = RecurrentAgentCentricCritic(
+            obs_dim    = obs_dim,
+            hidden_dim = hidden_dim,
+            num_layers = num_layers,
+            rngs       = rngs,
+        )
 
     def initial_actor_hidden(self, batch_shape=(), *, num_agents: int | None = None) -> jax.Array:
         """Return zero actor memory; N defaults to training, or the deployment count."""
@@ -195,51 +87,15 @@ class MAPPOModel(nnx.Module):
         deterministic:  bool = True,
         active:          jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array]:
-        """Centralised value call that carries critic memory when enabled."""
-        all_obs = self.critic_observations(all_obs)
-        if self.critic_memory:
-            if critic_hidden is None:
-                critic_hidden = self.initial_critic_hidden(all_obs.shape[:-2])
-            if getattr(self, "mask_inactive", False):
-                hidden, values = self.critic(all_obs, critic_hidden, resets,
-                                             deterministic=deterministic, active=active)
-                if hasattr(self, "value_normalizer"):
-                    values = self.value_normalizer.denormalize(values)
-                if active is not None:
-                    values = jnp.where(active, values, 0.0)
-                return hidden, values
-            return self.critic(all_obs, critic_hidden, resets, deterministic=deterministic)
-        return critic_hidden, self.critic(all_obs, deterministic=deterministic)
-
-    def rollout_step(
-        self,
-        all_obs:   jax.Array,   # (N, obs_dim)
-        keys:      jax.Array,   # (N, 2) — per-agent PRNGKeys
-        max_force: float = 50.0,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """
-        Full CTDE forward pass for ONE environment during rollout.
-
-        Actions are returned as PRE-SQUASH samples u (Gaussian samples before tanh).
-        The caller (runner) is responsible for:
-          1. Squashing:  tanh(u)  → bounded (-1, 1)
-          2. Scaling:    tanh(u) × max_force → physics space
-        The buffer stores u directly so evaluate_actions can recompute the
-        exact same log-prob on u.
-
-        Returns
-        -------
-        actions   : (N, act_dim)  — pre-squash u values
-        log_probs : (N,)          — Gaussian log-prob on u
-        value     : (N,)
-        """
-        def _act_one(obs_i, key_i):
-            a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
-            return a, lp
-
-        actions, log_probs = jax.vmap(_act_one)(all_obs, keys)
-        value = self.get_value(all_obs, deterministic=False)
-        return actions, log_probs, value
+        """Return the recurrent critic state and values in reward units."""
+        if critic_hidden is None:
+            critic_hidden = self.initial_critic_hidden(all_obs.shape[:-2])
+        hidden, values = self.critic(all_obs, critic_hidden, resets,
+                                     deterministic=deterministic, active=active)
+        values = self.value_normalizer.denormalize(values)
+        if active is not None:
+            values = jnp.where(active, values, 0.0)
+        return hidden, values
 
     def rollout_step_recurrent(
         self,
@@ -248,7 +104,6 @@ class MAPPOModel(nnx.Module):
         actor_hidden:   jax.Array | None,
         critic_hidden:  jax.Array | None,
         resets:         jax.Array,   # (N,)
-        max_force:      float = 50.0,
         actor_signature: jax.Array | None = None,
         actor_value:    jax.Array | None = None,
         comm_mask:      jax.Array | None = None,
@@ -257,51 +112,21 @@ class MAPPOModel(nnx.Module):
         base_value:     jax.Array | None = None,
         base_memory_mask: jax.Array | None = None,
     ) -> tuple[jax.Array | None, jax.Array | None, jax.Array | None, jax.Array | None, jax.Array, jax.Array, jax.Array]:
-        """
-        Rollout step that carries optional actor and critic recurrent states.
-
-        The returned actions are pre-squash Gaussian samples, matching the
-        feed-forward rollout contract.
-        """
-        if getattr(self, "mask_inactive", False) and active is not None:
+        """Sample pre-squash movement while updating actor and critic memory."""
+        if active is not None:
             resets = resets | ~active
-        if self.actor_memory:
-            if actor_hidden is None:
-                actor_hidden = self.initial_actor_hidden(())
-
-            if self.memory_comm_enabled:
-                if actor_signature is None:
-                    actor_signature = self.initial_actor_signature(())
-                if actor_value is None:
-                    actor_value = self.initial_actor_value(())
-                actor_hidden, actor_signature, actor_value, actions, log_probs, _ = self.actor.act_team(
-                    all_obs,
-                    actor_hidden,
-                    actor_signature,
-                    actor_value,
-                    keys,
-                    reset=resets,
-                    comm_mask=comm_mask,
-                    active=active,
-                    base_signature=base_signature,
-                    base_value=base_value,
-                    base_memory_mask=base_memory_mask,
-                    deterministic=False,
-                )
-            else:
-                def _act_one(obs_i, key_i, h_i, reset_i):
-                    h_i, a, lp, _ = self.actor.act(obs_i, h_i, key_i, deterministic=False, reset=reset_i)
-                    return h_i, a, lp
-
-                actor_hidden, actions, log_probs = jax.vmap(_act_one)(
-                    all_obs, keys, actor_hidden, resets
-                )
-        else:
-            def _act_one(obs_i, key_i):
-                a, lp, _ = self.actor.act(obs_i, key_i, deterministic=False)
-                return a, lp
-
-            actions, log_probs = jax.vmap(_act_one)(all_obs, keys)
+        if actor_hidden is None:
+            actor_hidden = self.initial_actor_hidden()
+        if actor_signature is None:
+            actor_signature = self.initial_actor_signature()
+        if actor_value is None:
+            actor_value = self.initial_actor_value()
+        actor_hidden, actor_signature, actor_value, actions, log_probs, _ = self.actor.act_team(
+            all_obs, actor_hidden, actor_signature, actor_value, keys,
+            reset=resets, comm_mask=comm_mask, active=active,
+            base_signature=base_signature, base_value=base_value, base_memory_mask=base_memory_mask,
+            deterministic=False,
+        )
 
         critic_hidden, value = self.get_value_recurrent(
             all_obs,
@@ -310,7 +135,7 @@ class MAPPOModel(nnx.Module):
             deterministic=False,
             active=active,
         )
-        if getattr(self, "mask_inactive", False) and active is not None:
+        if active is not None:
             actor_hidden = jnp.where(active[..., None], actor_hidden, 0.0)
             if actor_signature is not None:
                 actor_signature = jnp.where(active[..., None], actor_signature, 0.0)

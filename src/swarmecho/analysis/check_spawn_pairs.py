@@ -97,27 +97,18 @@ def check(level, *, manifest_path=None, pool_path=None, rounds=1, max_report=20)
 
     pool, metadata, choices = _load_selection(level, manifest_path, pool_path)
     training, cfg = level.training, level.env
-    threshold = (training.minimum_geodesic_separation_multiplier * cfg.comm_radius
-                 if training.minimum_geodesic_separation else 0.0)
     terminal_print(f"Pool: {pool}; selected {len(choices)} training maps from {metadata['count']}")
-    skip_targets = (training.skip_on_no_pair_found and training.randomize_base
-                    and training.minimum_geodesic_separation)
-    terminal_print(f"Spawn rule: {training.spawn_pair_max_attempts} base attempts per target; "
-                   f"separation >= {threshold:g} m; corner bonus {cfg.roadmap_corner_bonus_m:g} m; "
-                   f"randomized base={training.randomize_base}; skip exhausted target={skip_targets}")
-    records = load_records(pool, choices, require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]))
+    terminal_print(f"Spawn rule: {training.spawn_pair_max_attempts} attempts per pair, randomized base={training.randomize_base}")
+    records = load_records(pool, choices)
     bank = prepare_bank_from_records(records, level.building, cfg,
-        dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+        dynamic_max_geo_distance=True,
         relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
         relay_cache_dir=pool / "relay_cache", log=terminal_print)
     reset, _, _, _ = make_autoreset_fns(
         level.building, cfg, level.reward,
         randomize_base=training.randomize_base,
-        dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+        dynamic_max_geo_distance=True,
         relay_options=training.dynamic_max_geo_distance,
-        minimum_geodesic_separation=training.minimum_geodesic_separation,
-        minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
-        skip_on_no_pair_found=training.skip_on_no_pair_found,
         spawn_pair_max_attempts=training.spawn_pair_max_attempts,
         building_bank=bank,
     )

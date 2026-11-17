@@ -76,6 +76,17 @@ def visible(start, ends, lower, upper):
     return _visible_from(np.asarray(start), np.asarray(ends), lower, upper)
 
 
+def path_grid_shape(buildings):
+    """Cover every cell offset from the anchor, including horizontal rotations."""
+    extent = np.ones(3, dtype=int)
+    for building in buildings:
+        interior = np.asarray(building.interior_cells)
+        cells = np.argwhere(interior) if interior.dtype == bool else interior
+        extent = np.maximum(extent, np.ptp(cells, axis=0) + 1)
+    extent[:2] = max(extent[:2])
+    return tuple(map(int, 2 * extent - 1))
+
+
 class ReferencePlanner:
     def __init__(self, building, cfg, record_path=None, graph=None, *, grid_shape=DEFAULT_PATH_GRID_SHAPE):
         from swarmecho.env.roadmap_cpu import building_roadmap, RoadmapArrays
@@ -90,7 +101,7 @@ class ReferencePlanner:
                 self.graph = RoadmapArrays(saved["solid_min"], saved["solid_max"], saved["vertices"], saved["distances"],
                                            cfg.drone_radius + cfg.obstacle_planning_clearance_m)
         else:
-            self.graph = building_roadmap(building, cfg, plan=True, corner_bonus_m=0.)
+            self.graph = building_roadmap(building, cfg, plan=True)
         self.lower = np.asarray(building.solid_min_m)
         self.upper = np.asarray(building.solid_max_m)
         interior = np.asarray(building.interior_cells)

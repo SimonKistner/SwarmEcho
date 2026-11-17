@@ -1,26 +1,11 @@
-"""
-swarmecho/models/actor.py
-==========================
-Decentralised actor network for SwarmEcho (CTDE — Centralised Training,
-Decentralised Execution).
+"""Shared recurrent actor for decentralized execution with TarMAC.
 
-Network
--------
-  Local obs (obs_dim,) → MLP trunk → mu, log_std
-
-Action space
-------------
-  Uses tanh squashing: physical_action = tanh(u) × max_force, where u ~ N(mu, std).
-  The pre-squash sample u is stored in the buffer. The policy log-probabilities
-  and updates are computed directly on the pre-squash values u as standard Gaussian
-  densities (without the need for explicit Tanh Jacobian correction as the correction
-  terms cancel out in the PPO ratio).
-  This prevents boundary gradient explosion issues.
-  Physical force = tanh(u) × max_force is applied by the runner, NOT here.
-
-Parameter sharing
------------------
-  One actor instance is shared across all N agents (called via vmap).
+Each drone encodes its local observation and attends to available teammate
+and base messages. The encoder output and message context feed its GRU. The
+policy head then parameterizes a Gaussian over three pre-squash commands.
+PPO stores those commands and uses Gaussian log-probabilities for its ratio.
+The entropy bonus accounts for tanh squashing. The environment scales the
+squashed commands by its force limit.
 """
 
 from __future__ import annotations
@@ -30,13 +15,9 @@ import jax.numpy as jnp
 from flax import nnx
 
 from swarmecho.models.recurrent import GRUCell
-from swarmecho.models.actions import sample_vote, vote_statistics
 
 LOG_STD_MIN = -5.0
 LOG_STD_MAX =  2.0
-
-# Small epsilon added inside log(1 - tanh²(x)) to prevent log(0)
-_TANH_EPS = 1e-6
 
 
 def tarmac_aggregate(
@@ -120,141 +101,13 @@ class MLP(nnx.Module):
 
 
 # ---------------------------------------------------------------------------
-# DecentralizedActor
-# ---------------------------------------------------------------------------
-
-class DecentralizedActor(nnx.Module):
-    """
-    Shared actor network — every agent runs the same weights on its local obs.
-
-    Input : obs_i  (obs_dim,)    — agent i's local observation
-    Output: mu, log_std          — parameters of a diagonal Gaussian policy
-                                   BOTH clipped to give actions in [-1, 1]
-
-    Parameters
-    ----------
-    obs_dim          : observation dimension
-    act_dim          : action dimension (3 for the SwarmEcho runtime)
-    hidden_dim       : hidden layer width
-    actor_num_layers : number of hidden layers (recommended: 2)
-    rngs             : Flax NNX RNG state
-    """
-
-    def __init__(
-        self,
-        obs_dim:          int,
-        act_dim:          int,
-        hidden_dim:       int,
-        actor_num_layers: int,
-        rngs:             nnx.Rngs,
-    ) -> None:
-        self.act_dim = act_dim
-        self.trunk        = MLP(obs_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
-        self.mu_head      = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
-        self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
-
-    def __call__(self, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """obs: (..., obs_dim) → mu (..., act_dim), log_std (..., act_dim)"""
-        feat    = self.trunk(obs)
-        mu      = self.mu_head(feat)
-        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
-        return mu, log_std
-
-    def act(
-        self,
-        obs:           jax.Array,   # (obs_dim,)
-        key:           jax.Array,
-        deterministic: bool = False,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """
-        Sample a tanh-squashed action for one agent.
-
-        Action space
-        ------------
-        We use tanh squashing (not hard clip) to keep the action in (-1, 1):
-          1. Sample pre-squash noise: u ~ N(mu, std)
-          2. Squash:  action = tanh(u)  ∈ (-1, 1)
-
-        This is numerically stable (no hard boundaries → no gradient explosions)
-        and keeps old_log_probs / new_log_probs consistent, preventing NaN entropy.
-
-        The buffer stores the PRE-SQUASH sample `u` so that evaluate_actions can
-        recompute the exact same log-prob on u without needing to invert tanh.
-        PPO updates are computed directly in the pre-squash space (omitting explicit
-        Jacobian corrections since they cancel out in the PPO ratio).
-
-        Returns
-        -------
-        action   : (act_dim,)  — pre-squash sample u (runner squashes and scales)
-        log_prob : ()                       — Gaussian log probability on u
-        entropy  : ()                       — Gaussian entropy on u (for logging)
-        """
-        mu, log_std = self(obs)
-        std = jnp.exp(log_std)
-
-        if deterministic:
-            u = mu
-        else:
-            u = mu + std * jax.random.normal(key, mu.shape)
-
-        action = jnp.tanh(u)   # squash to (-1, 1)
-
-        # Gaussian log-prob at pre-squash sample u
-        log_prob = -0.5 * jnp.sum(
-            ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
-        )
-
-        # True squashed entropy = Gaussian entropy + log(1 - tanh^2(u))
-        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
-        jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
-        entropy = ent_gaussian + jnp.sum(jacobian)
-
-        # Return the pre-squash sample as the "stored action" so evaluate_actions
-        # can recompute the same log-prob exactly (buffer stores u, not tanh(u)).
-        return u, log_prob, entropy
-
-    def evaluate_actions(
-        self,
-        obs:     jax.Array,   # (..., obs_dim)
-        actions: jax.Array,   # (..., act_dim)  — PRE-SQUASH samples u from buffer
-    ) -> tuple[jax.Array, jax.Array]:
-        """
-        Evaluate log-probs and entropy for stored pre-squash actions.
-        Used in the PPO update step.
-
-        `actions` must be the PRE-SQUASH values u (as returned by act()),
-        NOT the tanh-squashed actions.
-
-        Returns
-        -------
-        log_prob : (...,)
-        entropy  : (...,)
-        """
-        mu, log_std = self(obs)
-        std = jnp.exp(log_std)
-
-        log_prob = -0.5 * jnp.sum(
-            ((actions - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi),
-            axis=-1,
-        )
-
-        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-        jacobian = 2.0 * (jnp.log(2.0) - actions - jax.nn.softplus(-2.0 * actions))
-        entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
-        return log_prob, entropy
-
-
-# ---------------------------------------------------------------------------
-# RecurrentDecentralizedActor
-# ---------------------------------------------------------------------------
-
 class RecurrentDecentralizedActor(nnx.Module):
     """
     Shared recurrent actor for decentralized execution.
 
     Flow per agent and timestep:
 
-        obs_i -> encoder MLP -> GRU_i -> policy MLP -> mu/log_std
+        [encoded local observation, TarMAC context] -> GRU -> policy head
 
     The GRU state is per environment and per agent. It is reset by the runner
     at episode boundaries and while an agent is inactive, so memory remains
@@ -268,48 +121,23 @@ class RecurrentDecentralizedActor(nnx.Module):
         hidden_dim:       int,
         actor_num_layers: int,
         rngs:             nnx.Rngs,
-        memory_comm_enabled: bool = False,
-        memory_comm_every_k_steps: int = 5,
         tarmac_sig_dim: int = 64,
         tarmac_val_dim: int = 128,
-        tarmac_include_self: bool = True,
-        vote_mode: str | None = None,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
-        self.memory_comm_enabled = memory_comm_enabled
-        self.memory_comm_every_k_steps = memory_comm_every_k_steps
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
-        self.tarmac_include_self = tarmac_include_self
-        self.vote_mode = vote_mode
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
 
-        gru_input_dim = hidden_dim + tarmac_val_dim if memory_comm_enabled else hidden_dim
-        self.gru = GRUCell(gru_input_dim, hidden_dim, rngs)
-        if memory_comm_enabled:
-            self.tarmac_query = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
-            self.tarmac_signature = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
-            self.tarmac_value = nnx.Linear(hidden_dim, tarmac_val_dim, rngs=rngs)
+        self.gru = GRUCell(hidden_dim + tarmac_val_dim, hidden_dim, rngs)
+        self.tarmac_query = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
+        self.tarmac_signature = nnx.Linear(hidden_dim, tarmac_sig_dim, rngs=rngs)
+        self.tarmac_value = nnx.Linear(hidden_dim, tarmac_val_dim, rngs=rngs)
         self.policy_trunk = MLP(hidden_dim, hidden_dim, actor_num_layers, hidden_dim, rngs)
         self.mu_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
         self.log_std_head = nnx.Linear(hidden_dim, act_dim, rngs=rngs)
-        if vote_mode is not None:
-            self.vote_head = nnx.Linear(hidden_dim, 1 if vote_mode == "hold" else 3, rngs=rngs)
 
-    def vote_logits(self, hidden):
-        return self.vote_head(self.policy_trunk(hidden))
-
-
-    def initial_tarmac_signature(self, batch_shape=(), num_agents: int | None = None) -> jax.Array:
-        """Return zero TarMAC signatures with shape batch_shape + (N, S)."""
-        n = num_agents if num_agents is not None else 0
-        return jnp.zeros((*tuple(batch_shape), n, self.tarmac_sig_dim), dtype=jnp.float32)
-
-    def initial_tarmac_value(self, batch_shape=(), num_agents: int | None = None) -> jax.Array:
-        """Return zero TarMAC values with shape batch_shape + (N, V)."""
-        n = num_agents if num_agents is not None else 0
-        return jnp.zeros((*tuple(batch_shape), n, self.tarmac_val_dim), dtype=jnp.float32)
 
     def _tarmac_context(
         self,
@@ -330,9 +158,6 @@ class RecurrentDecentralizedActor(nnx.Module):
         supplies the wall-aware communication graph and sparse communication
         cadence; this method only applies the learned query/signature matching.
         """
-        if not self.memory_comm_enabled:
-            return jnp.zeros((*prev_hidden.shape[:-1], self.tarmac_val_dim), dtype=prev_hidden.dtype)
-
         N = prev_hidden.shape[-2]
         if comm_mask is None:
             comm_mask = jnp.ones((N, N), dtype=bool)
@@ -341,18 +166,9 @@ class RecurrentDecentralizedActor(nnx.Module):
 
         active_pair = active[:, None] & active[None, :]
         eye = jnp.eye(N, dtype=bool)
-        external_mask = comm_mask & active_pair & ~eye
-
-        has_external_sender = jnp.any(external_mask, axis=-1)
-        if self.tarmac_include_self:
-            self_mask = eye & active[:, None] & has_external_sender[:, None]
-            share_mask = external_mask | self_mask
-        else:
-            share_mask = external_mask
-
+        mask = comm_mask & active_pair & ~eye
         sender_signature = prev_signature
         sender_value = prev_value
-        mask = share_mask
         if base_signature is not None and base_value is not None and base_memory_mask is not None:
             sender_signature = jnp.concatenate([sender_signature, base_signature[None, :]], axis=-2)
             sender_value = jnp.concatenate([sender_value, base_value[None, :]], axis=-2)
@@ -387,29 +203,26 @@ class RecurrentDecentralizedActor(nnx.Module):
             signature = jnp.where(reset[..., None], jnp.zeros_like(signature), signature)
             value = jnp.where(reset[..., None], jnp.zeros_like(value), value)
         prev_hidden = hidden
-        if getattr(self, "mask_inactive", False) and active is not None:
+        if active is not None:
             prev_hidden = jnp.where(active[..., None], prev_hidden, 0.0)
             signature = jnp.where(active[..., None], signature, 0.0)
             value = jnp.where(active[..., None], value, 0.0)
             obs = jnp.where(active[..., None], obs, 0.0)
         encoded = self.encoder(obs)
-        if self.memory_comm_enabled:
-            comm_context = self._tarmac_context(
-                prev_hidden, signature, value, comm_mask, active,
-                base_signature, base_value, base_memory_mask,
-            )
-            gru_input = jnp.concatenate([encoded, comm_context], axis=-1)
-        else:
-            gru_input = encoded
+        comm_context = self._tarmac_context(
+            prev_hidden, signature, value, comm_mask, active,
+            base_signature, base_value, base_memory_mask,
+        )
+        gru_input = jnp.concatenate([encoded, comm_context], axis=-1)
         hidden = self.gru(prev_hidden, gru_input)
-        if getattr(self, "mask_inactive", False) and active is not None:
+        if active is not None:
             hidden = jnp.where(active[..., None], hidden, 0.0)
-        signature = self.tarmac_signature(hidden) if self.memory_comm_enabled else signature
-        value = self.tarmac_value(hidden) if self.memory_comm_enabled else value
+        signature = self.tarmac_signature(hidden)
+        value = self.tarmac_value(hidden)
         feat = self.policy_trunk(hidden)
         mu = self.mu_head(feat)
         log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
-        if getattr(self, "mask_inactive", False) and active is not None:
+        if active is not None:
             signature = jnp.where(active[..., None], signature, 0.0)
             value = jnp.where(active[..., None], value, 0.0)
             mu = jnp.where(active[..., None], mu, 0.0)
@@ -441,141 +254,8 @@ class RecurrentDecentralizedActor(nnx.Module):
         ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
         jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
         entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
-        if getattr(self, "mask_inactive", False) and active is not None:
+        if active is not None:
             u = jnp.where(active[..., None], u, 0.0)
             log_prob = jnp.where(active, log_prob, 0.0)
             entropy = jnp.where(active, entropy, 0.0)
-        if self.vote_mode is not None:
-            logits = self.vote_logits(hidden)
-            vote, vote_lp, vote_entropy = jax.vmap(
-                lambda z, k: sample_vote(z, jax.random.fold_in(k, 0xA6), self.vote_mode, deterministic)
-            )(logits, keys)
-            if active is not None:
-                vote = jnp.where(active, vote, 0.0)
-                vote_lp = jnp.where(active, vote_lp, 0.0)
-                vote_entropy = jnp.where(active, vote_entropy, 0.0)
-            u = jnp.concatenate([u, vote[..., None]], axis=-1)
-            log_prob += vote_lp
-            entropy += vote_entropy
         return hidden, signature, value, u, log_prob, entropy
-
-    def __call__(
-        self,
-        obs:    jax.Array,
-        hidden: jax.Array,
-        reset:  jax.Array | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """obs (..., D), hidden (..., H), reset (...) -> hidden, mu, log_std."""
-        if reset is not None:
-            hidden = jnp.where(reset[..., None], jnp.zeros_like(hidden), hidden)
-
-        encoded = self.encoder(obs)
-        hidden = self.gru(hidden, encoded)
-        feat = self.policy_trunk(hidden)
-        mu = self.mu_head(feat)
-        log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)
-        return hidden, mu, log_std
-
-    def act(
-        self,
-        obs:           jax.Array,
-        hidden:        jax.Array,
-        key:           jax.Array,
-        deterministic: bool = False,
-        reset:         jax.Array | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """
-        Recurrent action sampling for one agent.
-
-        Returns the updated hidden state and the pre-squash sample `u`, matching
-        the stateless actor's buffer contract.
-        """
-        hidden, mu, log_std = self(obs, hidden, reset)
-        std = jnp.exp(log_std)
-
-        if deterministic:
-            u = mu
-        else:
-            u = mu + std * jax.random.normal(key, mu.shape)
-
-        log_prob = -0.5 * jnp.sum(
-            ((u - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi)
-        )
-        ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std)
-        jacobian = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
-        entropy = ent_gaussian + jnp.sum(jacobian)
-        if self.vote_mode is not None:
-            vote, lp, ent = sample_vote(self.vote_logits(hidden), jax.random.fold_in(key, 0xA6),
-                                        self.vote_mode, deterministic)
-            u = jnp.concatenate([u, vote[..., None]], axis=-1)
-            log_prob += lp
-            entropy += ent
-        return hidden, u, log_prob, entropy
-
-    def evaluate_actions_sequence(
-        self,
-        obs:          jax.Array,
-        actions:      jax.Array,
-        init_hidden:  jax.Array,
-        resets:       jax.Array,
-        init_signature: jax.Array | None = None,
-        init_value:   jax.Array | None = None,
-        comm_masks:   jax.Array | None = None,
-        actives:      jax.Array | None = None,
-        base_signatures: jax.Array | None = None,
-        base_values:   jax.Array | None = None,
-        base_memory_masks: jax.Array | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """Replay a rollout sequence for recurrent PPO updates.
-
-        When TarMAC communication is enabled, the scan carries hidden,
-        signature, and value state so policy replay matches rollout exactly.
-        """
-
-        if self.memory_comm_enabled:
-            if init_signature is None:
-                init_signature = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_sig_dim), dtype=init_hidden.dtype)
-            if init_value is None:
-                init_value = jnp.zeros((*init_hidden.shape[:-1], self.tarmac_val_dim), dtype=init_hidden.dtype)
-            def _step(carry, xs):
-                hidden, signature, value = carry
-                obs_t, act_t, reset_t, mask_t, active_t, base_sig_t, base_val_t, base_mask_t = xs
-                hidden, signature, value, mu, log_std = self.__call_team__(
-                    obs_t, hidden, signature, value, reset_t, mask_t, active_t,
-                    base_sig_t, base_val_t, base_mask_t,
-                )
-                std = jnp.exp(log_std)
-                movement = act_t[..., :3]
-                log_prob = -0.5 * jnp.sum(((movement - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-                ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-                jacobian = 2.0 * (jnp.log(2.0) - movement - jax.nn.softplus(-2.0 * movement))
-                entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
-                if self.vote_mode is not None:
-                    lp, ent = vote_statistics(self.vote_logits(hidden), act_t[..., 3], self.vote_mode)
-                    log_prob += lp
-                    entropy += ent
-                return (hidden, signature, value), (log_prob, entropy)
-            (final_hidden, final_signature, final_value), (log_probs, entropy) = jax.lax.scan(
-                _step,
-                (init_hidden, init_signature, init_value),
-                (obs, actions, resets, comm_masks, actives, base_signatures, base_values, base_memory_masks),
-            )
-            return final_hidden, log_probs, entropy
-
-        def _step(hidden, xs):
-            obs_t, act_t, reset_t = xs
-            hidden, mu, log_std = self(obs_t, hidden, reset_t)
-            std = jnp.exp(log_std)
-            movement = act_t[..., :3]
-            log_prob = -0.5 * jnp.sum(((movement - mu) / (std + 1e-8)) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-            ent_gaussian = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-            jacobian = 2.0 * (jnp.log(2.0) - movement - jax.nn.softplus(-2.0 * movement))
-            entropy = ent_gaussian + jnp.sum(jacobian, axis=-1)
-            if self.vote_mode is not None:
-                lp, ent = vote_statistics(self.vote_logits(hidden), act_t[..., 3], self.vote_mode)
-                log_prob += lp
-                entropy += ent
-            return hidden, (log_prob, entropy)
-
-        final_hidden, (log_probs, entropy) = jax.lax.scan(_step, init_hidden, (obs, actions, resets))
-        return final_hidden, log_probs, entropy

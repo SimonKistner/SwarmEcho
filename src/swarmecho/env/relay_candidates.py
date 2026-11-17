@@ -328,7 +328,5 @@ def prepare_record(record, cfg, building, options, *, randomize_base=False, cach
     result = {**record, "world_size": world, **data}
     if not len(vertices):
         result["vertices"] = np.full((1, 3), INF, np.float32)
-        for name in ("distances", "corner_distances"):
-            if name in result:
-                result[name] = np.full((1, 1), INF, np.float32)
+        result["distances"] = np.full((1, 1), INF, np.float32)
     return result

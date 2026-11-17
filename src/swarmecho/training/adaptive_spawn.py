@@ -56,9 +56,7 @@ class TargetBudgetCurriculum:
             if progression_config is None:
                 raise ValueError("Spawn curriculum requires the configured early-exit source and threshold.")
             from swarmecho.training.run_lifecycle import EvaluationHold
-            self.curriculum_source = progression_config.early_exit_source
-            if self.curriculum_source == "evaluation":
-                self.curriculum_target_sampling = progression_config.target_sampling
+            self.curriculum_source = "validation"
             self.curriculum_hold = EvaluationHold(progression_config.early_exit_success_rate,
                 progression_config.early_exit_hold_evals, progression_config.early_exit_min_success_length_reduction)
 
@@ -87,7 +85,7 @@ class TargetBudgetCurriculum:
             self.curriculum_hold.consecutive = 0
             from swarmecho.core.terminal import terminal_print
             terminal_print(f"[TARGET SPAWN] budget {budget} -> {self.curriculum_budget}; "
-                           f"{self.curriculum_maximum} recruitment slots remain available.")
+                           f"fleet capacity remains {self.curriculum_maximum} drones.")
         return {"target_budget": budget, "next_target_budget": self.curriculum_budget,
                 "success_rate": success, "eligible_episodes": count, "hold_evals": hold}
 
@@ -138,9 +136,9 @@ class AdaptiveTargetSpawnController(TargetBudgetCurriculum):
             identity.update(b"startup-cell-support-1pct-v1:")
             identity.update((f"relay-v2:{feasibility_budget}:{env.drone_radius}:"
                             f"{env.obstacle_planning_clearance_m}:{env.comm_radius_base}:"
-                            f"{env.comm_radius}:{env.visual_radius}:{env.roadmap_approach}:"
+                            f"{env.comm_radius}:{env.visual_radius}:full:"
                             f"{env.roadmap_node_density}:{env.roadmap_merge_wall_end_nodes}").encode("utf-8"))
-            if relay_options is not None and relay_options.mode == "global_candidates":
+            if relay_options is not None:
                 from swarmecho.env.relay_candidates import settings
                 identity.update(json.dumps(settings(relay_options), sort_keys=True).encode())
         self.sampler_identity = identity.hexdigest()

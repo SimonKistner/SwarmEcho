@@ -1,54 +1,45 @@
 # SwarmEcho
 
-SwarmEcho is a **JAX-accelerated multi-agent reinforcement learning** project that trains a drone swarm to explore an environment and form a communication relay between a base and a discovered target. The current runtime supports **3D buildings and cuboid worlds**, using recurrent MAPPO (Multi-Agent PPO with a centralised critic) and optional TarMAC communication.
+SwarmEcho is a **JAX-accelerated multi-agent reinforcement learning** project. It trains a drone swarm to search 3D buildings and form a communication relay between a base and a discovered target. The policy uses recurrent MAPPO with a centralized critic during training and TarMAC message passing between drones. The local quick start uses the authored-building presets G01 and G02.
 
-G02 is the migrated reference for [signed individual rewards](docs/01_reference/11_individual_rewards.md).
-Other authored levels keep unsupported legacy reward blocks, with TODOs and
-commented default replacements beneath them for manual migration.
-
-The demos show the project's progression from 2D to 3D. The 2D implementation is available on the [`2d_core_features_only` branch](https://github.com/M4GI3R/SwarmEcho/tree/2d_core_features_only).
+The demos show SwarmEcho’s progression from the early 2D implementation to the current 3D simulator.
 
 <p align="center"><strong>Earlier 2D demo</strong></p>
 <p align="center">
-  <img src="docs/05_assets/Preview_vid/demo_2x.gif" width="600" alt="SwarmEcho 2D drone swarm demo" />
+  <img src="docs/assets/Preview_vid/demo_2x.gif" width="600" alt="Early SwarmEcho 2D drone swarm demo" />
 </p>
 
 <p align="center"><strong>Current 3D demo</strong></p>
 <p align="center">
-  <img src="docs/05_assets/Preview_vid/demo_3d.gif" width="600" alt="SwarmEcho 3D drone swarm demo" />
+  <img src="docs/assets/Preview_vid/demo_3d.gif" width="600" alt="SwarmEcho drones exploring a 3D building" />
 </p>
 
 ---
 
 ## Architecture
 
-The `src/swarmecho/` package separates configuration, the environment, models, training, analysis, visualization, and map authoring:
+The `src/swarmecho/` package separates simulation, learning, evaluation, and map authoring.
 
 ```text
 SwarmEcho/
-├── docs/                      Technical reference, guides, and project history
-├── geo_experiments/           Frozen-policy target probes, configs and static reports
+├── docs/                      Numbered guides for training, simulation, and evaluation
+├── cluster/                   Determined submission, configuration, and result retrieval
 ├── src/swarmecho/
-│   ├── core/                  Level loading, configuration, and utilities
-│   ├── curriculum_config/     3D levels, maps, and building editor
-│   ├── env/                   Environment, building geometry, observations, and rewards
-│   ├── models/                MAPPO actor, critic, and recurrent communication
-│   ├── training/              Rollouts, PPO, checkpoints, and evaluation
-│   ├── analysis/              Cross-run analysis dashboard
-│   └── visualize/             Replay data and interactive spatial inspector
-└── README.md
+│   ├── core/                  Level loading and configuration
+│   ├── curriculum_config/     Levels, building maps, and the building editor
+│   ├── env/                   Geometry, physics, observations, and rewards
+│   ├── models/                Recurrent MAPPO actor, critic, and TarMAC
+│   ├── training/              Rollouts, PPO, checkpoints, validation, and evaluation
+│   ├── analysis/              Cross-run analysis
+│   └── visualize/             Replays and the spatial inspector
+└── tests/                     Unit and workflow tests
 ```
-
-The [Phase 0 target-probe suite](geo_experiments/README.md) evaluates target-cell
-and target-storey information in the finder GRU, outgoing message and base-stored
-message. It saves comparable static figures and source data in named,
-timestamped experiment folders.
 
 ---
 
 ## Installation
 
-**Prerequisites:** the project's WSL2/CUDA environment and the `uv` package manager. Run Python and training commands from the repository root in WSL.
+Use `uv` on x86-64 Linux, including WSL2 on Windows. The project requires Python 3.11 or newer and uses the CUDA 12 build of JAX. Run the Python commands from the repository root.
 
 ```bash
 git clone https://github.com/M4GI3R/SwarmEcho.git
@@ -56,119 +47,121 @@ cd SwarmEcho
 uv sync
 ```
 
-If this checkout was already installed before the CLI names were unified, run `uv sync` again to refresh its entry points.
-
 ---
 
 ## Quick Start
 
-### 1. Train the 3D baseline
+A **map file** is a YAML file that describes one building, including its layout, base position, and where targets can spawn. A **level file** is a YAML file that tells SwarmEcho which maps to use or generate and how to train and evaluate the swarm.
+
+- **G01** trains on one map, [g01_static_map.yaml](src/swarmecho/curriculum_config/maps/custom_maps/g01_static_map.yaml), in the custom maps folder.
+- **G02** trains on five maps in the [same folder](src/swarmecho/curriculum_config/maps/custom_maps).
+- **G03** selects 3,600 training maps and 400 separate validation maps from a pool of randomly generated buildings.
+
+### 1. Start training
+
+G01 validates on a fixed set of solvable targets on its training map. This command saves the best validation checkpoint for the evaluation example below.
 
 ```bash
-uv run swarmecho-train level=M00_no_maze_open_cuboid
+uv run swarmecho-train level=G01_static logging.run_name=g01_example logging.use_timestamp_postfix=false logging.wandb_mode=offline validation.save_best_checkpoint=true
 ```
 
-Level files select the environment and training settings. Override individual values with `key=value`, for example `training.num_envs=512 logging.wandb_mode=online`.
+Use `level=G02_static` for G02, or pass the path to your own level YAML. See the [map source options](docs/01_training.md#buildings-and-target-curriculum) for how to select maps.
 
-`B02c_random_buildings` experiments with majority-voted reinforcements and
-decommissioning, up to nine simultaneous drones. The two initial drones retain
-the usual spawn stagger; approved reinforcements arrive immediately. See the
-[adaptive swarm reference](docs/01_reference/06_adaptive_swarm_size.md) and
-[W&B diagnostics guide](docs/01_reference/07_adaptive_swarm_diagnostics.md).
+Pass `section.field=value` to override a setting for the run. If you change `training.num_envs`, make it a multiple of `training.num_minibatches`. The small rollout check in [Tests](#tests) is available before starting a full run.
 
-### 2. Start curriculum training
+The [cluster workflow](cluster/README/README.md) covers Determined submissions, cluster presets, seed batches, and fetching results.
 
-Run levels in order; each stage inherits the previous stage's final checkpoint:
+### 2. Run multiple seeds
+
+This launcher runs jobs sequentially with the same training settings and a different training seed for each run. `base_seed` determines the set of seeds so you can repeat it.
 
 ```bash
-uv run swarmecho-curriculum levels=M00_no_maze_open_cuboid,M01_no_maze_open_cuboid_tall logging.run_name=curriculum
+uv run swarmecho-multi-train level=G01_static seeds=3 base_seed=42 logging.run_name=g01_baseline logging.wandb_mode=offline
 ```
 
-### 3. Train a single level
+### 3. Edit a 3D building
 
-For example, train the office finding task:
-
-```bash
-uv run swarmecho-train level=B01a_office_find_only logging.run_name=office
-```
-
-### 4. Run multiple seeds
-
-Run sequential training jobs with distinct seeds:
-
-```bash
-uv run swarmecho-multi-train level=M00_no_maze_open_cuboid seeds=3 base_seed=42 logging.run_name=baseline
-```
-
-### 5. Edit a 3D building
-
-Launch the browser-based building editor, then validate a saved map:
+The building editor opens on port 8766. Save a building YAML and pass its path to the building validator. The second command uses an included example.
 
 ```bash
 uv run swarmecho-maze-builder --port 8766
-uv run swarmecho-validate-building src/swarmecho/curriculum_config/maps/custom_building.yaml
+uv run swarmecho-validate-building "src/swarmecho/curriculum_config/maps/custom_maps/custom_building.yaml"
 ```
 
-The `maze-builder` command retains its historical name, but opens the 3D building editor.
+### 4. Evaluate and inspect a checkpoint
 
-### 6. Evaluate and inspect a checkpoint
-
-Replace `RUN` and the checkpoint name with an existing run and checkpoint:
+Once the example run has saved a best validation checkpoint, evaluate it on an authored map. Replace `g01_example` with your actual run directory name if needed. `eval_samples` sets the number of episodes for the map.
 
 ```bash
-uv run swarmecho-evaluate checkpoint=outputs/RUN/checkpoints/ckpt_000050 mode=parallel replay_after=true replays=3
+uv run swarmecho-evaluate checkpoint=outputs/g01_example/checkpoints/best_val_checkpoint eval_map=open_cuboid eval_samples=8
 uv run swarmecho-inspect root=outputs
 ```
 
-The inspector shows replays and evaluation heatmaps. It opens on port 8765 by default.
-Its **Export public page** button prepares selected results for browser-only
-sharing through GitHub Pages. See the [export and deployment guide](docs/02_guide/04_public_inspector.md).
+The inspector opens on port 8765 and displays replays and heatmaps. Add `replay_after=true` to the evaluation command to request replays. The inspector’s **Export public page** button packages an artifact for browser-only sharing. See [evaluation and inspection](docs/03_evaluation.md#evaluate-or-inspect-a-checkpoint) and the [public inspector guide](public-inspector/README.md).
 
-### 7. Explore training runs
+### 5. Explore training runs
+
+The dashboard provides cross-run analysis.
 
 ```bash
 uv run swarmecho-dashboard
 ```
 
-The general dashboard provides cross-run analysis. `swarmecho-eval-dashboard` and `swarmecho-artefacts` are aliases for the spatial inspector.
+### 6. Start curriculum training
+
+To train on a list of maps in order, give each map its own level file and pass those files in order. When early exit is enabled, a stage ends once validation success meets the configured threshold for the required number of consecutive validation passes. A stage also ends at its time or step limit. The next stage starts from the previous stage’s final checkpoint.
+
+Replace the paths with your level files.
+
+```bash
+uv run swarmecho-curriculum levels=path/to/first_level.yaml,path/to/second_level.yaml logging.run_name=curriculum logging.wandb_mode=offline
+```
+
+For example, the list could start with [the G01 map](src/swarmecho/curriculum_config/maps/custom_maps/g01_static_map.yaml) and continue with [the mirrored office](src/swarmecho/curriculum_config/maps/custom_maps/mirrored_office.yaml). The office needs its own level file and a checkpoint with a path prediction grid large enough for it. The standard G01 grid is too small for training on the office.
 
 ---
 
 ## Documentation Directory
 
-The [documentation index](docs/README.md) links the detailed material:
-
-- [Reference](docs/01_reference/): architecture, environment, training, and assumptions.
-- [Guides](docs/02_guide/): configuration, supported commands, and analysis tools.
-- [Roadmap](docs/03_roadmap/): plans and transition history.
-- [Archive](docs/04_archive/): earlier experiments and design context.
+1. [Training](docs/01_training.md) covers run setup, map sources, the target curriculum, PPO, and checkpoints.
+2. [Environment](docs/02_environment.md) covers building geometry, drone deployment, observations, communication, and rewards.
+3. [Evaluation and inspection](docs/03_evaluation.md) covers validation, checkpoint evaluation, heatmaps, and replays.
 
 ---
 
 ## Output Structure
 
-By default, each training run writes to its own directory:
+Training runs write to their own directories under `outputs/` by default. This layout includes the validation artifacts and best checkpoint enabled by the G01 quick start. Standalone evaluation adds checkpoint-scoped artifacts under `artifacts/eval/`.
 
 ```text
 outputs/
 └── {run_name}/
+    ├── config.yaml             Resolved run settings
     ├── checkpoints/
-    │   └── ckpt_000050/       Saved model checkpoint
+    │   ├── ckpt_<update>/      Saved training checkpoint
+    │   └── best_val_checkpoint/
+    ├── validation/
+    │   ├── cases.npz           Fixed cases reused across validation passes
+    │   └── results_u*.json     Validation metrics and per-map results
     └── artifacts/
-        ├── train/             Training evaluation data and replays
-        └── eval/               Checkpoint evaluation data and replays
+        ├── train/              Inspection artifacts written during or after training
+        └── eval/               Standalone checkpoint evaluation artifacts
 ```
 
-Curriculum stages also appear as individual run directories under `outputs/`, with names prefixed by `curr_`. A timestamp is appended to a configured run name only when `logging.use_timestamp_postfix=true`.
+Each curriculum stage gets its own run directory. `logging.use_timestamp_postfix=true` adds a timestamp to a configured run name.
 
 ---
 
-## Core Workflow Validation
+## Tests
 
-Run the small rollout and PPO update validator in the project's WSL environment:
+Run the pytest suite from the repository root on Linux or WSL2.
 
 ```bash
-uv run swarmecho-validate
+uv run pytest -v
 ```
 
-For the full command list, including evaluation options and benchmarking, see the [commands guide](docs/02_guide/03_commands.md).
+The [tests](tests/) cover level configuration, building geometry and target placement, drone deployment and observations, relay communication and rewards, PPO updates, checkpoint handling, validation, and evaluation artifacts.
+
+The [G03 workflow tests](tests/test_g03_workflows.py) build a tiny temporary map bank and run one real PPO update. They check that training saves a checkpoint with a finite loss, that the checkpoint can be restored and evaluated on a saved inspection map, and that validation uses separate maps, saves fixed cases, and writes a best checkpoint. To run those checks on their own, use `uv run pytest -v tests/test_g03_workflows.py`.
+
+There is also a standalone smoke test, `uv run swarmecho-validate`. It runs a small rollout and one PPO update, then checks that the update produces finite statistics. It needs no existing checkpoint and lives in [the training package](src/swarmecho/training/validate_workflow.py), separate from the pytest suite.

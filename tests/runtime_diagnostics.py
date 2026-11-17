@@ -78,14 +78,7 @@ def _actor_components(
     agents = hidden.shape[-2]
     active_pair = active[:, None] & active[None, :]
     eye = jnp.eye(agents, dtype=jnp.bool_)
-    external_mask = comm_mask & active_pair & ~eye
-    has_external_sender = jnp.any(external_mask, axis=-1)
-    if actor.tarmac_include_self:
-        share_mask = external_mask | (
-            eye & active[:, None] & has_external_sender[:, None]
-        )
-    else:
-        share_mask = external_mask
+    share_mask = comm_mask & active_pair & ~eye
     sender_signature = jnp.concatenate(
         [signature, base_signature[None, :]], axis=-2
     )
@@ -255,7 +248,6 @@ def test_identical_actor_inputs_are_batch_independent():
     level = load_level(_batch_checkpoint_level(checkpoint))
     model = build_model(level)
     restore_model_checkpoint(model, checkpoint)
-    assert model.actor.memory_comm_enabled, "This diagnostic expects the TarMAC actor."
     batch_size = int(
         os.environ.get(
             "SWARMECHO_ACTOR_DIAGNOSTIC_BATCH", level.evaluation.eval_parallel_envs
@@ -395,7 +387,6 @@ def _build_tracer(model, level):
     cfg = level.env
     reset, step, observations, _ = _evaluation_env_fns(level)
     num_agents = cfg.num_agents
-    cadence = int(model.memory_comm_every_k_steps)
 
     def advance(model, carry, step_index):
         (
@@ -427,7 +418,6 @@ def _build_tracer(model, level):
                 state.pos, state.base_pos,
                 state.solid_min, state.solid_max,
             )
-        share_now = (step_index % cadence) == 0
         observation = observations(state)
         (
             next_actor_hidden,
@@ -441,23 +431,21 @@ def _build_tracer(model, level):
             actor_signature,
             actor_value,
             reset=jnp.zeros(num_agents, dtype=jnp.bool_),
-            comm_mask=comm_mask & share_now,
+            comm_mask=comm_mask,
             active=state.active,
             base_signature=base_signature,
             base_value=base_value,
             base_memory_mask=(
                 base_memory_valid
                 & in_base_range
-                & (jnp.ones_like(state.target_known) if cfg.base_keeps_informing
-                   else ~state.target_known)
-                & share_now
+                & (~state.target_known)
             ),
             deterministic=True,
         )
         next_state = step(state, jnp.tanh(means))
         reporters = state.target_known & in_base_range
         reporter_index = jnp.argmax(reporters.astype(jnp.int32))
-        should_store = ~base_memory_valid & jnp.any(reporters) & share_now
+        should_store = ~base_memory_valid & jnp.any(reporters)
         next_base_signature = jnp.where(
             should_store, emitted_signature[reporter_index], base_signature
         )

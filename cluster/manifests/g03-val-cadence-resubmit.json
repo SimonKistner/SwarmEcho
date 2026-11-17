@@ -1,0 +1,24 @@
+{
+  "name": "G03",
+  "description": "G03 CLU resubmission comparing validation every 50 versus 30 PPO updates",
+  "level": "G03_CLU_random_buildings",
+  "seeds": [
+    456789,
+    456790,
+    456791,
+    456792,
+    456793
+  ],
+  "overrides": [
+    "training.seed_map_pool=true",
+    "training.map_selection_seed=null"
+  ],
+  "variations": {
+    "baseline_val_50": [
+      "validation.val_freq=50"
+    ],
+    "ablation_val_30": [
+      "validation.val_freq=30"
+    ]
+  }
+}

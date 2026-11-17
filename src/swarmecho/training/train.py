@@ -24,7 +24,7 @@ import time
 from collections import OrderedDict, deque
 from contextlib import nullcontext
 from dataclasses import asdict, fields, replace
-from swarmecho.models.actions import physical_actions, deterministic_actions
+from swarmecho.models.actions import physical_actions
 from swarmecho.env.adapt_size import policy_resets
 from swarmecho.env.knowledge import information_counts
 from swarmecho.training.information_metrics import (
@@ -32,8 +32,7 @@ from swarmecho.training.information_metrics import (
 )
 from swarmecho.training.adapt_size_metrics import (
     AdaptiveWindow, RequiredAgentsDeploymentWindow,
-    REWARD_NAMES, VOTE_SHAPING_REWARD_NAMES, NON_CONTRIBUTOR_REWARD_NAMES,
-    REFERENCE_DIAGNOSTIC_NAMES, INFO_NAMES, validate_zones,
+    REWARD_NAMES, NON_CONTRIBUTOR_REWARD_NAMES, INFO_NAMES, validate_zones,
 )
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print, display_path, evaluation_row, init_logging
@@ -48,15 +47,11 @@ from swarmecho.core.config import (
     CHAIN_SUCCESS_CONDITIONS,
     DEPLOYED_AGENTS_OBS_REF,
     Level,
-    evaluation_minimum_geodesic_separation,
-    evaluation_dynamic_max_geo_distance,
-    evaluation_stop_source,
     load_level_cli,
     resolve_evaluation_level,
     inspection_config_dict,
 )
 from swarmecho.env.environment import (
-    chain_diagnostics,
     coverage_grid_geometry,
     final_chain_length,
     make_autoreset_fns,
@@ -71,7 +66,6 @@ from swarmecho.models.mappo import MAPPOModel
 from swarmecho.training.artifacts import (
     artifact_suffix,
     save_eval_info_csv,
-    save_eval_layout,
     train_replay_root,
     write_manifest,
 )
@@ -81,8 +75,6 @@ from swarmecho.training.mappo_buffer import MAPPORolloutBuffer, MAPPOTransition
 from swarmecho.training.ppo import PPOTrainer, RunningValueNormalizer
 from swarmecho.training.memory_execution import memory_phase, run_rollout, recovery_training_origin
 from swarmecho.training.run_lifecycle import (
-    EvaluationHold,
-    TrainingSuccessHold,
     broadcast_early_stop_metrics,
     init_wandb,
     resolve_resume_state,
@@ -92,94 +84,82 @@ from swarmecho.training.run_lifecycle import (
 from swarmecho.visualize.replay import ReplayRewards, building_snapshot, planner_metadata, write_replay
 
 
-def communication_due(episode_step, every_k_steps):
-    """Shared episode clock: independent of rollout boundaries and auto-reset lanes."""
-    return (episode_step % every_k_steps) == 0
-
-
-def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
+def build_model(level: Level, hidden_dim: int | None = None, *, checkpoint=None) -> MAPPOModel:
     """Construct the canonical recurrent MAPPO/TarMAC model."""
     cfg = level.env
+    from swarmecho.analysis.path_targets import path_grid_shape
+    from swarmecho.training.checkpoints import checkpoint_probe_grid
+    from swarmecho.training.geo_auxiliary import PathHead
+
     geo = level.training.geo_probe_auxiliary
-    if geo.observe_prev_path_probe and not geo.enabled:
-        raise ValueError("observe_prev_path_probe requires the geo auxiliary head.")
-    if geo.enabled:
-        from swarmecho.training.geo_auxiliary import PathHead
-    if not level.network.actor_memory or not level.network.critic_memory:
-        raise ValueError("The runtime requires recurrent actor and critic memory.")
-    if level.network.critic_type != "observation":
-        raise ValueError("network.critic_type currently supports only observation.")
+    if checkpoint is not None:
+        probe_grid = checkpoint_probe_grid(checkpoint)
+    else:
+        buildings = (level.building,)
+        if len(level.map_paths) > 1 and not level.random_buildings.enabled:
+            from swarmecho.env.buildings import load_building
+            buildings = map(load_building, level.map_paths)
+        probe_grid = path_grid_shape(buildings)
     model = MAPPOModel(
         obs_dim=observation_dim(cfg),
         act_dim=3,
-        vote_mode=cfg.adapt_size.policy_vote_mode,
         num_agents=cfg.num_agents,
         hidden_dim=hidden_dim or level.network.hidden_dim,
         num_layers=level.network.num_layers,
         actor_num_layers=level.network.actor_num_layers,
-        actor_memory=level.network.actor_memory,
-        critic_memory=level.network.critic_memory,
-        memory_comm_enabled=level.network.memory_comm_enabled,
-        memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
         tarmac_sig_dim=level.network.tarmac_sig_dim,
         tarmac_val_dim=level.network.tarmac_val_dim,
-        tarmac_include_self=level.network.tarmac_include_self,
-        path_probe_width=geo.grid_width if geo.observe_prev_path_probe else 0,
         rngs=nnx.Rngs(level.training.seed),
     )
-    model.mask_inactive = True
-    model.base_memory_replay = level.training.base_memory_replay
-    model.actor.mask_inactive = True
-    if level.training.value_normalization == "running":
-        model.value_normalizer = RunningValueNormalizer()
-    if geo.enabled:
-        model.geo_probe_head = PathHead(model.hidden_dim, geo, level.training.seed)
+    model.value_normalizer = RunningValueNormalizer()
+    model.geo_probe_head = PathHead(model.hidden_dim, geo, level.training.seed, probe_grid)
     # Static metadata; the numerical normalizer state is saved inside the model.
     model.checkpoint_contract = tuple(sorted({
         "format": 1,
         "obs_dim": model.obs_dim,
-        "observe_prev_path_probe": geo.observe_prev_path_probe,
-        **({"geo_path_grid": "x".join(map(str, geo.grid_shape))} if geo.enabled else {}),
+        "vote_observation_slot": False,
+        "observe_prev_path_probe": False,
+        "geo_path_grid": "x".join(map(str, probe_grid)),
         "hidden_dim": hidden_dim or level.network.hidden_dim,
         "num_layers": level.network.num_layers,
         "actor_num_layers": level.network.actor_num_layers,
         "tarmac_sig_dim": level.network.tarmac_sig_dim,
         "tarmac_val_dim": level.network.tarmac_val_dim,
-        "memory_comm_enabled": level.network.memory_comm_enabled,
-        "memory_comm_every_k_steps": level.network.memory_comm_every_k_steps,
-        "tarmac_include_self": level.network.tarmac_include_self,
-        "value_normalization": level.training.value_normalization,
-        "entropy_mode": level.training.entropy_mode,
+        "memory_comm_enabled": True,
+        "memory_comm_every_k_steps": 1,
+        "tarmac_include_self": False,
+        "value_normalization": "running",
+        "entropy_mode": "squashed",
         "actor_clip_eps": level.training.actor_clip_eps,
         "value_clip_eps": level.training.value_clip_eps,
         "gamma": level.training.gamma,
         "gae_lambda": level.training.gae_lambda,
-        "progress_based_cluster_tiebreaker_soft": level.reward.progress_based_cluster_tiebreaker_soft,
+        "progress_based_cluster_tiebreaker_soft": True,
         "reward_system": "signed_individual_v1",
         "communication_clock": "episode",
         "inactive_agents": "excluded",
-        **({"relay_estimator": json.dumps(_global_relay_identity(level.training.dynamic_max_geo_distance), sort_keys=True)}
-           if level.training.dynamic_max_geo_distance.enabled
-           and level.training.dynamic_max_geo_distance.mode == "global_candidates" else {}),
+        "relay_estimator": json.dumps(_global_relay_identity(level.training.dynamic_max_geo_distance), sort_keys=True),
         "visually_gated_target_displacement_scale_m": (
             cfg.visual_radius if cfg.observe_visually_gated_target_displacement else None
         ),
         "adaptive_size": cfg.adapt_size.enabled,
-        "vote_mode": cfg.adapt_size.policy_vote_mode,
-        "recruitment_enabled": cfg.adapt_size.enabled and cfg.adapt_size.recruitment_enabled,
-        "vote_protocol": cfg.adapt_size.vote_protocol if cfg.adapt_size.enabled else None,
-        **({"priveleged_vote_reward_enabled": True}
-           if level.reward.priveleged_vote_reward.enabled else {}),
+        "recruitment_enabled": False,
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
            if field.name.startswith("observe_") or field.name in {
-               "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
+               "wall_sensing_rays", "wall_sensing_ray_max_distance",
                "drone_radar_bins", "radar_mode",
                "distance_bands", "radar_count_cap",
            }},
         "radar_layout": ("band_counts_v2" if cfg.radar_mode == "band_sep_counting"
                          else "legacy_interleaved" if cfg.wall_sensing_rays == cfg.drone_radar_bins
                          else "radar_blocks_v1"),
-        "observe_base_vote_ratio": cfg.adapt_size.enabled and cfg.observe_base_vote_ratio,
+        "wall_sensing_layout": "fibonacci",
+        "observe_base_vote_ratio": False,
+        "observe_target_vector": False,
+        "observe_base_vector": False,
+        "observe_current_timestep": False,
+        "observe_coverage_probe": False,
+        "observe_seeing_target": False,
         "observe_decommission_zone": cfg.adapt_size.enabled and cfg.observe_decommission_zone,
         "observe_base_population": cfg.adapt_size.enabled and cfg.observe_base_population,
         "base_population_observation_reference": (
@@ -203,8 +183,7 @@ def _validate_relay_resume(training, checkpoint):
     source = Path(str(checkpoint).replace("\\", "/")) / "training_contract.json"
     actual = json.loads(source.read_text()).get("relay_estimator") if source.is_file() else None
     options = training.dynamic_max_geo_distance
-    expected = (json.dumps(_global_relay_identity(options), sort_keys=True)
-                if options.enabled and options.mode == "global_candidates" else None)
+    expected = json.dumps(_global_relay_identity(options), sort_keys=True)
     if actual != expected:
         raise ValueError("Relay estimator mode, resolution or implementation changed. Use ckpt_loading_mode=branch "
                          "and a new run name to retain weights with fresh adaptive support and statistics.")
@@ -222,45 +201,21 @@ def _evaluation_env_fns(level: Level):
         if isinstance(value, np.ndarray):
             value = (value.dtype.str, value.shape, value.tobytes())
         geometry_key.append((field.name, value))
-    plan_geodesic = level.reward.requires_geodesic
-    apply_separation = evaluation_minimum_geodesic_separation(level)
-    apply_dynamic = evaluation_dynamic_max_geo_distance(level)
     key = (
         tuple(geometry_key),
         level.env,
-        plan_geodesic,
-        level.reward.chain_reward_system,
-        level.reward.progress_based_cluster_tiebreaker_soft,
-        level.reward.allow_redundancy_reward,
-        level.reward.target_found_requires_delivery,
-        level.reward.delivery_gap_vesting_enabled,
-        level.reward.priveleged_vote_reward,
-        level.network.memory_comm_every_k_steps,
-        apply_separation,
-        apply_dynamic,
-        level.training.randomize_base if apply_dynamic else False,
-        level.training.minimum_geodesic_separation_multiplier,
+        level.training.randomize_base,
         level.training.spawn_pair_max_attempts,
+        level.training.dynamic_max_geo_distance,
     )
-    if apply_dynamic and level.training.dynamic_max_geo_distance.mode == "global_candidates":
-        key += (level.training.dynamic_max_geo_distance,)
     if key not in _EVALUATION_ENV_CACHE:
         with init_logging(level.logging.terminal_log_init):
             _EVALUATION_ENV_CACHE[key] = make_env_fns(
-                level.building, level.env, plan_geodesic=plan_geodesic,
-                allow_redundancy_reward=level.reward.allow_redundancy_reward,
-                target_found_requires_delivery=level.reward.target_found_requires_delivery,
-                minimum_geodesic_separation=apply_separation,
-                dynamic_max_geo_distance=apply_dynamic,
+                level.building, level.env, plan_geodesic=True,
+                dynamic_max_geo_distance=True,
                 relay_options=level.training.dynamic_max_geo_distance,
-                randomize_base=level.training.randomize_base if apply_dynamic else False,
-                minimum_geodesic_separation_multiplier=level.training.minimum_geodesic_separation_multiplier,
+                randomize_base=level.training.randomize_base,
                 spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
-                memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
-                chain_reward_system=level.reward.chain_reward_system,
-                progress_based_cluster_tiebreaker_soft=level.reward.progress_based_cluster_tiebreaker_soft,
-                delivery_gap_vesting_enabled=level.reward.delivery_gap_vesting_enabled,
-                priveleged_vote_reward=level.reward.priveleged_vote_reward,
             )
         if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.random_eval_envs):
             _EVALUATION_ENV_CACHE.popitem(last=False)
@@ -291,7 +246,7 @@ def _communication_inputs(states, cfg, base_valid, base_signature, base_value):
                 pos, base, lower, upper
             )
         )(states.pos, states.base_pos, states.solid_min, states.solid_max)
-    receivers = jnp.ones_like(states.target_known) if cfg.base_keeps_informing else ~states.target_known
+    receivers = ~states.target_known
     base_memory_masks = base_valid[:, None] & in_base_range & receivers
     return comm_masks, in_base_range, base_memory_masks, base_signature, base_value
 
@@ -305,15 +260,12 @@ def _update_base_memory(
     base_signature,
     base_value,
     dones,
-    share_now=None,
 ):
     reporters = states.target_known & in_base_range
     has_reporter = jnp.any(reporters, axis=-1)
     reporter_index = jnp.argmax(reporters.astype(jnp.int32), axis=-1)
     env_index = jnp.arange(states.pos.shape[0])
-    if share_now is None:
-        share_now = jnp.ones_like(base_valid, dtype=jnp.bool_)
-    should_store = ~base_valid & has_reporter & share_now
+    should_store = ~base_valid & has_reporter
     base_signature = jnp.where(
         should_store[:, None], emitted_signature[env_index, reporter_index], base_signature
     )
@@ -327,12 +279,11 @@ def _update_base_memory(
     return base_valid, base_signature, base_value
 
 
-def _evaluate_training_metrics(model, level, hold, *, eval_due, on_run=None, spawn_sampler=None,
+def _evaluate_training_metrics(model, level, *, eval_due, spawn_sampler=None,
                                sampling_kwargs=None):
-    """Measure the configured training metric and advance the stop hold once."""
+    """Measure periodic inspection metrics."""
     if not eval_due:
-        return None, None, False
-    from swarmecho.training.evaluate import collect_robust_evaluation
+        return None, None
     from swarmecho.training.inspection_sampling import inspection_sampling_kwargs
 
     evaluation = level.evaluation
@@ -341,59 +292,43 @@ def _evaluate_training_metrics(model, level, hold, *, eval_due, on_run=None, spa
     retain_result = evaluation.training_heatmap_creation or evaluation.target_sampling == "training"
     score_spawn = (getattr(spawn_sampler, "curriculum_source", None) == "evaluation")
     evaluation_result = None
-    if evaluation.training_robustness:
-        evaluation_result = collect_robust_evaluation(model, level, on_run=on_run, **sampling_kwargs)
-        metrics, _ = evaluation_result
+    result = evaluate_suite(
+        model, level, episodes=level.effective_eval_parallel_envs,
+        return_episode_info=retain_result or score_spawn,
+        return_required_agents=score_spawn,
+        **sampling_kwargs,
+    )
+    if retain_result or score_spawn:
+        metrics, episode_info = result
     else:
-        result = evaluate_suite(
-            model, level, episodes=level.effective_eval_parallel_envs,
-            return_episode_info=retain_result or score_spawn,
-            return_required_agents=score_spawn,
-            **sampling_kwargs,
-        )
-        if retain_result or score_spawn:
-            metrics, episode_info = result
-        else:
-            metrics = result
-        if score_spawn:
-            scores = spawn_sampler.observe_curriculum("evaluation", episode_info["required_agents"],
-                episode_info["successes"], episode_info["lengths"], level.env.max_steps)
-            metrics.update({"eval_spawn_curriculum_" + key: value for key, value in scores.items()})
-        if retain_result:
-            successes = np.asarray(episode_info["successes"], dtype=bool)
-            chain_success = successes & (resolve_evaluation_level(level).env.success_condition in CHAIN_SUCCESS_CONDITIONS)
-            delivered = np.asarray(episode_info["delivered"], dtype=bool) | chain_success
-            visually_found = np.asarray(episode_info["visually_found"], dtype=bool) | delivered
-            episode_info["stage_rates"] = {
-                "chain_success": chain_success.astype(float),
-                "found_and_delivered": delivered.astype(float),
-                "visually_found": visually_found.astype(float),
-            }
-        metrics = {**metrics, "eval_robustness_runs": 1}
-        if retain_result:
-            evaluation_result = metrics, episode_info
-    stop = evaluation.early_exit and evaluation_stop_source(evaluation) == "evaluation" and hold.observe(
-        metrics["eval_success"], metrics.get("eval_success_length_reduction"))
-    return metrics, evaluation_result, stop
+        metrics = result
+    if score_spawn:
+        scores = spawn_sampler.observe_curriculum("evaluation", episode_info["required_agents"],
+            episode_info["successes"], episode_info["lengths"], level.env.max_steps)
+        metrics.update({"eval_spawn_curriculum_" + key: value for key, value in scores.items()})
+    if retain_result:
+        successes = np.asarray(episode_info["successes"], dtype=bool)
+        chain_success = successes & (resolve_evaluation_level(level).env.success_condition in CHAIN_SUCCESS_CONDITIONS)
+        delivered = np.asarray(episode_info["delivered"], dtype=bool) | chain_success
+        visually_found = np.asarray(episode_info["visually_found"], dtype=bool) | delivered
+        episode_info["stage_rates"] = {
+            "chain_success": chain_success.astype(float),
+            "found_and_delivered": delivered.astype(float),
+            "visually_found": visually_found.astype(float),
+        }
+    metrics = {**metrics, "eval_robustness_runs": 1}
+    if retain_result:
+        evaluation_result = metrics, episode_info
+    return metrics, evaluation_result
 
 
-def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run, history_path, hold):
+def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run, history_path):
     """Publish one measurement with explicit provenance to all logging sinks."""
     if not level.logging.individual_map_diagnostics:
         metrics = {name: value for name, value in metrics.items() if not name.startswith("eval_map/")}
     runs = int(metrics.get("eval_robustness_runs", 1))
     prefix = "FINAL" if phase == "final_eval" else "EVAL"
-    tail = (
-        f"{f'est={level.evaluation.early_exit_success_rate:.0%}':<10}  "
-        f"hold={hold.consecutive}/{max(1, level.evaluation.early_exit_hold_evals)}"
-        if level.evaluation.early_exit else "est=off"
-    )
-    if level.evaluation.early_exit and level.evaluation.early_exit_source == "training":
-        tail = "early-exit source=training (diagnostic eval)"
-    if level.evaluation.early_exit and evaluation_stop_source(level.evaluation) == "validation":
-        tail = "early-exit source=validation (inspection only)"
-        if level.evaluation.target_sampling == "training":
-            tail = "full-level stop=validation; targets=training"
+    tail = "early-exit source=validation (inspection only)" if level.evaluation.early_exit else "est=off"
     if phase == "final_eval" and level.evaluation.early_exit:
         tail += " (unchanged)"
     evaluation_row(
@@ -404,9 +339,9 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
         stream.write(json.dumps({
             "update": update, "global_step": steps, "phase": phase,
             "mode": "robust" if runs > 1 else "single_pass", **metrics,
-            "early_exit_source": level.evaluation.early_exit_source,
+            "early_exit_source": "validation" if level.evaluation.early_exit else None,
             "target_sampling": level.evaluation.target_sampling,
-            "stop_source": evaluation_stop_source(level.evaluation),
+            "stop_source": "validation" if level.evaluation.early_exit else None,
         }) + "\n")
     values = {
         "ep_return": metrics["eval_return"],
@@ -542,9 +477,6 @@ def train(
     requested_ppo: dict[str, int] | None = None,
 ) -> tuple[Path | None, dict[str, float]]:
     """Train the strict level and return its final checkpoint and metrics."""
-    if level.training.agent_count_curriculum.enabled:
-        from swarmecho.training.curriculum import train_agent_counts
-        return train_agent_counts(level, output_dir=output_dir, checkpoint_path=checkpoint_path)
     init_started = init_previous = time.perf_counter()
 
     def init_log(message):
@@ -616,8 +548,6 @@ def train(
     # Random datasets always choose a map at episode boundaries. Adaptation
     # changes only their probabilities; authored suites retain legacy opt-out.
     resample_maps = level.random_buildings.enabled or training.adaptive_map_sampling.enabled
-    if resample_maps and evaluation.early_exit and evaluation.early_exit_source == "training":
-        raise ValueError("Episode map resampling requires inspection- or validation-based early exit.")
     frozen_selection = None
     if level.random_buildings.enabled or training.adaptive_map_sampling.enabled:
         from swarmecho.training.map_selection import (
@@ -626,18 +556,15 @@ def train(
     if training.adaptive_map_sampling.enabled:
         from swarmecho.core.config import validate_adaptive_map_sampling
         validate_adaptive_map_sampling(training.adaptive_map_sampling)
-        if evaluation.early_exit_source not in {"evaluation", "validation"}:
-            raise ValueError("Adaptive map sampling requires evaluation-based early exit.")
     if training.adaptive_target_spawn.enabled and (
-        cfg.num_obstacles or training.randomize_base or training.minimum_geodesic_separation
-        or cfg.success_condition == "coverage"
+        training.randomize_base
     ):
         raise ValueError("Adaptive target spawning requires static target maps and fixed bases, "
                          "without generated obstacles or minimum geodesic separation.")
     bank_eval_maps = None
     validation_map_paths = None
     adaptive_spawn_buildings = None
-    geo_paths = geo_records = None
+    geo_paths = geo_records = geo_buildings = None
     bank_map_count = level.training_map_count
     if level.static_map_suite:
         import hashlib
@@ -673,10 +600,10 @@ def train(
             map_identities = [building_identity(building, name) for building, name in zip(buildings, level.map_names)]
         init_log(f"Compiling {len(buildings)} static maps for {training.num_envs} training lanes...")
         building_bank = prepare_bank(buildings, cfg,
-            dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+            dynamic_max_geo_distance=True,
             relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
-            plan=cfg.success_condition != "coverage" and level.reward.requires_geodesic,
-            corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
+            plan=True,
+            log=init_log)
         write_manifest(manifest_path, static_manifest)
         bank_map_count = len(buildings)
         if training.adaptive_target_spawn.enabled:
@@ -706,17 +633,15 @@ def train(
                 if training.num_maps is not None and len(train_maps) != training.num_maps:
                     raise ValueError("Frozen training map count differs from training.num_maps; use a new run.")
                 if len(eval_maps) != eval_count:
-                    raise ValueError("Held-out map count changed; choose a new bank selection.")
+                    raise ValueError("Validation or inspection map count changed; choose a new bank selection.")
             else:
                 pool, metadata = ensure_pool(level, required, log=init_log)
                 train_maps, eval_maps = select_maps(pool, metadata, training.bank_selection_seed, level.training_map_count, eval_count)
             selected_ids = [item["id"] for item in (*train_maps, *eval_maps)]
             if len(set(selected_ids)) != len(selected_ids):
-                raise ValueError("Training and held-out map selections must contain distinct, disjoint map IDs.")
+                raise ValueError("Training and validation or inspection map selections must contain distinct, disjoint map IDs.")
             try:
-                records = load_records(pool, train_maps,
-                    require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]) and cfg.success_condition != "coverage",
-                    include_target=cfg.success_condition != "coverage")
+                records = load_records(pool, train_maps)
                 if any(not (pool / "maps" / f"{item['id']}.yaml").is_file()
                        for item in (*train_maps, *eval_maps)):
                     raise FileNotFoundError("A selected building map is missing from the pool.")
@@ -730,9 +655,7 @@ def train(
                 pool, metadata = build_pool(level, count=max(DEFAULT_POOL_SIZE, required),
                                             avoid_pool=pool, log=init_log)
                 train_maps, eval_maps = select_maps(pool, metadata, training.bank_selection_seed, level.training_map_count, eval_count)
-                records = load_records(pool, train_maps,
-                    require_corner=bool(metadata["settings"]["roadmap"]["corner_bonus_m"]) and cfg.success_condition != "coverage",
-                    include_target=cfg.success_condition != "coverage")
+                records = load_records(pool, train_maps)
                 if any(not (pool / "maps" / f"{item['id']}.yaml").is_file()
                        for item in (*train_maps, *eval_maps)):
                     raise FileNotFoundError("A selected building map is missing from the replacement pool.")
@@ -745,9 +668,8 @@ def train(
             import hashlib
             map_names = [item["id"] for item in train_maps]
             paths = [pool / "maps" / f"{name}.yaml" for name in map_names]
-            if training.geo_probe_auxiliary.enabled:
-                geo_paths = paths
-                geo_records = [{"vertices":r["vertices"],"distances":r["distances"]} for r in records]
+            geo_paths = paths
+            geo_records = [{"vertices": r["vertices"], "distances": r["distances"]} for r in records]
             map_identities = [{"name": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                               for name, path in zip(map_names, paths)]
             validation_identities = [
@@ -757,18 +679,13 @@ def train(
             verify_selection_geometry(destination, map_identities)
             selection = load_selection(destination, None)
             if selection.get("held_out_identities", validation_identities) != validation_identities:
-                raise ValueError("Frozen held-out bank map geometry changed.")
+                raise ValueError("Frozen validation or inspection map geometry changed.")
             save_selection(destination, {**selection, "held_out_identities": validation_identities})
             if training.adaptive_target_spawn.enabled:
                 from swarmecho.env.buildings import load_building
                 adaptive_spawn_buildings = [load_building(path) for path in paths]
-            if training.dynamic_max_geo_distance.enabled and training.dynamic_max_geo_distance.mode == "simplifier":
-                from swarmecho.env.buildings import load_building
-                from swarmecho.env.relay import opening_arrays
-                for record, item in zip(records, train_maps):
-                    record["relay_openings"] = opening_arrays(load_building(pool / "maps" / f"{item['id']}.yaml"))
             building_bank = prepare_bank_from_records(records, level.building, cfg,
-                dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+                dynamic_max_geo_distance=True,
                 relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
                 relay_cache_dir=pool / "relay_cache", log=init_log)
             del records
@@ -809,15 +726,17 @@ def train(
             write_manifest(destination / "random_buildings.json", generation_manifest)
             bank_map_count = len(buildings)
             map_names = [item["id"] for item in generation_manifest["maps"]]
+            geo_paths = [destination / "generated_maps" / f"{name}.yaml" for name in map_names]
+            geo_buildings = buildings
             map_identities = [building_identity(building, name) for building, name in zip(buildings, map_names)]
             verify_selection_geometry(destination, map_identities, version=generation_manifest["version"])
             if training.adaptive_target_spawn.enabled:
                 adaptive_spawn_buildings = buildings
             building_bank = prepare_bank(buildings, cfg,
-                dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+                dynamic_max_geo_distance=True,
                 relay_options=training.dynamic_max_geo_distance, randomize_base=training.randomize_base,
-                plan=cfg.success_condition != "coverage" and level.reward.requires_geodesic,
-                corner_bonus_m=cfg.roadmap_corner_bonus_m if training.minimum_geodesic_separation else 0., log=init_log)
+                plan=True,
+                log=init_log)
             if level.validation.enabled:
                 from swarmecho.training.validation import prepare_generated_validation_maps
                 validation_map_paths = prepare_generated_validation_maps(level, destination, init_log,
@@ -846,7 +765,7 @@ def train(
         level.building if building_bank is None else building_bank.envelope, cfg)
     init_log(
         f"Geometry: {len(level.building.solid_min_m):,} authored solids; "
-        f"{cfg.num_obstacles} generated obstacles; coverage {coverage_shape} = "
+        f"coverage {coverage_shape} = "
         f"{int(np.prod(coverage_shape)):,} voxels at {voxel_size:g} m; "
         f"{training.num_envs:,} environments. Constructing environment functions..."
     )
@@ -854,23 +773,19 @@ def train(
         reset, env_step, observations, _ = make_autoreset_fns(
             level.building, cfg, level.reward,
             randomize_base=training.randomize_base,
-            minimum_geodesic_separation=training.minimum_geodesic_separation,
-            dynamic_max_geo_distance=training.dynamic_max_geo_distance.enabled,
+            dynamic_max_geo_distance=True,
             relay_options=training.dynamic_max_geo_distance,
-            minimum_geodesic_separation_multiplier=training.minimum_geodesic_separation_multiplier,
-            skip_on_no_pair_found=training.skip_on_no_pair_found,
             spawn_pair_max_attempts=training.spawn_pair_max_attempts,
             building_bank=building_bank,
-            memory_comm_every_k_steps=network.memory_comm_every_k_steps,
             **({"resample_maps": True} if resample_maps else {}),
         )
     sig_dim = network.tarmac_sig_dim
     val_dim = network.tarmac_val_dim
     init_log("Environment functions constructed. Initializing model...")
-    model = build_model(level)
+    resume_from = checkpoint_path or training.checkpoint_path
+    model = build_model(level, checkpoint=resume_from)
     obs_dim = model.obs_dim
     init_log("Model constructed. Preparing checkpoint, optimizer and rollout buffer...")
-    resume_from = checkpoint_path or training.checkpoint_path
     _validate_relay_resume(training, resume_from)
     resume = resolve_resume_state(training, run_name, training.num_envs, training.num_steps)
     completed_checkpoint = {}
@@ -892,7 +807,7 @@ def train(
             MapAdaptiveTargetSpawnController, AdaptiveMapSpawnJournal,
             sampling_config_dict,
         )
-        feasibility_budget = cfg.geometric_agent_budget if training.dynamic_max_geo_distance.enabled else None
+        feasibility_budget = cfg.num_agents
         if building_bank is not None:
             adaptive_spawn = MapAdaptiveTargetSpawnController(
                 adaptive_spawn_buildings, map_names, cfg, training.adaptive_target_spawn,
@@ -926,10 +841,10 @@ def train(
         else:
             init_log("Adaptive target spawning: discovering eligible cells from the uniform accepted startup batch...")
     target_curriculum = None
-    if training.target_curriculum.mode != "none":
-        from swarmecho.training.target_curriculum import UniformTargetCurriculum
-        target_curriculum = UniformTargetCurriculum(
-            training.target_curriculum, cfg.num_agents,
+    if training.forward_target_curriculum.enabled:
+        from swarmecho.training.target_curriculum import ForwardTargetCurriculum
+        target_curriculum = ForwardTargetCurriculum(
+            cfg.num_agents,
             skip_empty_forward_groups=level.validation.mode == "uniform_full_task",
         )
         if resume_from and training.ckpt_loading_mode in {"resume", "branch"}:
@@ -944,19 +859,21 @@ def train(
     if resume_from and training.ckpt_loading_mode == "resume":
         from swarmecho.training.ppo_execution import restore_optimizer
         restore_optimizer(trainer,resume_from)
-    geo_data = None
-    if training.geo_probe_auxiliary.enabled:
-        from swarmecho.training.geo_auxiliary import PathLabels, AuxiliaryData
-        init_log("Preparing shared reward-reference path labels for auxiliary supervision...")
-        labels = PathLabels(geo_paths or level.map_paths,cfg,buildings=adaptive_spawn_buildings,
-            records=geo_records,directory=destination/"geo_probe_auxiliary",
-            grid_shape=training.geo_probe_auxiliary.grid_shape)
-        geo_data = AuxiliaryData(training.geo_probe_auxiliary,training.seed,labels)
-        trainer.auxiliary_data = geo_data
-        del geo_records
-        init_log(f"Path auxiliary ready: lambda={training.geo_probe_auxiliary.lambda_target}; "
-                 f"snapshots/agent={training.geo_probe_auxiliary.sampling.snapshots_per_agent}; "
-                 f"execution microbatches={training.optimizer_microbatches}")
+    from swarmecho.training.geo_auxiliary import PathLabels, AuxiliaryData
+    init_log("Preparing shared reward-reference path labels for auxiliary supervision...")
+    label_paths = geo_paths or level.map_paths
+    if not label_paths:
+        label_paths = [destination / f"{level.building_name}.yaml"]
+        geo_buildings = (level.building,)
+    labels = PathLabels(label_paths, cfg, buildings=geo_buildings if geo_buildings is not None else adaptive_spawn_buildings,
+        records=geo_records, directory=destination / "geo_probe_auxiliary", grid_shape=model.geo_probe_head.grid_shape)
+    geo_data = AuxiliaryData(training.geo_probe_auxiliary, training.seed, labels)
+    trainer.auxiliary_data = geo_data
+    del geo_records, geo_buildings
+    init_log(f"Path auxiliary ready: lambda={training.geo_probe_auxiliary.lambda_target}; "
+             f"snapshots/agent={training.geo_probe_auxiliary.sampling.snapshots_per_agent}; "
+             f"execution microbatches={training.optimizer_microbatches}")
+
     def save_current_checkpoint(*args,**kwargs):
         kwargs["metrics"] = checkpoint_metrics(kwargs.get("metrics"), training_started)
         return save_training_checkpoint(*args,trainer=trainer,target_eligibility=target_eligibility,**kwargs)
@@ -968,64 +885,45 @@ def train(
         act_dim=model.act_dim,
         gamma=training.gamma,
         gae_lambda=training.gae_lambda,
-        recurrent=True,
         hidden_dim=network.hidden_dim,
         tarmac_sig_dim=sig_dim,
         tarmac_val_dim=val_dim,
-        actor_memory=level.network.actor_memory,
-        critic_memory=level.network.critic_memory,
-        mask_inactive=True,
         host_minibatches=training.optimizer_microbatches > 1,
     )
     init_log("Optimizer and buffer prepared. Initial batched environment reset...")
     keys = jax.random.split(jax.random.PRNGKey(training.seed + 1), training.num_envs)
-    if training.randomize_base or training.minimum_geodesic_separation or training.dynamic_max_geo_distance.enabled or building_bank is not None:
-        reset_batch_size = min(32, training.num_envs)
-        reset_batch_count = (training.num_envs + reset_batch_size - 1) // reset_batch_size
-        reset_padded_count = reset_batch_count * reset_batch_size
-        reset_keys = jnp.concatenate((keys, jnp.repeat(keys[-1:], reset_padded_count - training.num_envs, axis=0)))
-        reset_keys = reset_keys.reshape((reset_batch_count, reset_batch_size) + keys.shape[1:])
-        if building_bank is not None:
-            from swarmecho.env.building_bank import balanced_map_ids
-            lane_ids = (np.arange(training.num_envs, dtype=np.int32) % bank_map_count
-                        if resample_maps else balanced_map_ids(training.num_envs, bank_map_count))
-            padded_ids = np.pad(lane_ids, (0, reset_padded_count - training.num_envs), mode="edge")
-            ids = jnp.asarray(padded_ids).reshape(reset_batch_count, reset_batch_size)
-            reset_batches = jax.lax.map(lambda pair: jax.vmap(lambda key, index: reset(
-                key, map_id=index, **({"target_spawn_weights": target_spawn_weights}
-                                      if adaptive_spawn is not None else {})))(*pair), (reset_keys, ids))
-        elif adaptive_spawn is not None:
-            reset_batches = jax.lax.map(jax.vmap(lambda key: reset(key, target_spawn_weights=target_spawn_weights)), reset_keys)
-        else:
-            reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
-        # Explicit dimensions avoid lax.map(batch_size=...)'s inferred -1
-        # reshape, which fails for legitimate zero-sized geometry leaves.
-        states = jax.tree_util.tree_map(
-            lambda value: value.reshape((reset_padded_count,) + value.shape[2:])[:training.num_envs],
-            reset_batches,
-        )
+    reset_batch_size = min(32, training.num_envs)
+    reset_batch_count = (training.num_envs + reset_batch_size - 1) // reset_batch_size
+    reset_padded_count = reset_batch_count * reset_batch_size
+    reset_keys = jnp.concatenate((keys, jnp.repeat(keys[-1:], reset_padded_count - training.num_envs, axis=0)))
+    reset_keys = reset_keys.reshape((reset_batch_count, reset_batch_size) + keys.shape[1:])
+    if building_bank is not None:
+        from swarmecho.env.building_bank import balanced_map_ids
+        lane_ids = (np.arange(training.num_envs, dtype=np.int32) % bank_map_count
+                    if resample_maps else balanced_map_ids(training.num_envs, bank_map_count))
+        padded_ids = np.pad(lane_ids, (0, reset_padded_count - training.num_envs), mode="edge")
+        ids = jnp.asarray(padded_ids).reshape(reset_batch_count, reset_batch_size)
+        reset_batches = jax.lax.map(lambda pair: jax.vmap(lambda key, index: reset(
+            key, map_id=index, **({"target_spawn_weights": target_spawn_weights}
+                                  if adaptive_spawn is not None else {})))(*pair), (reset_keys, ids))
     elif adaptive_spawn is not None:
-        states = jax.vmap(lambda key: reset(key, target_spawn_weights=target_spawn_weights))(keys)
+        reset_batches = jax.lax.map(jax.vmap(lambda key: reset(key, target_spawn_weights=target_spawn_weights)), reset_keys)
     else:
-        states = jax.vmap(reset)(keys)
+        reset_batches = jax.lax.map(jax.vmap(reset), reset_keys)
+    # Explicit dimensions avoid lax.map(batch_size=...)'s inferred -1
+    # reshape, which fails for legitimate zero-sized geometry leaves.
+    states = jax.tree_util.tree_map(
+        lambda value: value.reshape((reset_padded_count,) + value.shape[2:])[:training.num_envs],
+        reset_batches,
+    )
     # Synchronize once at startup so this milestone reports completion, not dispatch.
     jax.block_until_ready(states)
     def check_spawn_pairs(attempts):
         if np.any(np.asarray(attempts) == 0):
-            if training.dynamic_max_geo_distance.enabled:
-                raise ValueError(f"No certified spawn pair within geometric budget {cfg.geometric_agent_budget} after "
-                                 f"{training.spawn_pair_max_attempts} proposals. Check map eligibility, "
-                                 "minimum separation and the stage budget; no unfiltered fallback is allowed.")
-            raise ValueError(
-                f"No valid {'base spawn' if cfg.success_condition == 'coverage' else 'base/target pair'} "
-                f"in {training.spawn_pair_max_attempts} attempts per environment. "
-                f"Required roadmap separation: {training.minimum_geodesic_separation_multiplier * cfg.comm_radius if training.minimum_geodesic_separation else 0:g} m. "
-                "Randomized bases keep the target fixed; it may have no qualifying base location. "
-                "Reduce the separation multiplier or check spawn geometry; increasing the attempt limit only helps feasible targets."
-            )
+            raise ValueError(f"No certified spawn pair within geometric budget {cfg.num_agents} after "
+                             f"{training.spawn_pair_max_attempts} proposals. Check map eligibility and the stage budget.")
 
-    if training.randomize_base or training.minimum_geodesic_separation or training.dynamic_max_geo_distance.enabled:
-        check_spawn_pairs(states.spawn_pair_attempts)
+    check_spawn_pairs(states.spawn_pair_attempts)
     if training.target_spawn_eligibility.enabled:
         from swarmecho.training.target_spawn_eligibility import TargetSpawnEligibility
         target_eligibility = TargetSpawnEligibility(level, building_bank, map_identities=map_identities)
@@ -1041,7 +939,7 @@ def train(
                 from swarmecho.training.adaptive_maps import discover_cell_support
                 discover_cell_support(reset, adaptive_spawn, states,
                     training.adaptive_map_sampling.eligibility_samples_per_map,
-                    training.bank_selection_seed + cfg.geometric_agent_budget * 1009, init_log)
+                    training.bank_selection_seed + cfg.num_agents * 1009, init_log)
             else:
                 adaptive_spawn.initialize_eligibility(jax.device_get(states.target_pos),
                                                       map_ids=jax.device_get(states.map_id))
@@ -1085,7 +983,7 @@ def train(
         if target_eligibility is None:
             return
         maximum = (target_curriculum.curriculum_budget if target_curriculum is not None else
-                   getattr(adaptive_spawn, "curriculum_budget", None) or cfg.geometric_agent_budget)
+                   getattr(adaptive_spawn, "curriculum_budget", None) or cfg.num_agents)
         minimum = target_curriculum.minimum if target_curriculum is not None else 1
         weights, cdf, _ = target_eligibility.tables(minimum, maximum,
             adaptive_weights=adaptive_spawn.box_weights if adaptive_spawn is not None else None,
@@ -1112,7 +1010,7 @@ def train(
         jax.block_until_ready(states)
         check_spawn_pairs(states.spawn_pair_attempts)
         init_log(f"Target spawn budget {adaptive_spawn.curriculum_budget}/{cfg.num_agents}; "
-                 f"all {cfg.num_agents} recruitment slots available.")
+                 f"all {cfg.num_agents} drones scheduled for deployment.")
     if target_curriculum is not None or target_eligibility is not None:
         # Full-budget preparation stays shared across variants. Curriculum reset
         # retries maps lacking the selected groups, without admitting easier targets.
@@ -1129,7 +1027,7 @@ def train(
         jax.block_until_ready(states)
         check_spawn_pairs(states.spawn_pair_attempts)
         if target_curriculum is not None:
-            init_log(f"Uniform {training.target_curriculum.mode} targets: requirements "
+            init_log(f"Uniform forward targets: requirements "
                      f"{target_curriculum.minimum}..{target_curriculum.curriculum_budget}; gate group {target_curriculum.group}.")
         else:
             init_log("Full-task target resets use independently prepared cell eligibility.")
@@ -1139,15 +1037,11 @@ def train(
             raise ValueError("Adaptive map sampling requires a persistent prepared map bank.")
         adaptive_maps = AdaptiveMapSampler(map_identities, training.adaptive_map_sampling,
             stage_identity={"env": asdict(cfg), "reward": asdict(level.reward),
-                            "seed": training.seed, "filtered": training.dynamic_max_geo_distance.enabled,
+                            "seed": training.seed, "filtered": True,
                             "randomize_base": training.randomize_base,
-                            "minimum_geodesic_separation": training.minimum_geodesic_separation,
-                            "minimum_geodesic_separation_multiplier": training.minimum_geodesic_separation_multiplier,
                             "adaptive_cells": sampling_config_dict(training.adaptive_target_spawn)
                                 if training.adaptive_target_spawn.enabled else None,
-                            **({"relay_estimator": _global_relay_identity(training.dynamic_max_geo_distance)}
-                               if training.dynamic_max_geo_distance.enabled
-                               and training.dynamic_max_geo_distance.mode == "global_candidates" else {})})
+                            "relay_estimator": _global_relay_identity(training.dynamic_max_geo_distance)})
         resume_maps = bool(resume_from and training.ckpt_loading_mode == "resume")
         if resume_maps:
             if not adaptive_maps.restore(resume_from):
@@ -1171,7 +1065,6 @@ def train(
     if cfg.adapt_size.enabled:
         validate_zones(jax.device_get(states.adaptive.zone_valid))
     actor_hidden = model.initial_actor_hidden((training.num_envs,))
-    prev_path_probe = model.initial_path_probe((training.num_envs,))
     actor_signature = model.initial_actor_signature((training.num_envs,))
     actor_value = model.initial_actor_value((training.num_envs,))
     critic_hidden = model.initial_critic_hidden((training.num_envs,))
@@ -1180,26 +1073,12 @@ def train(
     base_value = jnp.zeros((training.num_envs, val_dim), dtype=jnp.float32)
     resets = jnp.zeros((training.num_envs, cfg.num_agents), dtype=jnp.bool_)
     latest_stats: dict[str, float] = {}
-    eval_hold = EvaluationHold(
-        evaluation.early_exit_success_rate,
-        evaluation.early_exit_hold_evals,
-        evaluation.early_exit_min_success_length_reduction,
-    )
-    training_hold = None
-    if evaluation.early_exit and evaluation.early_exit_source == "training":
-        training_hold = TrainingSuccessHold(
-            lane_ids if level.static_map_suite else [0] * training.num_envs,
-            cfg.max_steps, evaluation.early_exit_success_rate,
-            evaluation.early_exit_hold_evals,
-            evaluation.early_exit_min_success_length_reduction,
-        )
     final_evaluation_result = None
     episode_returns = np.zeros(training.num_envs, dtype=np.float64)
     episode_lengths = np.zeros(training.num_envs, dtype=np.int32)
     episode_success = np.zeros(training.num_envs, dtype=np.float32)
     episode_found = np.zeros(training.num_envs, dtype=np.float32)
     episode_visually_found = np.zeros(training.num_envs, dtype=np.float32)
-    episode_idle = np.zeros(training.num_envs, dtype=np.float32)
     episode_gap = np.zeros(training.num_envs, dtype=np.float32)
     episode_progress_pct = np.zeros(training.num_envs, dtype=np.float32)
     episode_coverage = np.zeros(training.num_envs, dtype=np.float32)
@@ -1209,38 +1088,31 @@ def train(
     episode_rewards = {
         name: np.zeros(training.num_envs, dtype=np.float64)
         for name in ("exploration_reward", "collision_reward", "finder_reward", "time_presure_reward", "gap_reward",
-                     "peer_informing_reward", "target_found_reward", "success_reward",
+                     "target_found_reward", "success_reward",
                      "useless_agent_at_success_reward",
-                     "useless_agent_at_success_all_agents_reward",
-                     "no_movement_termination_penalty")
+                     "useless_agent_at_success_all_agents_reward")
     }
-    if level.reward.enable_chain_efficiency_reward:
+    if level.reward.chain_efficiency_reward != 0:
         episode_rewards["chain_efficiency_reward"] = np.zeros(training.num_envs, dtype=np.float64)
     # Collect one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
     window_size = training.num_envs
-    adaptive_window = (AdaptiveWindow(
-        window_size, target_agents=cfg.geometric_agent_budget,
-        max_agents=cfg.num_agents, initial_agents=cfg.adapt_size.initial_agents,
-    ) if cfg.adapt_size.enabled else None)
+    adaptive_window = AdaptiveWindow(window_size) if cfg.adapt_size.enabled else None
     required_agents_window = (RequiredAgentsDeploymentWindow(
         logging.required_agents_metrics_window_episodes,
-        episode_window_size=window_size, max_required_agents=cfg.geometric_agent_budget,
-    ) if cfg.adapt_size.enabled and training.dynamic_max_geo_distance.enabled else None)
+        episode_window_size=window_size, max_required_agents=cfg.num_agents,
+    ) if cfg.adapt_size.enabled else None)
     adaptive_reward_names = REWARD_NAMES + (
-        VOTE_SHAPING_REWARD_NAMES if level.reward.priveleged_vote_reward.enabled else ()
-    ) + (
         NON_CONTRIBUTOR_REWARD_NAMES if level.reward.non_contributor_rewards_enabled else ()
     )
     if cfg.adapt_size.enabled:
         episode_rewards.update({name: np.zeros(training.num_envs)
-                                for name in (*adaptive_reward_names, *REFERENCE_DIAGNOSTIC_NAMES)})
+                                for name in adaptive_reward_names})
     window_ret: deque[float] = deque(maxlen=window_size)
     window_len: deque[int] = deque(maxlen=window_size)
     window_succ: deque[float] = deque(maxlen=window_size)
     window_fnd: deque[float] = deque(maxlen=window_size)
     window_visually_found: deque[float] = deque(maxlen=window_size)
-    window_idle: deque[float] = deque(maxlen=window_size)
     window_gap: deque[float] = deque(maxlen=window_size)
     window_prog_pct: deque[float] = deque(maxlen=window_size)
     window_cov: deque[float] = deque(maxlen=window_size)
@@ -1252,8 +1124,8 @@ def train(
     window_pair_attempts: deque[int] = deque(maxlen=window_size)
     window_success_target_distance: deque[float] = deque(maxlen=window_size)
     window_rewards = {name: deque(maxlen=window_size) for name in episode_rewards}
-    path_stat_names = (["number_of_valid_paths"] if level.reward.allow_redundancy_reward or level.reward.enable_chain_efficiency_reward else [])
-    if level.reward.enable_chain_efficiency_reward:
+    path_stat_names = (["number_of_valid_paths"] if level.reward.chain_efficiency_reward != 0 else [])
+    if level.reward.chain_efficiency_reward != 0:
         path_stat_names.append("chain_efficiency")
     window_path_stats = {name: deque(maxlen=window_size) for name in path_stat_names}
     completed_eps_count = 0
@@ -1335,7 +1207,7 @@ def train(
     terminal_print(f"  level / building : {level.name} / {level.building_name}")
     terminal_print(f"  devices          : {jax.devices()}")
     terminal_print(f"  agents           : {cfg.num_agents}")
-    terminal_print(f"  observation      : {obs_dim}  (wall rays: {cfg.wall_sensing_rays}, {cfg.wall_sensing_layout}, {cfg.wall_sensing_ray_max_distance:g} m; drone bins: {cfg.drone_radar_bins})")
+    terminal_print(f"  observation      : {obs_dim}  (wall rays: {cfg.wall_sensing_rays}, fibonacci, {cfg.wall_sensing_ray_max_distance:g} m; drone bins: {cfg.drone_radar_bins})")
     terminal_print(f"  radar mode       : {cfg.radar_mode}")
     if cfg.radar_mode == "band_sep_counting":
         terminal_print(f"  drone counting   : {max(1, cfg.distance_bands)} distance bands; cap {cfg.radar_count_cap}")
@@ -1350,15 +1222,10 @@ def train(
     elif evaluation.random_eval:
         terminal_print(f"  eval mode        : {evaluation.random_eval_envs} persistent maps, sequential, no action noise")
     else:
-        final_mode = (f"robust {evaluation.eval_robustness_runs} runs; noise +/-{evaluation.eval_action_noise_max:g}"
-                      if evaluation.final_robustness else "single-pass, no action noise")
-        terminal_print(f"  eval mode        : {'robust' if evaluation.training_robustness else 'single-pass'}; final {final_mode}")
+        terminal_print("  eval mode        : single-pass, no action noise")
     terminal_print(f"  terminal logging : every {logging.terminal_logging_frequency}; warmup={logging.terminal_log_warmup}; init={logging.terminal_log_init}")
-    terminal_print(f"  PPO critic units : {training.value_normalization}; actor/value clip "
-          f"{training.actor_clip_eps}/{training.value_clip_eps}; entropy {training.entropy_mode}")
-    terminal_print(f"  idle penalty     : {level.reward.no_movement_termination_penalty} (effective reward config)")
-    if training.training_noise:
-        terminal_print(f"  training noise   : uniform pre-tanh +/-{training.noise_level:g}")
+    terminal_print(f"  PPO critic units : running normalization, actor/value clip "
+          f"{training.actor_clip_eps}/{training.value_clip_eps}, squashed entropy")
     terminal_print(f"  total env steps  : {total_steps:,}")
     if training.max_wall_seconds is not None:
         terminal_print(f"  wall-time budget : {training.max_wall_seconds:g}s including setup/evaluation; final saving/media follow")
@@ -1374,7 +1241,6 @@ def train(
     # A complete rollout is one compiled device program.  In particular, do
     # not materialise any transition inside the scan: the host receives the
     # stacked rollout once per update for the existing CPU replay buffer.
-    comm_cadence = int(network.memory_comm_every_k_steps)
 
     def rollout_impl(
         model,
@@ -1388,7 +1254,6 @@ def train(
         base_signature,
         base_value,
         resets,
-        prev_path_probe,
         target_spawn_weights=None,
         map_sampling_cdf=None,
         target_agent_budget=None,
@@ -1406,13 +1271,9 @@ def train(
                 base_signature,
                 base_value,
                 resets,
-                prev_path_probe,
             ) = carry
             policy_reset = resets | policy_resets(states)
-            obs = model.actor_observations(
-                jax.vmap(observations)(states), prev_path_probe,
-                states.active, states.target_known, policy_reset,
-            )
+            obs = jax.vmap(observations)(states)
             split = jax.vmap(lambda key: jax.random.split(key))(keys)
             next_keys, action_roots = split[:, 0], split[:, 1]
             agent_keys = jax.vmap(lambda key: jax.random.split(key, cfg.num_agents))(
@@ -1421,9 +1282,6 @@ def train(
             comm_masks, in_base_range, base_masks, base_sig_in, base_val_in = (
                 _communication_inputs(states, cfg, base_valid, base_signature, base_value)
             )
-            share_step = communication_due(states.step, comm_cadence)
-            comm_masks = comm_masks & share_step[:, None, None]
-            base_masks = base_masks & share_step[:, None]
 
             def policy_one(obs_e, keys_e, ah, sig, val, ch, cm, active, bs, bv, bm, rst):
                 return model.rollout_step_recurrent(
@@ -1463,27 +1321,7 @@ def train(
                 base_masks,
                 policy_reset,
             )
-            # Mirror robust evaluation: perturb pre-tanh actions with bounded
-            # uniform noise. Keep the sampled policy actions and their
-            # log-probabilities in the rollout, since the perturbation belongs
-            # to the environment transition rather than to the policy density.
-            if training.training_noise:
-                noise_roots = jax.vmap(lambda key: jax.random.fold_in(key, 1))(
-                    action_roots
-                )
-                action_noise = jax.vmap(
-                    lambda key: jax.random.uniform(
-                        key,
-                        (cfg.num_agents, 3),
-                        dtype=actions.dtype,
-                        minval=-training.noise_level,
-                        maxval=training.noise_level,
-                    )
-                )(noise_roots)
-                executed_actions = actions.at[..., :3].add(action_noise)
-            else:
-                executed_actions = actions
-            executed_actions = jnp.where(states.active[..., None], executed_actions, 0.0)
+            executed_actions = jnp.where(states.active[..., None], actions, 0.0)
             if target_agent_budget is not None:
                 next_states, rewards, dones, info = env_step.batched(
                     states, physical_actions(executed_actions), target_spawn_weights,
@@ -1510,13 +1348,8 @@ def train(
                 base_signature,
                 base_value,
                 dones,
-                share_step,
             )
             next_resets = jnp.broadcast_to(dones[:, None], resets.shape) | policy_resets(next_states)
-            next_path_probe = model.next_path_probe(
-                next_actor_hidden, states.active & next_states.active & ~next_resets,
-                states.target_known,
-            )
             transition = {
                 "obs": obs,
                 "actions": actions,
@@ -1530,13 +1363,13 @@ def train(
                 **({"geo_target_known":states.target_known,"geo_map_id":states.map_id,
                     "geo_base":states.base_pos,"geo_target":states.target_pos} if geo_data is not None else {}),
                 "agent_terminated": info["agent_terminated"],
-                **({name: info[name] for name in (*INFO_NAMES, *adaptive_reward_names, *REFERENCE_DIAGNOSTIC_NAMES)}
+                **({name: info[name] for name in (*INFO_NAMES, *adaptive_reward_names)}
                    if cfg.adapt_size.enabled else {}),
                 "base_signatures": base_sig_in,
                 "base_values": base_val_in,
                 "base_memory_masks": base_masks,
                 "base_write_indices": jnp.where(
-                    ~base_valid & jnp.any(states.target_known & in_base_range, axis=-1) & share_step,
+                    ~base_valid & jnp.any(states.target_known & in_base_range, axis=-1),
                     jnp.argmax((states.target_known & in_base_range).astype(jnp.int32), axis=-1), -1),
                 "exploration_reward": info["exploration_reward"],
                 "collision_reward": info["collision_reward"],
@@ -1545,20 +1378,17 @@ def train(
                 "gap_reward": info["gap_reward"],
                 "gap_gain": info["gap_gain"],
                 "gap_loss": info["gap_loss"],
-                "peer_informing_reward": info["peer_informing_reward"],
                 "information_counts": info["information_counts"],
                 "best_chain_held_steps": info["best_chain_held_steps"],
                 "target_found_reward": info["target_found_reward"],
                 "success_reward": info["success_reward"],
                 "useless_agent_at_success_reward": info["useless_agent_at_success_reward"],
                 "useless_agent_at_success_all_agents_reward": info["useless_agent_at_success_all_agents_reward"],
-                "no_movement_termination_penalty": info["no_movement_termination_penalty"],
                 **({"chain_efficiency_reward": info["chain_efficiency_reward"]}
-                   if level.reward.enable_chain_efficiency_reward else {}),
+                   if level.reward.chain_efficiency_reward != 0 else {}),
                 "success": info["success"],
                 "global_target_found": info["global_target_found"],
                 "global_visually_found": info["global_visually_found"],
-                "idle_terminated": info["idle_terminated"],
                 "chain_gap_dist": info["chain_gap_dist"],
                 "chain_progress_pct": info["chain_progress_pct"],
                 "global_coverage": info["global_coverage"],
@@ -1584,7 +1414,6 @@ def train(
                 next_base_signature,
                 next_base_value,
                 next_resets,
-                next_path_probe,
             )
             return next_carry, transition
 
@@ -1601,11 +1430,10 @@ def train(
                 base_signature,
                 base_value,
                 resets,
-                prev_path_probe,
             ),
             jnp.arange(training.num_steps, dtype=jnp.int32),
         )
-        final_states, _, _, _, _, final_critic_hidden, _, _, _, final_resets, _ = carry
+        final_states, _, _, _, _, final_critic_hidden, _, _, _, final_resets = carry
         final_obs = jax.vmap(observations)(final_states)
 
         def value_one(obs_e, hidden_e, active_e, reset_e):
@@ -1643,7 +1471,6 @@ def train(
             base_signature,
             base_value,
             resets,
-            prev_path_probe,
             final_values,
             rollout_device,
         ) = run_rollout(
@@ -1658,7 +1485,6 @@ def train(
             base_signature,
             base_value,
             resets,
-            prev_path_probe,
             chunk_size=training.rollout_batch_size,
             **({"target_spawn_weights": target_spawn_weights} if target_spawn_weights is not None else {}),
             **({"map_sampling_cdf": map_sampling_cdf} if map_sampling_cdf is not None else {}),
@@ -1678,14 +1504,13 @@ def train(
         rollout_finished = time.perf_counter()
         if cfg.adapt_size.enabled:
             validate_zones(rollout_host["adapt_zone_valid"])
-        if training.randomize_base or training.minimum_geodesic_separation or training.dynamic_max_geo_distance.enabled:
-            check_spawn_pairs(rollout_host["spawn_pair_attempts"])
-            check_spawn_pairs(states.spawn_pair_attempts)
+        check_spawn_pairs(rollout_host["spawn_pair_attempts"])
+        check_spawn_pairs(states.spawn_pair_attempts)
         if initial_update:
             init_log("First rollout results received. Building host buffer and advantages...")
-        buffer.reset(
-            initial_states[0], initial_states[1], initial_states[2], initial_states[3]
-        )
+        actor_h, critic_h, actor_sig, actor_val = initial_states
+        buffer.reset(actor_h=actor_h, critic_h=critic_h,
+                     actor_signature=actor_sig, actor_value=actor_val)
         if geo_data is not None:
             geo_data.prepare(rollout_host,update)
         for step_index in range(training.num_steps):
@@ -1700,9 +1525,6 @@ def train(
             episode_visually_found = np.maximum(
                 episode_visually_found,
                 rollout_host["global_visually_found"][step_index],
-            )
-            episode_idle = np.maximum(
-                episode_idle, rollout_host["idle_terminated"][step_index]
             )
             episode_gap = rollout_host["chain_gap_dist"][step_index]
             episode_progress_pct = rollout_host["chain_progress_pct"][step_index]
@@ -1732,8 +1554,6 @@ def train(
             )
             completed_indices = np.flatnonzero(dones_host)
             for index in completed_indices:
-                if training_hold is not None:
-                    training_hold.append(index, episode_success[index] > .5, episode_lengths[index])
                 if adaptive_window is not None:
                     adaptive_window.append(
                         {name: rollout_host[name][step_index, index] for name in INFO_NAMES},
@@ -1752,7 +1572,6 @@ def train(
                 window_succ.append(float(episode_success[index]))
                 window_fnd.append(float(episode_found[index]))
                 window_visually_found.append(float(episode_visually_found[index]))
-                window_idle.append(float(episode_idle[index]))
                 window_gap.append(float(episode_gap[index]))
                 window_prog_pct.append(float(episode_progress_pct[index]))
                 window_cov.append(float(episode_coverage[index]))
@@ -1779,7 +1598,6 @@ def train(
             episode_success[completed_indices] = 0.0
             episode_found[completed_indices] = 0.0
             episode_visually_found[completed_indices] = 0.0
-            episode_idle[completed_indices] = 0.0
             episode_information_counts[completed_indices] = 0
             episode_gap_gain[completed_indices] = 0.0
             episode_gap_loss[completed_indices] = 0.0
@@ -1896,17 +1714,6 @@ def train(
         window_full = len(window_ret) == window_ret.maxlen
         if window_full:
             latest_stats.update(information_percentages(window_information_counts))
-        train_stop = False
-        if training_hold is not None:
-            train_stop, gate_metrics = training_hold.observe()
-            if gate_metrics is not None:
-                latest_stats.update(gate_metrics)
-                terminal_print(
-                    f"[TRAIN GATE] worst-map success={gate_metrics['train_early_exit_min_map_success']:.1%}; "
-                    f"worst-map speed reduction={gate_metrics['train_early_exit_min_map_length_reduction']:.1%}; "
-                    f"hold={training_hold.hold.consecutive}/{max(1, evaluation.early_exit_hold_evals)}",
-                    flush=True,
-                )
         with history_path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps({"update": update, **latest_stats}) + "\n")
         if update % log_every == 0 and (window_full or logging.terminal_log_warmup):
@@ -1918,11 +1725,9 @@ def train(
             display_found = f"{np.mean(window_fnd):>5.1%}" if window_full else " ----"
             display_progress = f"{np.mean(window_prog_pct):>5.1f}%" if window_full else "  ---%"
             display_success = f"{np.mean(window_succ):>5.1%}" if window_full else " ----"
-            pair_stat = ""
-            if training.minimum_geodesic_separation or training.dynamic_max_geo_distance.enabled:
-                rejected = (1.0 - len(window_pair_attempts) / sum(window_pair_attempts)) if window_full else 0.0
-                display_rejected = f"{rejected:>5.1%}" if window_full else " ----"
-                pair_stat = f"  pair_reject={display_rejected}"
+            rejected = (1.0 - len(window_pair_attempts) / sum(window_pair_attempts)) if window_full else 0.0
+            display_rejected = f"{rejected:>5.1%}" if window_full else " ----"
+            pair_stat = f"  pair_reject={display_rejected}"
             terminal_print(
                 f" [{update:>4}/{num_updates}]  "
                 f"steps={steps_done:>12,}  sps={sps:>6,.0f}  "
@@ -1965,7 +1770,6 @@ def train(
                     "train/ep_return": latest_stats["mean_episode_return"],
                     "train/ep_length": latest_stats["mean_episode_length"],
                     "train/success_rate": latest_stats["rolling_success_rate"],
-                    "train/no_movement_termination_rate": float(np.mean(window_idle)) * 100.0,
                     "train/target_found_rate": latest_stats["target_found_rate"],
                     "train/visually_found_rate": latest_stats["visually_found_rate"],
                     "train/chain_progress_pct": latest_stats["chain_progress_pct"],
@@ -2005,10 +1809,7 @@ def train(
             return cluster_checkpoint, dict(latest_stats, stop_reason="preempted")
         validation_stop = False
         time_limit_reached = deadline is not None and time.perf_counter() >= deadline
-        validation_interval = level.validation.val_every_env_steps
-        validation_due = validation_runner is not None and (steps_done // validation_interval >
-                          (steps_done - training.num_envs * training.num_steps) // validation_interval
-                          if validation_interval is not None else update % level.validation.val_freq == 0)
+        validation_due = validation_runner is not None and update % level.validation.val_freq == 0
         if validation_runner is not None and (
                 validation_due
                 or ((update == num_updates or time_limit_reached) and level.validation.val_on_finalization)):
@@ -2034,21 +1835,14 @@ def train(
                 run_dir=destination,
                 metrics=latest_stats,
             )
-        # The final update bypasses the gate. Its training metric uses the same
-        # mode as earlier evaluations; optional final robustness is a separate phase.
+        # The final update bypasses the minimum training success for scheduled inspection.
         is_final_update = (update == num_updates or
                            (deadline is not None and time.perf_counter() >= deadline))
-        if train_stop:
-            terminal_print("[EARLY-STOP] every map passed fresh training episode windows; collecting final diagnostics.")
         threshold_met = (
             latest_stats["rolling_success_rate"] >= evaluation.eval_min_train_success
         )
-        evaluation_enabled = threshold_met or is_final_update or train_stop
-        step_interval = evaluation.eval_every_env_steps
-        scheduled_eval = (steps_done // step_interval >
-                          (steps_done - training.num_envs * training.num_steps) // step_interval
-                          if step_interval is not None else
-                          schedule_due(update, evaluation.eval_freq, evaluation.eval_offset))
+        evaluation_enabled = threshold_met or is_final_update
+        scheduled_eval = schedule_due(update, evaluation.eval_freq, evaluation.eval_offset)
         if scheduled_eval and not evaluation_enabled:
             terminal_print(
                 f"[EVAL update={update}] skipped: training success "
@@ -2056,7 +1850,7 @@ def train(
                 f"{evaluation.eval_min_train_success:.1%} required.",
                 flush=True,
             )
-        eval_due = is_final_update or train_stop or validation_stop or (
+        eval_due = is_final_update or validation_stop or (
             scheduled_eval
             and evaluation_enabled
         )
@@ -2085,17 +1879,13 @@ def train(
                     update=update, steps=steps_done, eval_due=eval_due, replay_due=replay_due, on_run=report_run,
                     sampling_kwargs=inspection_sampling, spawn_sampler=adaptive_spawn)
                 evaluation_result = None
-                stop_training = bool(
-                    eval_metrics is not None and evaluation.early_exit and evaluation_stop_source(evaluation) == "evaluation"
-                    and eval_hold.observe(eval_metrics["eval_success"],
-                                          eval_metrics.get("eval_success_length_reduction")))
             else:
-                eval_metrics, evaluation_result, stop_training = _evaluate_training_metrics(
-                    model, evaluation_level, eval_hold,
-                    eval_due=eval_due, on_run=report_run, spawn_sampler=adaptive_spawn,
+                eval_metrics, evaluation_result = _evaluate_training_metrics(
+                    model, evaluation_level,
+                    eval_due=eval_due, spawn_sampler=adaptive_spawn,
                     sampling_kwargs=inspection_sampling,
                 )
-            stop_training = stop_training or train_stop or validation_stop
+            stop_training = validation_stop
             if (
                 stop_training
                 and map_suite_levels is not None
@@ -2119,29 +1909,16 @@ def train(
                     eval_metrics, evaluation_level, update=update, total=num_updates, steps=steps_done,
                     phase="eval", wandb_run=wandb_run,
                     history_path=destination / "evaluation_history.jsonl",
-                    hold=eval_hold,
                 )
                 if stop_training:
                     terminal_print("[EARLY-STOP]")
                 if on_progress is not None:
                     on_progress({"phase": "evaluation", "update": update,
                                  "global_step": steps_done, **eval_metrics,
-                                 "converged": bool(validation_stop or (stop_training and eval_hold.consecutive >=
-                                                   max(1, evaluation.early_exit_hold_evals)))})
+                                 "converged": bool(validation_stop)})
             if (eval_metrics is not None and (is_final_update or stop_training)
                     and map_suite_levels is None):
-                if evaluation.final_robustness and (evaluation_result is None
-                        or int(evaluation_result[0]["eval_robustness_runs"]) == 1):
-                    from swarmecho.training.evaluate import collect_robust_evaluation
-                    evaluation_result = collect_robust_evaluation(
-                        model, evaluation_level,
-                        on_run=functools.partial(report_run, prefix="FINAL"),
-                        **inspection_sampling,
-                    )
-                elif evaluation.final_robustness:
-                    terminal_print("[FINAL] reusing this update's robust runs.")
-                else:
-                    terminal_print("[FINAL] reusing this update's noise-free metric pass.")
+                terminal_print("[FINAL] reusing this update's noise-free metric pass.")
                 final_evaluation_result = evaluation_result
                 final_metrics = evaluation_result[0] if evaluation_result is not None else eval_metrics
                 latest_stats.update({f"final_{key}": value for key, value in final_metrics.items()})
@@ -2149,7 +1926,6 @@ def train(
                     final_metrics, evaluation_level, update=update, total=num_updates, steps=steps_done,
                     phase="final_eval", wandb_run=wandb_run,
                     history_path=destination / "evaluation_history.jsonl",
-                    hold=eval_hold,
                 )
             suffix = artifact_suffix(update, steps_done)
             if (evaluation_result is not None
@@ -2164,13 +1940,6 @@ def train(
                     stage_rates=episode_info["stage_rates"],
                     final_chain_lengths=episode_info["final_chain_lengths"],
                 )
-                layout_path = None
-                if cfg.num_obstacles:
-                    layout_path = save_eval_layout(
-                        info_path.with_suffix(".layout.json"),
-                        episode_info["obstacle_min"],
-                        episode_info["obstacle_max"],
-                    )
                 write_manifest(
                     info_path.with_suffix(".heatmap.json"),
                     {
@@ -2187,9 +1956,7 @@ def train(
                         "environment_steps": steps_done,
                         "artifact_scope": "train",
                         "robustness_runs": artifact_runs,
-                        "action_noise_max": evaluation.eval_action_noise_max if artifact_runs > 1 else 0.0,
-                        "obstacle_layout_mode": "fixed" if cfg.num_obstacles else "free_space",
-                        **({"layout_file": layout_path.name} if layout_path else {}),
+                        "action_noise_max": 0.0,
                     },
                 )
                 write_manifest(
@@ -2209,16 +1976,9 @@ def train(
                 and map_suite_levels is None
             ):
                 replay_started = time.perf_counter()
-                replay_bounds = evaluation.eval_fixed_obstacle_bounds
                 eval_states, eval_rewards = evaluate_model(
                     model, evaluation_level, max_steps=cfg.max_steps,
                     **inspection_sampling,
-                    obstacle_min=(
-                        None if not replay_bounds else jnp.asarray(replay_bounds)[:, :3]
-                    ),
-                    obstacle_max=(
-                        None if not replay_bounds else jnp.asarray(replay_bounds)[:, 3:]
-                    ),
                 )
                 write_replay(
                     replay_dir / f"eval_{suffix}",
@@ -2227,7 +1987,7 @@ def train(
                     dt=cfg.dt,
                     reward_terms=eval_rewards,
                     metadata={
-                        **planner_metadata(evaluation_level.env, reward_cfg=evaluation_level.reward),
+                        **planner_metadata(evaluation_level.env),
                         "world_size_m": evaluation_level.building.world_size_m.tolist(),
                         "cell_size_m": evaluation_level.building.cell_size_m,
                         "coverage_voxel_size_m": (
@@ -2236,7 +1996,7 @@ def train(
                             else cfg.coverage_voxel_size
                         ),
                         "comm_radius_m": cfg.comm_radius,
-                        "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                        "allow_redundancy_reward": False,
                         "comm_radius_base_m": cfg.comm_radius_base,
                         "visual_radius_m": cfg.visual_radius,
                         "success_condition": evaluation_level.env.success_condition,
@@ -2257,8 +2017,6 @@ def train(
             record_timing(update, "evaluation_and_artifacts", total_s=time.perf_counter() - evaluation_started)
             if stop_training:
                 latest_stats["stop_reason"] = "early_exit"
-                if training.dynamic_max_geo_distance.enabled:
-                    latest_stats["agent_curriculum_mastered"] = True
                 if wandb_run is not None:
                     import wandb
                     wandb.log({}, step=steps_done, commit=True)
@@ -2362,7 +2120,7 @@ def train(
 
 def _recordable_reward_components(rewards, terms):
     """Keep additive rewards; omit event counters and duplicate diagnostics."""
-    diagnostics = {"newly_knows", "reward_by_reference_positive", "reward_by_reference_negative"}
+    diagnostics = {"newly_knows"}
     return {
         name: jnp.broadcast_to(value, rewards.shape)
         for name, value in terms.items() if name not in diagnostics
@@ -2414,7 +2172,6 @@ def _collect_replay_impl(
     base_signature = jnp.zeros((model.tarmac_sig_dim,), dtype=jnp.float32)
     base_value = jnp.zeros((model.tarmac_val_dim,), dtype=jnp.float32)
     num_agents = cfg.num_agents
-    comm_cadence = int(model.memory_comm_every_k_steps)
 
     def replay_step(carry, step_index):
         (
@@ -2425,7 +2182,6 @@ def _collect_replay_impl(
             current_base_valid,
             current_base_signature,
             current_base_value,
-            prev_path_probe,
             completed,
             episode_length,
         ) = carry
@@ -2449,19 +2205,12 @@ def _collect_replay_impl(
                 current_state.pos, current_state.base_pos,
                 current_state.solid_min, current_state.solid_max,
             )
-        share_now = communication_due(current_state.step, comm_cadence)
-        comm_mask = comm_mask & share_now
         base_memory_mask = (
             current_base_valid & in_base_range
-            & (jnp.ones_like(current_state.target_known) if cfg.base_keeps_informing
-               else ~current_state.target_known)
-            & share_now
+            & (~current_state.target_known)
         )
         resets = policy_resets(current_state)
-        obs = model.actor_observations(
-            observations(current_state), prev_path_probe,
-            current_state.active, current_state.target_known, resets,
-        )
+        obs = observations(current_state)
         (
             next_hidden,
             emitted_signature,
@@ -2481,7 +2230,6 @@ def _collect_replay_impl(
             base_memory_mask=base_memory_mask,
             deterministic=True,
         )
-        means = deterministic_actions(model.actor, next_hidden, means)
         candidate_state = step(current_state, physical_actions(means))
         rewards, terms = compute_rewards(current_state, candidate_state, reward_cfg, cfg)
         components = _recordable_reward_components(rewards, terms)
@@ -2489,7 +2237,7 @@ def _collect_replay_impl(
         reporters = current_state.target_known & in_base_range
         has_reporter = jnp.any(reporters)
         reporter_index = jnp.argmax(reporters.astype(jnp.int32))
-        should_store = ~current_base_valid & has_reporter & share_now
+        should_store = ~current_base_valid & has_reporter
         next_base_signature = jnp.where(
             should_store, emitted_signature[reporter_index], current_base_signature
         )
@@ -2511,10 +2259,6 @@ def _collect_replay_impl(
             operand=None,
         )
         live = ~completed
-        next_path_probe = model.next_path_probe(
-            next_hidden, current_state.active & candidate_state.active & live & ~candidate_state.done,
-            current_state.target_known,
-        )
         next_carry = (
             next_state,
             next_hidden,
@@ -2523,7 +2267,6 @@ def _collect_replay_impl(
             next_base_valid,
             next_base_signature,
             next_base_value,
-            next_path_probe,
             completed | candidate_state.done,
             episode_length + live.astype(jnp.int32),
         )
@@ -2543,7 +2286,6 @@ def _collect_replay_impl(
             base_valid,
             base_signature,
             base_value,
-            model.initial_path_probe(num_agents=num_agents),
             jnp.bool_(False),
             jnp.int32(0),
         ),
@@ -2664,11 +2406,9 @@ def evaluate_model(
         "cfg",
         "num_envs",
         "horizon",
-        "action_noise_max",
         "capture_actions",
         "capture_result",
         "capture_offset",
-        "fixed_layout",
         "return_population",
         "return_required_agents",
         "return_useless_agents",
@@ -2680,7 +2420,6 @@ def evaluate_model(
 def _run_parallel_evaluation_jit(
     model: MAPPOModel,
     key: jax.Array,
-    action_noise_key: jax.Array,
     *,
     reset,
     step,
@@ -2690,15 +2429,9 @@ def _run_parallel_evaluation_jit(
     cfg,
     num_envs: int,
     horizon: int,
-    action_noise_max: float = 0.0,
     capture_actions: bool = False,
     capture_result: str = "success",
     capture_offset: int = 0,
-    fixed_layout: bool = False,
-    fixed_obstacle_min: jax.Array | None = None,
-    fixed_obstacle_max: jax.Array | None = None,
-    fixed_roadmap_vertices: jax.Array | None = None,
-    fixed_roadmap_distances: jax.Array | None = None,
     case_map_ids: jax.Array | None = None,
     case_keys: jax.Array | None = None,
     case_targets: jax.Array | None = None,
@@ -2715,16 +2448,11 @@ def _run_parallel_evaluation_jit(
     if (return_population or return_required_agents) and capture_actions:
         raise ValueError("Population summaries and action capture must be collected separately.")
     env_keys = jax.random.split(key, num_envs) if case_keys is None else case_keys
-    env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
-    comm_cadence = int(model.memory_comm_every_k_steps)
 
-    def run_single_environment(env_key, env_action_noise_key, case_map_id=None, case_target=None):
+    def run_single_environment(env_key, case_map_id=None, case_target=None):
         if case_map_id is not None:
             state = reset(env_key, map_id=case_map_id, target_pos=case_target)
-        elif fixed_layout:
-            state = reset(env_key, obstacle_min=fixed_obstacle_min, obstacle_max=fixed_obstacle_max,
-                          stored_vertices=fixed_roadmap_vertices, stored_distances=fixed_roadmap_distances)
         else:
             sampling_kwargs = {name: value for name, value in (
                 ("target_spawn_weights", target_spawn_weights), ("target_agent_budget", target_agent_budget),
@@ -2760,7 +2488,6 @@ def _run_parallel_evaluation_jit(
             initial_carry = (*initial_carry, jnp.int32(0))
         if return_information:
             initial_carry = (*initial_carry, jnp.zeros((3,), dtype=jnp.int32))
-        initial_carry = (*initial_carry, model.initial_path_probe(num_agents=num_agents))
         if return_geo:
             initial_carry = (*initial_carry,jnp.zeros_like(actor_hidden),jnp.full((num_agents,),jnp.inf))
 
@@ -2804,17 +2531,11 @@ def _run_parallel_evaluation_jit(
                     state.pos, state.base_pos,
                     state.solid_min, state.solid_max,
                 )
-            receivers = jnp.ones_like(state.target_known) if cfg.base_keeps_informing else ~state.target_known
+            receivers = ~state.target_known
             base_memory_mask = base_valid & in_base_range & receivers
-            share_now = communication_due(state.step, comm_cadence)
-            comm_mask = comm_mask & share_now
-            base_memory_mask = base_memory_mask & share_now
 
-            prev_path_probe = carry[-3] if return_geo else carry[-1]
             resets = policy_resets(state)
-            observation = model.actor_observations(
-                observations(state), prev_path_probe, state.active, state.target_known, resets,
-            )
+            observation = observations(state)
             (
                 next_actor_hidden,
                 emitted_signature,
@@ -2834,40 +2555,17 @@ def _run_parallel_evaluation_jit(
                 base_memory_mask=base_memory_mask,
                 deterministic=True,
             )
-            means = deterministic_actions(model.actor, next_actor_hidden, means)
-            if action_noise_max > 0.0:
-                # Probe the observed shape-dependent actor-mean discrepancy
-                # without altering resets, target positions, or matrix shapes.
-                step_noise_key = jax.random.fold_in(
-                    env_action_noise_key, step_index
-                )
-                means = means.at[..., :3].add(jax.random.uniform(
-                    step_noise_key,
-                    means[..., :3].shape,
-                    dtype=means.dtype,
-                    minval=-action_noise_max,
-                    maxval=action_noise_max,
-                ))
             executed_actions = jnp.where(state.active[:, None], physical_actions(means), 0.0)
             next_state = step(state, executed_actions)
             rewards, _ = compute_rewards(state, next_state, reward_cfg, cfg)
-            target_found_or_delivered = (
-                next_state.base_target_known
-                if reward_cfg.target_found_requires_delivery
-                else jnp.any(next_state.target_known)
-            )
+            target_found_or_delivered = next_state.base_target_known
             live = ~completed
-            if cfg.success_condition == "coverage":
-                step_chain_progress = jnp.float32(0.0)
-            elif reward_cfg.chain_reward_system == "obstacle_geodesic":
-                _, step_chain_progress, _, _ = obstacle_chain_diagnostics(next_state)
-            else:
-                _, step_chain_progress = chain_diagnostics(next_state)
+            _, step_chain_progress, _, _ = obstacle_chain_diagnostics(next_state)
 
             reporters = state.target_known & in_base_range
             has_reporter = jnp.any(reporters)
             reporter_index = jnp.argmax(reporters.astype(jnp.int32))
-            should_store = ~base_valid & has_reporter & share_now
+            should_store = ~base_valid & has_reporter
             next_base_signature = jnp.where(
                 should_store, emitted_signature[reporter_index], base_signature
             )
@@ -2909,9 +2607,7 @@ def _run_parallel_evaluation_jit(
                 useless_index = 16 + int(return_population)
                 useless = jax.lax.cond(
                     live & next_state.success,
-                    lambda _: jnp.sum(next_state.active & ~success_contributors(
-                        next_state, cfg, chain_reward_system=reward_cfg.chain_reward_system,
-                        allow_redundancy=reward_cfg.allow_redundancy_reward)),
+                    lambda _: jnp.sum(next_state.active & ~success_contributors(next_state, cfg)),
                     lambda _: carry[useless_index], None,
                 )
                 next_carry = (*next_carry, useless)
@@ -2919,11 +2615,6 @@ def _run_parallel_evaluation_jit(
                 information_index = 16 + int(return_population) + int(return_useless_agents)
                 next_carry = (*next_carry, carry[information_index]
                               + jnp.where(live, information_counts(state, next_state), 0))
-            next_path_probe = model.next_path_probe(
-                next_actor_hidden, state.active & next_state.active & live & ~next_state.done,
-                state.target_known,
-            )
-            next_carry = (*next_carry, next_path_probe)
             if return_geo:
                 # Min independent random priority selects one uniform informed
                 # lifetime snapshot without retaining a full hidden history.
@@ -2949,8 +2640,7 @@ def _run_parallel_evaluation_jit(
         )
         metrics = (
             *final_carry[8:15],
-            (final_chain_length(final_carry[0], cfg)
-             if cfg.success_condition != "coverage" else jnp.float32(0.0)),
+            final_chain_length(final_carry[0], cfg),
             state.target_pos, state.base_pos,
             state.obstacle_min, state.obstacle_max,
             state.spawn_pair_attempts,
@@ -2970,11 +2660,11 @@ def _run_parallel_evaluation_jit(
         return (*metrics, action_history) if capture_actions else metrics
 
     if case_map_ids is None:
-        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys)
+        batched = jax.vmap(run_single_environment)(env_keys)
     elif case_targets is None:
-        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys, case_map_ids)
+        batched = jax.vmap(run_single_environment)(env_keys, case_map_ids)
     else:
-        batched = jax.vmap(run_single_environment)(env_keys, env_action_noise_keys, case_map_ids, case_targets)
+        batched = jax.vmap(run_single_environment)(env_keys, case_map_ids, case_targets)
     if not capture_actions:
         return batched
 
@@ -2994,8 +2684,6 @@ def _run_parallel_evaluation_jit(
 
 
 def _validate_evaluation_pairs(level: Level, attempts: np.ndarray) -> None:
-    if not (evaluation_minimum_geodesic_separation(level) or evaluation_dynamic_max_geo_distance(level)):
-        return
     rejected = int(np.count_nonzero(np.asarray(attempts) == 0))
     if rejected:
         raise ValueError(
@@ -3015,10 +2703,6 @@ def evaluate_suite(
     max_steps: int | None = None,
     return_episode_info: bool = False,
     return_required_agents: bool = False,
-    action_noise_max: float = 0.0,
-    action_noise_seed: int | None = None,
-    layout_mode: str | None = None,
-    layout_seed_offset: int | None = None,
     target_spawn_weights: np.ndarray | None = None,
     target_agent_budget: int | None = None,
 ) -> dict[str, float] | tuple[dict[str, float], dict[str, np.ndarray]]:
@@ -3030,38 +2714,11 @@ def evaluate_suite(
     if show_progress:
         terminal_print(f"[EVAL] {level.building_name}: preparing environment for {episodes:,} episodes.")
     reset, step, observations, env_metrics = _evaluation_env_fns(level)
-    layout_mode = layout_mode or ("fixed" if cfg.num_obstacles else "per_environment")
-    fixed_layout = bool(cfg.num_obstacles)
-    layout_seed_offset = 30_000 if layout_seed_offset is None else layout_seed_offset
-    reference_state = None
-    fixed_min = fixed_max = fixed_vertices = fixed_distances = None
-    if fixed_layout:
-        configured_bounds = getattr(
-            level.evaluation, "eval_fixed_obstacle_bounds", None
-        )
-        if configured_bounds:
-            bounds = jnp.asarray(configured_bounds, dtype=jnp.float32)
-            if bounds.shape != (cfg.num_obstacles, 6):
-                raise ValueError(
-                    "eval_fixed_obstacle_bounds must contain six values per obstacle."
-                )
-            fixed_min, fixed_max = bounds[:, :3], bounds[:, 3:]
-            fixed_vertices, fixed_distances = reset.build_roadmap(fixed_min, fixed_max)
-        else:
-            reference_state = reset(
-                jax.random.PRNGKey(level.training.seed + layout_seed_offset)
-            )
-            fixed_min, fixed_max = reference_state.obstacle_min, reference_state.obstacle_max
-            fixed_vertices = reference_state.roadmap_vertices
-            fixed_distances = reference_state.roadmap_distances
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     batch_size = episodes if batch_size is None else batch_size
     if batch_size < 1 or episodes < 1:
         raise ValueError("Evaluation episode count and batch size must be positive.")
     reset_key = jax.random.PRNGKey(level.training.seed + 10_000)
-    noise_key = jax.random.PRNGKey(
-        level.training.seed + 20_000 if action_noise_seed is None else action_noise_seed
-    )
     batches = []
     progress = nullcontext()
     if show_progress:
@@ -3084,7 +2741,6 @@ def evaluate_suite(
             metrics_batch = _run_parallel_evaluation_jit(
                 model,
                 reset_key if batch_index == 0 else jax.random.fold_in(reset_key, batch_index),
-                noise_key if batch_index == 0 else jax.random.fold_in(noise_key, batch_index),
                 reset=reset,
                 step=step,
                 observations=observations,
@@ -3093,12 +2749,6 @@ def evaluate_suite(
                 cfg=cfg,
                 num_envs=size,
                 horizon=horizon,
-                action_noise_max=action_noise_max,
-                fixed_layout=fixed_layout,
-                fixed_obstacle_min=fixed_min,
-                fixed_obstacle_max=fixed_max,
-                fixed_roadmap_vertices=fixed_vertices,
-                fixed_roadmap_distances=fixed_distances,
                 return_required_agents=return_required_agents,
                 return_useless_agents=cfg.adapt_size.enabled,
                 return_information=True,
@@ -3195,28 +2845,11 @@ def evaluate_suite_with_action_capture(
 
     cfg = level.env
     reset, step, observations, env_metrics = _evaluation_env_fns(level)
-    fixed_layout = bool(cfg.num_obstacles)
-    reference_state = (
-        reset(jax.random.PRNGKey(level.training.seed + 30_000))
-        if fixed_layout else None
-    )
-    fixed_min = fixed_max = fixed_vertices = fixed_distances = None
-    if fixed_layout:
-        configured_bounds = getattr(level.evaluation, "eval_fixed_obstacle_bounds", None)
-        if configured_bounds:
-            bounds = jnp.asarray(configured_bounds, dtype=jnp.float32)
-            fixed_min, fixed_max = bounds[:, :3], bounds[:, 3:]
-            fixed_vertices, fixed_distances = reset.build_roadmap(fixed_min, fixed_max)
-        else:
-            fixed_min, fixed_max = reference_state.obstacle_min, reference_state.obstacle_max
-            fixed_vertices = reference_state.roadmap_vertices
-            fixed_distances = reference_state.roadmap_distances
     horizon = min(max_steps or cfg.max_steps, cfg.max_steps)
     batched, selected_lane, selected_actions = jax.device_get(
         _run_parallel_evaluation_jit(
             model,
             jax.random.PRNGKey(level.training.seed + 10_000),
-            jax.random.PRNGKey(level.training.seed + 20_000),
             reset=reset,
             step=step,
             observations=observations,
@@ -3232,11 +2865,6 @@ def evaluate_suite_with_action_capture(
             capture_offset=offset,
             target_spawn_weights=target_spawn_weights,
             target_agent_budget=target_agent_budget,
-            fixed_layout=fixed_layout,
-            fixed_obstacle_min=fixed_min,
-            fixed_obstacle_max=fixed_max,
-            fixed_roadmap_vertices=fixed_vertices,
-            fixed_roadmap_distances=fixed_distances,
         )
     )
     (

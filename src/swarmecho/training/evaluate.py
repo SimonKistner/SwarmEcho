@@ -122,15 +122,16 @@ def _load_checkpoint_on_map(run_dir: Path, map_name: str, overrides: list[str]):
     data["random_buildings"] = {"enabled": False}
     data["validation"] = {"enabled": False}
     training = data.setdefault("training", {})
-    training.update(num_maps=None, map_pool_path=None, checkpoint_path=None)
-    training.setdefault("target_curriculum", {})["mode"] = "none"
+    training.update(num_maps=None, seed_map_pool=False, map_pool_path=None, checkpoint_path=None)
+    training.pop("target_curriculum", None)
+    training["forward_target_curriculum"] = {"enabled": False}
     for key in ("agent_count_curriculum", "adaptive_map_sampling", "adaptive_target_spawn",
                 "target_spawn_eligibility"):
         training.pop(key, None)
     data.setdefault("evaluation", {}).update(
-        early_exit=False, early_exit_source="evaluation", random_eval=False, random_eval_maps=None,
-        training_robustness=False, eval_differes_from_training_map=False, eval_map=None,
-        eval_fixed_obstacle_bounds=None, target_sampling="independent",
+        early_exit=False, random_eval=False, random_eval_maps=None,
+        eval_differes_from_training_map=False, eval_map=None,
+        target_sampling="independent",
     )
     return load_level(source, overrides, config_data=data)
 
@@ -176,134 +177,6 @@ def _heatmap_manifest(
     write_manifest(info_path.with_suffix(".heatmap.json"), manifest)
 
 
-def collect_robust_evaluation(
-    model,
-    level,
-    *,
-    on_run=None,
-    target_spawn_weights=None,
-    target_agent_budget=None,
-) -> tuple[dict[str, float], dict]:
-    """Collect unanimous outcomes and ensemble means without writing artifacts."""
-    level = resolve_evaluation_level(level)
-    episodes = level.effective_eval_parallel_envs
-    robustness_runs = level.evaluation.eval_robustness_runs
-    if robustness_runs < 2:
-        raise ValueError("Robust evaluation requires at least two runs.")
-    action_noise_max = level.evaluation.eval_action_noise_max
-    layout_mode = "fixed" if getattr(getattr(level, "env", None), "num_obstacles", 0) else None
-    metric_runs: list[dict[str, float]] = []
-    success_runs: list[np.ndarray] = []
-    length_runs: list[np.ndarray] = []
-    chain_runs: list[np.ndarray] = []
-    delivered_runs: list[np.ndarray] = []
-    visually_found_runs: list[np.ndarray] = []
-    reference_targets: np.ndarray | None = None
-    reference_bases: np.ndarray | None = None
-    reference_chain_lengths: np.ndarray | None = None
-    reference_obstacle_min: np.ndarray | None = None
-    reference_obstacle_max: np.ndarray | None = None
-    sampling_kwargs = {name: value for name, value in (
-        ("target_spawn_weights", target_spawn_weights), ("target_agent_budget", target_agent_budget),
-    ) if value is not None}
-    for run_index in range(robustness_runs):
-        metrics, episode_info = evaluate_suite(
-            model,
-            level,
-            episodes=episodes,
-            return_episode_info=True,
-            action_noise_max=action_noise_max,
-            action_noise_seed=level.training.seed + 20_000 + run_index,
-            layout_mode=layout_mode,
-            **sampling_kwargs,
-        )
-        if on_run is not None:
-            on_run(metrics, run_index + 1, robustness_runs)
-        else:
-            evaluation_row(
-                metrics, label=f"[EVAL {run_index + 1}/{robustness_runs}]",
-                update=0, total=0, episodes=episodes,
-            )
-        targets = np.asarray(episode_info["target_positions"])
-        bases = np.asarray(episode_info["base_positions"])
-        chain_lengths = np.asarray(episode_info["final_chain_lengths"])
-        obstacle_min = np.asarray(episode_info["obstacle_min"])
-        obstacle_max = np.asarray(episode_info["obstacle_max"])
-        if reference_targets is None:
-            reference_targets = targets
-            reference_bases = bases
-            reference_chain_lengths = chain_lengths
-            reference_obstacle_min = obstacle_min
-            reference_obstacle_max = obstacle_max
-        elif not (
-            np.array_equal(targets, reference_targets)
-            and np.array_equal(bases, reference_bases)
-            and np.array_equal(obstacle_min, reference_obstacle_min)
-            and np.array_equal(obstacle_max, reference_obstacle_max)
-        ):
-            raise RuntimeError(
-                "Robust evaluation reset provenance changed between runs; "
-                "target and base positions must be identical."
-            )
-
-        successes = np.asarray(episode_info["successes"], dtype=bool)
-        chain_successes = successes & (level.env.success_condition in CHAIN_SUCCESS_CONDITIONS)
-        delivered = np.asarray(episode_info["delivered"], dtype=bool) | chain_successes
-        visually_found = (
-            np.asarray(episode_info["visually_found"], dtype=bool) | delivered
-        )
-        metric_runs.append(metrics)
-        success_runs.append(successes)
-        length_runs.append(np.asarray(episode_info["lengths"]))
-        chain_runs.append(chain_successes)
-        delivered_runs.append(delivered)
-        visually_found_runs.append(visually_found)
-
-    assert reference_targets is not None and reference_bases is not None
-    assert reference_chain_lengths is not None
-    success_rate = np.mean(np.stack(success_runs), axis=0)
-    chain_success_rate = np.mean(np.stack(chain_runs), axis=0)
-    found_and_delivered_rate = np.mean(np.stack(delivered_runs), axis=0)
-    visually_found_rate = np.mean(np.stack(visually_found_runs), axis=0)
-    metrics = {
-        key: float(np.mean([run[key] for run in metric_runs]))
-        for key in metric_runs[0]
-        if key != "eval_useless_agents_at_success" and key not in EVALUATION_INFORMATION_KEYS
-    }
-    metrics.update(pool_evaluation_information(metric_runs))
-    successful_count = sum(run.get("eval_success_episode_count", 0) for run in metric_runs)
-    if successful_count and any("eval_useless_agents_at_success" in run for run in metric_runs):
-        metrics["eval_useless_agents_at_success"] = sum(
-            run.get("eval_useless_agents_at_success", 0.0) * run.get("eval_success_episode_count", 0)
-            for run in metric_runs) / successful_count
-    all_successes = np.stack(success_runs)
-    all_lengths = np.stack(length_runs)
-    successful_length = (float(np.mean(all_lengths[all_successes])) if np.any(all_successes)
-                         else float(level.env.max_steps))
-    metrics.update(
-        eval_success=float(np.mean(success_rate == 1.0)),
-        eval_target_found_rate=float(np.mean((found_and_delivered_rate if level.reward.target_found_requires_delivery
-                                               else visually_found_rate) == 1.0)),
-        eval_visually_found_rate=float(np.mean(visually_found_rate == 1.0)),
-        eval_success_episode_length=successful_length,
-        eval_success_episode_count=int(np.count_nonzero(all_successes)),
-        eval_success_length_reduction=1.0 - successful_length / level.env.max_steps,
-        eval_robustness_runs=robustness_runs,
-    )
-    return metrics, {
-        "target_positions": reference_targets,
-        "base_positions": reference_bases,
-        "final_chain_lengths": reference_chain_lengths,
-        "obstacle_min": reference_obstacle_min,
-        "obstacle_max": reference_obstacle_max,
-        "stage_rates": {
-            "chain_success": chain_success_rate,
-            "found_and_delivered": found_and_delivered_rate,
-            "visually_found": visually_found_rate,
-        },
-    }
-
-
 def run_parallel_evaluation(
     model,
     level,
@@ -314,18 +187,14 @@ def run_parallel_evaluation(
     eval_name: str | None = None,
     result: tuple[dict[str, float], dict] | None = None,
 ) -> Path:
-    """Save the configured final ensemble or a single noise-free evaluation."""
+    """Write a heatmap from one deterministic evaluation pass."""
     level = resolve_evaluation_level(level)
     if result is not None:
         metrics, info = result
     else:
         sampling_kwargs = inspection_sampling_kwargs(level, checkpoint=checkpoint)
-        if level.evaluation.final_robustness:
-            metrics, info = collect_robust_evaluation(model, level, **sampling_kwargs)
-        else:
-            metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
-                                           return_episode_info=True, action_noise_max=0., **sampling_kwargs)
-    if result is None and not level.evaluation.final_robustness:
+        metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
+                                       return_episode_info=True, **sampling_kwargs)
         successes = np.asarray(info["successes"], dtype=bool)
         chain_success = successes & (level.env.success_condition in CHAIN_SUCCESS_CONDITIONS)
         delivered = np.asarray(info["delivered"], dtype=bool) | chain_success
@@ -333,9 +202,7 @@ def run_parallel_evaluation(
         info["stage_rates"] = {"chain_success": chain_success.astype(float),
                                "found_and_delivered": delivered.astype(float),
                                "visually_found": visually_found.astype(float)}
-        metrics = {**metrics, "eval_robustness_runs": 1}
-    if result is None:
-        evaluation_row(metrics, label="[EVAL UNAN]" if metrics["eval_robustness_runs"] > 1 else "[EVAL 1/1]", update=0, total=0,
+        evaluation_row(metrics, label="[EVAL 1/1]", update=0, total=0,
                        episodes=level.effective_eval_parallel_envs)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
@@ -352,8 +219,8 @@ def run_parallel_evaluation(
         info_path,
         level,
         checkpoint=checkpoint,
-        robustness_runs=int(metrics["eval_robustness_runs"]),
-        action_noise_max=level.evaluation.eval_action_noise_max if metrics["eval_robustness_runs"] > 1 else 0.,
+        robustness_runs=1,
+        action_noise_max=0.,
         obstacle_min=info["obstacle_min"],
         obstacle_max=info["obstacle_max"],
         eval_name=eval_name,
@@ -656,14 +523,14 @@ def render_csv_replays(
             reward_terms=rewards,
             progress=False,
             metadata={
-                **planner_metadata(level.env, reward_cfg=level.reward),
+                **planner_metadata(level.env),
                 "world_size_m": level.building.world_size_m.tolist(),
                 "cell_size_m": level.building.cell_size_m,
                 "coverage_voxel_size_m": level.building.cell_size_m
                 if level.env.coverage_voxel_size is None
                 else level.env.coverage_voxel_size,
                 "comm_radius_m": level.env.comm_radius,
-                "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+                "allow_redundancy_reward": False,
                 "comm_radius_base_m": level.env.comm_radius_base,
                 "visual_radius_m": level.env.visual_radius,
                 "success_condition": level.env.success_condition,
@@ -803,14 +670,15 @@ def _run_evaluation() -> None:
     if eval_samples is not None and (eval_samples < 1 or mode != "parallel"):
         raise ValueError("eval_samples requires a positive episode count and mode=parallel.")
     use_map_suite = bool(level.evaluation.random_eval or level.static_map_suite or suite_map_id)
-    authored_single_map = not use_map_suite and (replay_by_required_agents or eval_samples is not None)
+    authored_single_map = not use_map_suite and (
+        eval_map is not None or replay_by_required_agents or eval_samples is not None
+    )
     if mode == "required_agent_replays" and (use_map_suite or level.training.randomize_base
                                              or level.evaluation.eval_differes_from_training_map):
         raise ValueError("required_agent_replays needs one authored map with a fixed base.")
     if replay_by_required_agents or mode == "required_agent_replays":
-        from swarmecho.core.config import evaluation_dynamic_max_geo_distance
-        if not level.evaluation.eval_video or not evaluation_dynamic_max_geo_distance(level):
-            raise ValueError("Required-agent replays need inspection_evaluation.eval_video=true and dynamic_max_geo_distance=true.")
+        if not level.evaluation.eval_video:
+            raise ValueError("Required-agent replays need inspection_evaluation.eval_video=true.")
     if suite_map_id is not None:
         import re
         from dataclasses import replace
@@ -829,7 +697,7 @@ def _run_evaluation() -> None:
         level = replace(level, building=load_building(saved_map), map_names=[suite_map_id], map_paths=(saved_map,),
                         map_source_name=source_name,
                         random_buildings=replace(level.random_buildings, enabled=False),
-                        evaluation=replace(level.evaluation, random_eval=False, training_robustness=False,
+                        evaluation=replace(level.evaluation, random_eval=False,
                                            eval_differes_from_training_map=False, eval_map=None))
     elif (level.evaluation.random_eval or level.static_map_suite) and mode != "parallel":
         raise ValueError("Choose a saved evaluation map ID for a selected-map replay.")
@@ -837,7 +705,7 @@ def _run_evaluation() -> None:
         f"[EVAL] using level: {level.name}; agents: {resolve_evaluation_level(level).env.num_agents}",
         flush=True,
     )
-    model = build_model(level)
+    model = build_model(level, checkpoint=checkpoint)
     restore_model_checkpoint(model, checkpoint)
     if mode == "required_agent_replays":
         from swarmecho.training.random_evaluation import write_geometry_selected_replays
@@ -854,7 +722,6 @@ def _run_evaluation() -> None:
             directory = run_dir / ("static_eval_maps" if static else "random_eval_maps")
             levels = prepare_evaluation_maps(level, directory,
                 static_maps=level.map_paths if static else None, log=terminal_print)
-        # Evaluate the selected maps with no robust/noise ensemble.
         root = create_eval_run_root(run_dir, checkpoint, level, eval_name=eval_name)
         from swarmecho.training.artifacts import parse_checkpoint_update
         update = parse_checkpoint_update(checkpoint) or 0
@@ -1018,7 +885,7 @@ def _run_evaluation() -> None:
         reward_terms=rewards,
         progress=False,
         metadata={
-            **planner_metadata(level.env, reward_cfg=level.reward),
+            **planner_metadata(level.env),
             "world_size_m": level.building.world_size_m.tolist(),
             "cell_size_m": level.building.cell_size_m,
             "coverage_voxel_size_m": (
@@ -1027,7 +894,7 @@ def _run_evaluation() -> None:
                 else level.env.coverage_voxel_size
             ),
             "comm_radius_m": level.env.comm_radius,
-            "allow_redundancy_reward": level.reward.allow_redundancy_reward,
+            "allow_redundancy_reward": False,
             "comm_radius_base_m": level.env.comm_radius_base,
             "visual_radius_m": level.env.visual_radius,
             "success_condition": level.env.success_condition,
