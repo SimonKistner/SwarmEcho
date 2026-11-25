@@ -22,7 +22,7 @@ The `src/swarmecho/` package separates simulation, learning, evaluation, and map
 
 ```text
 SwarmEcho/
-├── docs/                      Numbered guides for training, simulation, and evaluation
+├── docs/                      Numbered system references
 ├── cluster/                   Determined submission, configuration, and result retrieval
 ├── src/swarmecho/
 │   ├── core/                  Level loading and configuration
@@ -65,7 +65,7 @@ G01 validates on a fixed set of solvable targets on its training map. This comma
 uv run swarmecho-train level=G01_static logging.run_name=g01_example logging.use_timestamp_postfix=false logging.wandb_mode=offline validation.save_best_checkpoint=true
 ```
 
-Use `level=G02_static` for G02, or pass the path to your own level YAML. See the [map source options](docs/01_training.md#buildings-and-target-curriculum) for how to select maps.
+Use `level=G02_static` for G02, or pass the path to your own level YAML. See the [map source options](docs/03_marl_and_training.md#buildings-and-target-curriculum) for how to select maps.
 
 Pass `section.field=value` to override a setting for the run. If you change `training.num_envs`, make it a multiple of `training.num_minibatches`. The small rollout check in [Tests](#tests) is available before starting a full run.
 
@@ -97,7 +97,7 @@ uv run swarmecho-evaluate checkpoint=outputs/g01_example/checkpoints/best_val_ch
 uv run swarmecho-inspect root=outputs
 ```
 
-The inspector opens on port 8765 and displays replays and heatmaps. Add `replay_after=true` to the evaluation command to request replays. The inspector’s **Export public page** button packages an artifact for browser-only sharing. See [evaluation and inspection](docs/03_evaluation.md#evaluate-or-inspect-a-checkpoint) and the [public inspector guide](public-inspector/README.md).
+The inspector opens on port 8765 and displays replays and heatmaps. Add `replay_after=true` to the evaluation command to request replays. The inspector’s **Export public page** button packages an artifact for browser-only sharing. See [evaluation and inspection](docs/04_validation_evaluation_and_inspection.md#evaluate-or-inspect-a-checkpoint) and the [public inspector guide](public-inspector/README.md).
 
 ### 5. Explore training runs
 
@@ -123,9 +123,10 @@ For example, the list could start with [the G01 map](src/swarmecho/curriculum_co
 
 ## Documentation Directory
 
-1. [Training](docs/01_training.md) covers run setup, map sources, the target curriculum, PPO, and checkpoints.
-2. [Environment](docs/02_environment.md) covers building geometry, drone deployment, observations, communication, and rewards.
-3. [Evaluation and inspection](docs/03_evaluation.md) covers validation, checkpoint evaluation, heatmaps, and replays.
+1. [System overview](docs/01_system_overview.md) introduces the task, maps, levels, configuration and implementation structure.
+2. [Environment and physics](docs/02_environment_and_physics.md) explains geometry, deployment, observations, communication, success and rewards.
+3. [MARL and training](docs/03_marl_and_training.md) explains the actor and critic, PPO, sampling curricula, path supervision and checkpoints.
+4. [Validation, evaluation and inspection](docs/04_validation_evaluation_and_inspection.md) explains measurement protocols, diagnostics and artifacts.
 
 ---
 

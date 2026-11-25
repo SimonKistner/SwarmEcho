@@ -57,7 +57,7 @@ def _data():
 
 def test_baseline_building_compiles_to_static_arrays():
     source = _data()
-    assert source["name"].startswith("M00_")
+    assert source["name"] == "open_cuboid"
     assert source["building_cell_grid"] == {"cols": 4, "rows": 4, "layers": 4}
     building = load_building(BUILDING_PATH)
 

@@ -15,6 +15,7 @@ import shutil
 
 import numpy as np
 
+from swarmecho.core.compatibility import historical_environment_identity, historical_reward_identity
 from swarmecho.training.adaptive_spawn import atomic_json
 from swarmecho.training.information_metrics import information_percentages
 
@@ -143,7 +144,7 @@ class ValidationRunner:
                       for path in self.paths]
         # Keep the saved validation identity for G03 contracts predating these fixed choices.
         env_identity = {
-            **asdict(level.env), "wall_sensing_layout": "fibonacci", "base_keeps_informing": False,
+            **historical_environment_identity(level.env), "wall_sensing_layout": "fibonacci", "base_keeps_informing": False,
             "observe_base_vector": False, "observe_target_vector": False, "observe_seeing_target": False,
             "observe_base_vote_ratio": False, "observe_current_timestep": False, "observe_coverage_probe": False,
             "no_movement_termination_steps": 1000, "relay_agent_budget": None, "roadmap_approach": "full",
@@ -159,7 +160,7 @@ class ValidationRunner:
             "reward_by_reference_steps": 500,
         }
         reward_identity = {
-            **asdict(level.reward), "no_movement_termination_penalty": 0.0,
+            **historical_reward_identity(level.reward), "no_movement_termination_penalty": 0.0,
             "success_reward_as_hold_record": False, "peer_informing_reward_enabled": False,
             "peer_informing_reward": 50, "gap_reward_uses_change": False, "gap_change_reward_per_meter": 3.0,
             "delivery_gap_vesting_enabled": False, "delivery_gap_vesting_steps": 10,
@@ -174,8 +175,8 @@ class ValidationRunner:
                 "dynamic_max_geo_distance": {"enabled": True, "mode": "global_candidates", **asdict(level.training.dynamic_max_geo_distance)},
                 "seed": self.config.seed, "num_episodes": self.config.num_episodes,
                 "fixed_targets": self.config.fixed_targets,
-                "gate": [level.evaluation.early_exit_success_rate, level.evaluation.early_exit_hold_evals,
-                         level.evaluation.early_exit_min_success_length_reduction]}
+                "gate": [level.validation.early_stopping.success_rate, level.validation.early_stopping.hold_evals,
+                         level.validation.early_stopping.min_success_length_reduction]}
         if self.config.mode is not None:
             task["mode"] = self.config.mode
         self.identity = hashlib.sha256(json.dumps(task, sort_keys=True).encode()).hexdigest()
@@ -308,7 +309,7 @@ class ValidationRunner:
                 self.level.env.num_agents, generation=update)
             self.case_targets = None
         fields = {name: [] for name in ("return", "length", "success", "target_found", "visually_found", "population")}
-        if self.level.env.adapt_size.enabled:
+        if self.level.env.decommissioning.enabled:
             fields["useless_agents"] = []
         if return_required:
             fields["required_agents"] = []
@@ -328,7 +329,7 @@ class ValidationRunner:
                 case_map_ids=jnp.asarray(self.map_ids[indices]), case_keys=jnp.asarray(self.case_keys[indices]),
                 case_targets=jnp.asarray(self.case_targets[indices]) if self.case_targets is not None else None,
                 return_population=True, return_required_agents=return_required,
-                return_useless_agents=self.level.env.adapt_size.enabled,
+                return_useless_agents=self.level.env.decommissioning.enabled,
                 return_information=True, return_geo=return_geo))
             size = end-start
             failed = np.flatnonzero(np.asarray(batch[12])[:size] == 0)
@@ -342,9 +343,9 @@ class ValidationRunner:
                 fields[name].append(np.asarray(batch[column])[:size])
             if return_required:
                 fields["required_agents"].append(np.asarray(batch[16])[:size])
-            if self.level.env.adapt_size.enabled:
+            if self.level.env.decommissioning.enabled:
                 fields["useless_agents"].append(np.asarray(batch[16+int(return_required)])[:size])
-            information_index = 16 + int(return_required) + int(self.level.env.adapt_size.enabled)
+            information_index = 16 + int(return_required) + int(self.level.env.decommissioning.enabled)
             information_counts += np.asarray(batch[information_index])[:size].sum(axis=0)
             if return_geo:
                 from swarmecho.training.geo_auxiliary import score_head
@@ -417,17 +418,18 @@ class ValidationRunner:
 
     def observe_gate(self, metrics):
         ev = self.level.evaluation
-        if not ev.early_exit:
+        gate = self.level.validation.early_stopping
+        if not gate.enabled:
             return False
-        threshold = (ev.final_early_exit_success_rate
+        threshold = (gate.final_success_rate
                      if (ev.target_sampling == "curriculum" or self.level.training.forward_target_curriculum.enabled)
-                     and ev.final_early_exit_success_rate is not None
-                     else ev.early_exit_success_rate)
+                     and gate.final_success_rate is not None
+                     else gate.success_rate)
         qualifies = metrics["success_rate"] >= threshold
-        if ev.early_exit_min_success_length_reduction is not None:
-            qualifies &= metrics["success_length_reduction"] >= ev.early_exit_min_success_length_reduction
+        if gate.min_success_length_reduction is not None:
+            qualifies &= metrics["success_length_reduction"] >= gate.min_success_length_reduction
         self.hold_count = self.hold_count+1 if qualifies else 0
-        return self.hold_count >= max(1, ev.early_exit_hold_evals)
+        return self.hold_count >= max(1, gate.hold_evals)
 
     def save(self, checkpoint):
         atomic_json(Path(checkpoint) / "validation_state.json", {

@@ -39,7 +39,7 @@ from swarmecho.env.environment import make_autoreset_fns
 def _load_selection(level, manifest_path: Path | None, pool_path: Path | None):
     training = level.training
     eval_count = (level.validation.num_maps if level.validation.enabled else
-                  level.evaluation.random_eval_envs if level.evaluation.random_eval
+                  level.evaluation.inspection_maps if level.evaluation.random_eval
                   and level.evaluation.random_eval_maps is None else 0)
     required = level.training_map_count + eval_count
 

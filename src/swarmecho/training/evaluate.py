@@ -26,7 +26,7 @@ import yaml
 
 from swarmecho.core.compatibility import LEGACY_LOCAL_G03_LEVEL
 from swarmecho.core.config import (
-    CHAIN_SUCCESS_CONDITIONS, load_level, load_level_cli, normalize_inspection_sections,
+    CHAIN_SUCCESS_CONDITIONS, load_level, load_level_cli, normalize_renamed_settings,
     resolve_evaluation_level,
 )
 from swarmecho.core.paths import normalize_wsl_path
@@ -115,7 +115,7 @@ def _checkpoint_level_name(checkpoint: Path) -> str | None:
 def _load_checkpoint_on_map(run_dir: Path, map_name: str, overrides: list[str]):
     """Use the saved policy configuration on an authored inspection map."""
     source = run_dir / "config.yaml"
-    data = normalize_inspection_sections(yaml.safe_load(source.read_text(encoding="utf-8")))
+    data = normalize_renamed_settings(yaml.safe_load(source.read_text(encoding="utf-8")))
     data.pop("name", None)
     data.pop("building", None)
     data.setdefault("env", {})["map_names"] = [map_name]
@@ -129,7 +129,7 @@ def _load_checkpoint_on_map(run_dir: Path, map_name: str, overrides: list[str]):
                 "target_spawn_eligibility"):
         training.pop(key, None)
     data.setdefault("evaluation", {}).update(
-        early_exit=False, random_eval=False, random_eval_maps=None,
+        random_eval=False, random_eval_maps=None,
         eval_differes_from_training_map=False, eval_map=None,
         target_sampling="independent",
     )
@@ -193,7 +193,7 @@ def run_parallel_evaluation(
         metrics, info = result
     else:
         sampling_kwargs = inspection_sampling_kwargs(level, checkpoint=checkpoint)
-        metrics, info = evaluate_suite(model, level, episodes=level.effective_eval_parallel_envs,
+        metrics, info = evaluate_suite(model, level, episodes=level.effective_episodes_per_map,
                                        return_episode_info=True, **sampling_kwargs)
         successes = np.asarray(info["successes"], dtype=bool)
         chain_success = successes & (level.env.success_condition in CHAIN_SUCCESS_CONDITIONS)
@@ -203,7 +203,7 @@ def run_parallel_evaluation(
                                "found_and_delivered": delivered.astype(float),
                                "visually_found": visually_found.astype(float)}
         evaluation_row(metrics, label="[EVAL 1/1]", update=0, total=0,
-                       episodes=level.effective_eval_parallel_envs)
+                       episodes=level.effective_episodes_per_map)
     artifact_tag = checkpoint_artifact_suffix(checkpoint, level)
     eval_run_root = eval_run_root or create_eval_run_root(
         run_dir, checkpoint, level, eval_name=eval_name
@@ -247,7 +247,7 @@ def run_action_capturing_evaluation(
 ) -> tuple[Path, np.ndarray, str, int, list, ReplayRewards]:
     """Evaluate, select, and replay actions originating in the same actor run."""
     level = resolve_evaluation_level(level)
-    episodes = level.effective_eval_parallel_envs
+    episodes = level.effective_episodes_per_map
     sampling_kwargs = inspection_sampling_kwargs(level, checkpoint=checkpoint)
     terminal_print(
         f"[EVAL] evaluating {episodes} deterministic episodes while capturing "
@@ -740,7 +740,7 @@ def _run_evaluation() -> None:
         )
         terminal_print(
             f"[EVAL] successfully completed: {len(levels)} map(s), "
-            f"{eval_samples or level.effective_eval_parallel_envs:,} episodes/map, "
+            f"{eval_samples or level.effective_episodes_per_map:,} episodes/map, "
             f"overall success={metrics['eval_success']:.1%}.",
             flush=True,
         )
@@ -848,7 +848,7 @@ def _run_evaluation() -> None:
         artifact_replay_tag = f"{artifact_replay_tag}_PARALLEL-CAPTURE"
     output = output.with_name(f"{output.name}_{artifact_replay_tag}")
     if replay_execution == "parallel_capture":
-        replay_batch_size = level.effective_eval_parallel_envs
+        replay_batch_size = level.effective_episodes_per_map
     else:
         replay_batch_size = None
     if replay_execution == "parallel_capture":

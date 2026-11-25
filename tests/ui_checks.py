@@ -215,7 +215,7 @@ def test_inspector_discovers_new_eval_runs_and_hides_timestamps_in_labels(tmp_pa
                 "is_conn_target": [[False]],
                 "target_known": [[False]],
                 "success": [False],
-                "fully_connected": [False],
+                "base_target_connected": [False],
                 "chain_held_steps": [0],
                 "done": [False],
                 "collided": [[False]],

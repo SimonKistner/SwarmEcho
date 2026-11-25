@@ -10,7 +10,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from swarmecho.env import adapt_size as adaptive_population
+from swarmecho.env import decommissioning as adaptive_population
 from swarmecho.env.knowledge import information_counts, new_information_counts
 from swarmecho.core.config import CHAIN_SUCCESS_CONDITIONS, DEPLOYED_AGENTS_OBS_REF, SUCCESS_CONDITIONS
 
@@ -46,7 +46,7 @@ class EnvState(NamedTuple):
     is_conn_target: jax.Array
     target_known: jax.Array
     success: jax.Array
-    fully_connected: jax.Array
+    base_target_connected: jax.Array
     chain_held_steps: jax.Array
     done: jax.Array
     collided: jax.Array
@@ -182,6 +182,7 @@ def coverage_grid_geometry(
 
 def observation_dim(cfg: EnvConfig) -> int:
     """Return the configured actor observation width."""
+    # The retained band_sep_counting ablation changes the observation width.
     return (
         6
         + 3 * int(cfg.observe_visually_gated_target_displacement)
@@ -189,7 +190,7 @@ def observation_dim(cfg: EnvConfig) -> int:
         + (cfg.drone_radar_bins * max(1, cfg.distance_bands) * 3
            if cfg.radar_mode == "band_sep_counting" else cfg.drone_radar_bins * 3)
         + int(cfg.observe_chain_contributor)
-        + int(cfg.adapt_size.enabled) * (
+        + int(cfg.decommissioning.enabled) * (
             int(cfg.observe_decommission_zone) + int(cfg.observe_base_population)
         )
     )
@@ -230,8 +231,8 @@ def obstacle_chain_diagnostics(state: EnvState, distances=None) -> tuple[jax.Arr
     score = jnp.where(base_valid[:, None] & target_valid[None, :], score, 1e6)
     flat = jnp.argmin(score)
     idx_b, idx_t = flat // score.shape[1], flat % score.shape[1]
-    gap = jnp.where(state.fully_connected, 0.0, gaps[idx_b, idx_t])
-    progress = jnp.where(state.fully_connected, 100.0, jnp.clip(100.0 * (1.0 - gap / jnp.maximum(mission, 1e-6)), 0.0, 100.0))
+    gap = jnp.where(state.base_target_connected, 0.0, gaps[idx_b, idx_t])
+    progress = jnp.where(state.base_target_connected, 100.0, jnp.clip(100.0 * (1.0 - gap / jnp.maximum(mission, 1e-6)), 0.0, 100.0))
     return gap, progress, jnp.maximum(excess[idx_b, idx_t], 0.0), jnp.asarray([idx_b - 1, idx_t - 1])
 
 
@@ -280,7 +281,7 @@ def final_chain_length(state: EnvState, cfg: EnvConfig) -> jax.Array:
             weighted, weighted[:, pivot, None] + weighted[pivot, None, :]
         )
     length = weighted[n, n + 1]
-    return jnp.where(state.fully_connected & (length < 1e6), length, 0.0)
+    return jnp.where(state.base_target_connected & (length < 1e6), length, 0.0)
 
 
 def _contributing_chain_agents(
@@ -408,7 +409,7 @@ def _contributing_chain_agents(
     base_path = jnp.where(has_base_chain, soft_trace_path(base_node, base_tip, opposite_target), 0.0)
     target_path = jnp.where(has_target_chain, soft_trace_path(target_node, target_tip, opposite_base), 0.0)
     complete_path = soft_trace_path(base_node, target_node, target_node)
-    return jnp.where(state.fully_connected, complete_path, jnp.maximum(base_path, target_path))
+    return jnp.where(state.base_target_connected, complete_path, jnp.maximum(base_path, target_path))
 
 class ChainPaths(NamedTuple):
     # Each subset represents its shortest simple route and number of valid
@@ -447,8 +448,8 @@ def simple_chain_paths(state: EnvState, cfg: EnvConfig) -> ChainPaths:
     terminal = adjacency[:n, n + 1]
     complete_lengths = jnp.min(jnp.where(terminal, lengths + distance[:n, n + 1], jnp.inf), axis=1)
     complete_counts = jnp.sum(jnp.where(terminal, counts, 0), axis=1)
-    return ChainPaths(jnp.where(state.fully_connected, complete_lengths, jnp.inf),
-                        jnp.where(state.fully_connected, complete_counts, 0), members)
+    return ChainPaths(jnp.where(state.base_target_connected, complete_lengths, jnp.inf),
+                        jnp.where(state.base_target_connected, complete_counts, 0), members)
 
 
 def chain_path_efficiencies(paths: ChainPaths, reference):
@@ -459,7 +460,7 @@ def chain_path_efficiencies(paths: ChainPaths, reference):
 def success_contributors(state, cfg):
     """Return selected relay membership when the chain is complete."""
     return jax.lax.cond(
-        state.fully_connected, lambda _: _contributing_chain_agents(state, cfg),
+        state.base_target_connected, lambda _: _contributing_chain_agents(state, cfg),
         lambda _: jnp.zeros_like(state.active), None,
     ) & state.active
 
@@ -486,7 +487,7 @@ def non_contributor_rewards(previous, current, cfg, env_cfg):
     """
     zero = jnp.zeros_like(current.coverage_credit)
     empty = (zero, zero, zero)
-    if not env_cfg.adapt_size.enabled or env_cfg.success_condition not in CHAIN_SUCCESS_CONDITIONS:
+    if not env_cfg.decommissioning.enabled or env_cfg.success_condition not in CHAIN_SUCCESS_CONDITIONS:
         return empty
 
     def pay(_):
@@ -513,7 +514,7 @@ def non_contributor_rewards(previous, current, cfg, env_cfg):
         return returned, departed, decommissioned
 
     return jax.lax.cond(
-        previous.fully_connected & current.fully_connected & ~previous.done,
+        previous.base_target_connected & current.base_target_connected & ~previous.done,
         pay, lambda _: empty, None,
     )
 
@@ -527,11 +528,10 @@ def compute_rewards(
     chain_paths=None,
     chain_diagnostics_result=None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Compute rewards for the configured coverage or target mission.
+    """Compute individual exploration, delivery, relay and cleanup rewards.
 
-    Finder and delivery rewards are one-shot events. Each active drone receives
-    the full target-found reward. Success pays at termination or incrementally
-    on new chain-hold records when configured.
+    Base delivery and success are one-shot events. Delivery pays the direct
+    reporters and active team separately. Relay shaping recurs each step.
     """
     n = current.pos.shape[0]
     reward_active = current.active.astype(jnp.float32)
@@ -574,40 +574,12 @@ def compute_rewards(
             jnp.isfinite(full_distance) & (full_distance < 1e6),
             jnp.maximum(full_distance - gap_distance, 0.0), 0.0,
         )
-        return is_contributing.astype(jnp.float32) * (cfg.gap_progress_reward_per_meter * closed_metres)
+        return is_contributing.astype(jnp.float32) * (cfg.closed_gap_reward_per_meter * closed_metres)
 
     gap_reward = (jax.lax.cond(dynamic_gap_enabled, gap_reward_when_known,
                               lambda _: jnp.zeros(n, dtype=jnp.float32), None)
-                  if cfg.gap_progress_reward_per_meter != 0 else jnp.zeros(n, dtype=jnp.float32))
+                  if cfg.closed_gap_reward_per_meter != 0 else jnp.zeros(n, dtype=jnp.float32))
     success_reward = reward_active * cfg.success_reward * success_event
-
-    useless_reward = jnp.zeros(n, dtype=jnp.float32)
-    all_agents_useless_reward = jnp.zeros(n, dtype=jnp.float32)
-    if env_cfg.success_condition in CHAIN_SUCCESS_CONDITIONS and (
-        cfg.useless_agent_at_success_reward != 0
-        or cfg.useless_agent_at_success_all_agents_reward != 0
-    ):
-        def pay_useless_agents(_):
-            contributors = success_contributors(current, env_cfg)
-            useless = (current.active & ~contributors).astype(jnp.float32)
-            all_agents_amount = cfg.useless_agent_at_success_all_agents_reward * jnp.sum(useless)
-            # Signed penalty bound: max(-750 * useless, -2000).
-            # This limits the loss per drone, not a shared team budget. With the
-            # default +3000 success reward, useful drones retain at least +1000
-            # from these components even when many drones are unused, preserving
-            # an incentive to finish. Positive bonuses use a positive upper bound;
-            # a zero cap disables the term in either direction.
-            cap = cfg.useless_agent_at_success_all_agents_reward_cap
-            all_agents_amount = jnp.clip(all_agents_amount, min(cap, 0.0), max(cap, 0.0))
-            return (
-                cfg.useless_agent_at_success_reward * useless,
-                all_agents_amount * reward_active,
-            )
-
-        useless_reward, all_agents_useless_reward = jax.lax.cond(
-            current.done & success_event, pay_useless_agents,
-            lambda _: (jnp.zeros(n, dtype=jnp.float32), jnp.zeros(n, dtype=jnp.float32)), None,
-        )
 
     if cfg.chain_efficiency_reward != 0 and chain_paths is None:
         chain_paths = simple_chain_paths(current, env_cfg)
@@ -616,15 +588,13 @@ def compute_rewards(
         "exploration_reward": cfg.exploration_reward * current.coverage_credit
         * (~current.target_known).astype(jnp.float32),
         "collision_reward": cfg.collision_reward * current.collided.astype(jnp.float32),
-        "finder_reward": cfg.finder_reward * (
+        "base_reporter_reward": cfg.base_reporter_reward * (
             target_found_event & finder_receivers
         ).astype(jnp.float32),
-        "target_found_reward": reward_active * cfg.target_found_reward * target_found_event,
+        "target_delivery_reward": reward_active * cfg.target_delivery_reward * target_found_event,
         "time_presure_reward": time_reward,
         "gap_reward": gap_reward,
         "success_reward": success_reward,
-        "useless_agent_at_success_reward": useless_reward,
-        "useless_agent_at_success_all_agents_reward": all_agents_useless_reward,
     }
     if cfg.chain_efficiency_reward != 0:
         efficiency = chain_path_efficiencies(chain_paths, geodesic_distances[0, 1])
@@ -634,13 +604,12 @@ def compute_rewards(
     # ``newly_knows`` is exposed for diagnostics without double-paying finders.
     terms["newly_knows"] = newly_knows.astype(jnp.float32)
     terms = {name: jnp.where(current.active, value, 0.0) for name, value in terms.items()}
-    if env_cfg.adapt_size.enabled:
+    if env_cfg.decommissioning.enabled:
         a = current.adaptive
         acting = previous.active.astype(jnp.float32)
         terms.update({
             # Signed event rewards pay each recipient in full, even after removal.
             "time_presure_reward": cfg.time_presure_reward * acting,
-            "decommission_reward": cfg.decommission_reward * a.decommissioned.astype(jnp.float32),
             "all_decommissioned_penalty": cfg.all_decommissioned_penalty
                 * a.all_decommissioned * acting,
         })
@@ -673,8 +642,8 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         building = building_bank.envelope
     if cfg.num_agents < 1:
         raise ValueError("num_agents must be positive.")
-    from swarmecho.core.config import validate_adapt_size
-    validate_adapt_size(cfg)
+    from swarmecho.core.config import validate_decommissioning
+    validate_decommissioning(cfg)
     if cfg.success_condition not in SUCCESS_CONDITIONS:
         raise ValueError("Unknown env.success_condition.")
     if dynamic_max_geo_distance and min(cfg.comm_radius_base, cfg.comm_radius, cfg.visual_radius) <= 0:
@@ -777,7 +746,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         # and drones spawn one radius above it, so lift the zone by one drone
         # radius beyond the decommission sphere radius to keep the initial
         # drone body outside the zone.
-        radius = cfg.adapt_size.decommission_radius_m
+        radius = cfg.decommissioning.decommission_radius_m
         spawn_z = jnp.maximum(base_pos[2] + cfg.drone_radius, lower[2])
         zone_z = spawn_z + radius + cfg.drone_radius
         candidates = jnp.stack([base_pos[0], base_pos[1], zone_z])[None, :]
@@ -1044,13 +1013,13 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         pos = jnp.broadcast_to(drone_spawn, (n, 3))
         active = jnp.arange(n) * cfg.spawn_delay <= 0
         adaptive = None
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             zone, valid_zone = decommission_zone(base_pos, obstacle_min, obstacle_max, map_id)
             adaptive = adaptive_population.initial_state(n, zone, valid_zone)
         coverage = jnp.zeros(coverage_shape, dtype=jnp.bool_)
         coverage, _ = update_coverage(coverage, pos, active, obstacle_min, obstacle_max, map_id)
         sees, conn_base, conn_target, _ = connectivity(pos, active, base_pos, target, obstacle_min, obstacle_max)
-        fully_connected = jnp.any(conn_base & conn_target)
+        base_target_connected = jnp.any(conn_base & conn_target)
         return EnvState(
             adaptive=adaptive,
             pos=pos,
@@ -1066,7 +1035,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             is_conn_target=conn_target,
             target_known=sees,
             success=jnp.bool_(False),
-            fully_connected=fully_connected,
+            base_target_connected=base_target_connected,
             chain_held_steps=jnp.int32(0),
             best_chain_held_steps=jnp.int32(0),
             peer_informed_by=jnp.zeros((n, n), dtype=jnp.bool_),
@@ -1102,10 +1071,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         from_base = base_links & state.base_target_known
         peer_received = jnp.any(informed_by, axis=1)
         next_step = state.step + 1
-        active = state.active if cfg.adapt_size.enabled else next_step >= jnp.arange(n) * cfg.spawn_delay
+        active = state.active if cfg.decommissioning.enabled else next_step >= jnp.arange(n) * cfg.spawn_delay
         force = jnp.clip(action[..., :3], -1.0, 1.0) * cfg.max_force
         # Newly spawned agents first choose an action from their next observation.
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             force = jnp.where(state.active[:, None], force, 0.0)
         velocity = state.vel * cfg.drag + force * cfg.dt
         speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
@@ -1126,15 +1095,15 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         pos = jnp.where(active[:, None], pos, drone_spawn)
         velocity = jnp.where(active[:, None], velocity, 0.0)
         adaptive = state.adaptive
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             adaptive, active = adaptive_population.transition(
-                adaptive, state.active, pos, cfg.adapt_size, spawn_delay=cfg.spawn_delay,
+                adaptive, state.active, pos, cfg.decommissioning, spawn_delay=cfg.spawn_delay,
             )
             pos = jnp.where((active & ~adaptive.spawned)[:, None], pos, drone_spawn)
             velocity = jnp.where((active & ~adaptive.spawned)[:, None], velocity, 0.0)
         any_agent_moved = jnp.any(
             (jnp.linalg.norm(pos - state.pos, axis=-1) > cfg.movement_epsilon) & active
-            & (state.active if cfg.adapt_size.enabled else True)
+            & (state.active if cfg.decommissioning.enabled else True)
         )
         stationary_steps = jnp.where(
             any_agent_moved,
@@ -1149,10 +1118,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             state.obstacle_min, state.obstacle_max,
         )
         known = state.target_known | sees | peer_received | from_base
-        fully_connected = jnp.any(conn_base & conn_target)
+        base_target_connected = jnp.any(conn_base & conn_target)
         base_target_known = state.base_target_known | base_received
         chain_held_steps = jnp.where(
-            fully_connected,
+            base_target_connected,
             state.chain_held_steps + jnp.int32(1),
             jnp.int32(0),
         )
@@ -1163,7 +1132,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
         # Direct sighting and base replay take precedence over peer credit.
         newly_peer_informed = (~state.target_known) & peer_received & ~sees & ~from_base
         peer_informed_by = informed_by & newly_peer_informed[:, None]
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             continuing = active & ~adaptive.spawned
             known &= continuing
             peer_informed_by &= continuing[:, None] & continuing[None, :]
@@ -1171,7 +1140,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 n - 1, adaptive.peer_credit_count + jnp.sum(jnp.any(peer_informed_by, axis=1))))
         success = chain_held_steps >= jnp.int32(cfg.hold_chain_for)
         done = next_step >= jnp.int32(cfg.max_steps)
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             done |= adaptive.all_decommissioned
         next_state = EnvState(
             adaptive=adaptive,
@@ -1188,7 +1157,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             is_conn_target=conn_target,
             target_known=known,
             success=success,
-            fully_connected=fully_connected,
+            base_target_connected=base_target_connected,
             chain_held_steps=chain_held_steps,
             best_chain_held_steps=best_chain_held_steps,
             peer_informed_by=peer_informed_by,
@@ -1222,7 +1191,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
 
     def observations(state: EnvState):
         pos = state.pos
-        if cfg.adapt_size.enabled and cfg.observe_base_population:
+        if cfg.decommissioning.enabled and cfg.observe_base_population:
             base_population = adaptive_population.base_population_feedback(
                 state.active, state.is_conn_base, DEPLOYED_AGENTS_OBS_REF,
             )
@@ -1272,7 +1241,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             other = (jnp.arange(n) != i) & state.active
             if state.obstacle_min.shape[0] or has_authored_solids:
                 other &= ~segments_blocked(origin, pos, solid_min, solid_max)
-            if cfg.radar_mode == "legacy":
+            if cfg.radar_mode == "max_proximity":
                 signal = jnp.maximum(0.0, 1.0 - pair_dist[i] / cfg.comm_radius) * other
 
                 def scatter(values):
@@ -1290,6 +1259,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 else:
                     radar = jnp.concatenate([wall_signal, drone_proximity.reshape(-1)])
             else:
+                # Retained band_sep_counting ablation.
                 visible = other & (pair_dist[i] <= cfg.comm_radius)
                 # An internal border belongs to the outer band; the final
                 # band includes comm_radius. Each neighbor occupies one cell.
@@ -1318,10 +1288,10 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
                 ]
             )
             optional = []
-            if cfg.adapt_size.enabled:
+            if cfg.decommissioning.enabled:
                 if cfg.observe_decommission_zone:
                     in_zone = (jnp.linalg.norm(origin - state.adaptive.zone_center)
-                               <= cfg.adapt_size.decommission_radius_m) & state.adaptive.zone_valid
+                               <= cfg.decommissioning.decommission_radius_m) & state.adaptive.zone_valid
                     optional.append(jnp.asarray([in_zone], dtype=jnp.float32))
                 # Instantaneous base-network feedback, never a latched receipt.
                 # is_conn_base includes physical relay paths, not only direct LOS.
@@ -1346,7 +1316,7 @@ def make_env_fns(building: BuildingArrays, cfg: EnvConfig, *, plan_geodesic: boo
             "active_agents": jnp.sum(state.active),
             "target_seen": jnp.any(state.directly_sees_target),
             "success": state.success,
-            "fully_connected": state.fully_connected,
+            "base_target_connected": state.base_target_connected,
             "base_target_known": state.base_target_known,
             "best_chain_held_steps": state.best_chain_held_steps,
             "stationary_steps": state.stationary_steps,
@@ -1409,7 +1379,7 @@ def make_autoreset_fns(
                 )
 
             paths = jax.lax.cond(
-                terminal_state.fully_connected,
+                terminal_state.base_target_connected,
                 lambda _: simple_chain_paths(terminal_state, cfg),
                 empty_paths, None,
             )
@@ -1430,7 +1400,7 @@ def make_autoreset_fns(
             "best_chain_held_steps": terminal_state.best_chain_held_steps,
             "done": terminal_state.done,
             "success": terminal_state.success,
-            "fully_connected": terminal_state.fully_connected,
+            "base_target_connected": terminal_state.base_target_connected,
             "global_target_found": terminal_state.base_target_known,
             "global_visually_found": jnp.any(terminal_state.directly_sees_target),
             "chain_gap_dist": chain_gap_dist,
@@ -1443,7 +1413,7 @@ def make_autoreset_fns(
             "terminal_coverage_fraction": terminal_metrics["coverage_fraction"],
             "agent_terminated": adaptive_population.lifetime_ended(state, terminal_state),
         }
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             a = terminal_state.adaptive
             info.update({
                 "adapt_decommissions": a.decommissions,

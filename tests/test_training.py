@@ -439,7 +439,7 @@ def test_real_training_update_reports_sources_from_completed_episodes(tmp_path):
         training=replace(level.training, num_envs=2, num_steps=6,
                          total_timesteps=12, num_minibatches=1),
         evaluation=replace(level.evaluation, save_model=False, eval_video=False,
-                           eval_parallel_envs=2),
+                           episodes_per_map=2),
         logging=replace(level.logging, wandb_mode="disabled"))
     _, metrics = train(level, output_dir=tmp_path)
     assert metrics["completed_episodes"] >= 2

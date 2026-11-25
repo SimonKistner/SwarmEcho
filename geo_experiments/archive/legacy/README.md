@@ -128,7 +128,7 @@ features, position, episode/agent/step IDs, discovery flags, SHA-256 history
 fingerprints, split membership, source counts/bucket limits and probe fits are in `data.npz`;
 the manifest and HTML remain the only companions. No W&B or separate figure files.
 
-Protocol and interpretation belong in [Phase 1](../../../docs/legacy-ablation/geo/Phase1.md).
+Protocol and interpretation belong in [historical own-cell protocol](../../../docs/ablations/observation_ambiguity.md#archived-own-cell-classification-attempts).
 
 ## Run
 
@@ -304,7 +304,7 @@ similarity and target separation. No files, plots or probe fits. `--every 5`
 subsamples if needed; `--checkpoint`, `--level`, `--samples`, `--seed` and
 `--batch-size` override defaults. Always includes capture, ignores padding, and
 counts unequal history lengths separately. The completed 5k console audit and
-its interpretation are recorded in [Phase 0](../../../docs/legacy-ablation/geo/Phase0.md).
+its interpretation are recorded in [historical observation audit](../../../docs/ablations/observation_ambiguity.md).
 
 ### Reuse probe data
 

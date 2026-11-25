@@ -29,7 +29,7 @@ def run_benchmark(
     grid: tuple[int, int, int] = (4, 4, 4),
     *,
     wall_sensing_ray_max_distance: float = EnvConfig.wall_sensing_ray_max_distance,
-    radar_mode: str = "legacy",
+    radar_mode: str = "max_proximity",
     distance_bands: int = 1,
     radar_count_cap: int = 3,
 ) -> dict:
@@ -103,7 +103,7 @@ def run_benchmark(
 def main() -> None:
     options = {"num_envs": "256", "steps": "100", "wall_sensing_rays": str(EnvConfig.wall_sensing_rays),
                "wall_sensing_ray_max_distance": str(EnvConfig.wall_sensing_ray_max_distance),
-               "drone_radar_bins": "8", "radar_mode": "legacy",
+               "drone_radar_bins": "8", "radar_mode": "max_proximity",
                "distance_bands": "1", "radar_count_cap": "3", "grid": "4x4x4"}
     output: Path | None = None
     for argument in sys.argv[1:]:

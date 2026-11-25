@@ -26,11 +26,22 @@ def checkpoint_probe_grid(path):
     return tuple(map(int, shape.split("x")))
 
 
+def _canonical_contract_names(contract):
+    contract = dict(contract)
+    if "adaptive_size" in contract:
+        contract.setdefault("decommissioning_enabled", contract.pop("adaptive_size"))
+    if contract.get("radar_mode") == "legacy":
+        contract["radar_mode"] = "max_proximity"
+    if contract.get("radar_layout") == "legacy_interleaved":
+        contract["radar_layout"] = "max_proximity_interleaved"
+    return contract
+
+
 def validate_checkpoint_contract(model: Any, path: Path) -> None:
     """Reject incompatible value units/input meanings before restoring tensors."""
     if not hasattr(model, "checkpoint_contract"):
         return
-    expected = dict(model.checkpoint_contract)
+    expected = _canonical_contract_names(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
         if expected.get("observe_prev_path_probe", False):
@@ -39,7 +50,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
             raise ValueError("A custom path grid requires matching checkpoint observation metadata.")
         if expected.get("observe_visually_gated_target_displacement", False):
             raise ValueError("Visually gated target displacement requires matching checkpoint observation metadata.")
-        if expected.get("adaptive_size", False):
+        if expected.get("decommissioning_enabled", False):
             raise ValueError("Automatic deployment checkpoints require matching observation metadata.")
         if expected["value_normalization"] != "none":
             raise ValueError(
@@ -47,16 +58,16 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
                 "running-normalized critic. Use the original raw-value settings or an explicitly "
                 "converted checkpoint; changing the flag alone changes critic units."
             )
-        if expected.get("radar_layout", "legacy_interleaved") != "legacy_interleaved":
+        if expected.get("radar_layout", "max_proximity_interleaved") != "max_proximity_interleaved":
             raise ValueError("Checkpoint has no radar metadata; its input layout cannot be verified. "
-                             "Load it with the original legacy radar settings.")
+                             "Load it with the original maximum-proximity radar settings.")
         if expected.get("wall_sensing_layout", "fibonacci") != "fibonacci":
             raise ValueError("Checkpoint has no wall sensing metadata; load it with the original Fibonacci layout.")
         warnings.warn("Checkpoint has no training contract; input semantics cannot be verified. "
                       "Communication timing and inactive-agent handling now use corrected behavior.",
                       stacklevel=2)
         return
-    actual = json.loads(source.read_text(encoding="utf-8"))
+    actual = _canonical_contract_names(json.loads(source.read_text(encoding="utf-8")))
     if actual.get("critic_type", "observation") != "observation":
         raise ValueError("This checkpoint uses a critic architecture that is no longer supported.")
     if actual.get("format") != expected["format"]:
@@ -74,12 +85,12 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         actual["wall_sensing_ray_max_distance"] = legacy_range
     for contract in (actual, expected):
         contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
-        contract.setdefault("adaptive_size", False)
-        contract.setdefault("vote_observation_slot", contract["adaptive_size"])
-        contract.setdefault("recruitment_enabled", contract["adaptive_size"])
+        contract.setdefault("decommissioning_enabled", False)
+        contract.setdefault("vote_observation_slot", contract["decommissioning_enabled"])
+        contract.setdefault("recruitment_enabled", contract["decommissioning_enabled"])
         contract.setdefault("vote_mode", None)
         # Contracts predating timestamped decisions used accumulating credits.
-        contract.setdefault("vote_protocol", "credits" if contract["adaptive_size"] else None)
+        contract.setdefault("vote_protocol", "credits" if contract["decommissioning_enabled"] else None)
         # Retain the behavior identity across the move into the reward section.
         contract.setdefault("priveleged_vote_reward_enabled",
                             contract.pop("reinforcement_vote_shaping_enabled", False))
@@ -90,9 +101,9 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         contract.setdefault("observe_prev_path_probe", False)
         contract.setdefault("geo_path_grid", _DEFAULT_GEO_PATH_GRID)
         # Adaptive actors always observed zone membership before this toggle existed.
-        contract.setdefault("observe_decommission_zone", contract["adaptive_size"])
+        contract.setdefault("observe_decommission_zone", contract["decommissioning_enabled"])
         contract.setdefault("base_population_observation_reference", None)
-        if not contract["adaptive_size"]:
+        if not contract["decommissioning_enabled"]:
             contract["vote_protocol"] = None
             contract["observe_base_vote_ratio"] = False
             contract["observe_base_population"] = False
@@ -107,25 +118,25 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
             contract.setdefault("wall_sensing_rays", old_bins)
             contract.setdefault("drone_radar_bins", old_bins)
         contract.setdefault("wall_sensing_layout", "fibonacci")
-        contract.setdefault("radar_mode", "legacy")
+        contract.setdefault("radar_mode", "max_proximity")
         contract.setdefault("distance_bands", 1)
         contract.setdefault("radar_count_cap", 3)
         contract.setdefault(
             "radar_layout",
             # Missing layout metadata predates counts-only radar. Keep the
             # old inference so it cannot match the new band_counts_v2 layout.
-            "legacy_interleaved" if contract["radar_mode"] == "legacy"
+            "max_proximity_interleaved" if contract["radar_mode"] == "max_proximity"
             and contract.get("wall_sensing_rays") == contract.get("drone_radar_bins")
             else "radar_blocks_v1",
         )
-        if contract["radar_mode"] == "legacy":
+        if contract["radar_mode"] == "max_proximity":
             # These settings do not affect legacy observations.
             contract["distance_bands"] = 1
             contract["radar_count_cap"] = None
         else:
             contract["distance_bands"] = max(1, contract["distance_bands"])
     critical = {
-        "adaptive_size", "recruitment_enabled", "vote_mode", "vote_protocol", "vote_observation_slot",
+        "decommissioning_enabled", "recruitment_enabled", "vote_mode", "vote_protocol", "vote_observation_slot",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",

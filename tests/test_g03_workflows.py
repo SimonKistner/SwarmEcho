@@ -34,7 +34,7 @@ def g03_run(tmp_path_factory):
         "network.tarmac_sig_dim=4",
         "network.tarmac_val_dim=4",
         "inspection_evaluation.inspection_maps=1",
-        "inspection_evaluation.eval_parallel_envs=2",
+        "inspection_evaluation.episodes_per_map=2",
         "validation.num_maps=1",
         "validation.num_episodes=2",
         "validation.parallel_envs=2",

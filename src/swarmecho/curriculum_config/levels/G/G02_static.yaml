@@ -19,9 +19,7 @@ env:
   wall_sensing_rays: 32 # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
   wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
   drone_radar_bins: 32
-  radar_mode: legacy #| band_sep_counting
-  distance_bands: 3
-  radar_count_cap: 3
+  radar_mode: max_proximity
 
   max_steps: 700
   success_condition: chain_held # coverage | discovery | delivery | chain_held
@@ -37,29 +35,25 @@ env:
 random_buildings:
   enabled: false
 
-adapt_size:
+decommissioning:
   enabled: true
   decommission_radius_m: 0.75 # Fits above a centred base inside a sealed 5 m shaft.
   decommission_hold_steps: 15 # Consecutive environment steps; exit resets dwell.
 
 
 reward:
-  decommission_reward: 0 # Full amount to each removed drone, on removal.
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
-  useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; max(-750 * useless_count, -2000). max limits the loss
-  useless_agent_at_success_all_agents_reward_cap: -2000
 
   chain_efficiency_reward: 0.0 # Per eligible drone times its path efficiency; no population divisor.
 
   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
-  finder_reward: 100 # Each direct base deliverer.
-  target_found_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
+  base_reporter_reward: 100 # Each direct base deliverer.
+  target_delivery_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
   success_reward: 3000 # Full amount to every active drone at first success; no population divisor.
 
   collision_reward: -0.5 # Per colliding drone per transition.
   time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
-  gap_progress_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
+  closed_gap_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
 
 training:
   total_timesteps: 1300000000
@@ -104,15 +98,10 @@ network:
 
 inspection_evaluation:
   num_agents: null # Use the training agent cap in every eval/replay.
-  eval_parallel_envs: null # Follow effective training.num_envs, including OOM reductions.
+  episodes_per_map: null # Follow effective training.num_envs, including OOM reductions.
   replay_targets_from_storey: null # Sample the current stage's eligible targets across storeys.
   inspection_maps: null # All five configured authored maps.
 
-  early_exit: false
-  early_exit_success_rate: 0.93
-  final_early_exit_success_rate: 0.99 # Only when target budget and population cap both reach seven.
-  early_exit_min_success_length_reduction: null # Success alone controls progression.
-  early_exit_hold_evals: 1 # Consecutive qualifying validation passes.
 
   save_model: true
   checkpoint_freq: 30
@@ -132,4 +121,10 @@ logging:
   terminal_log_init: true
 
 validation:
+  early_stopping:
+    enabled: false
+    success_rate: 0.93
+    final_success_rate: 0.99 # Only when target budget and population cap both reach seven.
+    min_success_length_reduction: null # Success alone controls progression.
+    hold_evals: 1 # Consecutive qualifying validation passes.
   enabled: false

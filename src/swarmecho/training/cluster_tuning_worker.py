@@ -94,7 +94,7 @@ def main():
                      *[f"training.{key}={value}" for key, value in spec["candidate"].items()],
                      "training.checkpoint_path=null", "training.oom_recovery.enabled=false",
                      "training.max_wall_seconds=null",
-                     "training.adaptive_target_spawn.curriculum_start_agents=null",
+                     "training.adaptive_target_spawn.initial_target_agent_budget=null",
                      "inspection_evaluation.target_sampling=independent",
                      "validation.enabled=false",
                      "logging.run_name=" + spec["run_name"],
@@ -104,11 +104,11 @@ def main():
                      "logging.wandb_mode=" + spec["wandb_mode"]]
         if spec["mode"] == "probe":
             overrides += ["env.spawn_delay=0",
-                          "adapt_size.decommission_hold_steps=701",
+                          "decommissioning.decommission_hold_steps=701",
                           "inspection_evaluation.save_model=false",
                           "inspection_evaluation.eval_video=false",
                           "inspection_evaluation.eval_freq=2147483647",
-                          "inspection_evaluation.early_exit=false",
+                          "validation.early_stopping.enabled=false",
                           "training.total_timesteps=" + str(
                               spec["candidate"]["num_envs"] * spec["candidate"]["num_steps"]
                               * (spec["probe_updates"] + 1))]

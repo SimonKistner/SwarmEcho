@@ -68,7 +68,7 @@ def validate(settings, run):
                          "resource_pool", "slots_per_trial", "pfss_mount", "persist_root", "image_repository"}
     if set(settings) != expected_settings:
         raise ValueError("Unexpected/missing settings keys: " + str(set(settings) ^ expected_settings))
-    if set(run) - {"tuning", "run_name_template", "wandb_group", "run_postfix"} not in ({"description", "level", "wandb_mode", "overrides"},
+    if set(run) - {"tuning", "run_name_template", "wandb_group", "run_postfix", "dependency_image"} not in ({"description", "level", "wandb_mode", "overrides"},
                                    {"description", "levels", "wandb_mode", "overrides"}):
         raise ValueError("A run requires description, level OR levels, wandb_mode and overrides.")
     if "wandb_group" in run and (not isinstance(run["wandb_group"], str)
@@ -265,6 +265,7 @@ def submission_run_name(name, run, stamp):
 
 def prepare_submission(settings, info, name, run, stamp, source_context=None):
     """Freeze each receipt separately, reusing one source snapshot across the batch."""
+    info = run.get("dependency_image", info)
     run_name = submission_run_name(name, run, stamp)
     ensure_unused_run_name(run_name)
     output = CLUSTER / ".submissions" / run_name

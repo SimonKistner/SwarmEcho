@@ -60,7 +60,7 @@ def test_authored_geodesic_roadmap_is_shared_through_batched_autoreset():
     state = jax.tree_util.tree_map(lambda value: value[0], states)._replace(
         base_pos=jnp.array([5., 10., 10.]), target_pos=jnp.array([15., 10., 10.]),
         is_conn_base=jnp.array([False]), is_conn_target=jnp.array([False]),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
     )
     gap = jax.jit(obstacle_chain_diagnostics)(state)[0]
     assert 10. < float(gap) < 1e6
@@ -87,7 +87,7 @@ def test_dynamic_roadmap_combines_authored_and_persisted_layout_geometry():
     query = state._replace(
         base_pos=jnp.array([5., 10., 10.]),
         is_conn_base=jnp.array([False]), is_conn_target=jnp.array([False]),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
     )
     assert 10. < float(obstacle_chain_diagnostics(query)[0]) < 1e6
     # Legacy generated-only graph arrays cannot bypass the authored walls.
@@ -113,7 +113,7 @@ def test_combined_chain_query_preserves_original_frontier_selection():
                            is_conn_base=jnp.array([True, False, False]),
                            is_conn_target=jnp.array([False, True, True]),
                            target_known=jnp.array([False, True, True]),
-                           fully_connected=jnp.bool_(False))
+                           base_target_connected=jnp.bool_(False))
     def distance(a, b):
         return free_space_distance(a, b, state.planning_vertices, state.planning_distances,
                                    state.planning_min, state.planning_max)
@@ -180,7 +180,7 @@ def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base
     assert not state.base_target_known
     state = step(state, action)  # B informs C without a target sighting.
     np.testing.assert_array_equal(state.target_known, [True, True, True])
-    assert not state.fully_connected
+    assert not state.base_target_connected
 
     # B can report the remembered target after moving out of the original group.
     state = state._replace(
@@ -190,7 +190,7 @@ def test_target_knowledge_relays_one_hop_per_communication_tick_and_reaches_base
     state = step(state, action)
     assert state.base_target_known
     assert not state.success
-    assert not state.fully_connected
+    assert not state.base_target_connected
 
 
 def test_informed_base_broadcasts_remembered_target_on_a_later_tick():
@@ -496,7 +496,7 @@ def test_scripted_five_drone_chain_uses_visual_final_hop():
         is_conn_target=jnp.zeros(5, dtype=jnp.bool_),
         target_known=jnp.zeros(5, dtype=jnp.bool_),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
         chain_held_steps=jnp.int32(0),
         done=jnp.bool_(False),
         collided=jnp.zeros(5, dtype=jnp.bool_),
@@ -527,7 +527,7 @@ def test_coverage_changes_across_height_layers():
         is_conn_target=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         target_known=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
         chain_held_steps=jnp.int32(0),
         done=jnp.bool_(False),
         collided=jnp.zeros(cfg.num_agents, dtype=jnp.bool_),
@@ -579,8 +579,8 @@ def test_reward_terms_preserve_local_credit_and_shared_events():
 def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     """must retain 2D's delivery milestone and resist finder farming."""
     reward_cfg = RewardConfig(
-        finder_reward=50.0,
-        target_found_reward=100.0,
+        base_reporter_reward=50.0,
+        target_delivery_reward=100.0,
         success_reward=500.0,
     )
     base = jnp.asarray([1.0, 1.0, 1.0])
@@ -600,7 +600,7 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
         is_conn_target=jnp.asarray([False, False]),
         target_known=jnp.asarray([True, False]),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
         chain_held_steps=jnp.int32(0),
         done=jnp.bool_(False),
         collided=jnp.zeros(2, dtype=jnp.bool_),
@@ -610,34 +610,34 @@ def test_target_delivery_and_success_are_distinct_one_shot_rewards():
     delivered = previous._replace(
         is_conn_target=jnp.asarray([True, True]),
         target_known=jnp.asarray([True, True]),
-        fully_connected=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True),
         base_target_known=jnp.bool_(True),
     )
     _, delivered_terms = compute_rewards(previous, delivered, reward_cfg, env_cfg)
-    np.testing.assert_allclose(delivered_terms["target_found_reward"], [100.0, 100.0])
-    np.testing.assert_allclose(delivered_terms["finder_reward"], [50.0, 0.0])
+    np.testing.assert_allclose(delivered_terms["target_delivery_reward"], [100.0, 100.0])
+    np.testing.assert_allclose(delivered_terms["base_reporter_reward"], [50.0, 0.0])
     np.testing.assert_allclose(delivered_terms["success_reward"], [0.0, 0.0])
 
     # A later visual re-entry, and a reconnection after the base already
     # knows the target, cannot earn delivery or finder reward again.
     reentry = delivered._replace(
         directly_sees_target=jnp.asarray([False, True]),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
     )
     _, reentry_terms = compute_rewards(delivered, reentry, reward_cfg, env_cfg)
-    np.testing.assert_allclose(reentry_terms["finder_reward"], [0.0, 0.0])
+    np.testing.assert_allclose(reentry_terms["base_reporter_reward"], [0.0, 0.0])
     reconnected = reentry._replace(
         directly_sees_target=jnp.asarray([False, False]),
-        fully_connected=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True),
     )
     _, reconnected_terms = compute_rewards(reentry, reconnected, reward_cfg, env_cfg)
-    np.testing.assert_allclose(reconnected_terms["target_found_reward"], [0.0, 0.0])
-    np.testing.assert_allclose(reconnected_terms["finder_reward"], [0.0, 0.0])
+    np.testing.assert_allclose(reconnected_terms["target_delivery_reward"], [0.0, 0.0])
+    np.testing.assert_allclose(reconnected_terms["base_reporter_reward"], [0.0, 0.0])
 
     succeeded = delivered._replace(success=jnp.bool_(True))
     _, success_terms = compute_rewards(delivered, succeeded, reward_cfg, env_cfg)
     np.testing.assert_allclose(success_terms["success_reward"], [500.0, 500.0])
-    np.testing.assert_allclose(success_terms["target_found_reward"], [0.0, 0.0])
+    np.testing.assert_allclose(success_terms["target_delivery_reward"], [0.0, 0.0])
 
 
 def test_post_delivery_gap_credit_is_limited_to_relay_route():
@@ -648,7 +648,7 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         comm_radius=4.0,
         visual_radius=4.0,
     )
-    reward_cfg = RewardConfig(time_presure_reward=-1.25, gap_progress_reward_per_meter=0.125)
+    reward_cfg = RewardConfig(time_presure_reward=-1.25, closed_gap_reward_per_meter=0.125)
     state = EnvState(
         pos=jnp.asarray(
             [[4.5, 1.0, 1.0], [8.5, 1.0, 1.0], [12.5, 1.0, 1.0], [1.0, 4.5, 1.0]]
@@ -665,7 +665,7 @@ def test_post_delivery_gap_credit_is_limited_to_relay_route():
         is_conn_target=jnp.asarray([True, True, True, False]),
         target_known=jnp.asarray([True, True, True, False]),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True),
         chain_held_steps=jnp.int32(1),
         done=jnp.bool_(False),
         collided=jnp.zeros(4, dtype=jnp.bool_),
@@ -695,7 +695,7 @@ def test_partial_chain_gap_credit_uses_geodesic_leaders():
         is_conn_target=jnp.array([False, False, True, True, False]),
         target_known=jnp.ones(5, dtype=bool),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(False),
+        base_target_connected=jnp.bool_(False),
         chain_held_steps=jnp.int32(0),
         done=jnp.bool_(False),
         collided=jnp.zeros(5, dtype=bool),
@@ -710,7 +710,7 @@ def test_partial_chain_gap_credit_uses_geodesic_leaders():
     np.testing.assert_array_equal(leaders, [1, 3])
     np.testing.assert_allclose(gap, 12.)
 
-    obstacle_cfg = RewardConfig(time_presure_reward=-1., gap_progress_reward_per_meter=0.125)
+    obstacle_cfg = RewardConfig(time_presure_reward=-1., closed_gap_reward_per_meter=0.125)
     _, obstacle_terms = compute_rewards(
         state, state, obstacle_cfg, env_cfg, roadmap_distances,
     )
@@ -860,7 +860,7 @@ def test_chain_efficiency_rewards_one_path_and_gap_credit_splits_ties():
         active=jnp.ones(4, dtype=bool), target_known=jnp.ones(4, dtype=bool),
         is_conn_base=jnp.ones(4, dtype=bool), is_conn_target=jnp.ones(4, dtype=bool),
         directly_sees_target=jnp.array([False, True, True, False]),
-        fully_connected=jnp.bool_(True), base_target_known=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True), base_target_known=jnp.bool_(True),
     )
     # D0 links the base to alternate relays D1/D2. D3 is only a dead-end
     # neighbour of D0; walking out to it and back must never count as a path.
@@ -869,7 +869,7 @@ def test_chain_efficiency_rewards_one_path_and_gap_credit_splits_ties():
     reference = jnp.zeros((6, 6)).at[0, 1].set(6.)
     expected = 6. / (2. + 2. * np.sqrt(5.))
     np.testing.assert_allclose(jnp.max(chain_path_efficiencies(paths, 6.)), expected)
-    reward_cfg = RewardConfig(time_presure_reward=-1.25, gap_progress_reward_per_meter=.125,
+    reward_cfg = RewardConfig(time_presure_reward=-1.25, closed_gap_reward_per_meter=.125,
                               chain_efficiency_reward=.125)
     reward, terms = compute_rewards(state, state, reward_cfg, cfg, reference)
     np.testing.assert_allclose(terms["time_presure_reward"], [-1.25] * 4)
@@ -879,7 +879,7 @@ def test_chain_efficiency_rewards_one_path_and_gap_credit_splits_ties():
     np.testing.assert_allclose(np.sort(credit[1:3]), [0., expected * .125])
     np.testing.assert_allclose(reward, terms["time_presure_reward"] + terms["gap_reward"] + credit)
     _, disconnected = compute_rewards(
-        state, state._replace(fully_connected=jnp.bool_(False)), reward_cfg, cfg, reference,
+        state, state._replace(base_target_connected=jnp.bool_(False)), reward_cfg, cfg, reference,
     )
     np.testing.assert_array_equal(disconnected["chain_efficiency_reward"], np.zeros(4))
     _, _, observe, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
@@ -893,10 +893,10 @@ def test_autoreset_step_uses_the_configured_reward_terms():
     zero_reward = RewardConfig(
         exploration_reward=0.0,
         collision_reward=0.0,
-        finder_reward=0.0,
+        base_reporter_reward=0.0,
         time_presure_reward=0.0,
-        gap_progress_reward_per_meter=0.0,
-        target_found_reward=0.0,
+        closed_gap_reward_per_meter=0.0,
+        target_delivery_reward=0.0,
         success_reward=0.0,
     )
     reset, autoreset_step, _, _ = make_autoreset_fns(
@@ -924,7 +924,7 @@ def test_chain_diagnostics_are_zero_gap_and_full_progress_for_a_complete_chain()
         is_conn_target=jnp.asarray([True, True]),
         target_known=jnp.asarray([True, True]),
         success=jnp.bool_(False),
-        fully_connected=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True),
         chain_held_steps=jnp.int32(0),
         done=jnp.bool_(False),
         collided=jnp.zeros(2, dtype=jnp.bool_),

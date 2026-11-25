@@ -54,7 +54,7 @@ def main():
             "inspection_evaluation.dynamic_max_geo_distance=true",
             "inspection_evaluation.target_sampling=independent",
             "inspection_evaluation.success_condition=chain_held_and_cleand_up",
-            "inspection_evaluation.seed=456789", "inspection_evaluation.eval_parallel_envs=1000",
+            "inspection_evaluation.seed=456789", "inspection_evaluation.episodes_per_map=1000",
             "inspection_evaluation.eval_video=true", "inspection_evaluation.map_suite_replay_limit=1",
             "logging.wandb_mode=disabled", "eval_name=chain&cleanUp"]
         commands.append((row, command))

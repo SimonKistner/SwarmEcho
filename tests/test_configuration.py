@@ -100,7 +100,7 @@ def test_g03_clu_is_solvable_with_automatic_deployment_and_generated_validation(
     assert resolve_level_file("G03_random_buildings", LEVEL_DIR) == canonical
     assert level.ideal_chain_margin_m > 0
     assert level.env.num_agents == 7
-    assert level.env.adapt_size.enabled
+    assert level.env.decommissioning.enabled
     assert level.training.num_maps == 3600
     assert level.validation.enabled and level.validation.num_maps == 400
     assert level.validation.mode is None

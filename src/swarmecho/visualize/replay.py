@@ -7,11 +7,12 @@ from dataclasses import asdict, dataclass
 import time
 from pathlib import Path
 from swarmecho.core.terminal import terminal_print
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
-from swarmecho.env.environment import EnvState
+if TYPE_CHECKING:
+    from swarmecho.env.environment import EnvState
 from swarmecho.env.buildings import BuildingArrays, BUILDING_FORMAT
 
 
@@ -44,7 +45,7 @@ def planner_metadata(cfg) -> dict:
              "roadmap_node_density", "roadmap_merge_wall_end_nodes",
              "wall_sensing_rays", "wall_sensing_ray_max_distance")
     metadata = {**{name: getattr(cfg, name) for name in names},
-                "adapt_size": asdict(cfg.adapt_size), "spawn_delay": cfg.spawn_delay}
+                "decommissioning": asdict(cfg.decommissioning), "spawn_delay": cfg.spawn_delay}
     return metadata
 
 
@@ -93,7 +94,7 @@ def write_replay(
         "connected_to_target": stack("is_conn_target"),
         "target_known": stack("target_known"),
         "success": stack("success"),
-        "fully_connected": stack("fully_connected"),
+        "base_target_connected": stack("base_target_connected"),
         "chain_held_steps": stack("chain_held_steps"),
         "done": stack("done"),
         "collided": stack("collided"),
@@ -126,7 +127,7 @@ def write_replay(
     if all(hasattr(state, "base_target_known") for state in state_list):
         arrays["base_target_known"] = stack("base_target_known")
     else:
-        arrays["base_target_known"] = np.logical_or.accumulate(arrays["fully_connected"], axis=0)
+        arrays["base_target_known"] = np.logical_or.accumulate(arrays["base_target_connected"], axis=0)
     if reward_terms is not None:
         rewards = np.asarray(reward_terms)
         if rewards.shape[0] != len(state_list):
@@ -209,6 +210,15 @@ def load_replay(manifest: str | Path) -> tuple[dict, dict[str, np.ndarray]]:
     data_path = manifest_path.parent / metadata["data_file"]
     with np.load(data_path, allow_pickle=False) as archive:
         arrays = {name: archive[name] for name in archive.files}
+    from swarmecho.core.compatibility import REWARD_NAME_ALIASES
+    if "fully_connected" in arrays:
+        arrays.setdefault("base_target_connected", arrays.pop("fully_connected"))
+    if "adapt_size" in metadata:
+        metadata.setdefault("decommissioning", metadata.pop("adapt_size"))
+    metadata["fields"] = sorted(arrays)
+    if "reward_component_names" in metadata:
+        metadata["reward_component_names"] = [
+            REWARD_NAME_ALIASES.get(name, name) for name in metadata["reward_component_names"]]
     if arrays["position"].shape[0] != metadata["frames"]:
         raise ValueError("Replay frame count does not match its manifest.")
     return metadata, arrays

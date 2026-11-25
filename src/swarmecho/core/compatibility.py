@@ -87,3 +87,34 @@ def resolve_level_file(name_or_path: str | Path, directory: Path) -> Path:
 
 def resolve_map_file(name_or_path: str | Path, directory: Path) -> Path:
     return resolve_named_file(name_or_path, directory, aliases=MAP_ALIASES)
+
+
+REWARD_NAME_ALIASES = {
+    "finder_reward": "base_reporter_reward",
+    "target_found_reward": "target_delivery_reward",
+    "gap_progress_reward_per_meter": "closed_gap_reward_per_meter",
+}
+
+
+def historical_environment_identity(env) -> dict:
+    """Keep frozen dataset identities stable across configuration renames."""
+    from dataclasses import asdict
+
+    values = asdict(env)
+    values["adapt_size"] = values.pop("decommissioning")
+    if values.get("radar_mode") == "max_proximity":
+        values["radar_mode"] = "legacy"
+    return values
+
+
+def historical_reward_identity(reward) -> dict:
+    """Retain the G03 identity format used by frozen validation cases."""
+    from dataclasses import asdict
+
+    values = asdict(reward)
+    for old, current in REWARD_NAME_ALIASES.items():
+        values[old] = values.pop(current)
+    values.update(decommission_reward=0, useless_agent_at_success_reward=-3000,
+                  useless_agent_at_success_all_agents_reward=-750,
+                  useless_agent_at_success_all_agents_reward_cap=-2000)
+    return values

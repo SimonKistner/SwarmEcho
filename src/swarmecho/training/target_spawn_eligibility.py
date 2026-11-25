@@ -45,6 +45,7 @@ class TargetSpawnEligibility:
         if map_identities is None:
             from swarmecho.training.map_selection import building_identity
             map_identities = [building_identity(level.building, level.building_name)]
+        self.level = level
         self.map_identities = map_identities
         self.config = level.training.target_spawn_eligibility
         self.maximum = level.env.num_agents
@@ -206,10 +207,36 @@ class TargetSpawnEligibility:
             "format": self.format, "identity": self.identity, "config": asdict(self.config),
             "map_identities": self.map_identities, "maps": rows})
 
+    def _matching_legacy_checkpoint(self, path, saved):
+        """Migrate frozen measurements after a name-only source identity change."""
+        if (saved.get("config") != asdict(self.config)
+                or saved.get("map_identities") != self.map_identities):
+            return False
+        source = path.parent.parent.parent / "config.yaml"
+        if not source.is_file():
+            return False
+        import yaml
+        from swarmecho.core.config import load_level
+        from swarmecho.core.compatibility import historical_environment_identity
+
+        data = yaml.safe_load(source.read_text(encoding="utf-8"))
+        data.pop("name", None)
+        data.pop("building", None)
+        previous = load_level(source, config_data=data)
+        current = self.level
+        return (historical_environment_identity(previous.env) == historical_environment_identity(current.env)
+                and previous.training.bank_selection_seed == current.training.bank_selection_seed
+                and previous.training.spawn_pair_max_attempts == current.training.spawn_pair_max_attempts
+                and previous.training.dynamic_max_geo_distance == current.training.dynamic_max_geo_distance)
+
     def restore(self, path):
-        saved = json.loads(Path(path).read_text(encoding="utf-8"))
-        if saved.get("format") != self.format or saved.get("identity") != self.identity or len(saved.get("maps", [])) != len(self.cells):
+        path = Path(path)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved.get("format") != self.format or len(saved.get("maps", [])) != len(self.cells):
+            raise ValueError("Frozen target-cell eligibility settings changed; start a new run or branch.")
+        renamed = saved.get("identity") != self.identity
+        if renamed and not self._matching_legacy_checkpoint(path, saved):
             raise ValueError("Frozen target-cell eligibility settings changed; start a new run or branch.")
         for index, row in enumerate(saved["maps"]):
-            self._load_map(index, row)
+            self._load_map(index, {**row, "identity": self.identity} if renamed else row)
         self._tables.clear()

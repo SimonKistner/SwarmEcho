@@ -8,6 +8,7 @@ import math
 import warnings
 from swarmecho.core.compatibility import (
     DEFAULT_LEVEL_NAME,
+    REWARD_NAME_ALIASES,
     canonical_level_name,
     canonical_map_name,
     resolve_level_file,
@@ -26,7 +27,7 @@ SUCCESS_CONDITIONS = CHAIN_SUCCESS_CONDITIONS
 
 # Adaptive population control is opt-in; disabled levels retain their old shapes.
 @dataclass(frozen=True)
-class AdaptSizeConfig:
+class DecommissioningConfig:
     enabled: bool = False
     decommission_radius_m: float = 1.0
     decommission_hold_steps: int = 15
@@ -36,7 +37,7 @@ class AdaptSizeConfig:
 @dataclass(frozen=True)
 class EnvConfig:
     num_agents: int = 5
-    adapt_size: AdaptSizeConfig = AdaptSizeConfig()
+    decommissioning: DecommissioningConfig = DecommissioningConfig()
 
     dt: float = 0.1  # Simulated time per step; scales velocity and position updates.
     max_force: float = 15.0
@@ -50,9 +51,10 @@ class EnvConfig:
     wall_sensing_rays: int = 16  # fibonacci: any integer >= 4; xyz: 14 | 18 | 26
     wall_sensing_ray_max_distance: float = 8.0  # Metres; independent of target visual_radius.
     drone_radar_bins: int = 8
-    radar_mode: str = "legacy"  # legacy | band_sep_counting
+    radar_mode: str = "max_proximity"  # Baseline radar; band_sep_counting is a retained ablation.
+    # Settings used only by the band_sep_counting ablation.
     distance_bands: int = 1  # Equal-width bands; 0 is an alias for 1.
-    radar_count_cap: int = 3  # Saturation count in band_sep_counting mode.
+    radar_count_cap: int = 3  # Saturation count per band and peer group.
 
     target_wall_buffer_fraction: float = 0.1
     spawn_delay: int = 5  # Minimum steps between automatic launches.
@@ -78,16 +80,16 @@ class EnvConfig:
     roadmap_merge_wall_end_nodes: bool = False
 
 
-def validate_adapt_size(cfg: EnvConfig) -> None:
-    a = cfg.adapt_size
+def validate_decommissioning(cfg: EnvConfig) -> None:
+    a = cfg.decommissioning
     if type(a.enabled) is not bool:
-        raise ValueError("adapt_size.enabled must be boolean.")
+        raise ValueError("decommissioning.enabled must be boolean.")
     if type(a.decommission_hold_steps) is not int or a.decommission_hold_steps < 1:
-        raise ValueError("adapt_size.decommission_hold_steps must be a positive integer.")
+        raise ValueError("decommissioning.decommission_hold_steps must be a positive integer.")
     if not math.isfinite(a.decommission_radius_m) or a.decommission_radius_m <= 0:
-        raise ValueError("adapt_size.decommission_radius_m must be positive and finite.")
+        raise ValueError("decommissioning.decommission_radius_m must be positive and finite.")
     if a.enabled and cfg.success_condition not in CHAIN_SUCCESS_CONDITIONS:
-        raise ValueError("Adaptive size requires chain_held or chain_held_and_cleand_up success.")
+        raise ValueError("Decommissioning requires chain_held or chain_held_and_cleand_up success.")
 
 
 def validate_radar_config(cfg: EnvConfig) -> None:
@@ -101,8 +103,8 @@ def validate_radar_config(cfg: EnvConfig) -> None:
         value = getattr(cfg, name)
         if type(value) is not int or value < 4:
             raise ValueError(f"env.{name} must be an integer of at least 4.")
-    if cfg.radar_mode not in {"legacy", "band_sep_counting"}:
-        raise ValueError("env.radar_mode must be legacy or band_sep_counting.")
+    if cfg.radar_mode not in {"max_proximity", "band_sep_counting"}:
+        raise ValueError("env.radar_mode must be max_proximity or band_sep_counting.")
     if type(cfg.distance_bands) is not int or cfg.distance_bands < 0:
         raise ValueError("env.distance_bands must be a nonnegative integer (0 means 1).")
     if type(cfg.radar_count_cap) is not int or cfg.radar_count_cap < 1:
@@ -142,32 +144,22 @@ class RandomBuildingConfig:
 class RewardConfig:
     # Signed individual amounts: negative values are costs; zero disables a term.
     # Numeric defaults follow G02, using the former four-agent split as reference.
-    decommission_reward: float = 0.0  # Full amount to each removed drone, on removal.
     # Independent, opt-in surplus-agent rewards during an intact chain hold.
     non_contributor_return_reward_per_meter: float = 0.0
     non_contributor_departure_reward_per_meter: float = 0.0
-    non_contributor_decommission_reward: float = 0.0  # Standalone terminal amount; G03 uses half its success reward.
+    non_contributor_decommission_reward: float = 0.0  # One-shot surplus-removal amount; G03 matches its success reward.
     all_decommissioned_penalty: float = -1000.0  # Full signed amount to each last acting drone.
-    useless_agent_at_success_reward: float = -3000.0  # Each active drone outside the selected success chain.
-    useless_agent_at_success_all_agents_reward: float = -750.0  # Each active drone per useless drone at terminal chain success; no population divisor.
-    useless_agent_at_success_all_agents_reward_cap: float = -2000.0  # Signed bound per active drone; same sign as the coefficient, or zero to disable.
     chain_efficiency_reward: float = 0.0  # Per eligible drone times its path efficiency; no population divisor.
 
     exploration_reward: float = 2.0  # Per new voxel; simultaneous viewers split that voxel's credit.
-    finder_reward: float = 100.0  # Each direct base deliverer.
-    target_found_reward: float = 125.0  # One-shot amount to each active drone when the target reaches base.
+    base_reporter_reward: float = 100.0  # Each direct base deliverer.
+    target_delivery_reward: float = 125.0  # One-shot amount to each active drone when the target reaches base.
     success_reward: float = 3000.0  # Full amount to every active drone at first success; no population divisor.
-    # Pay each qualifying holder success_reward / hold_chain_for per new record.
-    # One newly informed peer's credit is split among its simultaneous senders.
 
     collision_reward: float = -0.5  # Per colliding drone per transition.
     time_presure_reward: float = -0.75  # Each acting drone every step, including its removal step.
     # Recurring amount per credited closed metre per step; retain local soft shares.
-    gap_progress_reward_per_meter: float = 0.2  # Recurring per credited closed metre each step.
-    # Legacy diagnostic only: signed changes in per-drone credit. Retained for
-    # debugging historical experiments, not a training design/tuning option.
-    # Legacy diagnostic companion to change mode: vest already credited gap
-    # progress after target delivery instead of discarding its gain.
+    closed_gap_reward_per_meter: float = 0.2  # Recurring per credited closed metre each step.
 
     @property
     def non_contributor_movement_enabled(self) -> bool:
@@ -181,25 +173,16 @@ class RewardConfig:
 def validate_reward_config(cfg: RewardConfig) -> None:
     """All reward coefficients are signed, finite amounts; no implicit negation."""
     for name in (
-        "decommission_reward",
         "non_contributor_return_reward_per_meter", "non_contributor_departure_reward_per_meter",
         "non_contributor_decommission_reward",
-        "all_decommissioned_penalty", "useless_agent_at_success_reward",
-        "useless_agent_at_success_all_agents_reward",
-        "chain_efficiency_reward", "exploration_reward", "finder_reward",
-        "target_found_reward", "success_reward",
-        "collision_reward", "time_presure_reward", "gap_progress_reward_per_meter",
+        "all_decommissioned_penalty",
+        "chain_efficiency_reward", "exploration_reward", "base_reporter_reward",
+        "target_delivery_reward", "success_reward",
+        "collision_reward", "time_presure_reward", "closed_gap_reward_per_meter",
     ):
         value = getattr(cfg, name)
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError(f"reward.{name} must be finite (positive, zero or negative).")
-    cap = cfg.useless_agent_at_success_all_agents_reward_cap
-    if type(cap) not in (int, float) or not math.isfinite(cap):
-        raise ValueError("reward.useless_agent_at_success_all_agents_reward_cap must be finite (positive, zero or negative).")
-    coefficient = cfg.useless_agent_at_success_all_agents_reward
-    if cap != 0 and coefficient != 0 and (cap < 0) != (coefficient < 0):
-        raise ValueError("reward.useless_agent_at_success_all_agents_reward_cap must have the same sign as "
-                         "useless_agent_at_success_all_agents_reward, or be zero to disable it.")
 
 
 # training
@@ -259,7 +242,7 @@ def validate_adaptive_map_sampling(cfg: AdaptiveMapSamplingConfig) -> None:
 @dataclass(frozen=True)
 class AdaptiveTargetSpawnConfig:
     enabled: bool = False
-    curriculum_start_agents: int | None = None  # Optional reset-time target budget; population stays fixed.
+    initial_target_agent_budget: int | None = None  # Optional reset-time target budget; population stays fixed.
     min_probability_fraction: float = 0.20
     success_window_episodes_per_cell: int = 500
     probability_smoothing_half_life_updates: float = 3.0
@@ -269,9 +252,9 @@ class AdaptiveTargetSpawnConfig:
 
 
 def validate_adaptive_target_spawn(cfg: AdaptiveTargetSpawnConfig) -> None:
-    if cfg.curriculum_start_agents is not None and (
-            type(cfg.curriculum_start_agents) is not int or cfg.curriculum_start_agents < 1 or not cfg.enabled):
-        raise ValueError("training.adaptive_target_spawn.curriculum_start_agents must be a positive integer "
+    if cfg.initial_target_agent_budget is not None and (
+            type(cfg.initial_target_agent_budget) is not int or cfg.initial_target_agent_budget < 1 or not cfg.enabled):
+        raise ValueError("training.adaptive_target_spawn.initial_target_agent_budget must be a positive integer "
                          "with adaptive_target_spawn.enabled=true, or null.")
     for name in ("enabled", "plateau_warning_enabled"):
         if type(getattr(cfg, name)) is not bool:
@@ -426,27 +409,30 @@ class NetworkConfig:
 
 # evaluation
 @dataclass(frozen=True)
+class EarlyStoppingConfig:
+    enabled: bool = False
+    success_rate: float = 0.99
+    final_success_rate: float | None = None
+    min_success_length_reduction: float | None = None
+    hold_evals: int = 0
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     seed: int | None = None  # None follows training.seed; explicit value fixes inspection cases across training seeds.
     inspection_maps: int | None = None  # Random inspection subset; authored suites use their configured maps.
     num_agents: int | None = None  # None (YAML: null) uses env.num_agents from training; otherwise deploy this many for all evals/replays.
-    eval_parallel_envs: int | None = 4000  # null follows the effective training.num_envs.
+    episodes_per_map: int | None = 4000  # null follows the effective training.num_envs.
     eval_differes_from_training_map: bool = False
     eval_map: str | None = None
     # Optional handcrafted [min_x,min_y,min_z,max_x,max_y,max_z] cuboids.
 
     random_eval: bool = False
-    random_eval_envs: int = 5
     random_eval_maps: tuple[str, ...] | None = None
     replay_targets_from_storey: int | None = None  # 1-based; None samples every valid storey.
     target_sampling: str = "independent"  # independent | training (adaptive weights) | curriculum (uniform, current budget).
 
-    early_exit: bool = False
     success_condition: str | None = None  # null follows env; also accepts chain_held_and_cleand_up
-    early_exit_success_rate: float = 0.99
-    final_early_exit_success_rate: float | None = None  # Override only the final agent-count curriculum stage.
-    early_exit_min_success_length_reduction: float | None = None  # 0.25 -> mean completion by step 450 of 600
-    early_exit_hold_evals: int = 0
     eval_broadcast_on_curriculum_early_stop: bool = False
 
     save_model: bool = True
@@ -469,6 +455,7 @@ class EvaluationConfig:
 @dataclass(frozen=True)
 class ValidationConfig:
     enabled: bool = False
+    early_stopping: EarlyStoppingConfig = EarlyStoppingConfig()
     mode: str | None = None  # Generated maps use a separate validation split by default.
     success_condition: str | None = None  # null follows env, independently of inspection_evaluation.
     num_maps: int = 400
@@ -505,9 +492,6 @@ def inspection_config_dict(config: EvaluationConfig) -> dict:
     from dataclasses import asdict
     values = asdict(config)
     values.pop("random_eval")
-    values.pop("random_eval_envs")
-    if config.random_eval and config.inspection_maps is None:
-        values["inspection_maps"] = config.random_eval_envs
     return values
 
 
@@ -523,8 +507,6 @@ def normalize_inspection_sections(data: dict) -> dict:
         if not isinstance(values, dict):
             raise ValueError("inspection_evaluation must be a mapping.")
         values = dict(values)
-        if "random_eval_envs" in values and "inspection_maps" not in values:
-            values["inspection_maps"] = values.pop("random_eval_envs")
         data["evaluation"] = values
     return data
 
@@ -570,8 +552,8 @@ class Level:
     map_source_name: str | None = None
 
     @property
-    def adapt_size(self) -> AdaptSizeConfig:
-        return self.env.adapt_size
+    def decommissioning(self) -> DecommissioningConfig:
+        return self.env.decommissioning
 
     @property
     def inspection_evaluation(self) -> EvaluationConfig:
@@ -598,8 +580,8 @@ class Level:
         return self.training.total_timesteps // (self.training.num_envs * self.training.num_steps)
 
     @property
-    def effective_eval_parallel_envs(self) -> int:
-        value = self.evaluation.eval_parallel_envs
+    def effective_episodes_per_map(self) -> int:
+        value = self.evaluation.episodes_per_map
         return self.training.num_envs if value is None else value
 
 
@@ -612,7 +594,7 @@ def resolve_validation_level(level: Level) -> Level:
     """Apply the validation goal without inheriting inspection-only overrides."""
     if level.validation.success_condition is not None:
         level = replace(level, env=replace(level.env, success_condition=level.validation.success_condition))
-    validate_adapt_size(level.env)
+    validate_decommissioning(level.env)
     return level
 
 
@@ -626,7 +608,7 @@ def resolve_evaluation_level(level: Level) -> Level:
         level = replace(level, env=replace(level.env, num_agents=num_agents))
     if evaluation.success_condition is not None:
         level = replace(level, env=replace(level.env, success_condition=evaluation.success_condition))
-    validate_adapt_size(level.env)
+    validate_decommissioning(level.env)
     if not evaluation.eval_differes_from_training_map:
         return level
     if evaluation.eval_map is None:
@@ -670,6 +652,64 @@ def _strict_dataclass(cls, values: object, label: str):
     return cls(**values)
 
 
+def normalize_renamed_settings(data: dict) -> dict:
+    """Translate historical config keys before merging CLI overrides."""
+    from copy import deepcopy
+
+    data = normalize_inspection_sections(deepcopy(data))
+
+    def rename(values, aliases):
+        for old, new in aliases.items():
+            if old in values:
+                value = values.pop(old)
+                if new in values and values[new] != value:
+                    raise ValueError(f"Conflicting settings: {old} and {new}.")
+                values[new] = value
+
+    rename(data, {"adapt_size": "decommissioning"})
+    env = data.get("env", {})
+    rename(env, {"adapt_size": "decommissioning"})
+    if "decommissioning" in env:
+        data["decommissioning"] = {**env.pop("decommissioning"), **data.get("decommissioning", {})}
+    if env.get("radar_mode") == "legacy":
+        env["radar_mode"] = "max_proximity"
+    reward = data.get("reward", {})
+    rename(reward, REWARD_NAME_ALIASES)
+    adaptive = data.get("training", {}).get("adaptive_target_spawn", {})
+    rename(adaptive, {"curriculum_start_agents": "initial_target_agent_budget"})
+    inspection = data.get("evaluation", {})
+    rename(inspection, {"eval_parallel_envs": "episodes_per_map",
+                        "random_eval_envs": "inspection_maps"})
+    stopping = {new: inspection.pop(old) for old, new in {
+        "early_exit": "enabled", "early_exit_success_rate": "success_rate",
+        "final_early_exit_success_rate": "final_success_rate",
+        "early_exit_min_success_length_reduction": "min_success_length_reduction",
+        "early_exit_hold_evals": "hold_evals",
+    }.items() if old in inspection}
+    if stopping:
+        validation = data.setdefault("validation", {})
+        current = validation.get("early_stopping", {})
+        for name, value in stopping.items():
+            if name in current and current[name] != value:
+                raise ValueError(f"Conflicting validation early-stopping setting: {name}.")
+        validation["early_stopping"] = {**stopping, **current}
+    return data
+
+
+def validate_early_stopping(cfg: EarlyStoppingConfig) -> None:
+    if type(cfg.enabled) is not bool:
+        raise ValueError("validation.early_stopping.enabled must be boolean.")
+    for name in ("success_rate", "final_success_rate", "min_success_length_reduction"):
+        value = getattr(cfg, name)
+        if value is not None and (type(value) not in (int, float)
+                                  or not math.isfinite(value) or not 0 <= value <= 1):
+            raise ValueError(f"validation.early_stopping.{name} must be in [0, 1] or null.")
+    if cfg.success_rate is None:
+        raise ValueError("validation.early_stopping.success_rate is required.")
+    if type(cfg.hold_evals) is not int or cfg.hold_evals < 0:
+        raise ValueError("validation.early_stopping.hold_evals must be nonnegative.")
+
+
 def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[str] | None = None,
                *, config_data: dict | None = None) -> Level:
     """Load a strict level through the canonical config module."""
@@ -684,8 +724,10 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         if not source.exists():
             raise FileNotFoundError(f"level not found: {name_or_path}")
         config_data = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
-    data = normalize_inspection_sections(config_data)
+    data = normalize_renamed_settings(config_data)
     if saved_config:
+        data.pop("name", None)
+        data.pop("building", None)
         inspection = data.get("evaluation", {})
         for key in ("training_robustness", "final_robustness", "eval_robustness_runs", "eval_action_noise_max",
                     "eval_every_env_steps", "eval_not_deliv_not_visual_splitt_in_two", "early_exit_source",
@@ -707,9 +749,9 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
                     network_snapshot.pop(key)
             data["network"] = network_snapshot
     if overrides:
-        override_data = normalize_inspection_sections(OmegaConf.to_container(OmegaConf.from_dotlist(overrides), resolve=True))
+        override_data = normalize_renamed_settings(OmegaConf.to_container(OmegaConf.from_dotlist(overrides), resolve=True))
         data = OmegaConf.to_container(OmegaConf.merge(OmegaConf.create(data), OmegaConf.create(override_data)), resolve=True)
-    allowed = {"env", "reward", "training", "network", "evaluation", "logging", "random_buildings", "adapt_size", "validation"}
+    allowed = {"env", "reward", "training", "network", "evaluation", "logging", "random_buildings", "decommissioning", "validation"}
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"Unknown config sections: {', '.join(sorted(unknown))}.")
@@ -730,13 +772,13 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
                     "obstacle_spawn_layer_min", "obstacle_spawn_layer_max", "obstacle_boundary_buffer_m",
                     "obstacle_target_buffer_m", "roadmap_corner_bonus_m"):
             env_data.pop(key, None)
-    adapt_data = {**env_data.pop("adapt_size", {}), **data.get("adapt_size", {})}
+    adapt_data = {**env_data.pop("decommissioning", {}), **data.get("decommissioning", {})}
     if saved_config:
         for key in ("initial_agents", "vote_mode", "vote_protocol", "vote_holding", "quorum_fraction",
                     "quorum_hold", "reward_by_reference_enabled", "reward_by_reference_fraction",
                     "reward_by_reference_steps", "recruitment_enabled"):
             adapt_data.pop(key, None)
-    env_data["adapt_size"] = _strict_dataclass(AdaptSizeConfig, adapt_data, "adapt_size")
+    env_data["decommissioning"] = _strict_dataclass(DecommissioningConfig, adapt_data, "decommissioning")
     # Preserve frozen run configs, including the old coupling to visual_radius.
     # Explicit current fields take precedence over renamed/combined counts.
     legacy_wall_sensing = "wall_radar_bins" in env_data or "radar_bins" in env_data
@@ -750,10 +792,14 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         env_data.setdefault("wall_sensing_ray_max_distance", env_data.get("visual_radius", EnvConfig.visual_radius))
     map_names = env_data.pop("map_names", None)
     generation = _strict_dataclass(RandomBuildingConfig, data.get("random_buildings", {}), "random_buildings")
-    validation = _strict_dataclass(ValidationConfig, data.get("validation", {}), "validation")
+    validation_data = dict(data.get("validation", {}))
+    validation_data["early_stopping"] = _strict_dataclass(
+        EarlyStoppingConfig, validation_data.get("early_stopping", {}), "validation.early_stopping")
+    validate_early_stopping(validation_data["early_stopping"])
+    validation = _strict_dataclass(ValidationConfig, validation_data, "validation")
     validate_validation(validation)
     env = _strict_dataclass(EnvConfig, env_data, "env")
-    validate_adapt_size(env)
+    validate_decommissioning(env)
     validate_radar_config(env)
     training_data = dict(data.get("training", {}))
     if saved_config:
@@ -882,11 +928,11 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
                 or env.num_agents < 2
                 or not validation.enabled):
             raise ValueError("Target curriculum requires uniform sampling, full population, dynamic feasibility and validation progression.")
-    if training.adaptive_target_spawn.curriculum_start_agents is not None:
+    if training.adaptive_target_spawn.initial_target_agent_budget is not None:
         ev_data = data.get("evaluation", {})
         if ((not generation.enabled and not map_names)
-                or training.adaptive_target_spawn.curriculum_start_agents > env.num_agents
-                or not ev_data.get("early_exit", EvaluationConfig.early_exit)
+                or training.adaptive_target_spawn.initial_target_agent_budget > env.num_agents
+                or not validation.early_stopping.enabled
                 or not validation.enabled):
             raise ValueError("Spawn curriculum requires authored or persistent random maps, fixed full population, "
                              "dynamic feasibility and validation-based early exit.")
@@ -907,6 +953,8 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         raise ValueError("random_buildings.load_maps_from_bank requires random_buildings.enabled=true.")
     map_paths: tuple[Path, ...] = ()
     if generation.enabled:
+        if saved_config and map_names == ["random_buildings"]:
+            map_names = []
         if map_names not in (None, [], ["random"]):
             raise ValueError("random_buildings.enabled requires env.map_names: [] (or [random]); authored maps cannot be specified.")
         from swarmecho.env.random_buildings import generate_building, map_seed
@@ -933,7 +981,9 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         building = load_building(map_paths[0])
     reward_data = dict(data.get("reward", {}))
     if saved_config:
-        for key in ("no_movement_termination_penalty", "success_reward_as_hold_record", "peer_informing_reward_enabled",
+        for key in ("decommission_reward", "useless_agent_at_success_reward",
+                    "useless_agent_at_success_all_agents_reward", "useless_agent_at_success_all_agents_reward_cap",
+                    "no_movement_termination_penalty", "success_reward_as_hold_record", "peer_informing_reward_enabled",
                     "peer_informing_reward", "gap_reward_uses_change", "gap_change_reward_per_meter",
                     "delivery_gap_vesting_enabled", "delivery_gap_vesting_steps", "priveleged_vote_reward",
                     "reinforcement_reward", "rejected_call_reward", "target_found_requires_delivery",
@@ -959,18 +1009,18 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         count = level.evaluation.inspection_maps
         if count is None:
             count = (training.adaptive_map_sampling.held_out_maps if training.adaptive_map_sampling.enabled
-                     else level.evaluation.random_eval_envs)
+                     else 5)
         if type(count) is not int or count < 1:
             raise ValueError("inspection_evaluation.inspection_maps must be null or a positive integer.")
         if validation.enabled and count > validation.num_maps:
             raise ValueError("Inspection map count cannot exceed validation.num_maps.")
         level = replace(level, evaluation=replace(level.evaluation, random_eval=True,
-            random_eval_envs=count, random_eval_maps=None if validation.enabled or training.adaptive_map_sampling.enabled
+            inspection_maps=count, random_eval_maps=None if validation.enabled or training.adaptive_map_sampling.enabled
             else level.evaluation.random_eval_maps))
     if level.evaluation.inspection_maps is not None and (
             type(level.evaluation.inspection_maps) is not int or level.evaluation.inspection_maps < 1):
         raise ValueError("inspection_evaluation.inspection_maps must be null or a positive integer.")
-    if level.evaluation.early_exit and not validation.enabled:
+    if validation.early_stopping.enabled and not validation.enabled:
         raise ValueError("Validation early exit requires validation.enabled=true.")
     validate_reward_config(level.reward)
     success_conditions = SUCCESS_CONDITIONS
@@ -991,14 +1041,17 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         raise ValueError("training.actor_clip_eps must be positive.")
     if not math.isfinite(level.training.value_clip_eps) or level.training.value_clip_eps < 0:
         raise ValueError("training.value_clip_eps must be finite and nonnegative.")
-    parallel_envs = level.evaluation.eval_parallel_envs
+    parallel_envs = level.evaluation.episodes_per_map
     if parallel_envs is not None and (type(parallel_envs) is not int or parallel_envs < 1):
-        raise ValueError("evaluation.eval_parallel_envs must be null or a positive integer.")
+        raise ValueError("evaluation.episodes_per_map must be null or a positive integer.")
     recovery = level.training.oom_recovery
     if (recovery.enabled and recovery.parameter == "num_envs" and recovery.factor is None
             and recovery.decrement % level.training.num_minibatches):
         raise ValueError("OOM recovery requires num_minibatches to divide the configured environment decrement.")
     ev = level.evaluation
+    if ev.random_eval and ev.inspection_maps is None:
+        ev = replace(ev, inspection_maps=5)
+        level = replace(level, evaluation=ev)
     if ev.num_agents is not None and (type(ev.num_agents) is not int or ev.num_agents < 1):
         raise ValueError("evaluation.num_agents must be null or a positive integer.")
     if level.static_map_suite:
@@ -1010,7 +1063,7 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         raise ValueError("inspection_evaluation.target_sampling must be independent, training or curriculum.")
     if ev.target_sampling == "curriculum":
         if (not training.adaptive_target_spawn.enabled
-                or training.adaptive_target_spawn.curriculum_start_agents is None
+                or training.adaptive_target_spawn.initial_target_agent_budget is None
                 or ev.num_agents is not None or ev.eval_differes_from_training_map or ev.eval_map
                 or not validation.enabled):
             raise ValueError("Curriculum inspection requires a virtual target curriculum, the full training "
@@ -1024,8 +1077,8 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
                              "Inspection maps cannot reuse another map's adaptive cell weights.")
     if ev.seed is not None and (type(ev.seed) is not int or not 0 <= ev.seed < 2**32):
         raise ValueError("inspection_evaluation.seed must be null or an integer in [0, 2**32).")
-    if type(ev.random_eval) is not bool or type(ev.random_eval_envs) is not int or ev.random_eval_envs < 1:
-        raise ValueError("random_eval must be boolean and random_eval_envs a positive integer.")
+    if type(ev.random_eval) is not bool:
+        raise ValueError("random_eval must be boolean.")
     if ev.replay_targets_from_storey is not None and (
         type(ev.replay_targets_from_storey) is not int or ev.replay_targets_from_storey < 1
     ):
@@ -1034,8 +1087,8 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         if ev.eval_differes_from_training_map or ev.eval_map:
             raise ValueError("random_eval cannot be combined with eval_map overrides.")
         if ev.random_eval_maps is not None:
-            if not isinstance(ev.random_eval_maps, (list, tuple)) or len(ev.random_eval_maps) != ev.random_eval_envs:
-                raise ValueError("random_eval_maps must contain exactly random_eval_envs map paths.")
+            if not isinstance(ev.random_eval_maps, (list, tuple)) or len(ev.random_eval_maps) != (ev.inspection_maps or 5):
+                raise ValueError("random_eval_maps must contain exactly inspection_maps map paths.")
             for item in ev.random_eval_maps:
                 if not isinstance(item, str):
                     raise ValueError("random_eval_maps entries must be map names or paths.")
@@ -1060,17 +1113,8 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         value = getattr(level.evaluation, name)
         if type(value) is not int or value < 0:
             raise ValueError(f"evaluation.{name} must be a non-negative integer.")
-    for name in ("early_exit_success_rate", "eval_min_train_success"):
-        if not 0.0 <= getattr(level.evaluation, name) <= 1.0:
-            raise ValueError(f"evaluation.{name} must be in [0, 1].")
-    final_success_rate = level.evaluation.final_early_exit_success_rate
-    if final_success_rate is not None and not 0.0 <= final_success_rate <= 1.0:
-        raise ValueError("evaluation.final_early_exit_success_rate must be in [0, 1] or null.")
-    speed_gate = level.evaluation.early_exit_min_success_length_reduction
-    if speed_gate is not None and not 0.0 <= speed_gate <= 1.0:
-        raise ValueError("evaluation.early_exit_min_success_length_reduction must be in [0, 1] or null.")
-    if type(level.evaluation.early_exit_hold_evals) is not int or level.evaluation.early_exit_hold_evals < 0:
-        raise ValueError("evaluation.early_exit_hold_evals must be a non-negative integer.")
+    if not 0.0 <= level.evaluation.eval_min_train_success <= 1.0:
+        raise ValueError("evaluation.eval_min_train_success must be in [0, 1].")
     if ev.map_suite_replay_limit is not None and (
         type(ev.map_suite_replay_limit) is not int or ev.map_suite_replay_limit < 1
     ):

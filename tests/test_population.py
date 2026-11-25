@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from swarmecho.core.config import (
-    AdaptSizeConfig,
+    DecommissioningConfig,
     EnvConfig,
     EvaluationConfig,
     Level,
@@ -23,10 +23,10 @@ from swarmecho.core.config import (
     NetworkConfig,
     RewardConfig,
     TrainingConfig,
-    validate_adapt_size,
+    validate_decommissioning,
     validate_reward_config,
 )
-from swarmecho.env.adapt_size import (
+from swarmecho.env.decommissioning import (
     base_population_feedback,
     initial_state,
     transition,
@@ -64,23 +64,23 @@ BUILDING = load_building(Path("src/swarmecho/curriculum_config/maps/custom_maps/
 
 def env_config(**overrides):
     return replace(EnvConfig(num_agents=3, max_steps=100, hold_chain_for=90,
-                             adapt_size=AdaptSizeConfig(enabled=True)), **overrides)
+                             decommissioning=DecommissioningConfig(enabled=True)), **overrides)
 
 
 def test_disabled_defaults_and_validation():
     cfg = EnvConfig()
-    assert not cfg.adapt_size.enabled
+    assert not cfg.decommissioning.enabled
     reset, step, obs, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(0))
     assert state.adaptive is None
     assert int(state.active.sum()) == 1
     assert obs(state).shape == (cfg.num_agents, observation_dim(cfg))
     assert step(state, jnp.zeros((cfg.num_agents, 3))).adaptive is None
-    enabled = replace(cfg, adapt_size=replace(cfg.adapt_size, enabled=True))
+    enabled = replace(cfg, decommissioning=replace(cfg.decommissioning, enabled=True))
     assert observation_dim(enabled) == observation_dim(cfg) + 1
     for field, value in (("decommission_hold_steps", 0), ("decommission_radius_m", 0)):
         with pytest.raises(ValueError):
-            validate_adapt_size(replace(cfg, adapt_size=replace(cfg.adapt_size, **{field: value})))
+            validate_decommissioning(replace(cfg, decommissioning=replace(cfg.decommissioning, **{field: value})))
 
 
 def test_population_observation_is_the_only_optional_channel_when_the_zone_is_off():
@@ -102,7 +102,7 @@ def test_population_observation_is_the_only_optional_channel_when_the_zone_is_of
 
 
 def test_automatic_launches_are_staggered_and_removed_drones_stay_retired():
-    cfg = AdaptSizeConfig(enabled=True, decommission_hold_steps=1)
+    cfg = DecommissioningConfig(enabled=True, decommission_hold_steps=1)
     state = initial_state(3, jnp.zeros(3))
     active = jnp.array([True, False, False])
     positions = jnp.array([[0., 0., 0.], [5., 0., 0.], [5., 0., 0.]])
@@ -126,13 +126,13 @@ def test_decommission_zone_observation_toggle_and_membership():
     center = state.base_pos
     state = state._replace(
         active=jnp.array([True, True, False]),
-        pos=jnp.stack([center, center + jnp.array([cfg.adapt_size.decommission_radius_m, 0., 0.]), center]),
+        pos=jnp.stack([center, center + jnp.array([cfg.decommissioning.decommission_radius_m, 0., 0.]), center]),
         adaptive=state.adaptive._replace(zone_center=center, zone_valid=jnp.bool_(True)),
     )
     enabled_obs = jax.jit(observe)(state)
     # Zone membership includes the sphere boundary.
     np.testing.assert_array_equal(enabled_obs[:, 6], [1., 1., 0.])
-    outside = state._replace(pos=state.pos.at[0, 0].add(cfg.adapt_size.decommission_radius_m + 0.1))
+    outside = state._replace(pos=state.pos.at[0, 0].add(cfg.decommissioning.decommission_radius_m + 0.1))
     assert float(observe(outside)[0, 6]) == 0.
     invalid = state._replace(adaptive=state.adaptive._replace(zone_valid=jnp.bool_(False)))
     np.testing.assert_array_equal(observe(invalid)[:, 6], 0.)
@@ -144,7 +144,7 @@ def test_decommission_zone_observation_toggle_and_membership():
     assert observation_dim(disabled) == observation_dim(cfg) - 1
     np.testing.assert_allclose(disabled_obs, np.delete(enabled_obs, 6, axis=1))
 
-    fixed = replace(cfg, adapt_size=AdaptSizeConfig())
+    fixed = replace(cfg, decommissioning=DecommissioningConfig())
     reset_fixed, _, observe_fixed, _ = make_env_fns(BUILDING, fixed, plan_geodesic=False)
     _, _, observe_fixed_disabled, _ = make_env_fns(
         BUILDING, replace(fixed, observe_decommission_zone=False), plan_geodesic=False)
@@ -157,7 +157,7 @@ def test_decommission_zone_observation_toggle_and_membership():
 
 @pytest.mark.parametrize("terminated_lanes", [1, 3])
 def test_all_decommissioned_terminal_info_survives_sparse_and_dense_autoreset(terminated_lanes):
-    cfg = env_config(spawn_delay=0, adapt_size=replace(env_config().adapt_size,
+    cfg = env_config(spawn_delay=0, decommissioning=replace(env_config().decommissioning,
                                                        decommission_hold_steps=1))
     reward = RewardConfig(all_decommissioned_penalty=-60., time_presure_reward=-3.)
     reset, step, _, _ = make_autoreset_fns(BUILDING, cfg, reward)
@@ -175,7 +175,7 @@ def test_all_decommissioned_terminal_info_survives_sparse_and_dense_autoreset(te
     np.testing.assert_array_equal(fresh.active.sum(-1), 3)
 
 
-def test_capacity_and_useless_agent_rewards_have_correct_individual_recipients():
+def test_chain_membership_and_success_rewards_have_correct_individual_recipients():
     cfg = env_config(comm_radius=4.1, comm_radius_base=4.1, visual_radius=2.1)
     reset, step, _, _ = make_env_fns(BUILDING, cfg, plan_geodesic=False)
     state = reset(jax.random.PRNGKey(3))
@@ -184,15 +184,15 @@ def test_capacity_and_useless_agent_rewards_have_correct_individual_recipients()
                            active=jnp.ones(3, bool), target_known=jnp.ones(3, bool),
                            adaptive=initial_state(3, jnp.array([100., 100., 100.])))
     connected = step(state, jnp.zeros((3, 3)))
-    assert bool(connected.fully_connected)
+    assert bool(connected.base_target_connected)
     np.testing.assert_array_equal(success_contributors(connected, cfg), [1, 1, 0])
     successful = connected._replace(success=jnp.bool_(True), done=jnp.bool_(True))
-    reward = RewardConfig(useless_agent_at_success_reward=-30., success_reward=120.)
+    reward = RewardConfig(success_reward=120.)
     _, terms = compute_rewards(state, successful, reward, cfg)
-    np.testing.assert_allclose(terms["useless_agent_at_success_reward"], [0., 0., -30.])
+    assert "useless_agent_at_success_reward" not in terms
     np.testing.assert_allclose(terms["success_reward"], [120., 120., 120.])
     _, repeated = compute_rewards(successful, successful, reward, cfg)
-    np.testing.assert_array_equal(repeated["useless_agent_at_success_reward"], 0)
+    np.testing.assert_array_equal(repeated["success_reward"], 0)
 
 
 def test_complete_chain_excludes_redundant_frontier_leader():
@@ -204,7 +204,7 @@ def test_complete_chain_excludes_redundant_frontier_leader():
         active=jnp.ones(5, bool),
         directly_sees_target=jnp.array([0, 0, 0, 1, 0], bool),
         solid_min=jnp.zeros((0, 3)), solid_max=jnp.zeros((0, 3)),
-        fully_connected=jnp.bool_(True),
+        base_target_connected=jnp.bool_(True),
     )
     # D5 is one hop from base but is a dead end. A frontier leader at D5
     # previously pulled the complete-chain reward onto that longer detour.
@@ -229,7 +229,7 @@ def tiny_level():
         env=EnvConfig(), reward=RewardConfig(), training=TrainingConfig(),
         network=NetworkConfig(), evaluation=EvaluationConfig(), logging=LoggingConfig(),
     )
-    return replace(level, env=env_config(max_steps=6, adapt_size=AdaptSizeConfig(
+    return replace(level, env=env_config(max_steps=6, decommissioning=DecommissioningConfig(
         enabled=True)),
         network=replace(level.network, hidden_dim=8, num_layers=1, actor_num_layers=1,
                         tarmac_sig_dim=4, tarmac_val_dim=4),
@@ -366,7 +366,7 @@ def test_evaluation_capture_replay_and_inspector_payload(tmp_path):
     _, manifest = write_replay(tmp_path / "replay", frames, map_name="test", dt=level.env.dt,
                                metadata=planner_metadata(level.env), reward_terms=rewards, progress=False)
     meta, data = load_replay(manifest)
-    assert meta["adapt_size"]["enabled"]
+    assert meta["decommissioning"]["enabled"]
     assert data["adapt_decommissioned"].shape == data["active"].shape
     assert "adapt_vote" not in data
     metrics, info, capture = evaluate_suite_with_action_capture(model, level, episodes=2,
@@ -404,7 +404,7 @@ def cleanup_scenario(condition=CLEANUP, **overrides):
     cfg = replace(EnvConfig(
         num_agents=2, spawn_delay=0, success_condition=condition, hold_chain_for=2,
         max_steps=30, comm_radius_base=3.1, comm_radius=3.1, visual_radius=1.1,
-        adapt_size=AdaptSizeConfig(enabled=True, decommission_hold_steps=2),
+        decommissioning=DecommissioningConfig(enabled=True, decommission_hold_steps=2),
     ), **overrides)
     reset, step, _, _ = make_env_fns(CLEANUP_BUILDING, cfg)
     state = reset(jax.random.PRNGKey(12))
@@ -412,7 +412,7 @@ def cleanup_scenario(condition=CLEANUP, **overrides):
         base_pos=jnp.array([2., 2., 2.]), target_pos=jnp.array([6., 2., 2.]),
         pos=jnp.array([[5., 2., 2.], [2., 5., 3.5]]), vel=jnp.zeros((2, 3)),
         active=jnp.ones(2, dtype=bool), target_known=jnp.ones(2, dtype=bool),
-        base_target_known=jnp.bool_(True), fully_connected=jnp.bool_(True),
+        base_target_known=jnp.bool_(True), base_target_connected=jnp.bool_(True),
         directly_sees_target=jnp.array([True, False]),
         is_conn_base=jnp.array([True, False]), is_conn_target=jnp.array([True, False]),
         adaptive=state.adaptive._replace(zone_center=jnp.array([2., 2., 3.5]), zone_valid=jnp.bool_(True)),
@@ -422,15 +422,15 @@ def cleanup_scenario(condition=CLEANUP, **overrides):
 
 def rewards(**overrides):
     return replace(RewardConfig(
-        exploration_reward=0., collision_reward=0., finder_reward=0., target_found_reward=0.,
-        time_presure_reward=0., gap_progress_reward_per_meter=0.,
+        exploration_reward=0., collision_reward=0., base_reporter_reward=0., target_delivery_reward=0.,
+        time_presure_reward=0., closed_gap_reward_per_meter=0.,
         non_contributor_return_reward_per_meter=3., non_contributor_departure_reward_per_meter=-3.,
         non_contributor_decommission_reward=1500.,
     ), **overrides)
 
 
 @pytest.mark.parametrize("condition,expected", [("chain_held", True), (CLEANUP, False)])
-def test_hold_threshold_only_finishes_legacy_mode_with_surplus(condition, expected):
+def test_hold_threshold_only_finishes_chain_only_mode_with_surplus(condition, expected):
     cfg, state, step = cleanup_scenario(condition)
     first = step(state, ACTION)
     assert not first.success and not first.done
@@ -439,7 +439,6 @@ def test_hold_threshold_only_finishes_legacy_mode_with_surplus(condition, expect
     assert bool(second.success) == bool(second.done) == expected
     _, terms = compute_rewards(first, second, rewards(), cfg)
     np.testing.assert_array_equal(terms["success_reward"], [3000., 3000.] if expected else [0., 0.])
-    np.testing.assert_array_equal(terms["useless_agent_at_success_reward"], [0., -3000.] if expected else [0., 0.])
 
 
 def test_cleanup_after_hold_finishes_on_removal_and_pays_departing_lifetime():
@@ -451,12 +450,11 @@ def test_cleanup_after_hold_finishes_on_removal_and_pays_departing_lifetime():
     assert int(dwelling.chain_held_steps) > cfg.hold_chain_for
     assert not dwelling.done
     final = step(dwelling, ACTION)
-    assert final.success and final.done and final.fully_connected
+    assert final.success and final.done and final.base_target_connected
     np.testing.assert_array_equal(final.active, [True, False])
     _, terms = compute_rewards(dwelling, final, rewards(), cfg)
     np.testing.assert_array_equal(terms["non_contributor_decommission_reward"], [0., 1500.])
     np.testing.assert_array_equal(terms["success_reward"], [3000., 0.])
-    np.testing.assert_array_equal(terms["useless_agent_at_success_all_agents_reward"], 0.)
 
 
 def test_chain_break_during_cleanup_requires_a_fresh_full_hold():
@@ -465,7 +463,7 @@ def test_chain_break_during_cleanup_requires_a_fresh_full_hold():
         state = step(state, ACTION)
     assert not state.done
     broken = step(state._replace(pos=state.pos.at[0].set(jnp.array([12., 2., 2.]))), ACTION)
-    assert not broken.fully_connected and not broken.success and not broken.done
+    assert not broken.base_target_connected and not broken.success and not broken.done
     assert int(broken.chain_held_steps) == 0
     assert int(broken.best_chain_held_steps) == cfg.hold_chain_for
     restored = broken._replace(pos=broken.pos.at[0].set(jnp.array([5., 2., 2.]))
@@ -494,7 +492,6 @@ def test_failure_can_terminate_while_cleanup_is_pending_without_success(failure)
         assert final.adaptive.all_decommissioned
     _, terms = compute_rewards(first, final, rewards(), cfg)
     np.testing.assert_array_equal(terms["success_reward"], 0.)
-    np.testing.assert_array_equal(terms["useless_agent_at_success_reward"], 0.)
 
 
 def test_batched_autoreset_keeps_pending_lane_and_terminal_exit_rewards():
@@ -564,7 +561,7 @@ def test_cleanup_success_survives_csv_and_replay_filtering(tmp_path):
 def scenario(y=5.):
     env = EnvConfig(num_agents=4, comm_radius=3.1, comm_radius_base=3.1,
                     visual_radius=1.1, observe_chain_contributor=True,
-                    adapt_size=AdaptSizeConfig(enabled=True,
+                    decommissioning=DecommissioningConfig(enabled=True,
                                               decommission_radius_m=1.))
     active = jnp.ones(4, dtype=bool)
     zero = jnp.zeros(4, dtype=bool)
@@ -576,7 +573,7 @@ def scenario(y=5.):
         is_conn_base=jnp.array([1, 1, 1, 0], dtype=bool),
         is_conn_target=jnp.array([1, 1, 1, 0], dtype=bool), target_known=active,
         base_target_known=jnp.bool_(True), success=jnp.bool_(False),
-        fully_connected=jnp.bool_(True), chain_held_steps=jnp.int32(10), done=jnp.bool_(False),
+        base_target_connected=jnp.bool_(True), chain_held_steps=jnp.int32(10), done=jnp.bool_(False),
         collided=zero, coverage_credit=jnp.zeros(4),
         adaptive=initial_state(4, jnp.array([0., 0., 1.])),
     )
@@ -585,10 +582,9 @@ def scenario(y=5.):
 
 def reward_config(**overrides):
     return replace(RewardConfig(
-        exploration_reward=0., finder_reward=0., target_found_reward=0., success_reward=0.,
-        collision_reward=0., time_presure_reward=0., gap_progress_reward_per_meter=0.,
+        exploration_reward=0., base_reporter_reward=0., target_delivery_reward=0., success_reward=0.,
+        collision_reward=0., time_presure_reward=0., closed_gap_reward_per_meter=0.,
         all_decommissioned_penalty=0.,
-        useless_agent_at_success_reward=0., useless_agent_at_success_all_agents_reward=0.,
         non_contributor_return_reward_per_meter=3.,
         non_contributor_departure_reward_per_meter=-3.,
         non_contributor_decommission_reward=1500.,
@@ -645,9 +641,9 @@ def test_only_surviving_surplus_lifetimes_receive_movement(change):
     env, before = scenario(6.)
     after = move(before, 5.)
     if change == "chain_not_built":
-        before = before._replace(fully_connected=jnp.bool_(False))
+        before = before._replace(base_target_connected=jnp.bool_(False))
     elif change == "chain_broken":
-        after = after._replace(fully_connected=jnp.bool_(False))
+        after = after._replace(base_target_connected=jnp.bool_(False))
     elif change == "already_done":
         before = before._replace(done=jnp.bool_(True))
     elif change == "inactive":
@@ -690,9 +686,9 @@ def test_decommission_iff_chain_intact_and_prior_non_contributor_is_removed(chan
     env, before = scenario(1.)
     after = removed_state(before, slot=2 if change == "contributor" else 3)
     if change == "broken":
-        after = after._replace(fully_connected=jnp.bool_(False))
+        after = after._replace(base_target_connected=jnp.bool_(False))
     elif change == "no_previous_chain":
-        before = before._replace(fully_connected=jnp.bool_(False))
+        before = before._replace(base_target_connected=jnp.bool_(False))
     elif change == "not_removed":
         after = after._replace(adaptive=after.adaptive._replace(decommissioned=jnp.zeros(4, dtype=bool)))
     elif change == "stale_event":
@@ -768,7 +764,7 @@ def test_g03_configures_surplus_agent_cleanup_rewards():
     assert cfg["non_contributor_return_reward_per_meter"] == 3.
     assert cfg["non_contributor_departure_reward_per_meter"] == -3.
     assert cfg["non_contributor_decommission_reward"] == cfg["success_reward"] == 3000.
-    assert cfg["decommission_reward"] == 0.
+    assert "decommission_reward" not in cfg
     level = load_level(name)
     assert level.reward.non_contributor_return_reward_per_meter == 3.
     assert level.reward.non_contributor_departure_reward_per_meter == -3.
@@ -789,7 +785,7 @@ def test_coefficients_are_signed_finite_and_zero_disabled(field):
 def test_removal_payment_survives_real_protocol_and_batched_autoreset():
     building = load_building(Path("src/swarmecho/curriculum_config/maps/custom_maps/open_cuboid.yaml"))
     env = EnvConfig(num_agents=2, spawn_delay=0, hold_chain_for=2, comm_radius_base=10.,
-                    adapt_size=AdaptSizeConfig(enabled=True, decommission_hold_steps=1))
+                    decommissioning=DecommissioningConfig(enabled=True, decommission_hold_steps=1))
     reward = reward_config()
     reset, transition, _, _ = make_autoreset_fns(building, env, reward)
     states = jax.vmap(reset)(jax.random.split(jax.random.PRNGKey(22), 2))
@@ -798,7 +794,7 @@ def test_removal_payment_survives_real_protocol_and_batched_autoreset():
     states = states._replace(base_pos=base, target_pos=base + jnp.array([3., 0., 0.]),
         pos=pos, active=jnp.ones((2, 2), dtype=bool),
         directly_sees_target=jnp.array([[1, 0], [1, 0]], dtype=bool),
-        target_known=jnp.ones((2, 2), dtype=bool), fully_connected=jnp.ones(2, dtype=bool),
+        target_known=jnp.ones((2, 2), dtype=bool), base_target_connected=jnp.ones(2, dtype=bool),
         chain_held_steps=jnp.ones(2, dtype=jnp.int32),
         adaptive=states.adaptive._replace(zone_center=pos[:, 1], zone_valid=jnp.ones(2, dtype=bool)))
     fresh, rewards, done, info = jax.jit(transition.batched)(states, jnp.zeros((2, 2, 3)))

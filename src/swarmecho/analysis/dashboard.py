@@ -186,6 +186,8 @@ def find_all_runs(outputs_root: Path, wandb_root: Path):
 
         verified = (match_w_path is not None)
         if "_wandb" in raw_cfg: raw_cfg = flatten_wandb_config(raw_cfg)
+        from swarmecho.core.config import normalize_renamed_settings
+        raw_cfg = normalize_renamed_settings(raw_cfg)
 
         # Calculate Steps Trained (Priority: WandB Summary > Checkpoints)
         actual_steps = "Unknown"
@@ -482,7 +484,7 @@ if len(selected_operations) == 1:
     else:
         rew_items.extend([
             ("time_presure_reward", str(rew_cfg.get("time_presure_reward", "5.0"))),
-            ("gap_progress_reward_per_meter", str(rew_cfg.get("gap_progress_reward_per_meter", "0.2"))),
+            ("closed_gap_reward_per_meter", str(rew_cfg.get("closed_gap_reward_per_meter", "0.2"))),
         ])
 
     render_vertical_card("Env", env_items)

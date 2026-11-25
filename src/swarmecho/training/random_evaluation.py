@@ -29,7 +29,7 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
     directory.mkdir(parents=True, exist_ok=True)
     if static_maps is not None and bank_maps is not None:
         raise ValueError("An evaluation suite cannot use both static and random bank maps.")
-    count = len(static_maps) if static_maps is not None else level.evaluation.random_eval_envs
+    count = len(static_maps) if static_maps is not None else (level.evaluation.inspection_maps or 5)
     prefix = "static_eval" if static_maps is not None else "random_eval"
     if bank_maps is None and static_maps is None and level.random_buildings.enabled:
         from swarmecho.training.map_selection import load_selection
@@ -47,10 +47,10 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
             and getattr(level.random_buildings, "load_maps_from_bank", False)
             and level.evaluation.random_eval_maps is None
             and any(not (directory / f"random_eval_{index:04d}.yaml").exists()
-                    for index in range(level.evaluation.random_eval_envs))):
+                    for index in range((level.evaluation.inspection_maps or 5)))):
         from swarmecho.curriculum_config.maps.random_building_bank.generate_bank import (
             DEFAULT_POOL_SIZE, build_pool, ensure_pool, select_maps)
-        count = level.evaluation.random_eval_envs
+        count = (level.evaluation.inspection_maps or 5)
         pool, metadata = ensure_pool(level, level.training_map_count + count, log=log)
         _, selection = select_maps(pool, metadata, level.training.bank_selection_seed, level.training_map_count, count)
         bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
@@ -62,8 +62,8 @@ def prepare_evaluation_maps(level, directory, *, bank_maps=None, static_maps=Non
                                         avoid_pool=pool, log=log)
             _, selection = select_maps(pool, metadata, level.training.bank_selection_seed, level.training_map_count, count)
             bank_maps = [pool / "maps" / f"{item['id']}.yaml" for item in selection]
-    if bank_maps is not None and len(bank_maps) != level.evaluation.random_eval_envs:
-        raise ValueError("bank_maps must contain exactly random_eval_envs maps.")
+    if bank_maps is not None and len(bank_maps) != (level.evaluation.inspection_maps or 5):
+        raise ValueError("bank_maps must contain exactly inspection_maps maps.")
     result = []
     for index in range(count):
         name = f"{prefix}_{index:04d}"
@@ -159,7 +159,7 @@ def evaluate_map_suite(model, levels, destination, *, update, steps, eval_due=Tr
                   **({"checkpoint": str(checkpoint)} if checkpoint is not None else {}),
                   **({"eval_name": eval_name} if eval_name else {})}
         if eval_due:
-            batch_size = level.effective_eval_parallel_envs
+            batch_size = level.effective_episodes_per_map
             batching = {"batch_size": batch_size, "show_progress": True} if eval_samples is not None else {}
             metrics, info = evaluate_suite(model, level, episodes=eval_samples or batch_size,
                                           return_episode_info=True,

@@ -53,7 +53,7 @@ def prepare_policy(config, run_dir=None, *, allow_suite=False):
         raise ValueError("Suite probes use the authored training map list; separate evaluation-map substitution is unsupported.")
     if ((configured_level.random_buildings.enabled and not validation_maps) or (configured_level.static_map_suite and not allow_suite)
             or (configured_level.evaluation.random_eval and not validation_maps) or level.env.num_obstacles
-            or (level.env.adapt_size.enabled and not allow_suite)
+            or (level.env.decommissioning.enabled and not allow_suite)
             or (level.training.randomize_base and config.get("experiment") != "path")):
         raise ValueError("Phase 0 supports one authored static map, fixed base, fixed population, no random obstacles.")
     if level.env.success_condition == "coverage" or not level.network.memory_comm_enabled:
@@ -123,7 +123,7 @@ def make_collector(level, *, requested_inputs=None, history_stride=None, own_str
     import jax.numpy as jnp
     from flax import nnx
 
-    from swarmecho.env.adapt_size import policy_resets
+    from swarmecho.env.decommissioning import policy_resets
     from swarmecho.env.obstacles import segments_blocked
     from swarmecho.models.actions import physical_actions, deterministic_actions
     from swarmecho.training.train import _evaluation_env_fns, communication_due

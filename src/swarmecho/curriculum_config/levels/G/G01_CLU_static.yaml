@@ -19,9 +19,7 @@ env:
   wall_sensing_rays: 32
   wall_sensing_ray_max_distance: 8.0
   drone_radar_bins: 32
-  radar_mode: legacy
-  distance_bands: 3
-  radar_count_cap: 3
+  radar_mode: max_proximity
 
   max_steps: 700
   success_condition: chain_held
@@ -37,28 +35,24 @@ random_buildings:
   enabled: false
   load_maps_from_bank: false
 
-adapt_size:
+decommissioning:
   enabled: true
   decommission_radius_m: 0.75
   decommission_hold_steps: 5
 
 reward:
-  decommission_reward: 0 # Full amount to each removed drone, on removal.
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
-  useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: 0 # Each active drone per useless drone at terminal chain success; max(-750 * useless_count, -2000). max limits the loss
-  useless_agent_at_success_all_agents_reward_cap: -2000
 
   chain_efficiency_reward: 0.0 # Per eligible drone times its path efficiency; no population divisor.
 
   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
-  finder_reward: 100 # Each direct base deliverer.
-  target_found_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
+  base_reporter_reward: 100 # Each direct base deliverer.
+  target_delivery_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
   success_reward: 3000 # Full amount to every active drone at first success; no population divisor.
 
   collision_reward: -0.5 # Per colliding drone per transition.
   time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
-  gap_progress_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
+  closed_gap_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
 
 training:
   total_timesteps: 1000000000
@@ -84,7 +78,7 @@ training:
     max_candidates_per_map: 4096
   adaptive_target_spawn:
     enabled: false # Uniform sampling across solvable target volume; no adaptive cell weighting.
-    curriculum_start_agents: null # No virtual target curriculum.
+    initial_target_agent_budget: null # No virtual target curriculum.
     min_probability_fraction: 0.20
     success_window_episodes_per_cell: 500
     probability_smoothing_half_life_updates: 3.0
@@ -106,14 +100,9 @@ inspection_evaluation:
   target_sampling: independent # Uniform solvable targets; independent of training outcomes.
   eval_differes_from_training_map: false
   eval_map: null
-  eval_parallel_envs: 500 # Independent of the candidate's training env count.
+  episodes_per_map: 500 # Independent of the candidate's training env count.
   inspection_maps: null # Use the single authored training map.
   replay_targets_from_storey: null
-  early_exit: true
-  early_exit_success_rate: 0.95
-  final_early_exit_success_rate: null
-  early_exit_min_success_length_reduction: null
-  early_exit_hold_evals: 2 # Confirm the threshold on two consecutive evaluations.
   save_model: true
   checkpoint_freq: 1000000 # Final checkpoint is always saved; avoid intermediate I/O.
   eval_freq: 50 # PPO updates.
@@ -135,6 +124,12 @@ logging:
   terminal_log_init: true
 
 validation:
+  early_stopping:
+    enabled: true
+    success_rate: 0.95
+    final_success_rate: null
+    min_success_length_reduction: null
+    hold_evals: 2 # Confirm the threshold on two consecutive evaluations.
   enabled: true
   mode: uniform_full_task # Same map; uniform solvable targets under the full seven-slot budget.
   num_maps: 1

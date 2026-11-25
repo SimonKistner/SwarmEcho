@@ -250,7 +250,7 @@ def test_identical_actor_inputs_are_batch_independent():
     restore_model_checkpoint(model, checkpoint)
     batch_size = int(
         os.environ.get(
-            "SWARMECHO_ACTOR_DIAGNOSTIC_BATCH", level.evaluation.eval_parallel_envs
+            "SWARMECHO_ACTOR_DIAGNOSTIC_BATCH", level.evaluation.episodes_per_map
         )
     )
     assert batch_size > 0
@@ -304,7 +304,7 @@ _FIELDS = (
     "target_known",
     "connected_to_base",
     "connected_to_target",
-    "fully_connected",
+    "base_target_connected",
     "chain_held_steps",
     "base_target_known",
     "success",
@@ -362,7 +362,7 @@ def _snapshot(
         "target_known": state.target_known,
         "connected_to_base": state.is_conn_base,
         "connected_to_target": state.is_conn_target,
-        "fully_connected": state.fully_connected,
+        "base_target_connected": state.base_target_connected,
         "chain_held_steps": state.chain_held_steps,
         "base_target_known": state.base_target_known,
         "success": state.success,
@@ -516,7 +516,7 @@ def _trace_single(model, level, key, *, target: np.ndarray | None):
 def _trace_parallel_lane(model, level, *, lane: int):
     """Trace one lane while retaining 4,000-way batched actor computations."""
     reset, advance = _build_tracer(model, level)
-    parallel_envs = level.evaluation.eval_parallel_envs
+    parallel_envs = level.evaluation.episodes_per_map
     root_key = jax.random.PRNGKey(level.training.seed + 10_000)
     keys = jax.random.split(root_key, parallel_envs)
     states = jax.vmap(reset)(keys)
@@ -601,7 +601,7 @@ def _first_production_state_difference(
         ("target_known", "target_known"),
         ("connected_to_base", "is_conn_base"),
         ("connected_to_target", "is_conn_target"),
-        ("fully_connected", "fully_connected"),
+        ("base_target_connected", "base_target_connected"),
         ("chain_held_steps", "chain_held_steps"),
         ("base_target_known", "base_target_known"),
         ("success", "success"),
@@ -658,7 +658,7 @@ def test_parallel_success_replays_identically_step_by_step():
     )
 
     root_key = jax.random.PRNGKey(level.training.seed + 10_000)
-    lane_key = jax.random.split(root_key, level.evaluation.eval_parallel_envs)[lane]
+    lane_key = jax.random.split(root_key, level.evaluation.episodes_per_map)[lane]
 
     # 2. Same reset key and sampled target, but one environment at a time.
     single_initial, single_trace = _trace_single(model, level, lane_key, target=None)

@@ -143,8 +143,7 @@ training directory. Use a new `run_postfix` for a fresh directory.
 ## 6. Historical experiment records
 
 The [historical manifests](../manifests/historical/) retain the G01 and G03
-submission recipes. The [cluster experiment reports](../../ablations/cluster/README.md)
-contain the measured results. A saved recipe that inherits level settings uses
+submission recipes. A saved recipe that inherits level settings uses
 the current YAML if submitted again.
 
 ## 7. Capacity, live state, logs and configuration
@@ -360,7 +359,7 @@ uv run python cluster/eval_g03_curriculum.py
 ```
 
 The script runs sequential one-map metrics, heatmaps and required-agent replays. See the
-[selected runs and checkpoint scores](../../docs/legacy-ablation/02_guide/10_G03_auto7_curriculum_sweep.md#one-map-replay-comparison-3-november-2026).
+[selected runs and checkpoint scores](../../docs/ablations/curriculum_experiments.md#one-map-replay-comparison-3-november-2026).
 
 ## 13. Geometry-probe suite and local compatible pools (WSL)
 
@@ -422,10 +421,8 @@ study-specific helpers. Classification keeps quota, OOM and learning outcomes
 separate. Analysis verifies saved maps/configuration/validation journals before
 the report is rebuilt.
 
-The maintained [published report index](../../ablations/cluster/README.md) lives in `ablations/cluster/`.
-The build command writes the working analysis directory under `outputs/`; it
-does not publish those files automatically. When adopting a rebuilt report,
-refresh its linked charts/data in the published directory and update the index.
+The build command writes the report and supporting analysis files to the working
+analysis directory under `outputs/`.
 
 ## Artifacts and command discovery
 
@@ -443,7 +440,6 @@ refresh its linked charts/data in the published directory and update the index.
 | PFSS `swarm_echo/map_pools/` | Shared cluster map pools |
 | Local `src/swarmecho/curriculum_config/maps/random_building_bank/pools/` | Local/generated/imported pool files |
 | `cluster/README/` | Workflow, command register, and image build guide |
-| `ablations/cluster/` | Cluster study reports and their supporting data |
 
 For additional flags, read the installed command's help:
 
@@ -457,5 +453,5 @@ det shell --help
 ```
 
 Related references: [cluster workflow](README.md),
-[dependency images](IMAGE_BUILD.md), [reports](../../ablations/cluster/README.md),
-[local training guide](../../docs/01_training.md).
+[dependency images](IMAGE_BUILD.md),
+[training reference](../../docs/03_marl_and_training.md).

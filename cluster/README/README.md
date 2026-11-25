@@ -13,7 +13,7 @@ Local `swarmecho-train` uses the same level.
 Use `-Config` for a different recipe. The saved
 [chain-efficiency sweep](../manifests/chain-efficiency/fresh-sweep.json) and
 [checkpoint retries](../manifests/chain-efficiency/checkpoint-retries/) record
-earlier experiments. See the [G03 experiment record](../../docs/legacy-ablation/02_guide/10_G03_auto7_curriculum_sweep.md)
+earlier experiments. See the [G03 experiment record](../../docs/ablations/curriculum_experiments.md)
 for run IDs, lineage, and results.
 
 File-preparation progress updates on one line in an interactive terminal. When
@@ -70,9 +70,6 @@ Only `level` is required; the other fields below show their defaults:
 - `exclude_trials` optionally lists exact `{"variation":"name","seed":456789}`
   pairs to omit. Unknown pairs and duplicates are rejected. The auxiliary sweep
   uses this to leave its initial test trial out of the remaining 23.
-
-The ready-to-submit 24-run path auxiliary comparison, its one-run test and the
-remaining 23 are documented in [GEO_AUXILIARY.md](../../ablations/cluster/path-probe/GEO_AUXILIARY.md).
 
 The [five-seed G03 CLU baseline](../manifests/g03-baseline-5-seeds.json) uses
 seeds 456789–456793. With `training.seed_map_pool=true`, each seed gets a
@@ -182,7 +179,7 @@ Open results with `uv run swarmecho-inspect root=outputs`.
 
 The [command register](COMMANDS.md) covers setup, monitoring, cancellation,
 checkpoint retrieval, local evaluation/probes and report updates. See the
-[image guide](IMAGE_BUILD.md) and [report index](../../ablations/cluster/README.md).
+[image guide](IMAGE_BUILD.md).
 
 ## Folder layout
 
@@ -197,5 +194,4 @@ checkpoint retrieval, local evaluation/probes and report updates. See the
 | `scratch/` | Ignored local recipes for one-off submissions |
 | `.submissions/`, `.fetch/`, `.context-*/` | Generated receipts, transfer state and snapshots |
 
-Historical manifests are under `manifests/historical/`. See the
-[cluster experiment reports](../../ablations/cluster/README.md) for the recorded results.
+Historical manifests are under `manifests/historical/`.

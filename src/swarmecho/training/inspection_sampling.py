@@ -24,7 +24,7 @@ def inspection_sampling_kwargs(level, spawn_sampler=None, *, checkpoint=None):
                 raise ValueError("Curriculum inspection requires checkpointed adaptive spawn state.")
             state = json.loads(path.read_text(encoding="utf-8"))
             budget = state.get("spawn_curriculum", {}).get("budget")
-        minimum = level.training.adaptive_target_spawn.curriculum_start_agents or 1
+        minimum = level.training.adaptive_target_spawn.initial_target_agent_budget or 1
         if type(budget) not in (int, np.int32, np.int64) or not minimum <= budget <= level.env.num_agents:
             raise ValueError("Curriculum inspection requires a valid live or checkpointed target budget.")
         # Only the feasibility limit is shared. Map and cell success weights stay in training.
@@ -38,7 +38,7 @@ def inspection_sampling_kwargs(level, spawn_sampler=None, *, checkpoint=None):
             level.building, level.env, level.training.adaptive_target_spawn,
             feasibility_budget=level.env.num_agents,
             relay_options=level.training.dynamic_max_geo_distance,
-            progression_config=level.evaluation,
+            progression_config=level.validation.early_stopping,
         )
         if not spawn_sampler.restore(checkpoint):
             raise ValueError("Training target sampling requires adaptive_spawn_state.json in the checkpoint. "

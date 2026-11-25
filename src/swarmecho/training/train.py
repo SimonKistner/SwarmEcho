@@ -25,12 +25,12 @@ from collections import OrderedDict, deque
 from contextlib import nullcontext
 from dataclasses import asdict, fields, replace
 from swarmecho.models.actions import physical_actions
-from swarmecho.env.adapt_size import policy_resets
+from swarmecho.env.decommissioning import policy_resets
 from swarmecho.env.knowledge import information_counts
 from swarmecho.training.information_metrics import (
     INFORMATION_PERCENTAGES, information_percentages, evaluation_information_metrics,
 )
-from swarmecho.training.adapt_size_metrics import (
+from swarmecho.training.decommissioning_metrics import (
     AdaptiveWindow, RequiredAgentsDeploymentWindow,
     REWARD_NAMES, NON_CONTRIBUTOR_REWARD_NAMES, INFO_NAMES, validate_zones,
 )
@@ -43,6 +43,7 @@ import numpy as np
 import yaml
 from flax import nnx
 
+from swarmecho.core.compatibility import historical_environment_identity, historical_reward_identity
 from swarmecho.core.config import (
     CHAIN_SUCCESS_CONDITIONS,
     DEPLOYED_AGENTS_OBS_REF,
@@ -142,7 +143,7 @@ def build_model(level: Level, hidden_dim: int | None = None, *, checkpoint=None)
         "visually_gated_target_displacement_scale_m": (
             cfg.visual_radius if cfg.observe_visually_gated_target_displacement else None
         ),
-        "adaptive_size": cfg.adapt_size.enabled,
+        "decommissioning_enabled": cfg.decommissioning.enabled,
         "recruitment_enabled": False,
         **{field.name: getattr(cfg, field.name) for field in fields(cfg)
            if field.name.startswith("observe_") or field.name in {
@@ -151,7 +152,7 @@ def build_model(level: Level, hidden_dim: int | None = None, *, checkpoint=None)
                "distance_bands", "radar_count_cap",
            }},
         "radar_layout": ("band_counts_v2" if cfg.radar_mode == "band_sep_counting"
-                         else "legacy_interleaved" if cfg.wall_sensing_rays == cfg.drone_radar_bins
+                         else "max_proximity_interleaved" if cfg.wall_sensing_rays == cfg.drone_radar_bins
                          else "radar_blocks_v1"),
         "wall_sensing_layout": "fibonacci",
         "observe_base_vote_ratio": False,
@@ -160,10 +161,10 @@ def build_model(level: Level, hidden_dim: int | None = None, *, checkpoint=None)
         "observe_current_timestep": False,
         "observe_coverage_probe": False,
         "observe_seeing_target": False,
-        "observe_decommission_zone": cfg.adapt_size.enabled and cfg.observe_decommission_zone,
-        "observe_base_population": cfg.adapt_size.enabled and cfg.observe_base_population,
+        "observe_decommission_zone": cfg.decommissioning.enabled and cfg.observe_decommission_zone,
+        "observe_base_population": cfg.decommissioning.enabled and cfg.observe_base_population,
         "base_population_observation_reference": (
-            DEPLOYED_AGENTS_OBS_REF if cfg.adapt_size.enabled and cfg.observe_base_population else None
+            DEPLOYED_AGENTS_OBS_REF if cfg.decommissioning.enabled and cfg.observe_base_population else None
         ),
     }.items()))
     return model
@@ -217,7 +218,7 @@ def _evaluation_env_fns(level: Level):
                 randomize_base=level.training.randomize_base,
                 spawn_pair_max_attempts=level.training.spawn_pair_max_attempts,
             )
-        if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.random_eval_envs):
+        if len(_EVALUATION_ENV_CACHE) > max(8, level.evaluation.inspection_maps or 5):
             _EVALUATION_ENV_CACHE.popitem(last=False)
     _EVALUATION_ENV_CACHE.move_to_end(key)
     return _EVALUATION_ENV_CACHE[key]
@@ -293,7 +294,7 @@ def _evaluate_training_metrics(model, level, *, eval_due, spawn_sampler=None,
     score_spawn = (getattr(spawn_sampler, "curriculum_source", None) == "evaluation")
     evaluation_result = None
     result = evaluate_suite(
-        model, level, episodes=level.effective_eval_parallel_envs,
+        model, level, episodes=level.effective_episodes_per_map,
         return_episode_info=retain_result or score_spawn,
         return_required_agents=score_spawn,
         **sampling_kwargs,
@@ -328,20 +329,20 @@ def _report_evaluation(metrics, level, *, update, total, steps, phase, wandb_run
         metrics = {name: value for name, value in metrics.items() if not name.startswith("eval_map/")}
     runs = int(metrics.get("eval_robustness_runs", 1))
     prefix = "FINAL" if phase == "final_eval" else "EVAL"
-    tail = "early-exit source=validation (inspection only)" if level.evaluation.early_exit else "est=off"
-    if phase == "final_eval" and level.evaluation.early_exit:
+    tail = "early-exit source=validation (inspection only)" if level.validation.early_stopping.enabled else "est=off"
+    if phase == "final_eval" and level.validation.early_stopping.enabled:
         tail += " (unchanged)"
     evaluation_row(
         metrics, label=f"[{prefix} {'UNAN' if runs > 1 else '1/1'}]",
-        update=update, total=total, episodes=level.effective_eval_parallel_envs, tail=tail,
+        update=update, total=total, episodes=level.effective_episodes_per_map, tail=tail,
     )
     with history_path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({
             "update": update, "global_step": steps, "phase": phase,
             "mode": "robust" if runs > 1 else "single_pass", **metrics,
-            "early_exit_source": "validation" if level.evaluation.early_exit else None,
+            "early_exit_source": "validation" if level.validation.early_stopping.enabled else None,
             "target_sampling": level.evaluation.target_sampling,
-            "stop_source": "validation" if level.evaluation.early_exit else None,
+            "stop_source": "validation" if level.validation.early_stopping.enabled else None,
         }) + "\n")
     values = {
         "ep_return": metrics["eval_return"],
@@ -504,9 +505,9 @@ def train(
         inspection_count = evaluation.inspection_maps
         if inspection_count is None:
             inspection_count = (training.adaptive_map_sampling.held_out_maps
-                                if training.adaptive_map_sampling.enabled else evaluation.random_eval_envs)
+                                if training.adaptive_map_sampling.enabled else 5)
         evaluation = replace(evaluation, random_eval=True,
-                             random_eval_envs=inspection_count,
+                             inspection_maps=inspection_count,
                              random_eval_maps=(None if level.validation.enabled or training.adaptive_map_sampling.enabled
                                                else evaluation.random_eval_maps))
         level = replace(level, evaluation=evaluation)
@@ -618,7 +619,7 @@ def train(
             from swarmecho.env.building_bank import prepare_bank_from_records
 
             eval_count = (level.validation.num_maps if level.validation.enabled else
-                          evaluation.random_eval_envs if evaluation.random_eval
+                          evaluation.inspection_maps if evaluation.random_eval
                           and evaluation.random_eval_maps is None else 0)
             required = level.training_map_count + eval_count
             if frozen_selection is not None:
@@ -693,7 +694,7 @@ def train(
                               if eval_maps else None)
             if level.validation.enabled:
                 validation_map_paths = bank_eval_maps
-                bank_eval_maps = validation_map_paths[:evaluation.random_eval_envs]
+                bank_eval_maps = validation_map_paths[:evaluation.inspection_maps]
             if level.random_buildings.save_training_maps:
                 saved = destination / "generated_maps"
                 saved.mkdir(parents=True, exist_ok=True)
@@ -741,7 +742,7 @@ def train(
                 from swarmecho.training.validation import prepare_generated_validation_maps
                 validation_map_paths = prepare_generated_validation_maps(level, destination, init_log,
                                                                          training_buildings=buildings)
-                bank_eval_maps = validation_map_paths[:evaluation.random_eval_envs]
+                bank_eval_maps = validation_map_paths[:evaluation.inspection_maps]
             del buildings
     validation_runner = None
     if level.validation.enabled:
@@ -813,11 +814,11 @@ def train(
                 adaptive_spawn_buildings, map_names, cfg, training.adaptive_target_spawn,
                 compact=resample_maps,
                 feasibility_budget=feasibility_budget, relay_options=training.dynamic_max_geo_distance,
-                progression_config=evaluation)
+                progression_config=level.validation.early_stopping)
         else:
             adaptive_spawn = AdaptiveTargetSpawnController(level.building, cfg, training.adaptive_target_spawn,
                 feasibility_budget=feasibility_budget, relay_options=training.dynamic_max_geo_distance,
-                progression_config=evaluation)
+                progression_config=level.validation.early_stopping)
         resume_controller = bool(resume_from and training.ckpt_loading_mode == "resume")
         spawn_history_path = destination / "adaptive_spawn" / "history.jsonl"
         spawn_history_paths = [
@@ -1036,7 +1037,7 @@ def train(
         if building_bank is None or map_identities is None:
             raise ValueError("Adaptive map sampling requires a persistent prepared map bank.")
         adaptive_maps = AdaptiveMapSampler(map_identities, training.adaptive_map_sampling,
-            stage_identity={"env": asdict(cfg), "reward": asdict(level.reward),
+            stage_identity={"env": historical_environment_identity(cfg), "reward": historical_reward_identity(level.reward),
                             "seed": training.seed, "filtered": True,
                             "randomize_base": training.randomize_base,
                             "adaptive_cells": sampling_config_dict(training.adaptive_target_spawn)
@@ -1062,7 +1063,7 @@ def train(
         init_log(f"Uniform map sampling: all {bank_map_count} training maps available at each episode reset; "
                  "adaptive weighting and map warmup disabled.")
     init_log("Initial reset complete on device. Preparing recurrent state and logging...")
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         validate_zones(jax.device_get(states.adaptive.zone_valid))
     actor_hidden = model.initial_actor_hidden((training.num_envs,))
     actor_signature = model.initial_actor_signature((training.num_envs,))
@@ -1087,25 +1088,23 @@ def train(
     episode_gap_loss = np.zeros(training.num_envs, dtype=np.float64)
     episode_rewards = {
         name: np.zeros(training.num_envs, dtype=np.float64)
-        for name in ("exploration_reward", "collision_reward", "finder_reward", "time_presure_reward", "gap_reward",
-                     "target_found_reward", "success_reward",
-                     "useless_agent_at_success_reward",
-                     "useless_agent_at_success_all_agents_reward")
+        for name in ("exploration_reward", "collision_reward", "base_reporter_reward", "time_presure_reward", "gap_reward",
+                     "target_delivery_reward", "success_reward")
     }
     if level.reward.chain_efficiency_reward != 0:
         episode_rewards["chain_efficiency_reward"] = np.zeros(training.num_envs, dtype=np.float64)
     # Collect one completed episode per parallel environment,
     # rather than a fixed-size history of partial/live rollouts.
     window_size = training.num_envs
-    adaptive_window = AdaptiveWindow(window_size) if cfg.adapt_size.enabled else None
+    adaptive_window = AdaptiveWindow(window_size) if cfg.decommissioning.enabled else None
     required_agents_window = (RequiredAgentsDeploymentWindow(
         logging.required_agents_metrics_window_episodes,
         episode_window_size=window_size, max_required_agents=cfg.num_agents,
-    ) if cfg.adapt_size.enabled else None)
+    ) if cfg.decommissioning.enabled else None)
     adaptive_reward_names = REWARD_NAMES + (
         NON_CONTRIBUTOR_REWARD_NAMES if level.reward.non_contributor_rewards_enabled else ()
     )
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         episode_rewards.update({name: np.zeros(training.num_envs)
                                 for name in adaptive_reward_names})
     window_ret: deque[float] = deque(maxlen=window_size)
@@ -1140,8 +1139,8 @@ def train(
     config_snapshot = {
         "name": level.name,
         "building": level.building_name,
-        "env": {**{k: v for k, v in asdict(level.env).items() if k != "adapt_size"}, "map_names": level.map_names},
-        "adapt_size": asdict(level.adapt_size),
+        "env": {**{k: v for k, v in asdict(level.env).items() if k != "decommissioning"}, "map_names": level.map_names},
+        "decommissioning": asdict(level.decommissioning),
         "reward": asdict(level.reward),
         "training": training_snapshot,
         "network": asdict(network),
@@ -1220,7 +1219,7 @@ def train(
     if level.static_map_suite:
         terminal_print(f"  eval mode        : {len(level.map_paths)} training maps, sequential, no action noise")
     elif evaluation.random_eval:
-        terminal_print(f"  eval mode        : {evaluation.random_eval_envs} persistent maps, sequential, no action noise")
+        terminal_print(f"  eval mode        : {evaluation.inspection_maps} persistent maps, sequential, no action noise")
     else:
         terminal_print("  eval mode        : single-pass, no action noise")
     terminal_print(f"  terminal logging : every {logging.terminal_logging_frequency}; warmup={logging.terminal_log_warmup}; init={logging.terminal_log_init}")
@@ -1364,7 +1363,7 @@ def train(
                     "geo_base":states.base_pos,"geo_target":states.target_pos} if geo_data is not None else {}),
                 "agent_terminated": info["agent_terminated"],
                 **({name: info[name] for name in (*INFO_NAMES, *adaptive_reward_names)}
-                   if cfg.adapt_size.enabled else {}),
+                   if cfg.decommissioning.enabled else {}),
                 "base_signatures": base_sig_in,
                 "base_values": base_val_in,
                 "base_memory_masks": base_masks,
@@ -1373,17 +1372,15 @@ def train(
                     jnp.argmax((states.target_known & in_base_range).astype(jnp.int32), axis=-1), -1),
                 "exploration_reward": info["exploration_reward"],
                 "collision_reward": info["collision_reward"],
-                "finder_reward": info["finder_reward"],
+                "base_reporter_reward": info["base_reporter_reward"],
                 "time_presure_reward": info["time_presure_reward"],
                 "gap_reward": info["gap_reward"],
                 "gap_gain": info["gap_gain"],
                 "gap_loss": info["gap_loss"],
                 "information_counts": info["information_counts"],
                 "best_chain_held_steps": info["best_chain_held_steps"],
-                "target_found_reward": info["target_found_reward"],
+                "target_delivery_reward": info["target_delivery_reward"],
                 "success_reward": info["success_reward"],
-                "useless_agent_at_success_reward": info["useless_agent_at_success_reward"],
-                "useless_agent_at_success_all_agents_reward": info["useless_agent_at_success_all_agents_reward"],
                 **({"chain_efficiency_reward": info["chain_efficiency_reward"]}
                    if level.reward.chain_efficiency_reward != 0 else {}),
                 "success": info["success"],
@@ -1502,7 +1499,7 @@ def train(
             )
         )
         rollout_finished = time.perf_counter()
-        if cfg.adapt_size.enabled:
+        if cfg.decommissioning.enabled:
             validate_zones(rollout_host["adapt_zone_valid"])
         check_spawn_pairs(rollout_host["spawn_pair_attempts"])
         check_spawn_pairs(states.spawn_pair_attempts)
@@ -1870,7 +1867,7 @@ def train(
             def report_run(metrics, index, runs, *, prefix="EVAL "):
                 evaluation_row(
                     metrics, label=f"[{prefix} {index}/{runs}]", update=update,
-                    total=num_updates, episodes=level.effective_eval_parallel_envs,
+                    total=num_updates, episodes=level.effective_episodes_per_map,
                 )
             # Replay-only updates do not create metrics or advance the hold.
             if map_suite_levels is not None:
@@ -1965,7 +1962,7 @@ def train(
                         "type": "evaluation",
                         "update": update,
                         "steps": steps_done,
-                        "episodes": level.effective_eval_parallel_envs,
+                        "episodes": level.effective_episodes_per_map,
                         "data_path": str(info_path),
                         **artifact_metrics,
                     },
@@ -2381,7 +2378,7 @@ def evaluate_model(
         )
     )
     _validate_evaluation_pairs(level, timeline.spawn_pair_attempts[0])
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         validate_zones(timeline.adaptive.zone_valid)
     frames = int(episode_length) + 1
     timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)
@@ -2645,7 +2642,7 @@ def _run_parallel_evaluation_jit(
             state.obstacle_min, state.obstacle_max,
             state.spawn_pair_attempts,
             final_carry[15],
-            state.adaptive.zone_valid if cfg.adapt_size.enabled else jnp.bool_(True),
+            state.adaptive.zone_valid if cfg.decommissioning.enabled else jnp.bool_(True),
         )
         if return_population:
             metrics = (*metrics, final_carry[16])
@@ -2750,7 +2747,7 @@ def evaluate_suite(
                 num_envs=size,
                 horizon=horizon,
                 return_required_agents=return_required_agents,
-                return_useless_agents=cfg.adapt_size.enabled,
+                return_useless_agents=cfg.decommissioning.enabled,
                 return_information=True,
                 target_spawn_weights=target_spawn_weights,
                 target_agent_budget=target_agent_budget,
@@ -2782,7 +2779,7 @@ def evaluate_suite(
         np.concatenate(values) for values in zip(*batches, strict=True)
     )
     _validate_evaluation_pairs(level, spawn_pair_attempts)
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         validate_zones(zone_valid)
     success_episode_length = float(np.mean(lengths[successes])) if np.any(successes) else float(cfg.max_steps)
     metrics = {
@@ -2800,7 +2797,7 @@ def evaluate_suite(
         "eval_success_chain_length": float(np.mean(final_chain_lengths[successes])) if np.any(successes) else 0.0,
     }
     metrics.update(evaluation_information_metrics(extra_metrics[-1]))
-    if cfg.adapt_size.enabled and np.any(successes):
+    if cfg.decommissioning.enabled and np.any(successes):
         metrics["eval_useless_agents_at_success"] = float(np.mean(extra_metrics[int(return_required_agents)][successes]))
     if not return_episode_info:
         return metrics
@@ -2859,7 +2856,7 @@ def evaluate_suite_with_action_capture(
             num_envs=episodes,
             horizon=horizon,
             capture_actions=True,
-            return_useless_agents=cfg.adapt_size.enabled,
+            return_useless_agents=cfg.decommissioning.enabled,
             return_information=True,
             capture_result=capture_result,
             capture_offset=offset,
@@ -2886,7 +2883,7 @@ def evaluate_suite_with_action_capture(
         *extra_metrics,
     ) = batched
     _validate_evaluation_pairs(level, spawn_pair_attempts)
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         validate_zones(zone_valid)
     matching_count = int(np.count_nonzero(successes if capture_result == "success" else ~successes))
     if offset >= matching_count:
@@ -2921,7 +2918,7 @@ def evaluate_suite_with_action_capture(
         "obstacle_max": np.asarray(obstacle_max),
     }
     metrics.update(evaluation_information_metrics(extra_metrics[-1]))
-    if cfg.adapt_size.enabled and np.any(successes):
+    if cfg.decommissioning.enabled and np.any(successes):
         metrics["eval_useless_agents_at_success"] = float(np.mean(extra_metrics[0][successes]))
     capture = {
         "lane": lane,
@@ -3040,7 +3037,7 @@ def replay_recorded_actions(
         )
     )
     _validate_evaluation_pairs(level, timeline.spawn_pair_attempts[0])
-    if cfg.adapt_size.enabled:
+    if cfg.decommissioning.enabled:
         validate_zones(timeline.adaptive.zone_valid)
     frames = int(episode_length) + 1
     timeline = jax.tree_util.tree_map(lambda item: item[:frames], timeline)

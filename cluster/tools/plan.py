@@ -84,7 +84,7 @@ def level_run_name(root, level, overrides):
 def expand_config(config, root, stamp):
     """Return (name, run) pairs; a default single run has no training overrides."""
     allowed = {"level", "seeds", "wandb_mode", "overrides", "variations",
-               "name", "description", "wandb_group", "run_postfix", "exclude_trials"}
+               "name", "description", "wandb_group", "run_postfix", "exclude_trials", "dependency_image"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("Unknown cluster config keys; expected: " + ", ".join(sorted(allowed)))
     level = config.get("level")
@@ -154,6 +154,8 @@ def expand_config(config, root, stamp):
                    "level": level, "wandb_mode": config.get("wandb_mode", "online"),
                    "wandb_group": group, "run_postfix": postfix,
                    "overrides": overrides[:] if seed is None else merge_overrides(overrides, ["training.seed=" + str(seed)])}
+            if "dependency_image" in config:
+                run["dependency_image"] = config["dependency_image"]
             plans.append((variant_name + ("_seed" + str(seed) if seed is not None else ""), run))
     if matched != excluded:
         raise ValueError("exclude_trials refers to a variation/seed absent from this batch.")

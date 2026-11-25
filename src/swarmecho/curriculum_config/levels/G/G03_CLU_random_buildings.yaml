@@ -18,9 +18,7 @@ env:
   wall_sensing_rays: 32 # Fibonacci directions
   wall_sensing_ray_max_distance: 8.0 # Metres; independent of target visual_radius.
   drone_radar_bins: 32
-  radar_mode: legacy #| band_sep_counting
-  distance_bands: 3
-  radar_count_cap: 3
+  radar_mode: max_proximity
 
   max_steps: 700
   success_condition: chain_held_and_cleand_up # Hold the chain and decommission all active non-contributors.
@@ -56,7 +54,7 @@ random_buildings:
   save_training_maps: false
   load_maps_from_bank: true
 
-adapt_size:
+decommissioning:
   enabled: true
   decommission_radius_m: 0.75 # Fits above a centred base inside a sealed 5 m shaft.
   decommission_hold_steps: 5 # Consecutive environment steps; exit resets dwell.
@@ -64,27 +62,23 @@ adapt_size:
 
 
 reward:
-  decommission_reward: 0 # Full amount to each removed drone, on removal.
 
   non_contributor_return_reward_per_meter: 3.0 # Positive geodesic progress toward the decommission-zone centre while a chain is intact; no radius cutoff.
   non_contributor_departure_reward_per_meter: -3.0 # Cost per metre away from that centre, including inside the zone.
   non_contributor_decommission_reward: 3000 # One-shot surplus-agent exit reward if the chain survives; matches this level's success_reward.
 
   all_decommissioned_penalty: -1000 # Full signed amount to each last acting drone.
-  useless_agent_at_success_reward: -3000 # Each active drone outside the selected success chain.
-  useless_agent_at_success_all_agents_reward: -750 # Each active drone per useless drone at terminal chain success; max(-750 * useless_count, -2000). max limits the loss
-  useless_agent_at_success_all_agents_reward_cap: -2000
 
   chain_efficiency_reward: 25.0 # Per eligible drone times its path efficiency; no population divisor.
 
   exploration_reward: 2.0 # Per new voxel; simultaneous viewers split that voxel's credit.
-  finder_reward: 100 # Each direct base deliverer.
-  target_found_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
+  base_reporter_reward: 100 # Each direct base deliverer.
+  target_delivery_reward: 100 # Full one-shot amount to every active drone when the target reaches base.
   success_reward: 3000 # Full amount to every active drone at first success; no population divisor.
 
   collision_reward: -0.5 # Per colliding drone per transition.
   time_presure_reward: -0.75 # Each acting drone every step, including its removal step.
-  gap_progress_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
+  closed_gap_reward_per_meter: 0.2 # Recurring per credited closed metre each step; local soft shares remain.
 
 training:
   total_timesteps: 1000000000 # Maximum environment steps across the run.
@@ -138,7 +132,7 @@ training:
 
   adaptive_target_spawn:
     enabled: false # Uniform target positions within target_curriculum's allowed groups.
-    curriculum_start_agents: null # Use target_curriculum instead of the legacy adaptive-spawn gate.
+    initial_target_agent_budget: null # Use target_curriculum instead of the legacy adaptive-spawn gate.
     min_probability_fraction: 0.20
     success_window_episodes_per_cell: 500
     probability_smoothing_half_life_updates: 3.0
@@ -165,15 +159,10 @@ inspection_evaluation:
   seed: 456789 # Freeze inspection reset cases while training.seed varies.
   num_agents: null # Use the training agent cap in every eval/replay.
   target_sampling: independent # Inspection stays independent of the training curriculum.
-  eval_parallel_envs: 1000 # Fixed per-map episode/lane budget: 3000 episodes across three validation maps.
+  episodes_per_map: 1000 # Fixed per-map episode/lane budget: 3000 episodes across three validation maps.
   replay_targets_from_storey: null # Sample full-task eligible targets across storeys.
   inspection_maps: 3 # Fixed inspection subset from the 400 validation maps.
 
-  early_exit: true
-  early_exit_success_rate: 0.99 # Full-task stopping; target_curriculum has its own 75% group gate.
-  final_early_exit_success_rate: 0.99 # Full-task validation threshold, independent of the virtual budget.
-  early_exit_min_success_length_reduction: null # Success alone controls progression.
-  early_exit_hold_evals: 1 # Consecutive qualifying validation passes.
 
   save_model: true
   checkpoint_freq: 30
@@ -199,6 +188,12 @@ logging:
   terminal_log_init: true
 
 validation:
+  early_stopping:
+    enabled: true
+    success_rate: 0.99 # Full-task stopping; target_curriculum has its own 75% group gate.
+    final_success_rate: 0.99 # Full-task validation threshold, independent of the virtual budget.
+    min_success_length_reduction: null # Success alone controls progression.
+    hold_evals: 1 # Consecutive qualifying validation passes.
   enabled: true
   success_condition: chain_held # Full-task validation does not require surplus cleanup.
 

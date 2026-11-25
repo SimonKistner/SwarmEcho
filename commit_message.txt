@@ -2,10 +2,13 @@ Pin CLU G03 to the winning training recipe
 
 - Record the winning stage, frozen inputs, and implementation removal plan.
 - Restore fresh-start CLU G03 and automatic map-bank generation. Move the removal candidates into docs/cleanup.
-- Document paired population-channel and radar ablations for G03 and defer decisions on either option.
+- Record the completed population-channel and radar comparisons. Retain population feedback and legacy radar in the baseline, and document counting radar as a retained ablation.
 - Add opt-in seed-specific random-building pools and a five-seed G03 CLU cluster baseline.
 - Remove dry-run modes from cluster submission, curriculum evaluation, and the geometry suite.
-- Number the training, environment and evaluation guides and explain the supported settings in terms of their runtime behavior. Preserve earlier guides and cleanup history in an indexed legacy ablation archive.
+- Restore the numbered system overview, environment/physics, MARL/training and evaluation references. Explain current mechanisms and configurable adaptations, and consolidate removed features and historical results in a flat ablation archive. Retire duplicate guides and cleanup narratives after transferring relevant details.
 - Refresh the repository README and fix bundled authored level loading and custom-map heatmap replays. Retire the C preview command and replay vote overlays.
 - Prune unused authored maps and retire the C corridor generator. Keep the station and cellar for standalone evaluation.
 - Group authored buildings in custom_maps, give them descriptive names, and point both G01 presets at their standalone map.
+
+- Rename baseline radar, delivery/relay rewards, base-target connectivity, decommissioning, target budgets and inspection counts. Move stopping settings under validation and retain historical config/checkpoint/replay readers.
+- Remove the generic decommission reward and surplus-at-success penalties while preserving G03 cleanup-training rewards.

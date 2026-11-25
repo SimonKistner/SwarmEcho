@@ -2,6 +2,13 @@
   "name": "G03",
   "description": "G03 CLU population feedback and counting radar ablations paired with the five-seed val-50 baseline",
   "level": "G03_CLU_random_buildings",
+  "dependency_image": {
+    "repository": "ghcr.io/simonkistner/swarmecho-deps",
+    "tag": "deps-5443e6e5727873f6",
+    "fingerprint": "5443e6e5727873f6da28b7a92f9cbff8664a7b20dabb40b5f228d0769e9165b6",
+    "inputs": ["cluster/Dockerfile", "pyproject.toml", "uv.lock"],
+    "image": "ghcr.io/simonkistner/swarmecho-deps:deps-5443e6e5727873f6"
+  },
   "seeds": [456789, 456790, 456791, 456792, 456793],
   "overrides": [
     "training.seed_map_pool=true",
@@ -9,11 +16,13 @@
     "validation.val_freq=50"
   ],
   "variations": {
-    "ablation_population_off": [
+    "ablation_population_off_v2": [
       "env.observe_base_population=false"
     ],
-    "ablation_counting_radar": [
-      "env.radar_mode=band_sep_counting"
+    "ablation_counting_radar_v2": [
+      "env.radar_mode=band_sep_counting",
+      "env.distance_bands=3",
+      "env.radar_count_cap=3"
     ]
   }
 }

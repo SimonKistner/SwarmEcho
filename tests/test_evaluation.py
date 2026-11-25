@@ -372,7 +372,7 @@ def test_map_suite_requests_classes_and_uses_class_replays(tmp_path, monkeypatch
                                        target_sampling="independent", training_heatmap_creation=False)
     level.logging = SimpleNamespace(individual_map_diagnostics=False)
     level.map_source_name = None
-    level.effective_eval_parallel_envs = 4
+    level.effective_episodes_per_map = 4
     suite_calls, replay_calls = [], []
 
     def evaluate(model, level, **kwargs):
@@ -403,7 +403,7 @@ def test_authored_evaluation_records_map_path_and_writes_heatmap(tmp_path, monke
     level.map_source_name = None
     level.evaluation = EvaluationConfig(training_heatmap_creation=False)
     level.logging = SimpleNamespace(individual_map_diagnostics=False)
-    level.effective_eval_parallel_envs = 4
+    level.effective_episodes_per_map = 4
     info.update(
         base_positions=np.zeros((4, 3)), final_chain_lengths=np.zeros(4),
         successes=np.zeros(4, dtype=bool), delivered=np.zeros(4, dtype=bool),
@@ -442,7 +442,7 @@ def test_map_suite_pools_successful_agent_counts(tmp_path, monkeypatch, counts):
 
     levels = [SimpleNamespace(
         building_name=f"static_eval_{i:04d}", map_source_name=None,
-        env=SimpleNamespace(num_agents=3, max_steps=100), effective_eval_parallel_envs=3,
+        env=SimpleNamespace(num_agents=3, max_steps=100), effective_episodes_per_map=3,
         evaluation=SimpleNamespace(map_suite_replay_limit=None, target_sampling="independent",
                                    training_heatmap_creation=False),
         logging=SimpleNamespace(individual_map_diagnostics=False),
