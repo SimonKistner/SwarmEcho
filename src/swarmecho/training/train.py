@@ -2673,6 +2673,7 @@ def evaluate_model(
         "return_required_agents",
         "return_useless_agents",
         "return_information",
+        "return_hold_outcomes",
         "return_geo",
         "on_progress",
     ),
@@ -2706,6 +2707,7 @@ def _run_parallel_evaluation_jit(
     return_required_agents: bool = False,
     return_useless_agents: bool = False,
     return_information: bool = False,
+    return_hold_outcomes: bool = False,
     return_geo: bool = False,
     target_spawn_weights: jax.Array | None = None,
     target_agent_budget: jax.Array | None = None,
@@ -2714,6 +2716,8 @@ def _run_parallel_evaluation_jit(
     """Run deterministic metrics and optionally retain one lane's actions."""
     if (return_population or return_required_agents) and capture_actions:
         raise ValueError("Population summaries and action capture must be collected separately.")
+    if return_hold_outcomes and cfg.success_condition != "chain_held_and_cleand_up":
+        raise ValueError("First-hold cleanup outcomes require cleanup-inclusive success.")
     env_keys = jax.random.split(key, num_envs) if case_keys is None else case_keys
     env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
@@ -2760,6 +2764,9 @@ def _run_parallel_evaluation_jit(
             initial_carry = (*initial_carry, jnp.int32(0))
         if return_information:
             initial_carry = (*initial_carry, jnp.zeros((3,), dtype=jnp.int32))
+        hold_outcomes_index = len(initial_carry)
+        if return_hold_outcomes:
+            initial_carry = (*initial_carry, (jnp.bool_(False), jnp.bool_(False)))
         initial_carry = (*initial_carry, model.initial_path_probe(num_agents=num_agents))
         if return_geo:
             initial_carry = (*initial_carry,jnp.zeros_like(actor_hidden),jnp.full((num_agents,),jnp.inf))
@@ -2919,6 +2926,13 @@ def _run_parallel_evaluation_jit(
                 information_index = 16 + int(return_population) + int(return_useless_agents)
                 next_carry = (*next_carry, carry[information_index]
                               + jnp.where(live, information_counts(state, next_state), 0))
+            if return_hold_outcomes:
+                ever_held, first_hold_surplus = carry[hold_outcomes_index]
+                held_now = live & (next_state.chain_held_steps >= cfg.hold_chain_for)
+                # At a qualifying hold the environment checks the actual active
+                # contributors. Failure on that step means surplus drones remain.
+                first_hold_surplus |= ~ever_held & held_now & ~next_state.success
+                next_carry = (*next_carry, (ever_held | held_now, first_hold_surplus))
             next_path_probe = model.next_path_probe(
                 next_actor_hidden, state.active & next_state.active & live & ~next_state.done,
                 state.target_known,
@@ -2965,6 +2979,8 @@ def _run_parallel_evaluation_jit(
             metrics = (*metrics, final_carry[16 + int(return_population)])
         if return_information:
             metrics = (*metrics, final_carry[16 + int(return_population) + int(return_useless_agents)])
+        if return_hold_outcomes:
+            metrics = (*metrics, final_carry[hold_outcomes_index])
         if return_geo:
             metrics = (*metrics,final_carry[-2],jnp.isfinite(final_carry[-1]))
         return (*metrics, action_history) if capture_actions else metrics
@@ -2980,7 +2996,7 @@ def _run_parallel_evaluation_jit(
 
     successes = batched[2]
     final_chain_lengths = batched[7]
-    metric_count = 15 + int(return_useless_agents) + int(return_information) + 2 * int(return_geo)
+    metric_count = len(batched) - 1  # Action history is the last result in capture mode.
     action_histories = batched[metric_count]
     if capture_result == "success":
         scores = jnp.where(successes, final_chain_lengths, -jnp.inf)

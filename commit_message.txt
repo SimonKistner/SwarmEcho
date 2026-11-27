@@ -1,0 +1,6 @@
+feat: prepare the five-seed relay holding and cleanup study
+
+- Compare forward and reverse target curricula with detached or supervised path decoding across 2.4 billion environment steps per run.
+- Use 50-step relay holding with surplus cleanup for training, validation, inspection and target-group promotion.
+- Report relay holding and subsequent mission completion for episodes with surplus drones at first hold, overall and by target difficulty.
+- Support indexed submissions from one seed-ordered 20-trial manifest and allocation recovery for runs without a time limit.

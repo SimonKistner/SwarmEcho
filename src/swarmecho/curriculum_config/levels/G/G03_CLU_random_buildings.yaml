@@ -28,7 +28,7 @@ env:
 
   max_steps: 700
   success_condition: chain_held_and_cleand_up # Hold the chain and decommission all active non-contributors.
-  hold_chain_for: 30
+  hold_chain_for: 50 # Five seconds of uninterrupted relay connectivity.
 
   observe_chain_contributor: true
   observe_decommission_zone: true # Own membership in the valid decommission sphere (1 inside, 0 outside).
@@ -126,9 +126,9 @@ reward:
   no_movement_termination_penalty: 0.0 # Full signed amount to each active drone at idle failure.
 
 training:
-  total_timesteps: 5000000000 # One continuous run; virtual budget changes do not reset this limit.
-  max_wall_seconds: null # Setup/pool preparation does not consume the learning-comparison budget.
-  max_training_seconds: 86400 # 24h from training-run initialization, including first JIT and evaluation; final saving/media follow.
+  total_timesteps: 2400000000 # 8,000 updates of 300,000 environment steps across all curriculum stages.
+  max_wall_seconds: null
+  max_training_seconds: null
   num_envs: 6000
   num_maps: 3600 # Persistent training maps: 90% of the 4000-map dataset.
   oom_recovery:
@@ -144,7 +144,7 @@ training:
   base_memory_replay: differentiable # Reconstruct base writes inside PPO replay for sender gradients.
 
   target_curriculum:
-    mode: none # none (full uniform task) | forward (<=2, <=3, ...) | reverse (7, >=6, ...).
+    mode: forward # none (full uniform task) | forward (<=2, <=3, ...) | reverse (7, >=6, ...).
     success_threshold: 0.75 # Validation success on the newest added required-agent group only.
 
   target_spawn_eligibility:
@@ -155,7 +155,7 @@ training:
   geo_probe_auxiliary:
     enabled: true # Also enable for policy-only controls, with lambda_target=0 for detached probes.
     observe_prev_path_probe: false # Add this agent's 125 previous-step path probabilities to the actor input.
-    lambda_target: 0.03
+    lambda_target: 0.3
     metric_threshold: 0.8 # Thresholded similarity/exact masks; soft overlap and BCE have no cutoff.
     gradient_diagnostics: true # Existing training.diagnostics_every; one PPO minibatch.
     head:
@@ -169,7 +169,7 @@ training:
       warmup_updates: 10 # PPO continues; auxiliary gradient into the policy stays zero.
       ramp_updates: 100 # Valid-supervision cycles 11..110 linearly reach lambda_target.
   seed: 456789
-  map_selection_seed: 456789 # Same training/held-out split for both PPO training seeds.
+  map_selection_seed: 456789 # Same training and held-out map split across policy seeds on a common bank.
   map_pool_path: null # Reuse a compatible PFSS pool, or create one for the current generation/exclusion settings.
   checkpoint_path: null # Every configuration/seed comparison starts from fresh weights.
 
@@ -216,7 +216,7 @@ network:
   tarmac_include_self: false
 
 inspection_evaluation:
-  success_condition: chain_held # Measure chain holding independently of training's surplus cleanup.
+  success_condition: chain_held_and_cleand_up # Replays and inspection use the full mission criterion.
   seed: 456789 # Freeze inspection reset cases while training.seed varies.
   num_agents: null # Use the training agent cap in every eval/replay.
   dynamic_max_geo_distance: true # Uniform solvable targets under the full seven-agent budget.
@@ -226,8 +226,8 @@ inspection_evaluation:
   replay_targets_from_storey: null # Sample full-task eligible targets across storeys.
   inspection_maps: 3 # Fixed inspection subset from the 400 validation maps.
 
-  early_exit: true
-  early_exit_source: validation # Validation controls full-task stopping and any target progression.
+  early_exit: false # Train for the common step budget. Target-group promotion uses its own validation gate.
+  early_exit_source: validation
   early_exit_success_rate: 0.99 # Full-task stopping; target_curriculum has its own 75% group gate.
   final_early_exit_success_rate: 0.99 # Full-task held-out validation threshold, independent of the virtual budget.
   early_exit_min_success_length_reduction: null # Success alone controls progression.
@@ -261,7 +261,7 @@ logging:
 
 validation:
   enabled: true
-  success_condition: chain_held # Full-task validation does not require surplus cleanup.
+  success_condition: chain_held_and_cleand_up # Score full missions for both reporting and curriculum promotion.
   mode: held_out_maps # Uniform full-seven-agent task; no virtual budget or adaptive success weights.
 
   # Held-out maps and validation episodes; no heatmaps or replays.

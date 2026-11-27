@@ -12,14 +12,14 @@ uv run swarmecho-train
 
 | Setting | G03 CLU |
 | --- | --- |
-| Training task | Hold the chain for 30 consecutive steps and retire active non-contributors |
+| Training task | Hold the chain for 50 consecutive steps and retire active non-contributors |
 | Deployment | Seven slots reserved at reset, with launches five steps apart. Recruitment is disabled. |
 | PPO | 6,000 lanes, 50 steps per update, three epochs, six minibatches |
-| Budget | Five billion environment steps or 24 hours of training |
-| Training maps and targets | 3,600 bank maps, frozen target-cell eligibility, uniform sampling, no target curriculum |
-| Held-out validation | 400 maps, 10,000 fixed cases, every 50 updates and on finalization. Success means chain holding. |
+| Budget | 2.4 billion environment steps (8,000 updates), with time limits and early stopping disabled |
+| Training maps and targets | 3,600 bank maps, frozen target-cell eligibility, uniform sampling within the admitted groups. The default forward curriculum admits the next group at 75% full-mission validation success in the current group. |
+| Held-out validation | 400 maps, 10,000 fixed cases, every 50 updates and on finalization. Validation and inspection score the same hold and cleanup criterion as training. |
 | Inspection | Three held-out maps, 1,000 cases per map, independent target sampling, final heatmaps and replays |
-| Path auxiliary | Enabled at λ 0.03. Previous-step probe feedback is off in the preset. |
+| Path auxiliary | Enabled at λ 0.3. Previous-step probe feedback is off in the preset. |
 
 See the [validation reference](../01_reference/12_validation.md) and
 [cluster guide](../../cluster/README/README.md).

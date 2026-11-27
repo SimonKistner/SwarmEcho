@@ -84,7 +84,7 @@ def level_run_name(root, level, overrides):
 def expand_config(config, root, stamp):
     """Return (name, run) pairs; a default single run has no training overrides."""
     allowed = {"level", "seeds", "wandb_mode", "overrides", "variations",
-               "name", "description", "wandb_group", "run_postfix", "exclude_trials"}
+               "name", "description", "wandb_group", "run_postfix", "exclude_trials", "trial_order"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("Unknown cluster config keys; expected: " + ", ".join(sorted(allowed)))
     level = config.get("level")
@@ -117,6 +117,9 @@ def expand_config(config, root, stamp):
     variations = config.get("variations", {})
     if not isinstance(variations, dict):
         raise ValueError("variations must map descriptive names to override lists.")
+    trial_order = config.get("trial_order", "variation_first")
+    if trial_order not in ("variation_first", "seed_first"):
+        raise ValueError("trial_order must be variation_first or seed_first.")
     common = merge_overrides(config.get("overrides", []))
     postfix = config.get("run_postfix", "")
     use_timestamp = level_timestamp_postfix(root, level)
@@ -154,12 +157,16 @@ def expand_config(config, root, stamp):
                    "level": level, "wandb_mode": config.get("wandb_mode", "online"),
                    "wandb_group": group, "run_postfix": postfix,
                    "overrides": overrides[:] if seed is None else merge_overrides(overrides, ["training.seed=" + str(seed)])}
-            plans.append((variant_name + ("_seed" + str(seed) if seed is not None else ""), run))
+            trial_name = variant_name + ("_seed" + str(seed) if seed is not None else "")
+            plans.append((seed, trial_name, run))
     if matched != excluded:
         raise ValueError("exclude_trials refers to a variation/seed absent from this batch.")
     if not plans:
         raise ValueError("The cluster config excludes every trial.")
-    return plans
+    if trial_order == "seed_first":
+        seed_index = {seed: index for index, seed in enumerate(seeds)}
+        plans.sort(key=lambda row: seed_index[row[0]])
+    return [(name, run) for _, name, run in plans]
 
 
 def check_capacity(plans, slots_per_trial):

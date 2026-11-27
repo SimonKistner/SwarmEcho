@@ -1,0 +1,26 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "hold50_cleanup",
+  "description": "Five-seed forward and reverse curriculum comparison with 50-step relay holding and surplus cleanup",
+  "seeds": [456801, 456802, 456803, 456804, 456805],
+  "trial_order": "seed_first",
+  "wandb_mode": "online",
+  "variations": {
+    "forward_aux": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "forward_policy_only": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ],
+    "reverse_aux": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.3"
+    ],
+    "reverse_policy_only": [
+      "training.target_curriculum.mode=reverse",
+      "training.geo_probe_auxiliary.lambda_target=0.0"
+    ]
+  }
+}

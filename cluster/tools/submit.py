@@ -321,11 +321,15 @@ def main():
         help=f"Batch config; defaults to {DEFAULT_MANIFEST.relative_to(ROOT).as_posix()}",
     )
     selection.add_argument("--run", help="Historical manifest name without .json, such as g03-smoke")
+    parser.add_argument("--trials", type=int, nargs="+", metavar="N",
+                        help="Submit selected 1-based trials from --config in the given order")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--override-existing", action="store_true",
                         help="Use existing-name override approval already given to a batch wrapper")
     parser.add_argument("--image-info", action="store_true", help="Print image metadata JSON; no writes/network")
     args = parser.parse_args()
+    if args.trials and not args.config:
+        parser.error("--trials requires an explicit --config")
     settings = read_json(CLUSTER / "settings.json")
     if args.image_info:
         if args.run or args.config or args.dry_run or args.override_existing:
@@ -349,6 +353,10 @@ def main():
     else:
         config_path = (args.config or DEFAULT_MANIFEST).resolve()
         plans = expand_config(read_json(config_path), ROOT, stamp)
+        if args.trials:
+            if len(set(args.trials)) != len(args.trials) or any(n < 1 or n > len(plans) for n in args.trials):
+                parser.error(f"--trials expects distinct numbers from 1 to {len(plans)}")
+            plans = [plans[n - 1] for n in args.trials]
     for _, run in plans:
         validate(settings, run)
     # Resolve and confirm the entire batch before freezing files or submitting

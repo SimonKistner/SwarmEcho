@@ -63,16 +63,17 @@ def resume_allocation(run, root, child_env, train_python):
         ), run["level"], *run["overrides"]]
         allowance = json.loads(subprocess.check_output(command, env=child_env, text=True))
     if allowance is None or allowance == "null":
-        raise RuntimeError("Allocation recovery requires training.max_training_seconds to be set.")
-    remaining = float(allowance) - spent
-    if remaining <= 0:
-        print("[CLUSTER RESUME] Training allowance exhausted at complete checkpoint.", flush=True)
-        return run, True
-    overrides.update({"training.checkpoint_path": str(checkpoint), "training.ckpt_loading_mode": "resume",
-                      "training.max_training_seconds": str(remaining)})
+        budget_message = "continuing to the configured step budget"
+    else:
+        remaining = float(allowance) - spent
+        if remaining <= 0:
+            print("[CLUSTER RESUME] Training allowance exhausted at complete checkpoint.", flush=True)
+            return run, True
+        overrides["training.max_training_seconds"] = str(remaining)
+        budget_message = "{:.1f}s remaining".format(remaining)
+    overrides.update({"training.checkpoint_path": str(checkpoint), "training.ckpt_loading_mode": "resume"})
     child_env["SWARMECHO_CLUSTER_PRIOR_TRAINING_SECONDS"] = str(spent)
-    print("[CLUSTER RESUME] {} ; {:.1f}s consumed, {:.1f}s remaining.".format(
-        checkpoint, spent, remaining), flush=True)
+    print("[CLUSTER RESUME] {} ({:.1f}s consumed, {}).".format(checkpoint, spent, budget_message), flush=True)
     return dict(run, overrides=[key + "=" + value for key, value in overrides.items()]), False
 
 

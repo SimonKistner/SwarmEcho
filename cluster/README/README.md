@@ -39,6 +39,41 @@ outside-project and outside-user slot counts.
 No raw shell connection data is printed or saved. The result is a snapshot, not
 a reservation of the displayed free slots.
 
+## Submit the 50-step hold and cleanup comparison
+
+From the repository root, use the [20-run manifest](../manifests/target-curriculum/g03_hold50_cleanup.json).
+Each seed has four consecutive trials in this order: forward auxiliary,
+forward policy only, reverse auxiliary, reverse policy only.
+
+| Seed | Trial numbers |
+| --- | --- |
+| 456801 | 1–4 |
+| 456802 | 5–8 |
+| 456803 | 9–12 |
+| 456804 | 13–16 |
+| 456805 | 17–20 |
+
+With 17 free slots, submit the first four complete seed groups (16 jobs).
+Each condition then has the same four seeds for the preliminary comparison.
+
+```powershell
+$study = '.\cluster\manifests\target-curriculum\g03_hold50_cleanup.json'
+.\cluster\capacity.ps1
+.\cluster\submit.ps1 -Config $study -Trials (1..16)
+```
+
+When four slots are free, submit the fifth seed in all four conditions with
+`.\cluster\submit.ps1 -Config $study -Trials (17..20)`.
+Smaller balanced batches can use any complete four-trial seed group in the
+table. Individual trial numbers are also available for retries. Check the batch receipt after a
+partial failure. Submit only the outstanding indices after verifying any entry
+marked `CHECK_RECEIPT` against Determined. Each invocation takes a new snapshot
+of the source and level. Use the same source and settings across batches.
+All five training seeds use the level's fixed map-selection and validation
+seeds. Automatic pool selection can reuse or create a compatible building bank.
+Check the recorded pool in `random_buildings.json` and the validation case
+identity in `validation/metadata.json` across batches before pairing results.
+
 ## One config for runs, seeds and variations
 
 Only `level` is required; the other fields below show their defaults:
@@ -70,6 +105,11 @@ Only `level` is required; the other fields below show their defaults:
 - `exclude_trials` optionally lists exact `{"variation":"name","seed":456789}`
   pairs to omit. Unknown pairs and duplicates are rejected. The auxiliary sweep
   uses this to leave its initial test trial out of the remaining 23.
+- `trial_order` defaults to `variation_first` and accepts `seed_first` to group
+  all variations of a seed together in manifest order.
+- `-Trials` selects one-based indices after exclusions and respects the order of
+  the supplied indices. It requires an explicit `-Config`. Omitting `-Trials`
+  selects every trial in the manifest.
 
 The ready-to-submit 24-run path auxiliary comparison, its one-run test and the
 remaining 23 are documented in [GEO_AUXILIARY.md](../../ablations/cluster/path-probe/GEO_AUXILIARY.md).
@@ -134,8 +174,9 @@ launching a batch. The submitter validates the requested slot count. Actual
 allocation depends on the cluster.
 
 The driver handles preemption by saving a complete checkpoint after an update.
-On allocation restart it resumes the latest complete checkpoint and applies
-the remaining training allowance.
+On allocation restart it resumes the latest complete checkpoint with the
+original step budget. If the run has a training-time limit, the driver deducts
+time consumed by prior allocations from that limit.
 
 [settings.json](../settings.json) holds the cluster destination, resource pool,
 PFSS paths, CLI version, and dependency image. Use system Python and the

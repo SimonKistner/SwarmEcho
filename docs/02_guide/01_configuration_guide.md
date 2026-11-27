@@ -46,9 +46,9 @@ after a complete update and in-flight evaluation; final validation/saving/media
 may follow. The training-only clock is per attempt; OOM retry supervision retains
 its existing shared `max_wall_seconds` limit.
 
-`G03_CLU_random_buildings` sets `max_training_seconds: 14400` and disables OOM
-recovery for the four-hour Wave 3 comparisons. Its local G03 counterpart keeps
-the existing unlimited defaults. `perf/wall_seconds` retains setup-inclusive
+`G03_CLU_random_buildings` uses a fixed environment-step budget with both time
+limits disabled. The historical four-hour Wave 3 comparisons used a training
+time limit of 14,400 seconds. `perf/wall_seconds` retains setup-inclusive
 timing; `perf/training_seconds` reports the new setup-excluded clock.
 
 ### Optional reinforcement vote rewards

@@ -108,13 +108,13 @@ may be enabled or disabled. It uses the training stage population and defaults t
 the training success condition; inspection-only overrides do not change validation.
 
 Set `validation.success_condition` and `inspection_evaluation.success_condition`
-independently to select each runner's goal. For example, G03 CLU trains with
-`env.success_condition: chain_held_and_cleand_up`, while both overrides are
-`chain_held`. Validation and inspection episodes then succeed and finish when
-the chain hold completes, even with active surplus agents. Their success rates,
-episode lengths, progression/stopping gates and best-validation checkpoint use
-that selected goal. A `null` override follows training. Changing the effective
-validation goal changes its frozen task identity and requires a new run.
+independently to select each runner's goal. G03 CLU uses a 50-step hold with
+surplus cleanup for training, validation and inspection. Selecting `chain_held`
+for an individual runner lets its episodes end with active surplus agents. The
+selected goal determines success rates, episode lengths and any progression,
+stopping or checkpoint decisions based on those rates. A `null` override follows
+training. Changing the effective validation goal changes its frozen task identity
+and requires a new run.
 
 When validation controls curriculum progression, inspection may set
 `dynamic_max_geo_distance: false` to sample the permitted spawn volume without
@@ -150,6 +150,16 @@ map-target episodes. `map_balanced_success_rate` separately averages observed
 map rates equally. Summaries include a Wilson 95% episode-success interval,
 observed-map coverage, worst/best/median/p10 map success, lengths, returns and
 terminal active population. These estimates do not prove mastery of every map.
+
+With `chain_held_and_cleand_up` validation, `validation/chain_hold_rate` is the
+fraction of all episodes that reached `hold_chain_for` consecutive connected
+steps before termination. `first_hold_surplus_episodes` counts episodes with
+active agents outside the selected relay at the first qualifying hold.
+`first_hold_surplus_successes` counts how many of those episodes subsequently
+achieved full mission success, including after a broken and re-established relay.
+`first_hold_surplus_success_rate` divides those counts and is omitted for an
+empty denominator. The same summaries appear under
+`validation/required_agents_<n>/` when target requirement estimates are available.
 
 With adaptive swarm size enabled, `validation/useless_agents_at_success` and
 `eval/useless_agents_at_success` report the mean number of active agents outside

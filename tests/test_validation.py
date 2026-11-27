@@ -13,14 +13,12 @@ from swarmecho.training.validation import ValidationRunner
 CLEANUP = "chain_held_and_cleand_up"
 
 
-def test_g03_cluster_trains_cleanup_but_scores_chain_holding():
+def test_g03_cluster_trains_and_scores_full_mission():
     level = load_level("G03_CLU_random_buildings")
     assert level.env.success_condition == CLEANUP
-    assert level.evaluation.success_condition == "chain_held"
-    assert level.validation.success_condition == "chain_held"
-    assert resolve_evaluation_level(level).env.success_condition == "chain_held"
-    assert resolve_validation_level(level).env.success_condition == "chain_held"
-    assert level.env.success_condition == CLEANUP
+    assert resolve_evaluation_level(level).env.success_condition == CLEANUP
+    assert resolve_validation_level(level).env.success_condition == CLEANUP
+    assert level.env.hold_chain_for == 50
 
 
 @pytest.mark.parametrize("inspection,validation", [
@@ -52,7 +50,7 @@ def test_invalid_validation_goals_are_rejected(overrides, match):
 
 @pytest.mark.parametrize("mode", ["held_out_maps", "uniform_full_task"])
 def test_runner_uses_validation_goal_and_guards_saved_identity(tmp_path, mode):
-    level = load_level("G03_CLU_random_buildings")
+    level = load_level("G03_CLU_random_buildings", ["validation.success_condition=chain_held"])
     paths = [Path("src/swarmecho/curriculum_config/maps/M00_no_maze_open_cuboid.yaml")]
     level = replace(level, map_paths=tuple(paths), validation=replace(level.validation, num_maps=1, mode=mode))
     runner = ValidationRunner(level, tmp_path, paths)
