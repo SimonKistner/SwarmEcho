@@ -50,7 +50,7 @@ def tarmac_aggregate(
     Parameters
     ----------
     query     : (N, S)
-        Receiver queries projected from each agent's previous GRU hidden state.
+        Projected receiver queries.
     signature : (M, S)
         Sender keys/signatures from agents plus optional base replay token.
     value     : (M, V)
@@ -274,6 +274,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         tarmac_val_dim: int = 128,
         tarmac_include_self: bool = True,
         vote_mode: str | None = None,
+        disable_actor_memory_carry: bool = False,
     ) -> None:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
@@ -282,6 +283,7 @@ class RecurrentDecentralizedActor(nnx.Module):
         self.tarmac_sig_dim = tarmac_sig_dim
         self.tarmac_val_dim = tarmac_val_dim
         self.tarmac_include_self = tarmac_include_self
+        self.disable_actor_memory_carry = disable_actor_memory_carry
         self.vote_mode = vote_mode
         self.encoder = MLP(obs_dim, hidden_dim, 1, hidden_dim, rngs)
 
@@ -311,9 +313,17 @@ class RecurrentDecentralizedActor(nnx.Module):
         n = num_agents if num_agents is not None else 0
         return jnp.zeros((*tuple(batch_shape), n, self.tarmac_val_dim), dtype=jnp.float32)
 
+    def _carry_and_query_input(
+        self, previous_hidden: jax.Array, encoded_obs: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Choose the private GRU carry and the receiver features used for attention."""
+        if self.disable_actor_memory_carry:
+            return jnp.zeros_like(previous_hidden), encoded_obs
+        return previous_hidden, previous_hidden
+
     def _tarmac_context(
         self,
-        prev_hidden: jax.Array,
+        query_input: jax.Array,
         prev_signature: jax.Array,
         prev_value: jax.Array,
         comm_mask: jax.Array | None = None,
@@ -331,9 +341,9 @@ class RecurrentDecentralizedActor(nnx.Module):
         cadence; this method only applies the learned query/signature matching.
         """
         if not self.memory_comm_enabled:
-            return jnp.zeros((*prev_hidden.shape[:-1], self.tarmac_val_dim), dtype=prev_hidden.dtype)
+            return jnp.zeros((*query_input.shape[:-1], self.tarmac_val_dim), dtype=query_input.dtype)
 
-        N = prev_hidden.shape[-2]
+        N = query_input.shape[-2]
         if comm_mask is None:
             comm_mask = jnp.ones((N, N), dtype=bool)
         if active is None:
@@ -358,7 +368,7 @@ class RecurrentDecentralizedActor(nnx.Module):
             sender_value = jnp.concatenate([sender_value, base_value[None, :]], axis=-2)
             mask = jnp.concatenate([mask, base_memory_mask[:, None] & active[:, None]], axis=-1)
 
-        query = self.tarmac_query(prev_hidden)
+        query = self.tarmac_query(query_input)
         return tarmac_aggregate(query, sender_signature, sender_value, mask)
 
     def __call_team__(
@@ -393,15 +403,16 @@ class RecurrentDecentralizedActor(nnx.Module):
             value = jnp.where(active[..., None], value, 0.0)
             obs = jnp.where(active[..., None], obs, 0.0)
         encoded = self.encoder(obs)
+        carry, query_input = self._carry_and_query_input(prev_hidden, encoded)
         if self.memory_comm_enabled:
             comm_context = self._tarmac_context(
-                prev_hidden, signature, value, comm_mask, active,
+                query_input, signature, value, comm_mask, active,
                 base_signature, base_value, base_memory_mask,
             )
             gru_input = jnp.concatenate([encoded, comm_context], axis=-1)
         else:
             gru_input = encoded
-        hidden = self.gru(prev_hidden, gru_input)
+        hidden = self.gru(carry, gru_input)
         if getattr(self, "mask_inactive", False) and active is not None:
             hidden = jnp.where(active[..., None], hidden, 0.0)
         signature = self.tarmac_signature(hidden) if self.memory_comm_enabled else signature
@@ -470,7 +481,8 @@ class RecurrentDecentralizedActor(nnx.Module):
             hidden = jnp.where(reset[..., None], jnp.zeros_like(hidden), hidden)
 
         encoded = self.encoder(obs)
-        hidden = self.gru(hidden, encoded)
+        carry, _ = self._carry_and_query_input(hidden, encoded)
+        hidden = self.gru(carry, encoded)
         feat = self.policy_trunk(hidden)
         mu = self.mu_head(feat)
         log_std = jnp.clip(self.log_std_head(feat), LOG_STD_MIN, LOG_STD_MAX)

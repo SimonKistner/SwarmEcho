@@ -120,6 +120,7 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         actor_memory=level.network.actor_memory,
         critic_memory=level.network.critic_memory,
         memory_comm_enabled=level.network.memory_comm_enabled,
+        disable_actor_memory_carry=level.network.disable_actor_memory_carry,
         memory_comm_every_k_steps=level.network.memory_comm_every_k_steps,
         tarmac_sig_dim=level.network.tarmac_sig_dim,
         tarmac_val_dim=level.network.tarmac_val_dim,
@@ -146,6 +147,7 @@ def build_model(level: Level, hidden_dim: int | None = None) -> MAPPOModel:
         "tarmac_sig_dim": level.network.tarmac_sig_dim,
         "tarmac_val_dim": level.network.tarmac_val_dim,
         "memory_comm_enabled": level.network.memory_comm_enabled,
+        "disable_actor_memory_carry": level.network.disable_actor_memory_carry,
         "memory_comm_every_k_steps": level.network.memory_comm_every_k_steps,
         "tarmac_include_self": level.network.tarmac_include_self,
         "value_normalization": level.training.value_normalization,
@@ -2674,6 +2676,7 @@ def evaluate_model(
         "return_useless_agents",
         "return_information",
         "return_hold_outcomes",
+        "return_delivery_timing",
         "return_geo",
         "on_progress",
     ),
@@ -2708,6 +2711,7 @@ def _run_parallel_evaluation_jit(
     return_useless_agents: bool = False,
     return_information: bool = False,
     return_hold_outcomes: bool = False,
+    return_delivery_timing: bool = False,
     return_geo: bool = False,
     target_spawn_weights: jax.Array | None = None,
     target_agent_budget: jax.Array | None = None,
@@ -2718,6 +2722,8 @@ def _run_parallel_evaluation_jit(
         raise ValueError("Population summaries and action capture must be collected separately.")
     if return_hold_outcomes and cfg.success_condition != "chain_held_and_cleand_up":
         raise ValueError("First-hold cleanup outcomes require cleanup-inclusive success.")
+    if return_delivery_timing and cfg.success_condition != "delivery":
+        raise ValueError("Delivery timing requires delivery success.")
     env_keys = jax.random.split(key, num_envs) if case_keys is None else case_keys
     env_action_noise_keys = jax.random.split(action_noise_key, num_envs)
     num_agents = cfg.num_agents
@@ -2767,6 +2773,11 @@ def _run_parallel_evaluation_jit(
         hold_outcomes_index = len(initial_carry)
         if return_hold_outcomes:
             initial_carry = (*initial_carry, (jnp.bool_(False), jnp.bool_(False)))
+        delivery_timing_index = len(initial_carry)
+        if return_delivery_timing:
+            sighted_at_reset = jnp.any(state.active & state.directly_sees_target)
+            first_sighting_step = jnp.where(sighted_at_reset, state.step, jnp.int32(-1))
+            initial_carry = (*initial_carry, (first_sighting_step, jnp.int32(-1)))
         initial_carry = (*initial_carry, model.initial_path_probe(num_agents=num_agents))
         if return_geo:
             initial_carry = (*initial_carry,jnp.zeros_like(actor_hidden),jnp.full((num_agents,),jnp.inf))
@@ -2933,6 +2944,14 @@ def _run_parallel_evaluation_jit(
                 # contributors. Failure on that step means surplus drones remain.
                 first_hold_surplus |= ~ever_held & held_now & ~next_state.success
                 next_carry = (*next_carry, (ever_held | held_now, first_hold_surplus))
+            if return_delivery_timing:
+                first_sighting, first_delivery = carry[delivery_timing_index]
+                sees_target = jnp.any(next_state.active & next_state.directly_sees_target)
+                first_sighting = jnp.where(live & (first_sighting < 0) & sees_target,
+                                           next_state.step, first_sighting)
+                first_delivery = jnp.where(live & (first_delivery < 0) & next_state.base_target_known,
+                                           next_state.step, first_delivery)
+                next_carry = (*next_carry, (first_sighting, first_delivery))
             next_path_probe = model.next_path_probe(
                 next_actor_hidden, state.active & next_state.active & live & ~next_state.done,
                 state.target_known,
@@ -2981,6 +3000,8 @@ def _run_parallel_evaluation_jit(
             metrics = (*metrics, final_carry[16 + int(return_population) + int(return_useless_agents)])
         if return_hold_outcomes:
             metrics = (*metrics, final_carry[hold_outcomes_index])
+        if return_delivery_timing:
+            metrics = (*metrics, final_carry[delivery_timing_index])
         if return_geo:
             metrics = (*metrics,final_carry[-2],jnp.isfinite(final_carry[-1]))
         return (*metrics, action_history) if capture_actions else metrics

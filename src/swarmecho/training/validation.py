@@ -39,6 +39,21 @@ def summarize_hold_outcomes(ever_held, first_hold_surplus, success):
     return metrics
 
 
+def summarize_delivery_timing(first_sighting_step, first_delivery_step):
+    """Measure time from first direct sighting to base receipt, conditional on delivery."""
+    sighted = first_sighting_step >= 0
+    delivered = first_delivery_step >= 0
+    paired = sighted & delivered
+    sighted_count = int(sighted.sum())
+    metrics = {"sighted_episodes": sighted_count, "delivered_episodes": int(delivered.sum())}
+    if sighted_count:
+        metrics["delivery_rate_after_sighting"] = int(paired.sum()) / sighted_count
+    if paired.any():
+        delays = first_delivery_step[paired] - first_sighting_step[paired]
+        metrics["mean_steps_from_sighting_to_delivery"] = float(delays.mean())
+    return metrics
+
+
 def summarize_outcomes(map_ids, outcomes, map_names, max_steps):
     """Pool IID episode results; also report equally weighted observed-map rates."""
     success = np.asarray(outcomes["success"], dtype=bool)
@@ -291,6 +306,7 @@ class ValidationRunner:
         score_spawn = getattr(spawn_sampler, "curriculum_source", None) == "validation"
         return_required = self.level.training.dynamic_max_geo_distance.enabled
         return_hold_outcomes = self.level.env.success_condition == "chain_held_and_cleand_up"
+        return_delivery_timing = self.level.env.success_condition == "delivery"
         self.training_target_budget = getattr(spawn_sampler, "curriculum_budget", None) or self.level.env.geometric_agent_budget
         if not self.config.fixed_targets:
             self.map_ids, self.case_keys = case_plan(self.config.seed, len(self.paths), self.config.num_episodes,
@@ -304,6 +320,9 @@ class ValidationRunner:
         if return_hold_outcomes:
             fields["ever_held"] = []
             fields["first_hold_surplus"] = []
+        if return_delivery_timing:
+            fields["first_sighting_step"] = []
+            fields["first_delivery_step"] = []
         targets = []
         geo_scores = []
         information_counts = np.zeros(3, dtype=np.int64)
@@ -321,7 +340,8 @@ class ValidationRunner:
                 case_targets=jnp.asarray(self.case_targets[indices]) if self.case_targets is not None else None,
                 return_population=True, return_required_agents=return_required,
                 return_useless_agents=self.level.env.adapt_size.enabled,
-                return_information=True, return_hold_outcomes=return_hold_outcomes, return_geo=return_geo))
+                return_information=True, return_hold_outcomes=return_hold_outcomes,
+                return_delivery_timing=return_delivery_timing, return_geo=return_geo))
             size = end-start
             failed = np.flatnonzero(np.asarray(batch[12])[:size] == 0)
             if len(failed):
@@ -342,6 +362,10 @@ class ValidationRunner:
                 held, surplus = batch[information_index + 1]
                 fields["ever_held"].append(np.asarray(held)[:size])
                 fields["first_hold_surplus"].append(np.asarray(surplus)[:size])
+            if return_delivery_timing:
+                sighting, delivery = batch[information_index + 1 + int(return_hold_outcomes)]
+                fields["first_sighting_step"].append(np.asarray(sighting)[:size])
+                fields["first_delivery_step"].append(np.asarray(delivery)[:size])
             if return_geo:
                 from swarmecho.training.geo_auxiliary import score_head
                 features = np.asarray(batch[-2])[:size]
@@ -381,6 +405,8 @@ class ValidationRunner:
         if return_hold_outcomes:
             metrics.update(summarize_hold_outcomes(outcomes["ever_held"], outcomes["first_hold_surplus"],
                                                   outcomes["success"]))
+        if return_delivery_timing:
+            metrics.update(summarize_delivery_timing(outcomes["first_sighting_step"], outcomes["first_delivery_step"]))
         if return_required:
             for group in range(1, self.level.env.num_agents + 1):
                 selected = outcomes["required_agents"] == group
@@ -391,6 +417,10 @@ class ValidationRunner:
                     group_metrics = summarize_hold_outcomes(outcomes["ever_held"][selected],
                                                             outcomes["first_hold_surplus"][selected],
                                                             outcomes["success"][selected])
+                    metrics.update({f"required_agents_{group}/{key}": value for key, value in group_metrics.items()})
+                if return_delivery_timing:
+                    group_metrics = summarize_delivery_timing(outcomes["first_sighting_step"][selected],
+                                                              outcomes["first_delivery_step"][selected])
                     metrics.update({f"required_agents_{group}/{key}": value for key, value in group_metrics.items()})
         if geo_scores:
             score = np.mean(geo_scores,axis=0)*100

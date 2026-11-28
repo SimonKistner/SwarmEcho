@@ -1,0 +1,23 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "delivery_1b",
+  "description": "Paired five-seed comparison of private actor memory for delivery of target information to base",
+  "seeds": [456801, 456802, 456803, 456804, 456805],
+  "trial_order": "variation_first",
+  "wandb_mode": "online",
+  "overrides": [
+    "env.success_condition=delivery",
+    "validation.success_condition=delivery",
+    "inspection_evaluation.success_condition=delivery",
+    "adapt_size.enabled=false",
+    "reward.enable_chain_efficiency_reward=false",
+    "reward.gap_progress_reward_per_meter=0.0",
+    "training.total_timesteps=1000000000",
+    "training.target_curriculum.mode=forward",
+    "training.geo_probe_auxiliary.lambda_target=0.0"
+  ],
+  "variations": {
+    "forward_policy_only_no_private_memory": ["network.disable_actor_memory_carry=true"],
+    "forward_policy_only": ["network.disable_actor_memory_carry=false"]
+  }
+}

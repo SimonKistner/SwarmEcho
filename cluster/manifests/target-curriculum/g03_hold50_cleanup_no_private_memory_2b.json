@@ -1,0 +1,15 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "hold50_cleanup",
+  "description": "Five-seed forward policy-only comparison without private actor memory on the 50-step hold and cleanup mission",
+  "seeds": [456801, 456802, 456803, 456804, 456805],
+  "wandb_mode": "online",
+  "overrides": ["training.total_timesteps=2000000000"],
+  "variations": {
+    "forward_policy_only_no_private_memory": [
+      "training.target_curriculum.mode=forward",
+      "training.geo_probe_auxiliary.lambda_target=0.0",
+      "network.disable_actor_memory_carry=true"
+    ]
+  }
+}

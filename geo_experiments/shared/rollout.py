@@ -314,8 +314,10 @@ def make_collector(level, *, requested_inputs=None, history_stride=None, own_str
                         prev_sig = jnp.where(state.active[:, None], prev_sig, 0.0)
                         prev_val = jnp.where(state.active[:, None], prev_val, 0.0)
                         obs = jnp.where(state.active[:, None], obs, 0.0)
+                    encoded = model.actor.encoder(obs)
+                    _, query_input = model.actor._carry_and_query_input(prev_h, encoded)
                     context = model.actor._tarmac_context(
-                        prev_h, prev_sig, prev_val, comm & share, state.active,
+                        query_input, prev_sig, prev_val, comm & share, state.active,
                         c["base_sig"], c["base_val"], base_mask,
                     )
                     def record(_):
@@ -324,7 +326,7 @@ def make_collector(level, *, requested_inputs=None, history_stride=None, own_str
                         return {
                             "history_steps": c["history_steps"].at[slot].set(state.step),
                             "history_obs": c["history_obs"].at[slot].set(obs),
-                            "history_encoded": c["history_encoded"].at[slot].set(model.actor.encoder(obs)),
+                            "history_encoded": c["history_encoded"].at[slot].set(encoded),
                             "history_context": c["history_context"].at[slot].set(context),
                             "history_flags": c["history_flags"].at[slot].set(
                                 jnp.stack((state.active, resets), axis=-1)),

@@ -1,0 +1,22 @@
+{
+  "level": "G03_CLU_random_buildings",
+  "run_postfix": "hold50_cleanup",
+  "description": "Five-seed policy-only ablations of learned messages and target curriculum with 50-step relay holding and surplus cleanup",
+  "seeds": [456801, 456802, 456803, 456804, 456805],
+  "trial_order": "seed_first",
+  "wandb_mode": "online",
+  "overrides": [
+    "training.total_timesteps=2000000000",
+    "training.geo_probe_auxiliary.lambda_target=0.0"
+  ],
+  "variations": {
+    "forward_policy_only_no_learned_messages": [
+      "training.target_curriculum.mode=forward",
+      "network.memory_comm_enabled=false"
+    ],
+    "uniform_policy_only": [
+      "training.target_curriculum.mode=none",
+      "network.memory_comm_enabled=true"
+    ]
+  }
+}

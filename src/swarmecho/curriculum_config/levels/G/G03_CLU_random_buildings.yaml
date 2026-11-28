@@ -209,6 +209,7 @@ network:
   hidden_dim: 256
   num_layers: 3
   actor_num_layers: 3
+  disable_actor_memory_carry: false # Set true to start each actor decision with zero private GRU state.
   memory_comm_enabled: true
   memory_comm_every_k_steps: 1
   tarmac_sig_dim: 32

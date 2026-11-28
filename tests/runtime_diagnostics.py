@@ -93,7 +93,8 @@ def _actor_components(
     attention_mask = jnp.concatenate(
         [share_mask, base_memory_mask[:, None] & active[:, None]], axis=-1
     )
-    query = actor.tarmac_query(hidden)
+    query_input = encoded if actor.disable_actor_memory_carry else hidden
+    query = actor.tarmac_query(query_input)
     raw_logits = jnp.einsum("ns,ms->nm", query, sender_signature) / jnp.sqrt(
         jnp.asarray(query.shape[-1], query.dtype)
     )
@@ -111,7 +112,7 @@ def _actor_components(
     # This is the model's own helper; checking it against the expanded pieces
     # catches masking or attention-axis errors independently of later layers.
     helper_context = actor._tarmac_context(
-        hidden,
+        query_input,
         signature,
         value,
         comm_mask,
@@ -121,7 +122,8 @@ def _actor_components(
         base_memory_mask,
     )
     recurrent_input = jnp.concatenate([encoded, context], axis=-1)
-    updated_hidden = actor.gru(hidden, recurrent_input)
+    carry = jnp.zeros_like(hidden) if actor.disable_actor_memory_carry else hidden
+    updated_hidden = actor.gru(carry, recurrent_input)
     next_signature = actor.tarmac_signature(updated_hidden)
     next_value = actor.tarmac_value(updated_hidden)
     policy_features = expand_mlp("policy_trunk", actor.policy_trunk, updated_hidden)

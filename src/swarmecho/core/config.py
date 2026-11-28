@@ -601,6 +601,7 @@ class NetworkConfig:
     tarmac_sig_dim: int = 16
     tarmac_val_dim: int = 32
     tarmac_include_self: bool = False
+    disable_actor_memory_carry: bool = False
 
 
 # evaluation
@@ -1213,6 +1214,8 @@ def load_level(name_or_path: str | Path = DEFAULT_LEVEL_NAME, overrides: list[st
         raise ValueError("logging.required_agents_metrics_window_episodes must be a positive integer.")
     if level.network.memory_comm_every_k_steps < 1:
         raise ValueError("network.memory_comm_every_k_steps must be positive.")
+    if type(level.network.disable_actor_memory_carry) is not bool:
+        raise ValueError("network.disable_actor_memory_carry must be boolean.")
     if type(env.base_keeps_informing) is not bool:
         raise ValueError("env.base_keeps_informing must be a boolean.")
     if level.training.noise_level < 0.0:

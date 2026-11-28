@@ -4,3 +4,7 @@ feat: prepare the five-seed relay holding and cleanup study
 - Use 50-step relay holding with surplus cleanup for training, validation, inspection and target-group promotion.
 - Report relay holding and subsequent mission completion for episodes with surplus drones at first hold, overall and by target difficulty.
 - Support indexed submissions from one seed-ordered 20-trial manifest and allocation recovery for runs without a time limit.
+- Add a paired ten-trial follow-up at 2B steps to isolate learned message exchange and forward target progression against the existing policy-only controls.
+- Add an independent private actor memory ablation with observation-conditioned message attention, checkpoint-compatible evaluation and a five-seed 2B-step submission.
+- Prepare a paired five-seed delivery study at 1B steps per run to compare policies with and without private actor memory.
+- Measure validation steps from first direct sighting to receipt at base, alongside delivery rates after sighting, overall and by estimated relay size.

@@ -74,6 +74,58 @@ seeds. Automatic pool selection can reuse or create a compatible building bank.
 Check the recorded pool in `random_buildings.json` and the validation case
 identity in `validation/metadata.json` across batches before pairing results.
 
+### Learned-message and target-curriculum ablations
+
+The [ten-trial manifest](../manifests/target-curriculum/g03_hold50_cleanup_policy_ablations_2b.json)
+uses the existing forward policy-only runs as controls. Odd trials train the
+forward curriculum with learned messages disabled. Physical relay links and
+automatic discovery notifications still operate. Even trials retain learned
+messages and sample the full feasible target distribution from the start.
+Both arms use a detached path decoder and a two-billion environment-step cap.
+
+```powershell
+$study = '.\cluster\manifests\target-curriculum\g03_hold50_cleanup_policy_ablations_2b.json'
+.\cluster\submit.ps1 -Config $study -Trials (1..10)
+```
+
+For partial batches, each consecutive pair covers one seed, from trials 1–2
+for 456801 to trials 9–10 for 456805. For example, use `-Trials (1..2)` for
+the first pair and `-Trials (3..10)` for the remaining four pairs.
+
+### Private actor memory ablation
+
+The [five-trial manifest](../manifests/target-curriculum/g03_hold50_cleanup_no_private_memory_2b.json)
+disables private actor memory while retaining learned messages in the forward
+policy-only condition. Trials 1–5 correspond to seeds 456801–456805 in order.
+
+```powershell
+.\cluster\submit.ps1 -Config .\cluster\manifests\target-curriculum\g03_hold50_cleanup_no_private_memory_2b.json -Trials (1..5)
+```
+
+### Private actor memory on the delivery task
+
+The [paired delivery study](../manifests/target-curriculum/g03_delivery_memory_1b.json)
+ends training and evaluation episodes successfully when the base first receives
+the target information. Both arms use seven drones, learned communication, the
+forward target curriculum, zero auxiliary-loss weight and a budget of one billion
+environment steps per seed. Adaptive team size, chain-efficiency rewards and
+partial-chain gap rewards are disabled in both arms.
+
+Held-out validation reports `validation/mean_steps_from_sighting_to_delivery`
+over episodes where the target was seen and its information reached base.
+`validation/delivery_rate_after_sighting` reports the fraction of sighted
+episodes that delivered. Both metrics and their episode counts are also
+reported under `validation/required_agents_N/` for each estimated relay size.
+
+Trials 1–5 disable private actor memory. Trials 6–10 enable it, using the same
+five seeds in the same order. Select a range according to available slots.
+
+```powershell
+$study = '.\cluster\manifests\target-curriculum\g03_delivery_memory_1b.json'
+.\cluster\submit.ps1 -Config $study -Trials (1..5)
+.\cluster\submit.ps1 -Config $study -Trials (6..10)
+```
+
 ## One config for runs, seeds and variations
 
 Only `level` is required; the other fields below show their defaults:

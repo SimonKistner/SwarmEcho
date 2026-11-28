@@ -70,6 +70,7 @@ class MAPPOModel(nnx.Module):
         tarmac_include_self: bool = True,
         vote_mode: str | None = None,
         path_probe_width: int = 0,
+        disable_actor_memory_carry: bool = False,
     ) -> None:
         self.num_agents  = num_agents
         self.obs_dim     = obs_dim + path_probe_width
@@ -98,6 +99,7 @@ class MAPPOModel(nnx.Module):
                 tarmac_val_dim = tarmac_val_dim,
                 tarmac_include_self = tarmac_include_self,
                 vote_mode        = vote_mode,
+                disable_actor_memory_carry = disable_actor_memory_carry,
             )
         else:
             self.actor = DecentralizedActor(

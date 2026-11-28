@@ -24,6 +24,8 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
     expected = dict(model.checkpoint_contract)
     source = path / "training_contract.json"
     if not source.exists():
+        if expected.get("disable_actor_memory_carry", False):
+            raise ValueError("Disabling private actor carry requires matching checkpoint metadata.")
         if expected.get("observe_prev_path_probe", False):
             raise ValueError("Previous path probe feedback requires matching checkpoint observation metadata.")
         if expected.get("geo_path_grid", _DEFAULT_GEO_PATH_GRID) != _DEFAULT_GEO_PATH_GRID:
@@ -64,6 +66,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
             legacy_range = saved_env.get("visual_radius", legacy_range)
         actual["wall_sensing_ray_max_distance"] = legacy_range
     for contract in (actual, expected):
+        contract.setdefault("disable_actor_memory_carry", False)
         contract.setdefault("progress_based_cluster_tiebreaker_soft", False)
         contract.setdefault("adaptive_size", False)
         contract.setdefault("recruitment_enabled", contract["adaptive_size"])
@@ -118,6 +121,7 @@ def validate_checkpoint_contract(model: Any, path: Path) -> None:
         "adaptive_size", "recruitment_enabled", "vote_mode", "vote_protocol",
         "obs_dim", "hidden_dim", "num_layers", "actor_num_layers", "tarmac_sig_dim",
         "tarmac_val_dim", "memory_comm_enabled", "value_normalization",
+        "disable_actor_memory_carry",
         "wall_sensing_rays", "wall_sensing_layout", "wall_sensing_ray_max_distance",
         "drone_radar_bins", "radar_mode", "radar_layout",
         "distance_bands", "radar_count_cap",

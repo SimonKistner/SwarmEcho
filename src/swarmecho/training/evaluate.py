@@ -799,6 +799,13 @@ def _run_evaluation() -> None:
         checkpoint_level = None if explicit_level else _checkpoint_level_name(checkpoint)
         if checkpoint_level is not None:
             config_arguments.insert(0, f"level={checkpoint_level}")
+        # A study can override the actor's memory and message paths per run.
+        contract_path = checkpoint / "training_contract.json"
+        if contract_path.is_file():
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            for key in ("disable_actor_memory_carry", "memory_comm_enabled"):
+                if key in contract:
+                    config_arguments.insert(0, f"network.{key}={json.dumps(contract[key])}")
         level = load_level_cli(config_arguments)
     if eval_samples is not None and (eval_samples < 1 or mode != "parallel"):
         raise ValueError("eval_samples requires a positive episode count and mode=parallel.")
